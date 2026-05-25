@@ -13,7 +13,9 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
+import mimetypes
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -70,6 +72,26 @@ class ThreadResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Thread metadata")
     values: dict[str, Any] = Field(default_factory=dict, description="Current state channel values")
     interrupts: dict[str, Any] = Field(default_factory=dict, description="Pending interrupts")
+
+
+class SandboxFileInfo(BaseModel):
+    """Single file inside a thread's sandbox user-data directory."""
+
+    path: str = Field(description="Sandbox virtual path, e.g. /mnt/user-data/outputs/report.xlsx")
+    name: str = Field(description="File name")
+    size: int = Field(description="File size in bytes")
+    modified_at: float = Field(description="Unix timestamp when the file was last modified")
+    source: str = Field(description="Top-level sandbox bucket: workspace, uploads, outputs, or user-data")
+    extension: str = Field(default="", description="Lowercase file extension without dot")
+    mime_type: str | None = Field(default=None, description="Detected MIME type")
+
+
+class SandboxFilesResponse(BaseModel):
+    """Response model for sandbox file listing."""
+
+    files: list[SandboxFileInfo]
+    count: int
+    truncated: bool = False
 
 
 class ThreadCreateRequest(BaseModel):
@@ -185,6 +207,63 @@ def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: 
     return ThreadDeleteResponse(success=True, message=f"Deleted local thread data for {thread_id}")
 
 
+def _sandbox_file_source(relative_path: Path) -> str:
+    first_segment = relative_path.parts[0] if relative_path.parts else ""
+    if first_segment in {"workspace", "uploads", "outputs"}:
+        return first_segment
+    return "user-data"
+
+
+def _list_sandbox_files(
+    thread_id: str,
+    paths: Paths | None = None,
+    *,
+    user_id: str | None = None,
+    max_files: int = 500,
+) -> SandboxFilesResponse:
+    """List files under the current thread's sandbox user-data directory."""
+    path_manager = paths or get_paths()
+    try:
+        root = path_manager.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not root.exists():
+        return SandboxFilesResponse(files=[], count=0)
+
+    files: list[SandboxFileInfo] = []
+    truncated = False
+    for actual_path in sorted(root.rglob("*"), key=lambda p: p.as_posix().lower()):
+        if len(files) >= max_files:
+            truncated = True
+            break
+        if not actual_path.is_file() or actual_path.is_symlink():
+            continue
+
+        try:
+            relative_path = actual_path.resolve().relative_to(root)
+        except ValueError:
+            logger.warning("Skipping sandbox file outside root: %s", sanitize_log_param(str(actual_path)))
+            continue
+
+        stat = actual_path.stat()
+        virtual_path = f"/mnt/user-data/{relative_path.as_posix()}"
+        mime_type, _ = mimetypes.guess_type(actual_path.name)
+        files.append(
+            SandboxFileInfo(
+                path=virtual_path,
+                name=actual_path.name,
+                size=stat.st_size,
+                modified_at=stat.st_mtime,
+                source=_sandbox_file_source(relative_path),
+                extension=actual_path.suffix.lower().lstrip("."),
+                mime_type=mime_type,
+            )
+        )
+
+    return SandboxFilesResponse(files=files, count=len(files), truncated=truncated)
+
+
 def _derive_thread_status(checkpoint_tuple) -> str:
     """Derive thread status from checkpoint metadata."""
     if checkpoint_tuple is None:
@@ -241,6 +320,13 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
     return response
+
+
+@router.get("/{thread_id}/sandbox/files", response_model=SandboxFilesResponse)
+@require_permission("threads", "read", owner_check=True)
+async def list_thread_sandbox_files(thread_id: str, request: Request) -> SandboxFilesResponse:
+    """List files in the thread sandbox's user-data directory."""
+    return _list_sandbox_files(thread_id, user_id=get_effective_user_id())
 
 
 @router.post("", response_model=ThreadResponse)

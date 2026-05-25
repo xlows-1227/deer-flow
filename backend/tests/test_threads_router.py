@@ -104,6 +104,34 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
     assert "Invalid thread_id" in exc_info.value.detail
 
 
+def test_list_sandbox_files_returns_virtual_paths(tmp_path):
+    paths = Paths(tmp_path)
+    paths.ensure_thread_dirs("thread-files")
+    (paths.sandbox_work_dir("thread-files") / "analysis.py").write_text("print('ok')", encoding="utf-8")
+    (paths.sandbox_uploads_dir("thread-files") / "input.xlsx").write_bytes(b"xlsx")
+    (paths.sandbox_outputs_dir("thread-files") / "nested").mkdir(parents=True, exist_ok=True)
+    (paths.sandbox_outputs_dir("thread-files") / "nested" / "result.csv").write_text("a,b\n1,2", encoding="utf-8")
+
+    response = threads._list_sandbox_files("thread-files", paths=paths)
+
+    by_path = {item.path: item for item in response.files}
+    assert response.count == 3
+    assert "/mnt/user-data/workspace/analysis.py" in by_path
+    assert "/mnt/user-data/uploads/input.xlsx" in by_path
+    assert "/mnt/user-data/outputs/nested/result.csv" in by_path
+    assert by_path["/mnt/user-data/outputs/nested/result.csv"].source == "outputs"
+
+
+def test_list_sandbox_files_rejects_invalid_thread_id(tmp_path):
+    paths = Paths(tmp_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        threads._list_sandbox_files("../escape", paths=paths)
+
+    assert exc_info.value.status_code == 422
+    assert "Invalid thread_id" in exc_info.value.detail
+
+
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
     from deerflow.runtime.user_context import get_effective_user_id
 

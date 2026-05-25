@@ -39,6 +39,17 @@ is_port_listening() {
         fi
     fi
 
+    # Git Bash on Windows may expose Windows netstat instead of GNU netstat,
+    # so the Linux-style flags above do not always work. Fall back to
+    # PowerShell's TCP table when available.
+    if command -v powershell.exe >/dev/null 2>&1; then
+        if powershell.exe -NoProfile -Command \
+            "\$ErrorActionPreference='SilentlyContinue'; if (Get-NetTCPConnection -LocalPort $PORT -State Listen) { exit 0 } else { exit 1 }" \
+            >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
     return 1
 }
 

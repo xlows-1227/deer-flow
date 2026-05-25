@@ -17,6 +17,19 @@ from deerflow.agents.middlewares.todo_middleware import (
     _reminder_in_messages,
     _todos_in_messages,
 )
+from deerflow.agents.thread_state import ThreadState
+
+
+def test_todo_middleware_uses_deerflow_thread_state():
+    """TodoMiddleware must not re-introduce LangChain PlanningState.todos.
+
+    DeerFlow's ThreadState already declares the `todos` channel with a custom
+    reducer. If this middleware exposes the base PlanningState schema, LangGraph
+    sees a second incompatible `todos` channel and Pro/Ultra runs fail with:
+    "Channel 'todos' already exists with a different type".
+    """
+
+    assert TodoMiddleware.state_schema is ThreadState
 
 
 def _ai_with_write_todos():

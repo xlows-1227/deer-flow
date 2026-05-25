@@ -25,6 +25,8 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.thread_state import ThreadState
+
 
 def _todos_in_messages(messages: list[Any]) -> bool:
     """Return True if any AIMessage in *messages* contains a write_todos tool call."""
@@ -112,6 +114,12 @@ class TodoMiddleware(TodoListMiddleware):
     todo list. This middleware detects that gap in `before_model` / `abefore_model`
     and injects a reminder message so the model can continue tracking progress.
     """
+
+    # Use DeerFlow's full thread state so LangGraph sees one canonical `todos`
+    # channel definition. The base TodoListMiddleware declares PlanningState,
+    # which defines `todos` differently and conflicts with ThreadState.todos
+    # when plan mode is enabled mid-thread.
+    state_schema = ThreadState  # type: ignore[assignment]
 
     @override
     def before_model(

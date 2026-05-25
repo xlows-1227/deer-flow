@@ -12,6 +12,7 @@
 #
 # Actions:
 #   --skip-install  Skip dependency installation (faster restart)
+#   --no-nginx  Skip local nginx and use the Next.js frontend URL directly
 #   --stop      Stop all running services and exit
 #   --restart   Stop all services, then start with the given mode flags
 #
@@ -42,6 +43,7 @@ fi
 DEV_MODE=true
 DAEMON_MODE=false
 SKIP_INSTALL=false
+SKIP_NGINX=false
 ACTION="start"   # start | stop | restart
 
 for arg in "$@"; do
@@ -50,11 +52,12 @@ for arg in "$@"; do
         --prod)    DEV_MODE=false ;;
         --daemon)  DAEMON_MODE=true ;;
         --skip-install) SKIP_INSTALL=true ;;
+        --no-nginx) SKIP_NGINX=true ;;
         --stop)    ACTION="stop" ;;
         --restart) ACTION="restart" ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--dev|--prod] [--daemon] [--skip-install] [--stop|--restart]"
+            echo "Usage: $0 [--dev|--prod] [--daemon] [--skip-install] [--no-nginx] [--stop|--restart]"
             exit 1
             ;;
     esac
@@ -103,6 +106,12 @@ _kill_repo_port() {
     if [ -n "$pids" ]; then
         kill -9 $pids 2>/dev/null || true
     fi
+
+    if command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -Command \
+            "\$ErrorActionPreference='SilentlyContinue'; Get-NetTCPConnection -LocalPort $port -State Listen | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { \$_ -ne 0 } | ForEach-Object { Stop-Process -Id \$_ -Force }" \
+            >/dev/null 2>&1 || true
+    fi
 }
 
 _is_port_listening() {
@@ -122,6 +131,14 @@ _is_port_listening() {
 
     if command -v netstat >/dev/null 2>&1; then
         if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
+            return 0
+        fi
+    fi
+
+    if command -v powershell.exe >/dev/null 2>&1; then
+        if powershell.exe -NoProfile -Command \
+            "\$ErrorActionPreference='SilentlyContinue'; if (Get-NetTCPConnection -LocalPort $port -State Listen) { exit 0 } else { exit 1 }" \
+            >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -179,7 +196,9 @@ stop_all() {
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
-    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
+    if command -v nginx >/dev/null 2>&1; then
+        nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
+    fi
     sleep 1
     _kill_repo_nginx
     # Force-kill any survivors still holding the service ports
@@ -312,7 +331,12 @@ echo ""
 echo "  Services:"
 echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
 echo "    Frontend    → localhost:3000  (Next.js)"
-echo "    Nginx       → localhost:2026  (reverse proxy)"
+if ! $SKIP_NGINX && command -v nginx >/dev/null 2>&1; then
+    echo "    Nginx       → localhost:2026  (reverse proxy)"
+else
+    SKIP_NGINX=true
+    echo "    Nginx       → skipped (nginx command not found or --no-nginx)"
+fi
 echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
@@ -372,10 +396,12 @@ run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
-# 3. Nginx
-run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-    2026 10
+# 3. Nginx (optional on Windows/local development)
+if ! $SKIP_NGINX; then
+    run_service "Nginx" \
+        "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+        2026 10
+fi
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
@@ -384,9 +410,17 @@ echo "=========================================="
 echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
-echo "  🌐 http://localhost:2026"
+if $SKIP_NGINX; then
+    echo "  🌐 http://localhost:3000"
+else
+    echo "  🌐 http://localhost:2026"
+fi
 echo ""
-echo "  Routing: Frontend → Nginx → Gateway"
+if $SKIP_NGINX; then
+    echo "  Routing: Frontend rewrites → Gateway"
+else
+    echo "  Routing: Frontend → Nginx → Gateway"
+fi
 echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
 echo "           /api/*              →  Gateway REST API (8001)"
 echo ""
