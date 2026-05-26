@@ -1,15 +1,8 @@
 "use client";
 
-import { Settings2Icon, SettingsIcon } from "lucide-react";
+import { SettingsIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import {
   SidebarMenu,
   SidebarMenuButton,
@@ -55,6 +48,11 @@ export function WorkspaceNavMenu() {
     setMounted(true);
   }, []);
 
+  const handleOpenSettings = () => {
+    setSettingsDefaultSection("appearance");
+    setSettingsOpen(true);
+  };
+
   return (
     <>
       <SettingsDialog
@@ -65,33 +63,13 @@ export function WorkspaceNavMenu() {
       <SidebarMenu className="w-full">
         <SidebarMenuItem>
           {mounted ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <SidebarMenuButton
-                  size="lg"
-                  className="rounded-lg text-gray-700 hover:bg-gray-200 data-[state=open]:bg-gray-200 data-[state=open]:text-gray-900"
-                >
-                  <NavMenuButtonContent isSidebarOpen={isSidebarOpen} t={t} />
-                </SidebarMenuButton>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
-                align="end"
-                sideOffset={4}
-              >
-                <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      setSettingsDefaultSection("appearance");
-                      setSettingsOpen(true);
-                    }}
-                  >
-                    <Settings2Icon />
-                    {t.common.settings}
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <SidebarMenuButton
+              size="lg"
+              className="rounded-lg text-gray-700 hover:bg-gray-200 data-[state=open]:bg-gray-200 data-[state=open]:text-gray-900"
+              onClick={handleOpenSettings}
+            >
+              <NavMenuButtonContent isSidebarOpen={isSidebarOpen} t={t} />
+            </SidebarMenuButton>
           ) : (
             <SidebarMenuButton size="lg" className="pointer-events-none">
               <NavMenuButtonContent isSidebarOpen={isSidebarOpen} t={t} />

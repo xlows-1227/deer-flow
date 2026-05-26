@@ -12,7 +12,7 @@ import {
   FileXIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
-  XIcon,
+  PanelRightCloseIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -189,10 +189,10 @@ function WorkspacePreviewEmpty() {
 
 export function ConversationWorkspacePanel({
   threadId,
-  onClose,
+  onCollapse,
 }: {
   threadId: string;
-  onClose: () => void;
+  onCollapse: () => void;
 }) {
   const { thread } = useThread();
   const { data, error, isFetching, refetch } = useSandboxFiles(threadId);
@@ -253,12 +253,12 @@ export function ConversationWorkspacePanel({
         <h2 className="text-sm font-semibold text-slate-800">工作空间</h2>
         <button
           type="button"
-          onClick={onClose}
+          onClick={onCollapse}
           className="rounded-lg p-1.5 transition-colors hover:bg-slate-100"
-          title="关闭工作空间"
-          aria-label="关闭工作空间"
+          title="收缩工作空间"
+          aria-label="收缩工作空间"
         >
-          <XIcon className="size-4 text-slate-400" />
+          <PanelRightCloseIcon className="size-4 text-slate-400" />
         </button>
       </header>
 

@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { PanelRightOpenIcon } from "lucide-react";
 
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -8,8 +10,9 @@ import { useThread } from "../messages/context";
 
 import { ConversationWorkspacePanel } from "./conversation-workspace-panel";
 
-/** Right-side workspace panel width. Keep in sync with inner content width. */
-const WORKSPACE_PANEL_WIDTH_CLASS = "w-80";
+const MIN_PANEL_WIDTH = 240;
+const MAX_PANEL_WIDTH = 800;
+const DEFAULT_PANEL_WIDTH = 320;
 
 const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   children,
@@ -29,6 +32,10 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   } = useArtifacts();
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
+
+  const [width, setWidth] = useState(DEFAULT_PANEL_WIDTH);
+  const [isResizing, setIsResizing] = useState(false);
+
   useEffect(() => {
     if (threadIdRef.current !== threadId) {
       threadIdRef.current = threadId;
@@ -68,32 +75,82 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     return artifactsOpen;
   }, [artifactsOpen, artifacts]);
 
+  const handleResizeStart = useCallback(() => {
+    setIsResizing(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = window.innerWidth - e.clientX;
+      setWidth(
+        Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, newWidth)),
+      );
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isResizing]);
+
   return (
     <div className="flex h-full w-full">
       <div className="relative min-w-0 flex-1">{children}</div>
-      <aside
-        className={cn(
-          "h-full shrink-0 overflow-hidden border-l border-slate-200 transition-[width] duration-300 ease-in-out",
-          artifactPanelOpen
-            ? WORKSPACE_PANEL_WIDTH_CLASS
-            : "w-0 border-l-0",
-          !artifactsOpen && "opacity-0",
-        )}
-        aria-hidden={!artifactPanelOpen}
-      >
+
+      {artifactPanelOpen && (
         <div
           className={cn(
-            "h-full transition-transform duration-300 ease-in-out",
-            WORKSPACE_PANEL_WIDTH_CLASS,
-            artifactPanelOpen ? "translate-x-0" : "translate-x-full",
+            "group/resizer z-20 w-1 shrink-0 transition-colors",
+            isResizing
+              ? "bg-blue-400/60"
+              : "hover:bg-blue-400/40 cursor-col-resize bg-transparent",
           )}
-        >
+          onMouseDown={handleResizeStart}
+          title="拖拽调整宽度"
+        />
+      )}
+
+      <aside
+        className={cn(
+          "h-full shrink-0 overflow-hidden border-l border-slate-200",
+          !artifactPanelOpen && "border-l-0",
+        )}
+        style={{
+          width: artifactPanelOpen ? width : 0,
+          transition: isResizing ? "none" : "width 300ms ease-in-out",
+        }}
+      >
+        <div className="h-full w-full">
           <ConversationWorkspacePanel
             threadId={threadId}
-            onClose={() => setArtifactsOpen(false)}
+            onCollapse={() => setArtifactsOpen(false)}
           />
         </div>
       </aside>
+
+      {!artifactPanelOpen && (
+        <button
+          type="button"
+          className="flex h-full w-6 shrink-0 cursor-pointer items-center justify-center border-l border-slate-200 bg-background hover:bg-slate-50"
+          onClick={() => setArtifactsOpen(true)}
+          title="展开工作空间"
+        >
+          <PanelRightOpenIcon className="size-3.5 text-slate-400" />
+        </button>
+      )}
     </div>
   );
 };

@@ -98,6 +98,20 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
     model_class = resolve_class(model_config.use, BaseChatModel)
+
+    # Auto-patch ChatDeepSeek to preserve reasoning_content in multi-turn conversations.
+    # The DeepSeek API requires reasoning_content to be passed back on all assistant
+    # messages when thinking mode is enabled; the stock ChatDeepSeek drops it.
+    if model_config.use == "langchain_deepseek:ChatDeepSeek":
+        try:
+            from langchain_deepseek import ChatDeepSeek
+            from deerflow.models.patched_deepseek import PatchedChatDeepSeek
+
+            if model_class is ChatDeepSeek:
+                model_class = PatchedChatDeepSeek
+        except ImportError:
+            pass
+
     model_settings_from_config = model_config.model_dump(
         exclude_none=True,
         exclude={

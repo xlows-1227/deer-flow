@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
@@ -202,11 +201,6 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <div className="text-muted-foreground text-center text-xs">
-          <Link href="/" className="hover:underline">
-            ← Back to home
-          </Link>
-        </div>
       </div>
     </div>
   );
