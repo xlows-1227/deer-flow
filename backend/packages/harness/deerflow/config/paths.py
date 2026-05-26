@@ -160,6 +160,10 @@ class Paths:
         """Per-user root for that user's custom agents: `{base_dir}/users/{user_id}/agents/`."""
         return self.user_dir(user_id) / "agents"
 
+    def user_documents_dir(self, user_id: str) -> Path:
+        """Per-user document library: `{base_dir}/users/{user_id}/documents/`."""
+        return self.user_dir(user_id) / "documents"
+
     def user_agent_dir(self, user_id: str, agent_name: str) -> Path:
         """Per-user per-agent directory: `{base_dir}/users/{user_id}/agents/{name}/`."""
         return self.user_agents_dir(user_id) / agent_name.lower()

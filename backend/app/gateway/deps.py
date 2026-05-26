@@ -140,14 +140,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
+            from deerflow.persistence.scheduled_task import make_scheduled_task_store
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            app.state.scheduler_store = make_scheduled_task_store(sf)
         else:
+            from deerflow.persistence.scheduled_task import make_scheduled_task_store
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            app.state.scheduler_store = make_scheduled_task_store(None)
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -204,6 +208,7 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_scheduler_store: Callable[[Request], object] = _require("scheduler_store", "Scheduler store")
 
 
 def get_store(request: Request):

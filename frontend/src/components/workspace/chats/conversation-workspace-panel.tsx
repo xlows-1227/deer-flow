@@ -1,38 +1,37 @@
+"use client";
+
 import {
-  CheckCircle2Icon,
-  CircleIcon,
+  AlertCircleIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   FileCode2Icon,
   FileIcon,
   FileImageIcon,
   FileSpreadsheetIcon,
-  FolderIcon,
-  ListTodoIcon,
+  FileTextIcon,
+  FileXIcon,
   LoaderCircleIcon,
-  PanelRightCloseIcon,
-  RotateCwIcon,
+  RefreshCwIcon,
+  XIcon,
 } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import { useSandboxFiles, type SandboxFileInfo } from "@/core/sandbox";
-import type { Todo } from "@/core/todos";
 import { getFileName } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileDetail, useArtifacts } from "../artifacts";
 import { useThread } from "../messages/context";
 
+import { WorkspaceToolExecutionPanel } from "./workspace-tool-execution-panel";
+
+type WorkspaceTab = "files" | "tools";
+
 const SOURCE_LABELS: Record<string, string> = {
   workspace: "工作区",
   uploads: "上传",
   outputs: "输出",
   "user-data": "Sandbox",
-};
-
-const STATUS_LABELS: Record<NonNullable<Todo["status"]>, string> = {
-  pending: "待执行",
-  in_progress: "当前",
-  completed: "已完成",
 };
 
 function formatFileSize(size: number) {
@@ -81,136 +80,6 @@ function shortPath(path: string) {
   return path.replace(/^\/mnt\/user-data\/?/, "");
 }
 
-function StepStatusIcon({ status }: { status: Todo["status"] }) {
-  if (status === "completed") {
-    return <CheckCircle2Icon className="size-4 text-emerald-600" />;
-  }
-  if (status === "in_progress") {
-    return <LoaderCircleIcon className="size-4 animate-spin text-blue-600" />;
-  }
-  return <CircleIcon className="size-4 text-slate-300" />;
-}
-
-function ExecutionSteps({ todos }: { todos: Todo[] }) {
-  const completed = todos.filter((todo) => todo.status === "completed").length;
-  const currentIndex = todos.findIndex((todo) => todo.status === "in_progress");
-
-  return (
-    <section className="min-h-0">
-      <div className="mb-2 flex items-center justify-between px-1">
-        <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
-          <ListTodoIcon className="size-4 text-slate-500" />
-          执行步骤
-        </div>
-        {todos.length > 0 && (
-          <span className="text-xs text-slate-500">
-            {completed}/{todos.length}
-          </span>
-        )}
-      </div>
-      {todos.length === 0 ? (
-        <div className="rounded-md border border-dashed border-slate-200 bg-white px-3 py-4 text-center text-xs text-slate-500">
-          Pro/Ultra 模式开始规划后，这里会显示当前步骤。
-        </div>
-      ) : (
-        <div className="space-y-1.5">
-          {todos.map((todo, index) => {
-            const status = todo.status ?? "pending";
-            const isCurrent =
-              status === "in_progress" ||
-              (currentIndex === -1 &&
-                status === "pending" &&
-                index === completed);
-            return (
-              <div
-                key={`${todo.content ?? "step"}-${index}`}
-                className={cn(
-                  "flex gap-2 rounded-md border px-2.5 py-2 text-sm",
-                  isCurrent
-                    ? "border-blue-200 bg-blue-50"
-                    : "border-slate-200 bg-white",
-                )}
-              >
-                <StepStatusIcon status={isCurrent ? "in_progress" : status} />
-                <div className="min-w-0 flex-1">
-                  <div className="line-clamp-2 text-slate-800">
-                    {todo.content ?? `步骤 ${index + 1}`}
-                  </div>
-                  <div className="mt-1 text-xs text-slate-500">
-                    {isCurrent ? "当前" : STATUS_LABELS[status]}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function SandboxFileList({
-  files,
-  selectedPath,
-  onSelect,
-}: {
-  files: SandboxFileInfo[];
-  selectedPath: string | null;
-  onSelect: (path: string) => void;
-}) {
-  return (
-    <section className="flex min-h-0 flex-1 flex-col">
-      <div className="mb-2 flex items-center justify-between px-1">
-        <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
-          <FolderIcon className="size-4 text-slate-500" />
-          Sandbox 文件
-        </div>
-        <span className="text-xs text-slate-500">{files.length}</span>
-      </div>
-      {files.length === 0 ? (
-        <div className="flex min-h-24 items-center justify-center rounded-md border border-dashed border-slate-200 bg-white px-3 text-center text-xs text-slate-500">
-          当前对话还没有可预览文件。
-        </div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="space-y-1">
-            {files.map((file) => {
-              const Icon = fileIcon(file);
-              const selected = selectedPath === file.path;
-              return (
-                <button
-                  key={file.path}
-                  type="button"
-                  onClick={() => onSelect(file.path)}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors",
-                    selected
-                      ? "border-blue-200 bg-blue-50"
-                      : "border-transparent bg-white hover:border-slate-200 hover:bg-slate-50",
-                  )}
-                >
-                  <Icon className="size-4 shrink-0 text-slate-500" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-slate-800">
-                      {file.name}
-                    </span>
-                    <span className="block truncate text-xs text-slate-500">
-                      {sourceLabel(file.source)} / {shortPath(file.path)}
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-xs text-slate-400">
-                    {formatFileSize(file.size)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function mergeSandboxAndArtifacts(
   sandboxFiles: SandboxFileInfo[],
   artifacts: string[],
@@ -240,6 +109,84 @@ function mergeSandboxAndArtifacts(
   });
 }
 
+function WorkspaceFileList({
+  files,
+  selectedPath,
+  isLoading,
+  onSelect,
+}: {
+  files: SandboxFileInfo[];
+  selectedPath: string | null;
+  isLoading: boolean;
+  onSelect: (path: string) => void;
+}) {
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center p-6">
+        <LoaderCircleIcon className="size-5 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  if (files.length === 0) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div className="text-center text-slate-400">
+          <FileTextIcon className="mx-auto mb-2 size-12" />
+          <p className="text-sm">暂无文件</p>
+          <p className="mt-1 text-xs">
+            上传文件或让 Agent 在工作区中创建文件
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5 p-1">
+      {files.map((file) => {
+        const Icon = fileIcon(file);
+        const selected = selectedPath === file.path;
+        return (
+          <button
+            key={file.path}
+            type="button"
+            onClick={() => onSelect(file.path)}
+            className={cn(
+              "flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors",
+              selected
+                ? "border-indigo-200 bg-indigo-50"
+                : "border-transparent hover:border-slate-200 hover:bg-slate-50",
+            )}
+          >
+            <Icon className="size-4 shrink-0 text-slate-500" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-medium text-slate-800">
+                {file.name}
+              </span>
+              <span className="block truncate text-xs text-slate-500">
+                {sourceLabel(file.source)} · {shortPath(file.path)}
+              </span>
+            </span>
+            <span className="shrink-0 text-xs text-slate-400">
+              {formatFileSize(file.size)}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkspacePreviewEmpty() {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center p-8 text-slate-400">
+      <FileXIcon className="mb-2 size-12" />
+      <p className="text-sm">选择文件以预览</p>
+    </div>
+  );
+}
+
 export function ConversationWorkspacePanel({
   threadId,
   onClose,
@@ -254,6 +201,10 @@ export function ConversationWorkspacePanel({
     select: selectArtifact,
     setArtifacts,
   } = useArtifacts();
+
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("files");
+  const [filesSectionOpen, setFilesSectionOpen] = useState(true);
+  const [previewSectionOpen, setPreviewSectionOpen] = useState(true);
 
   const files = useMemo(
     () =>
@@ -284,63 +235,179 @@ export function ConversationWorkspacePanel({
     ? null
     : selectedArtifact;
 
+  const handleRefreshFiles = useCallback(() => {
+    void refetch();
+  }, [refetch]);
+
+  const tabClass = (tab: WorkspaceTab) =>
+    cn(
+      "rounded-lg px-2.5 py-1.5 text-sm whitespace-nowrap transition-all duration-150",
+      activeTab === tab
+        ? "bg-white font-medium text-indigo-600 shadow-sm"
+        : "text-slate-500 hover:bg-white/60 hover:text-slate-700",
+    );
+
   return (
-    <div className="flex size-full min-w-0 flex-col border-l border-slate-200 bg-slate-50">
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-3">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold text-slate-900">
-            对话工作区
-          </h2>
-          <p className="truncate text-xs text-slate-500">
-            当前 sandbox 文件和执行进度
-          </p>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            onClick={() => void refetch()}
-            disabled={isFetching}
-          >
-            <RotateCwIcon className={cn(isFetching && "animate-spin")} />
-          </Button>
-          <Button size="icon-sm" variant="ghost" onClick={onClose}>
-            <PanelRightCloseIcon />
-          </Button>
-        </div>
+    <div className="flex size-full min-w-0 flex-col border-l border-slate-200 bg-background">
+      <header className="flex shrink-0 items-center justify-between border-b border-slate-100 bg-background px-4 py-3">
+        <h2 className="text-sm font-semibold text-slate-800">工作空间</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg p-1.5 transition-colors hover:bg-slate-100"
+          title="关闭工作空间"
+          aria-label="关闭工作空间"
+        >
+          <XIcon className="size-4 text-slate-400" />
+        </button>
       </header>
-      <div className="flex min-h-0 flex-[0_0_42%] flex-col gap-4 overflow-hidden border-b border-slate-200 p-3">
-        <div className="max-h-[45%] min-h-0 overflow-y-auto pr-1">
-          <ExecutionSteps todos={thread.values.todos ?? []} />
-        </div>
-        <SandboxFileList
-          files={files}
-          selectedPath={selectedFilePath}
-          onSelect={(path) => selectArtifact(path)}
-        />
-        {error && (
-          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            无法读取 sandbox 文件列表，仍会显示已记录的 artifacts。
-          </div>
-        )}
-        {data?.truncated && (
-          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">
-            文件较多，当前只显示前 {files.length} 个。
-          </div>
-        )}
+
+      <div className="flex shrink-0 gap-1 border-b border-slate-100 bg-slate-50/50 px-3 py-2">
+        <button
+          type="button"
+          className={tabClass("files")}
+          onClick={() => setActiveTab("files")}
+        >
+          文件管理
+        </button>
+        <button
+          type="button"
+          className={tabClass("tools")}
+          onClick={() => setActiveTab("tools")}
+        >
+          执行记录
+        </button>
       </div>
-      <div className="min-h-0 flex-1 bg-white p-3">
-        {selectedFilePath ? (
-          <ArtifactFileDetail
-            className="size-full overflow-hidden rounded-md border border-slate-200"
-            filepath={selectedFilePath}
-            threadId={threadId}
-          />
-        ) : (
-          <div className="flex size-full items-center justify-center rounded-md border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
-            选择一个文件后在这里预览。
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {activeTab === "files" && (
+          <>
+            <div
+              className={cn(
+                "flex flex-col border-b border-slate-100 bg-background",
+                !previewSectionOpen && "min-h-0 flex-1",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => setFilesSectionOpen((open) => !open)}
+                className="flex w-full shrink-0 items-center justify-between border-b border-slate-100 bg-slate-50/50 px-4 py-2.5 text-left transition-colors hover:bg-slate-100/50"
+              >
+                <span className="flex items-center gap-1.5">
+                  {filesSectionOpen ? (
+                    <ChevronDownIcon className="size-3.5 shrink-0 text-slate-400" />
+                  ) : (
+                    <ChevronRightIcon className="size-3.5 shrink-0 text-slate-400" />
+                  )}
+                  <span className="text-xs font-semibold tracking-wider text-slate-600 uppercase">
+                    文件管理
+                    {files.length > 0 && ` (${files.length})`}
+                  </span>
+                </span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleRefreshFiles();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      handleRefreshFiles();
+                    }
+                  }}
+                  className={cn(
+                    "rounded-md p-1 transition-colors hover:bg-slate-200",
+                    isFetching && "cursor-not-allowed opacity-50",
+                  )}
+                  title="刷新文件"
+                  aria-label="刷新文件"
+                >
+                  <RefreshCwIcon
+                    className={cn(
+                      "size-3.5 text-slate-400",
+                      isFetching && "animate-spin",
+                    )}
+                  />
+                </span>
+              </button>
+
+              {filesSectionOpen && (
+                <div
+                  className={cn(
+                    previewSectionOpen
+                      ? "max-h-64 min-h-0 overflow-y-auto"
+                      : "flex min-h-0 flex-1 flex-col overflow-hidden",
+                  )}
+                >
+                  {error && !isFetching && (
+                    <div className="flex items-center gap-2 p-4 text-amber-800">
+                      <AlertCircleIcon className="size-4 shrink-0" />
+                      <p className="text-sm">
+                        无法读取 sandbox 文件列表，仍会显示已记录的 artifacts。
+                      </p>
+                    </div>
+                  )}
+                  {data?.truncated && (
+                    <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">
+                      文件较多，当前只显示前 {files.length} 个。
+                    </div>
+                  )}
+                  <WorkspaceFileList
+                    files={files}
+                    selectedPath={selectedFilePath}
+                    isLoading={isFetching && files.length === 0}
+                    onSelect={(path) => selectArtifact(path)}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPreviewSectionOpen((open) => !open)}
+                className="flex w-full shrink-0 items-center gap-1.5 border-b border-slate-100 bg-slate-50/50 px-4 py-2.5 text-left transition-colors hover:bg-slate-100/50"
+              >
+                {previewSectionOpen ? (
+                  <ChevronDownIcon className="size-3.5 shrink-0 text-slate-400" />
+                ) : (
+                  <ChevronRightIcon className="size-3.5 shrink-0 text-slate-400" />
+                )}
+                <span className="text-xs font-semibold tracking-wider text-slate-600 uppercase">
+                  预览
+                </span>
+              </button>
+              {previewSectionOpen && (
+                <div className="min-h-0 flex-1 overflow-hidden bg-background">
+                  {selectedFilePath || selectedArtifact?.startsWith("write-file:") ? (
+                    <ArtifactFileDetail
+                      className="size-full overflow-hidden"
+                      filepath={selectedArtifact ?? selectedFilePath!}
+                      threadId={threadId}
+                    />
+                  ) : (
+                    <WorkspacePreviewEmpty />
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {activeTab === "tools" && (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="border-b border-slate-100 bg-slate-50/50 px-4 py-2.5">
+              <h3 className="text-xs font-semibold tracking-wider text-slate-600 uppercase">
+                工具执行记录
+              </h3>
+            </div>
+            <WorkspaceToolExecutionPanel />
           </div>
         )}
+
       </div>
     </div>
   );

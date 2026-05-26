@@ -17,10 +17,12 @@ from app.gateway.routers import (
     auth,
     channels,
     feedback,
+    files,
     mcp,
     memory,
     models,
     runs,
+    scheduler,
     skills,
     suggestions,
     thread_runs,
@@ -187,6 +189,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
+        try:
+            from app.gateway.scheduler import start_scheduler_loop
+
+            start_scheduler_loop(app)
+        except Exception:
+            logger.exception("Failed to start scheduled task loop")
+
         # Start IM channel service if any channels are configured
         try:
             from app.channels.service import start_channel_service
@@ -213,6 +222,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop channel service")
+
+        try:
+            from app.gateway.scheduler import stop_scheduler_loop
+
+            await asyncio.wait_for(
+                stop_scheduler_loop(app),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Scheduled task loop shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to stop scheduled task loop")
 
     logger.info("Shutting down API Gateway")
 
@@ -276,6 +300,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Access and download thread artifacts and generated files",
             },
             {
+                "name": "files",
+                "description": "Manage the current user's document library",
+            },
+            {
                 "name": "uploads",
                 "description": "Upload and manage user files for threads",
             },
@@ -302,6 +330,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             {
                 "name": "runs",
                 "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
+            },
+            {
+                "name": "scheduler",
+                "description": "Create, manage, and trigger scheduled agent tasks",
             },
             {
                 "name": "health",
@@ -341,6 +373,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+
+    # Scheduler API is mounted at /api/scheduler
+    app.include_router(scheduler.router)
+
+    # User file library API is mounted at /api/files
+    app.include_router(files.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)

@@ -1,12 +1,5 @@
-import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { GroupImperativeHandle } from "react-resizable-panels";
 
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -15,17 +8,15 @@ import { useThread } from "../messages/context";
 
 import { ConversationWorkspacePanel } from "./conversation-workspace-panel";
 
-const CLOSE_MODE = { chat: 100, artifacts: 0 };
-const OPEN_MODE = { chat: 66, artifacts: 34 };
+/** Right-side workspace panel width. Keep in sync with inner content width. */
+const WORKSPACE_PANEL_WIDTH_CLASS = "w-80";
 
 const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   children,
   threadId,
 }) => {
   const { thread } = useThread();
-  const pathname = usePathname();
   const threadIdRef = useRef(threadId);
-  const layoutRef = useRef<GroupImperativeHandle>(null);
 
   const {
     artifacts,
@@ -44,7 +35,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       deselect();
     }
 
-    // Update artifacts from the current thread
     setArtifacts(thread.values.artifacts);
 
     if (
@@ -78,48 +68,23 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     return artifactsOpen;
   }, [artifactsOpen, artifacts]);
 
-  const resizableIdBase = useMemo(() => {
-    return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-  }, [pathname]);
-
-  useEffect(() => {
-    if (layoutRef.current) {
-      if (artifactPanelOpen) {
-        layoutRef.current.setLayout(OPEN_MODE);
-      } else {
-        layoutRef.current.setLayout(CLOSE_MODE);
-      }
-    }
-  }, [artifactPanelOpen]);
-
   return (
-    <ResizablePanelGroup
-      id={`${resizableIdBase}-panels`}
-      orientation="horizontal"
-      defaultLayout={{ chat: 66, artifacts: 34 }}
-      groupRef={layoutRef}
-    >
-      <ResizablePanel className="relative" defaultSize={66} id="chat">
-        {children}
-      </ResizablePanel>
-      <ResizableHandle
-        id={`${resizableIdBase}-separator`}
+    <div className="flex h-full w-full">
+      <div className="relative min-w-0 flex-1">{children}</div>
+      <aside
         className={cn(
-          "opacity-33 hover:opacity-100",
-          !artifactPanelOpen && "pointer-events-none opacity-0",
-        )}
-      />
-      <ResizablePanel
-        className={cn(
-          "transition-all duration-300 ease-in-out",
+          "h-full shrink-0 overflow-hidden border-l border-slate-200 transition-[width] duration-300 ease-in-out",
+          artifactPanelOpen
+            ? WORKSPACE_PANEL_WIDTH_CLASS
+            : "w-0 border-l-0",
           !artifactsOpen && "opacity-0",
         )}
-        defaultSize={34}
-        id="artifacts"
+        aria-hidden={!artifactPanelOpen}
       >
         <div
           className={cn(
             "h-full transition-transform duration-300 ease-in-out",
+            WORKSPACE_PANEL_WIDTH_CLASS,
             artifactPanelOpen ? "translate-x-0" : "translate-x-full",
           )}
         >
@@ -128,8 +93,8 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
             onClose={() => setArtifactsOpen(false)}
           />
         </div>
-      </ResizablePanel>
-    </ResizablePanelGroup>
+      </aside>
+    </div>
   );
 };
 

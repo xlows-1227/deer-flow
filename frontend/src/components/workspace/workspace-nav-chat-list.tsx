@@ -1,11 +1,10 @@
 "use client";
 
 import {
-  ActivityIcon,
   BotIcon,
   BrainIcon,
   ClockIcon,
-  DatabaseIcon,
+  FolderIcon,
   PlugIcon,
   SparklesIcon,
 } from "lucide-react";
@@ -56,13 +55,16 @@ export function WorkspaceNavChatList() {
         </SidebarMenuItem>
         <SidebarMenuItem>
           <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/knowledge")}
+            isActive={
+              pathname.startsWith("/workspace/files") ||
+              pathname.startsWith("/workspace/knowledge")
+            }
             asChild
             className={itemClassName}
           >
-            <Link href="/workspace/knowledge">
-              <DatabaseIcon />
-              <span>知识库</span>
+            <Link href="/workspace/files">
+              <FolderIcon />
+              <span>文件</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -87,18 +89,6 @@ export function WorkspaceNavChatList() {
             <Link href="/workspace/memory">
               <BrainIcon />
               <span>记忆</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/traces")}
-            asChild
-            className={itemClassName}
-          >
-            <Link href="/workspace/traces">
-              <ActivityIcon />
-              <span>日志链路</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

@@ -3,6 +3,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EyeIcon,
+  FileIcon,
   LoaderIcon,
   PackageIcon,
   SquareArrowOutUpRightIcon,
@@ -20,6 +21,7 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { Button } from "@/components/ui/button";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
   SelectContent,
@@ -297,9 +299,10 @@ export function ArtifactFileDetail({
           />
         )}
         {!isCodeFile && (
-          <iframe
-            className="size-full"
-            src={urlOfArtifact({ filepath, threadId, isMock })}
+          <NonCodeFilePreview
+            filepath={filepath}
+            threadId={threadId}
+            isMock={isMock ?? false}
           />
         )}
       </ArtifactContent>
@@ -512,4 +515,87 @@ function useThrottledValue(
   return intervalMs <= 0 || resetKeyRef.current !== resetKey
     ? value
     : throttledValue;
+}
+
+const IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "svg",
+]);
+
+function isImageFile(filepath: string): boolean {
+  const ext = filepath.split(".").pop()?.toLowerCase();
+  return ext ? IMAGE_EXTENSIONS.has(ext) : false;
+}
+
+function NonCodeFilePreview({
+  filepath,
+  threadId,
+  isMock,
+}: {
+  filepath: string;
+  threadId: string;
+  isMock: boolean;
+}) {
+  const { t } = useI18n();
+  const artifactUrl = urlOfArtifact({ filepath, threadId, isMock });
+  const downloadUrl = urlOfArtifact({
+    filepath,
+    threadId,
+    isMock,
+    download: true,
+  });
+
+  if (isImageFile(filepath)) {
+    return (
+      <div className="flex size-full items-center justify-center overflow-auto bg-slate-50 p-4">
+        <img
+          src={artifactUrl}
+          alt={getFileName(filepath)}
+          className="max-h-full max-w-full object-contain shadow-sm"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex size-full flex-col items-center justify-center gap-6 bg-slate-50 p-8">
+      <FileIcon className="size-16 text-slate-300" />
+      <div className="text-center">
+        <p className="text-lg font-medium text-slate-700">
+          {getFileName(filepath)}
+        </p>
+        <p className="mt-1 text-sm text-slate-400">
+          Preview not available for this file type
+        </p>
+      </div>
+      <div className="flex gap-3">
+        <Button
+          variant="outline"
+          onClick={() => {
+            const w = window.open(artifactUrl, "_blank", "noopener,noreferrer");
+            if (w) w.opener = null;
+          }}
+        >
+          <SquareArrowOutUpRightIcon className="mr-2 size-4" />
+          {t.common.openInNewWindow}
+        </Button>
+        <Button
+          variant="default"
+          onClick={() => {
+            const w = window.open(downloadUrl, "_blank", "noopener,noreferrer");
+            if (w) w.opener = null;
+          }}
+        >
+          <DownloadIcon className="mr-2 size-4" />
+          {t.common.download}
+        </Button>
+      </div>
+    </div>
+  );
 }

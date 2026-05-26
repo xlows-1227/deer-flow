@@ -429,6 +429,99 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     assert captured.get("reasoning_effort") == "minimal"
 
 
+def test_deepseek_reasoning_effort_minimal_maps_to_low(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "deepseek",
+                use="langchain_deepseek:ChatDeepSeek",
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="deepseek", reasoning_effort="minimal")
+
+    assert captured.get("reasoning_effort") == "low"
+
+
+def test_patched_deepseek_reasoning_effort_minimal_maps_to_low(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "deepseek",
+                use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="deepseek", reasoning_effort="minimal")
+
+    assert captured.get("reasoning_effort") == "low"
+
+
+@pytest.mark.parametrize(
+    ("provider", "effort"),
+    [
+        ("langchain_deepseek:ChatDeepSeek", "low"),
+        ("langchain_deepseek:ChatDeepSeek", "medium"),
+        ("langchain_deepseek:ChatDeepSeek", "high"),
+        ("langchain_deepseek:ChatDeepSeek", "max"),
+        ("langchain_deepseek:ChatDeepSeek", "xhigh"),
+        ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "low"),
+        ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "medium"),
+        ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "high"),
+        ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "max"),
+        ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "xhigh"),
+    ],
+)
+def test_deepseek_reasoning_effort_supported_values_are_preserved(monkeypatch, provider, effort):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "deepseek",
+                use=provider,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="deepseek", reasoning_effort=effort)
+
+    assert captured.get("reasoning_effort") == effort
+
+
 # ---------------------------------------------------------------------------
 # thinking shortcut field
 # ---------------------------------------------------------------------------

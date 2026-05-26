@@ -47,6 +47,28 @@ def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_con
         model_settings_from_config["stream_usage"] = True
 
 
+def _normalize_provider_reasoning_effort(model_use_path: str, model_settings_from_config: dict, kwargs: dict) -> None:
+    """Normalize frontend reasoning effort labels for providers with narrower enums."""
+    if model_use_path not in {
+        "langchain_deepseek:ChatDeepSeek",
+        "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    }:
+        return
+
+    deepseek_reasoning_effort = {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "max": "max",
+        "xhigh": "xhigh",
+    }
+    for settings in (model_settings_from_config, kwargs):
+        effort = settings.get("reasoning_effort")
+        if effort in deepseek_reasoning_effort:
+            settings["reasoning_effort"] = deepseek_reasoning_effort[effort]
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -126,6 +148,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+    else:
+        _normalize_provider_reasoning_effort(model_config.use, model_settings_from_config, kwargs)
 
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
 
