@@ -145,13 +145,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
             app.state.scheduler_store = make_scheduled_task_store(sf)
+            from deerflow.persistence.scheduled_task_run import ScheduledTaskRunRepository
+
+            app.state.scheduler_run_store = ScheduledTaskRunRepository(sf)
         else:
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
+            from deerflow.persistence.scheduled_task_run import MemoryScheduledTaskRunStore
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
             app.state.scheduler_store = make_scheduled_task_store(None)
+            app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
 
         from deerflow.persistence.thread_meta import make_thread_store
 

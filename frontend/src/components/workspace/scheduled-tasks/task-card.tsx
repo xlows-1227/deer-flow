@@ -4,8 +4,11 @@ import {
   BanIcon,
   CalendarClockIcon,
   CheckCircle2Icon,
+  ChevronDownIcon,
+  ChevronUpIcon,
   ClockIcon,
   EyeIcon,
+  HistoryIcon,
   LoaderCircleIcon,
   PauseIcon,
   PencilIcon,
@@ -13,12 +16,19 @@ import {
   RotateCwIcon,
   StopCircleIcon,
   Trash2Icon,
+  UserIcon,
   ZapIcon,
 } from "lucide-react";
+import { useCallback, useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { ScheduledTask } from "@/core/scheduled-tasks/types";
+import { getTaskHistory } from "@/core/scheduled-tasks/api";
+import type {
+  ScheduledTask,
+  ScheduledTaskRunHistory,
+} from "@/core/scheduled-tasks/types";
 import { cn } from "@/lib/utils";
 
 const repeatLabels: Record<string, string> = {
@@ -82,6 +92,35 @@ function statusBadge(task: ScheduledTask) {
   };
 }
 
+function runStatusBadge(status: ScheduledTaskRunHistory["status"]) {
+  if (status === "running") {
+    return {
+      icon: <LoaderCircleIcon className="size-3 animate-spin" />,
+      label: "运行中",
+      className: "text-amber-600",
+    };
+  }
+  if (status === "success") {
+    return {
+      icon: <CheckCircle2Icon className="size-3" />,
+      label: "成功",
+      className: "text-emerald-600",
+    };
+  }
+  if (status === "error") {
+    return {
+      icon: <BanIcon className="size-3" />,
+      label: "失败",
+      className: "text-red-600",
+    };
+  }
+  return {
+    icon: <StopCircleIcon className="size-3" />,
+    label: "已取消",
+    className: "text-slate-500",
+  };
+}
+
 export function ScheduledTaskCard({
   task,
   busy,
@@ -106,6 +145,29 @@ export function ScheduledTaskCard({
   const status = statusBadge(task);
   const running = task.last_run_status === "running" || busy;
   const canOpen = Boolean(task.last_run_thread_id);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyRuns, setHistoryRuns] = useState<ScheduledTaskRunHistory[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const result = await getTaskHistory(task.id);
+      setHistoryRuns(result.runs);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载执行历史失败");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [task.id]);
+
+  const toggleHistory = useCallback(() => {
+    if (!historyOpen && historyRuns.length === 0) {
+      void loadHistory();
+    }
+    setHistoryOpen((open) => !open);
+  }, [historyOpen, historyRuns.length, loadHistory]);
 
   return (
     <article
@@ -187,6 +249,92 @@ export function ScheduledTaskCard({
               {formatDateTime(task.last_run_at)}
             </span>
           </div>
+        </div>
+
+        {/* Execution history */}
+        <div className="mt-1">
+          <button
+            type="button"
+            onClick={toggleHistory}
+            className="flex w-full items-center justify-between rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-600 transition-colors hover:bg-slate-100"
+          >
+            <span className="flex items-center gap-1.5">
+              <HistoryIcon className="size-3.5" />
+              执行历史
+              {historyRuns.length > 0 && (
+                <span className="rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600">
+                  {historyRuns.length}
+                </span>
+              )}
+            </span>
+            {historyOpen ? (
+              <ChevronUpIcon className="size-3.5" />
+            ) : (
+              <ChevronDownIcon className="size-3.5" />
+            )}
+          </button>
+
+          {historyOpen && (
+            <div className="mt-1 max-h-48 overflow-y-auto rounded-md border border-slate-100 bg-slate-50/50">
+              {historyLoading ? (
+                <div className="flex items-center justify-center py-4">
+                  <LoaderCircleIcon className="size-4 animate-spin text-slate-400" />
+                </div>
+              ) : historyRuns.length === 0 ? (
+                <div className="py-3 text-center text-xs text-slate-400">
+                  暂无执行记录
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {historyRuns.map((run) => {
+                    const runStatus = runStatusBadge(run.status);
+                    return (
+                      <li
+                        key={run.run_id}
+                        className="flex items-center justify-between gap-2 px-3 py-2"
+                      >
+                        <div className="flex min-w-0 flex-col gap-0.5">
+                          <div className="flex items-center gap-1.5 text-xs">
+                            <span className={runStatus.className}>
+                              {runStatus.icon}
+                            </span>
+                            <span className="font-medium text-slate-700">
+                              {runStatus.label}
+                            </span>
+                            {run.thread_id && (
+                              <span className="text-[10px] text-slate-400">
+                                ·
+                              </span>
+                            )}
+                            {run.thread_id && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onOpen({ ...task, last_run_thread_id: run.thread_id })
+                                }
+                                className="inline-flex items-center gap-0.5 text-[10px] text-indigo-600 hover:text-indigo-700 hover:underline"
+                              >
+                                <EyeIcon className="size-2.5" />
+                                查看对话
+                              </button>
+                            )}
+                          </div>
+                          {run.error && (
+                            <p className="truncate text-[10px] text-red-500">
+                              {run.error}
+                            </p>
+                          )}
+                        </div>
+                        <span className="shrink-0 text-[10px] text-slate-400">
+                          {formatDateTime(run.created_at)}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

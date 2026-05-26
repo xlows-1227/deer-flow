@@ -54,3 +54,17 @@ export interface ScheduledTaskCancelResponse {
   reason: string;
   message: string;
 }
+
+export interface ScheduledTaskRunHistory {
+  run_id: string;
+  thread_id: string | null;
+  status: "running" | "success" | "error" | "cancelled";
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+}
+
+export interface ScheduledTaskHistoryResponse {
+  task: ScheduledTask;
+  runs: ScheduledTaskRunHistory[];
+}

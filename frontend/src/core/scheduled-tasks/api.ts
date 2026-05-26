@@ -4,6 +4,7 @@ import { getBackendBaseURL } from "@/core/config";
 import type {
   ScheduledTask,
   ScheduledTaskCancelResponse,
+  ScheduledTaskHistoryResponse,
   ScheduledTaskListResponse,
   ScheduledTaskPayload,
   ScheduledTaskRunResponse,
@@ -94,5 +95,13 @@ export function cancelScheduledTask(
     {
       method: "POST",
     },
+  );
+}
+
+export function getTaskHistory(
+  taskId: string,
+): Promise<ScheduledTaskHistoryResponse> {
+  return request<ScheduledTaskHistoryResponse>(
+    `/api/scheduler/tasks/${encodeURIComponent(taskId)}/history`,
   );
 }

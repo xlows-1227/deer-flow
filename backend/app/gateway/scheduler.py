@@ -243,6 +243,7 @@ class SchedulerService:
     def __init__(self, app: FastAPI) -> None:
         self._app = app
         self._store = app.state.scheduler_store
+        self._run_store = getattr(app.state, "scheduler_run_store", None)
 
     def _run_context(self) -> RunContext:
         return RunContext(
@@ -442,6 +443,22 @@ class SchedulerService:
                 await run_manager.cancel(record.run_id)
                 return ExecuteTaskResult(found=True, error_message="Task is already running")
 
+            # Record execution history
+            if self._run_store is not None:
+                try:
+                    await self._run_store.create(
+                        {
+                            "task_id": task_id,
+                            "run_id": record.run_id,
+                            "thread_id": thread_id,
+                            "status": "running",
+                            "started_at": run_at,
+                            "is_automatic": automatic,
+                        }
+                    )
+                except Exception:
+                    logger.exception("Failed to record scheduled task run history for %s", task_id)
+
             record.task = asyncio.create_task(
                 self._run_task_worker(
                     task_id,
@@ -489,11 +506,23 @@ class SchedulerService:
             )
         finally:
             reset_current_user(token)
+            status = _status_for_record(record)
             await self._store.mark_finished(
                 task_id,
-                status=_status_for_record(record),
+                status=status,
                 disable=automatic and task.get("repeat_type") == "once",
             )
+            # Update execution history
+            if self._run_store is not None:
+                try:
+                    await self._run_store.update_status(
+                        record.run_id,
+                        status=status,
+                        finished_at=datetime.now(UTC),
+                        error=record.error,
+                    )
+                except Exception:
+                    logger.exception("Failed to update scheduled task run history for %s", task_id)
 
     async def cancel_running_execution(self, task_id: str, *, user_id: str) -> ScheduledTaskCancelResponse:
         task = await self._store.get(task_id, user_id=user_id)
@@ -518,7 +547,27 @@ class SchedulerService:
         if task is None:
             return None
         runs: list[ScheduledRunSummary] = []
-        if task.last_run_id:
+
+        # Query execution history from run_store (new table)
+        if self._run_store is not None:
+            try:
+                history = await self._run_store.list_by_task(task_id, limit=50)
+                for row in history:
+                    runs.append(
+                        ScheduledRunSummary(
+                            run_id=row["run_id"],
+                            thread_id=row["thread_id"],
+                            status=row["status"],
+                            created_at=row["started_at"] or "",
+                            updated_at=row["finished_at"] or row["started_at"] or "",
+                            error=row.get("error"),
+                        )
+                    )
+            except Exception:
+                logger.exception("Failed to load scheduled task run history for %s", task_id)
+
+        # Fallback: also include the current last_run if not already in history
+        if task.last_run_id and not any(r.run_id == task.last_run_id for r in runs):
             record = await self._app.state.run_manager.get(task.last_run_id, user_id=user_id)
             if record is not None:
                 runs.append(
@@ -531,6 +580,9 @@ class SchedulerService:
                         error=record.error,
                     )
                 )
+
+        # Sort by created_at desc
+        runs.sort(key=lambda r: r.created_at, reverse=True)
         return ScheduledTaskHistoryResponse(task=task, runs=runs)
 
     async def run_due_tasks_once(self) -> None:
