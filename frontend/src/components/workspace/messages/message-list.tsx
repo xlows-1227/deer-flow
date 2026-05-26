@@ -17,9 +17,11 @@ import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
+  formatMessageTime,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
+  getMessageTimestamp,
   getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
@@ -213,24 +215,45 @@ export function MessageList({
     [],
   );
 
+  const timestampMapRef = useRef<Map<string, string>>(new Map());
+
   const renderTokenUsage = useCallback(
     ({
       messages,
       turnUsageMessages,
       inlineDebug = true,
       debugMessageIds,
+      groupId,
     }: {
       messages: Message[];
       turnUsageMessages?: Message[] | null;
       inlineDebug?: boolean;
       debugMessageIds?: string[];
+      groupId?: string;
     }) => {
+      const aiMessage = messages.find((m) => m.type === "ai");
+      let aiTimestamp = formatMessageTime(
+        getMessageTimestamp(aiMessage ?? messages[0]!),
+      );
+
+      // Fallback: record frontend render time if no backend timestamp
+      if (!aiTimestamp && groupId) {
+        if (!timestampMapRef.current.has(groupId)) {
+          timestampMapRef.current.set(
+            groupId,
+            formatMessageTime(new Date().toISOString()),
+          );
+        }
+        aiTimestamp = timestampMapRef.current.get(groupId)!;
+      }
+
       if (tokenUsageInlineMode === "per_turn") {
         return (
           <MessageTokenUsageList
             enabled={true}
             isLoading={thread.isLoading}
             messages={turnUsageMessages ?? []}
+            timestamp={aiTimestamp}
           />
         );
       }
@@ -244,13 +267,28 @@ export function MessageList({
               .filter((id): id is string => typeof id === "string"),
         );
         return (
-          <MessageTokenUsageDebugList
-            enabled={true}
-            isLoading={thread.isLoading}
-            steps={tokenDebugSteps.filter((step) =>
-              messageIds.has(step.messageId),
+          <>
+            <MessageTokenUsageDebugList
+              enabled={true}
+              isLoading={thread.isLoading}
+              steps={tokenDebugSteps.filter((step) =>
+                messageIds.has(step.messageId),
+              )}
+            />
+            {aiTimestamp && (
+              <div className="mt-1 text-right text-[10px] text-slate-400">
+                {aiTimestamp}
+              </div>
             )}
-          />
+          </>
+        );
+      }
+
+      if (aiTimestamp) {
+        return (
+          <div className="mt-1 text-right text-[10px] text-slate-400">
+            {aiTimestamp}
+          </div>
         );
       }
 
@@ -299,6 +337,7 @@ export function MessageList({
                 {renderTokenUsage({
                   messages: group.messages,
                   turnUsageMessages,
+                  groupId: group.id,
                 })}
                 {group.type === "assistant" &&
                   renderAssistantCopyButton(
@@ -350,6 +389,7 @@ export function MessageList({
                 {renderTokenUsage({
                   messages: group.messages,
                   turnUsageMessages,
+                  groupId: group.id,
                 })}
               </div>
             );
@@ -436,6 +476,7 @@ export function MessageList({
                   messages: group.messages,
                   turnUsageMessages,
                   debugMessageIds: subagentDebugMessageIds,
+                  groupId: group.id,
                 })}
               </div>
             );
@@ -456,6 +497,7 @@ export function MessageList({
                 messages: group.messages,
                 turnUsageMessages,
                 inlineDebug: false,
+                groupId: group.id,
               })}
             </div>
           );

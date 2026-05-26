@@ -12,11 +12,13 @@ function TokenUsageSummary({
   inputTokens,
   outputTokens,
   totalTokens,
+  timestamp,
 }: {
   className?: string;
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  timestamp?: string;
 }) {
   const { t } = useI18n();
 
@@ -40,6 +42,9 @@ function TokenUsageSummary({
       <span className="font-medium">
         {t.tokenUsage.total}: {formatTokenCount(totalTokens ?? 0)}
       </span>
+      {timestamp && (
+        <span className="ml-auto text-slate-400">{timestamp}</span>
+      )}
     </div>
   );
 }
@@ -49,11 +54,13 @@ export function MessageTokenUsageList({
   enabled = false,
   isLoading: _isLoading = false,
   messages,
+  timestamp,
 }: {
   className?: string;
   enabled?: boolean;
   isLoading?: boolean;
   messages: Message[];
+  timestamp?: string;
 }) {
   if (!enabled) {
     return null;
@@ -77,6 +84,7 @@ export function MessageTokenUsageList({
       inputTokens={usage.inputTokens}
       outputTokens={usage.outputTokens}
       totalTokens={usage.totalTokens}
+      timestamp={timestamp}
     />
   );
 }

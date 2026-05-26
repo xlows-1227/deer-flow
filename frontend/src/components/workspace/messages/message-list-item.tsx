@@ -39,6 +39,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  formatMessageTime,
+  getMessageTimestamp,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -136,6 +138,7 @@ export function MessageListItem({
   showCopyButton?: boolean;
 }) {
   const isHuman = message.type === "human";
+  const timestamp = formatMessageTime(getMessageTimestamp(message));
   return (
     <AIElementMessage
       className={cn("group/conversation-message relative w-full", className)}
@@ -147,6 +150,16 @@ export function MessageListItem({
         isLoading={isLoading}
         threadId={threadId}
       />
+      {timestamp && (
+        <div
+          className={cn(
+            "mt-0.5 text-[10px] text-slate-400",
+            isHuman ? "text-right" : "text-left",
+          )}
+        >
+          {timestamp}
+        </div>
+      )}
       {!isLoading && showCopyButton && (
         <MessageToolbar
           className={cn(

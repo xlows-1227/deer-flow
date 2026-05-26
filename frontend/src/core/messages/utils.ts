@@ -427,6 +427,42 @@ export function extractPresentFilesFromMessage(message: Message) {
   return files;
 }
 
+/**
+ * Extract timestamp from a message.
+ * - Human messages: from additional_kwargs.timestamp (set by backend middleware)
+ * - AI messages: from response_metadata.created_at (if provided by LLM)
+ */
+export function getMessageTimestamp(message: Message): string | null {
+  if (message.type === "human") {
+    const ts = message.additional_kwargs?.timestamp;
+    if (typeof ts === "string") return ts;
+  }
+  if (message.type === "ai") {
+    const createdAt = message.response_metadata?.created_at;
+    if (typeof createdAt === "string") return createdAt;
+  }
+  return null;
+}
+
+/**
+ * Format an ISO timestamp to a locale datetime string (MM-DD HH:mm:ss).
+ */
+export function formatMessageTime(isoString: string | null | undefined): string {
+  if (!isoString) return "";
+  try {
+    return new Date(isoString).toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return "";
+  }
+}
+
 export function hasSubagent(message: AIMessage) {
   for (const toolCall of message.tool_calls ?? []) {
     if (toolCall.name === "task") {
