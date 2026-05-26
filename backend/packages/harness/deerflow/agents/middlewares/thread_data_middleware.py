@@ -4,7 +4,7 @@ from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
@@ -116,3 +116,24 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             },
             "messages": messages,
         }
+
+    @override
+    def after_model(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
+        """Add timestamp to the last AIMessage after model generation."""
+        messages = list(state.get("messages", []))
+        if not messages:
+            return None
+
+        last_message = messages[-1]
+        if isinstance(last_message, AIMessage) and "timestamp" not in last_message.additional_kwargs:
+            messages[-1] = last_message.model_copy(
+                update={
+                    "additional_kwargs": {
+                        **last_message.additional_kwargs,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                }
+            )
+            return {"messages": messages}
+
+        return None

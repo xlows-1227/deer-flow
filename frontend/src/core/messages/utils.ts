@@ -440,6 +440,8 @@ export function getMessageTimestamp(message: Message): string | null {
   if (message.type === "ai") {
     const createdAt = message.response_metadata?.created_at;
     if (typeof createdAt === "string") return createdAt;
+    const ts = message.additional_kwargs?.timestamp;
+    if (typeof ts === "string") return ts;
   }
   return null;
 }
