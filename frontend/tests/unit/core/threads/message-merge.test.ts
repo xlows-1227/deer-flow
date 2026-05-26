@@ -49,6 +49,46 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
   ]);
 });
 
+test("mergeMessages preserves history timestamps when live messages replace history", () => {
+  const historyAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "old",
+    additional_kwargs: { timestamp: "2026-05-27T01:23:45+08:00" },
+  } as Message;
+  const liveAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live",
+  } as Message;
+
+  expect(mergeMessages([historyAi], [liveAi], [])).toEqual([
+    {
+      ...liveAi,
+      additional_kwargs: {
+        timestamp: "2026-05-27T01:23:45+08:00",
+      },
+    },
+  ]);
+});
+
+test("mergeMessages keeps live timestamps when they already exist", () => {
+  const historyAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "old",
+    additional_kwargs: { timestamp: "2026-05-27T01:23:45+08:00" },
+  } as Message;
+  const liveAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live",
+    additional_kwargs: { timestamp: "2026-05-27T02:00:00+08:00" },
+  } as Message;
+
+  expect(mergeMessages([historyAi], [liveAi], [])).toEqual([liveAi]);
+});
+
 test("mergeMessages deduplicates tool messages by tool_call_id", () => {
   const oldTool = {
     id: "tool-message-old",

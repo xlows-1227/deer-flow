@@ -11,7 +11,10 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import type { FileInMessage } from "../messages/utils";
+import {
+  getMessageTimestamp,
+  type FileInMessage,
+} from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
@@ -79,6 +82,47 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   });
 }
 
+function withMessageTimestamp(message: Message, timestamp?: string | null): Message {
+  if (!timestamp || getMessageTimestamp(message)) {
+    return message;
+  }
+
+  return {
+    ...message,
+    additional_kwargs: {
+      ...(message.additional_kwargs ?? {}),
+      timestamp,
+    },
+  } as Message;
+}
+
+function mergeMissingTimestamps(
+  sourceMessages: Message[],
+  targetMessages: Message[],
+): Message[] {
+  const timestampByIdentity = new Map<string, string>();
+
+  for (const message of sourceMessages) {
+    const identity = messageIdentity(message);
+    const timestamp = getMessageTimestamp(message);
+    if (identity && timestamp) {
+      timestampByIdentity.set(identity, timestamp);
+    }
+  }
+
+  if (timestampByIdentity.size === 0) {
+    return targetMessages;
+  }
+
+  return targetMessages.map((message) => {
+    const identity = messageIdentity(message);
+    return withMessageTimestamp(
+      message,
+      identity ? timestampByIdentity.get(identity) : null,
+    );
+  });
+}
+
 function findLatestUnloadedRunIndex(
   runs: Run[],
   loadedRunIds: ReadonlySet<string>,
@@ -97,8 +141,12 @@ export function mergeMessages(
   threadMessages: Message[],
   optimisticMessages: Message[],
 ): Message[] {
+  const timestampedThreadMessages = mergeMissingTimestamps(
+    historyMessages,
+    threadMessages,
+  );
   const threadMessageIds = new Set(
-    threadMessages.map(messageIdentity).filter(isNonEmptyString),
+    timestampedThreadMessages.map(messageIdentity).filter(isNonEmptyString),
   );
 
   // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
@@ -120,7 +168,7 @@ export function mergeMessages(
 
   return dedupeMessagesByIdentity([
     ...historyMessages.slice(0, cutoff),
-    ...threadMessages,
+    ...timestampedThreadMessages,
     ...optimisticMessages,
   ]);
 }
@@ -740,7 +788,7 @@ export function useThreadHistory(threadId: string) {
         });
         const _messages = result.data
           .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
-          .map((m) => m.content);
+          .map((m) => withMessageTimestamp(m.content, m.created_at));
         if (threadIdRef.current !== requestThreadId) {
           return;
         }
