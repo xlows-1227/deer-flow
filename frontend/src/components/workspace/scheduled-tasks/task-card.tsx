@@ -16,7 +16,6 @@ import {
   RotateCwIcon,
   StopCircleIcon,
   Trash2Icon,
-  UserIcon,
   ZapIcon,
 } from "lucide-react";
 import { useCallback, useState } from "react";
@@ -275,7 +274,7 @@ export function ScheduledTaskCard({
           </button>
 
           {historyOpen && (
-            <div className="mt-1 max-h-48 overflow-y-auto rounded-md border border-slate-100 bg-slate-50/50">
+            <div className="mt-1 max-h-[280px] overflow-y-auto rounded-md border border-slate-100 bg-slate-50/50">
               {historyLoading ? (
                 <div className="flex items-center justify-center py-4">
                   <LoaderCircleIcon className="size-4 animate-spin text-slate-400" />
@@ -285,53 +284,60 @@ export function ScheduledTaskCard({
                   暂无执行记录
                 </div>
               ) : (
-                <ul className="divide-y divide-slate-100">
-                  {historyRuns.map((run) => {
-                    const runStatus = runStatusBadge(run.status);
-                    return (
-                      <li
-                        key={run.run_id}
-                        className="flex items-center justify-between gap-2 px-3 py-2"
-                      >
-                        <div className="flex min-w-0 flex-col gap-0.5">
-                          <div className="flex items-center gap-1.5 text-xs">
-                            <span className={runStatus.className}>
-                              {runStatus.icon}
-                            </span>
-                            <span className="font-medium text-slate-700">
-                              {runStatus.label}
-                            </span>
-                            {run.thread_id && (
-                              <span className="text-[10px] text-slate-400">
-                                ·
+                <>
+                  <ul className="divide-y divide-slate-100">
+                    {historyRuns.map((run) => {
+                      const runStatus = runStatusBadge(run.status);
+                      return (
+                        <li
+                          key={run.run_id}
+                          className="flex items-center justify-between gap-2 px-3 py-2.5"
+                        >
+                          <div className="flex min-w-0 flex-col gap-0.5">
+                            <div className="flex items-center gap-1.5 text-xs">
+                              <span className={runStatus.className}>
+                                {runStatus.icon}
                               </span>
-                            )}
-                            {run.thread_id && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  onOpen({ ...task, last_run_thread_id: run.thread_id })
-                                }
-                                className="inline-flex items-center gap-0.5 text-[10px] text-indigo-600 hover:text-indigo-700 hover:underline"
-                              >
-                                <EyeIcon className="size-2.5" />
-                                查看对话
-                              </button>
+                              <span className="font-medium text-slate-700">
+                                {runStatus.label}
+                              </span>
+                              {run.thread_id && (
+                                <span className="text-[10px] text-slate-400">
+                                  ·
+                                </span>
+                              )}
+                              {run.thread_id && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onOpen({ ...task, last_run_thread_id: run.thread_id })
+                                  }
+                                  className="inline-flex items-center gap-0.5 text-[10px] text-indigo-600 hover:text-indigo-700 hover:underline"
+                                >
+                                  <EyeIcon className="size-2.5" />
+                                  查看对话
+                                </button>
+                              )}
+                            </div>
+                            {run.error && (
+                              <p className="truncate text-[10px] text-red-500">
+                                {run.error}
+                              </p>
                             )}
                           </div>
-                          {run.error && (
-                            <p className="truncate text-[10px] text-red-500">
-                              {run.error}
-                            </p>
-                          )}
-                        </div>
-                        <span className="shrink-0 text-[10px] text-slate-400">
-                          {formatDateTime(run.created_at)}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
+                          <span className="shrink-0 text-[10px] text-slate-400">
+                            {formatDateTime(run.created_at)}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {historyRuns.length > 5 && (
+                    <div className="border-t border-slate-100 px-3 py-1.5 text-center text-[10px] text-slate-400">
+                      共 {historyRuns.length} 条记录，滚动查看更多
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
