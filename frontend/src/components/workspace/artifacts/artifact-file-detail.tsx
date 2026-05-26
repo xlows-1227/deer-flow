@@ -177,7 +177,7 @@ export function ArtifactFileDetail({
               <div className="px-2">{getFileName(filepath)}</div>
             ) : (
               <Select value={filepath} onValueChange={select}>
-                <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0">
+                <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0 [&>svg]:hidden">
                   <SelectValue placeholder="Select a file" />
                 </SelectTrigger>
                 <SelectContent className="select-none">
