@@ -5,6 +5,7 @@ import {
   EyeIcon,
   FileIcon,
   LoaderIcon,
+  Maximize2Icon,
   PackageIcon,
   SquareArrowOutUpRightIcon,
   XIcon,
@@ -21,6 +22,12 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
@@ -130,6 +137,12 @@ export function ArtifactFileDetail({
     artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
+  const [zoomDialogOpen, setZoomDialogOpen] = useState(false);
+  const [zoomViewMode, setZoomViewMode] = useState<"code" | "preview">("preview");
+  // Keep zoom dialog view mode in sync when the underlying file changes
+  useEffect(() => {
+    setZoomViewMode("preview");
+  }, [filepathFromProps]);
   useEffect(() => {
     setViewMode(artifactViewState.initialViewMode);
   }, [artifactViewState.initialViewMode]);
@@ -182,25 +195,34 @@ export function ArtifactFileDetail({
         </div>
         <div className="flex min-w-0 grow items-center justify-center">
           {artifactViewState.canPreview && (
-            <ToggleGroup
-              className="mx-auto"
-              type="single"
-              variant="outline"
-              size="sm"
-              value={viewMode}
-              onValueChange={(value) => {
-                if (value) {
-                  setViewMode(value as "code" | "preview");
-                }
-              }}
-            >
-              <ToggleGroupItem value="code">
-                <Code2Icon />
-              </ToggleGroupItem>
-              <ToggleGroupItem value="preview">
-                <EyeIcon />
-              </ToggleGroupItem>
-            </ToggleGroup>
+            <div className="inline-flex items-center rounded-md border">
+              <button
+                type="button"
+                onClick={() => setViewMode("code")}
+                className={cn(
+                  "inline-flex h-8 items-center justify-center rounded-l-md px-3 transition-colors",
+                  viewMode === "code"
+                    ? "bg-accent text-accent-foreground"
+                    : "bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                title="代码"
+              >
+                <Code2Icon className="size-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("preview")}
+                className={cn(
+                  "inline-flex h-8 items-center justify-center rounded-r-md border-l px-3 transition-colors",
+                  viewMode === "preview"
+                    ? "bg-accent text-accent-foreground"
+                    : "bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                title="预览"
+              >
+                <EyeIcon className="size-4" />
+              </button>
+            </div>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -219,6 +241,12 @@ export function ArtifactFileDetail({
                 />
               </Tooltip>
             )}
+            <ArtifactAction
+              icon={Maximize2Icon}
+              label="放大预览"
+              tooltip="放大预览"
+              onClick={() => setZoomDialogOpen(true)}
+            />
             {!isWriteFile && (
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}
@@ -306,6 +334,78 @@ export function ArtifactFileDetail({
           />
         )}
       </ArtifactContent>
+
+      <Dialog open={zoomDialogOpen} onOpenChange={setZoomDialogOpen}>
+        <DialogContent
+          className="max-h-[95vh] overflow-hidden p-0"
+          style={{ width: "98vw", maxWidth: "1800px" }}
+          showCloseButton={false}
+        >
+          <DialogHeader className="flex-row items-center justify-between border-b px-4 py-3">
+            <DialogTitle className="text-base">{getFileName(filepath)}</DialogTitle>
+            {language === "markdown" && (
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                value={zoomViewMode}
+                onValueChange={(value) => {
+                  if (value) setZoomViewMode(value as "code" | "preview");
+                }}
+              >
+                <ToggleGroupItem value="code">
+                  <Code2Icon />
+                </ToggleGroupItem>
+                <ToggleGroupItem value="preview">
+                  <EyeIcon />
+                </ToggleGroupItem>
+              </ToggleGroup>
+            )}
+          </DialogHeader>
+          <div className="max-h-[calc(95vh-60px)] overflow-auto p-4">
+            {language === "markdown" && zoomViewMode === "preview" && (
+              <Streamdown {...streamdownPlugins} components={{ a: ArtifactLink }}>
+                {visibleContent ?? ""}
+              </Streamdown>
+            )}
+            {language === "markdown" && zoomViewMode === "code" && (
+              <CodeEditor
+                className="size-full min-h-[50vh] resize-none rounded-none border-none"
+                value={visibleContent ?? ""}
+                readonly
+              />
+            )}
+            {language === "html" && (
+              <ZoomHtmlPreview
+                content={visibleContent ?? ""}
+                url={url}
+              />
+            )}
+            {isCodeFile && language !== "markdown" && language !== "html" && (
+              <CodeEditor
+                className="size-full min-h-[50vh] resize-none rounded-none border-none"
+                value={visibleContent ?? ""}
+                readonly
+              />
+            )}
+            {!isCodeFile && isImageFile(filepath) && (
+              <div className="flex items-center justify-center">
+                <img
+                  src={urlOfArtifact({ filepath, threadId, isMock })}
+                  alt={getFileName(filepath)}
+                  className="max-h-[70vh] max-w-full object-contain"
+                />
+              </div>
+            )}
+            {!isCodeFile && !isImageFile(filepath) && (
+              <div className="flex flex-col items-center justify-center gap-4 py-12 text-slate-400">
+                <FileIcon className="size-12" />
+                <p>该文件类型暂不支持弹窗预览</p>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </Artifact>
   );
 }
@@ -418,6 +518,32 @@ export function ArtifactFilePreview({
     );
   }
   return null;
+}
+
+function ZoomHtmlPreview({ content, url }: { content: string; url?: string }) {
+  const htmlUrl = useMemo(() => {
+    const previewContent = appendHtmlPreviewScrollRestoration(
+      appendHtmlPreviewBaseHref(content, url),
+      "zoom",
+    );
+    const blob = new Blob([previewContent], { type: "text/html;charset=utf-8" });
+    return URL.createObjectURL(blob);
+  }, [content, url]);
+
+  useEffect(() => {
+    return () => {
+      URL.revokeObjectURL(htmlUrl);
+    };
+  }, [htmlUrl]);
+
+  return (
+    <iframe
+      className="h-[70vh] w-full"
+      title="Zoom preview"
+      sandbox="allow-scripts allow-forms"
+      src={htmlUrl}
+    />
+  );
 }
 
 function isArtifactScrollMessage(

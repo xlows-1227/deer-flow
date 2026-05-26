@@ -58,6 +58,11 @@ class TestProviders:
         free = [provider for provider in WEB_FETCH_PROVIDERS if provider.env_var is None]
         assert free, "Expected at least one free (no-key) web fetch provider"
 
+    def test_deepseek_provider_uses_reasoning_preserving_adapter(self):
+        deepseek = next(provider for provider in LLM_PROVIDERS if provider.name == "deepseek")
+
+        assert deepseek.use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
+
 
 class TestBuildMinimalConfig:
     def test_produces_valid_yaml(self):
