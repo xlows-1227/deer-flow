@@ -25,9 +25,11 @@ export default function ChatsPage() {
   }, [t.pages.chats, t.pages.appName]);
 
   const filteredThreads = useMemo(() => {
-    return threads?.filter((thread) => {
-      return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
-    });
+    return threads
+      ?.filter((thread) => thread.metadata?.source !== "scheduled_task")
+      .filter((thread) => {
+        return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
+      });
   }, [threads, search]);
   return (
     <WorkspaceContainer>

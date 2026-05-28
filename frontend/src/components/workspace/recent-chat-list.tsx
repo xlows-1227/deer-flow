@@ -71,6 +71,9 @@ export function RecentChatList() {
       agent_name?: string;
     }>();
   const { data: threads = [] } = useThreads();
+  const nonScheduledThreads = threads.filter(
+    (t) => t.metadata?.source !== "scheduled_task",
+  );
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -163,11 +166,11 @@ export function RecentChatList() {
     [t],
   );
 
-  if (threads.length === 0) {
+  if (nonScheduledThreads.length === 0) {
     return null;
   }
 
-  const recentThreads = threads.slice(0, RECENT_CHAT_LIMIT);
+  const recentThreads = nonScheduledThreads.slice(0, RECENT_CHAT_LIMIT);
 
   return (
     <>

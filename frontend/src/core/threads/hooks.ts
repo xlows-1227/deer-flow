@@ -421,6 +421,53 @@ export function useThreadStream({
     },
   });
 
+  // Auto-join active runs for threads that were not started from this client
+  // (e.g. scheduled tasks). reconnectOnMount only works when sessionStorage
+  // contains the run id from a previous submit() on this tab.
+  const threadRef = useRef(thread);
+  threadRef.current = thread;
+
+  useEffect(() => {
+    const currentThreadId = onStreamThreadId;
+    if (!currentThreadId || isMock) return;
+
+    const sessionKey = `lg:stream:${currentThreadId}`;
+    if (
+      typeof window !== "undefined" &&
+      window.sessionStorage.getItem(sessionKey)
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function tryJoinRunning() {
+      try {
+        const apiClient = getAPIClient(isMock);
+        const runs = await apiClient.runs.list(currentThreadId as string);
+        if (cancelled) return;
+        const activeRun = runs.find(
+          (r) => r.status === "pending" || r.status === "running",
+        );
+        if (
+          activeRun &&
+          threadRef.current &&
+          !threadRef.current.isLoading
+        ) {
+          await threadRef.current.joinStream(activeRun.run_id);
+        }
+      } catch {
+        // Silently ignore — run may have finished before we could join
+      }
+    }
+
+    const timer = window.setTimeout(() => void tryJoinRunning(), 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [onStreamThreadId, isMock]);
+
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
