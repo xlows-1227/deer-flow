@@ -165,8 +165,19 @@ export const zhCN: Translations = {
     newChat: "新对话",
     chats: "对话",
     recentChats: "最近的对话",
+    viewAllChats: "查看全部",
     demoChats: "演示对话",
     agents: "智能体",
+    taskRecords: "任务记录",
+    taskRecordsEmpty: "暂无任务运行记录",
+    taskRecordsLoadFailed: "任务记录加载失败。",
+    taskRecordsOpen: "打开任务对话",
+    taskRunStatus: {
+      running: "运行中",
+      success: "成功",
+      error: "失败",
+      cancelled: "已取消",
+    },
   },
 
   // Agents
@@ -338,7 +349,7 @@ export const zhCN: Translations = {
       account: "账号",
       appearance: "外观",
       memory: "记忆",
-      tools: "工具",
+      tools: "MCP",
       skills: "技能",
       notification: "通知",
       about: "关于",
@@ -433,8 +444,8 @@ export const zhCN: Translations = {
       languageDescription: "在不同语言之间切换。",
     },
     tools: {
-      title: "工具",
-      description: "管理 MCP 工具的配置和启用状态。",
+      title: "MCP",
+      description: "管理 MCP 服务配置、导入导出和启用状态。",
     },
     skills: {
       title: "技能",

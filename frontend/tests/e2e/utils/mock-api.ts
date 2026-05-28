@@ -35,9 +35,19 @@ export type MockAgent = {
   system_prompt?: string;
 };
 
+export type MockScheduledTask = {
+  id: string;
+  name: string;
+  last_run_status?: "running" | "success" | "error" | "cancelled" | null;
+  last_run_at?: string | null;
+  last_run_thread_id?: string | null;
+  last_run_id?: string | null;
+};
+
 export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
+  scheduledTasks?: MockScheduledTask[];
 };
 
 // ---------------------------------------------------------------------------
@@ -52,6 +62,7 @@ export type MockAPIOptions = {
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const threads = options?.threads ?? [];
   const agents = options?.agents ?? [];
+  const scheduledTasks = options?.scheduledTasks ?? [];
 
   // Thread search — sidebar thread list & chats list page
   void page.route("**/api/langgraph/threads/search", (route) => {
@@ -301,6 +312,75 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       contentType: "application/json",
       body: JSON.stringify({ detail: "Agent not found" }),
     });
+  });
+
+  void page.route("**/api/scheduler/tasks", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          tasks: scheduledTasks.map((task) => ({
+            id: task.id,
+            name: task.name,
+            prompt: "Mock scheduled task",
+            repeat_type: "daily",
+            execution_time: "09:00",
+            day_of_week: null,
+            is_enabled: true,
+            model_name: null,
+            mode: "pro",
+            reasoning_effort: "medium",
+            last_run_at: task.last_run_at ?? null,
+            last_run_status: task.last_run_status ?? null,
+            last_run_thread_id: task.last_run_thread_id ?? null,
+            last_run_id: task.last_run_id ?? null,
+            next_run_at: "2025-01-02T09:00:00Z",
+            created_at: "2025-01-01T00:00:00Z",
+            updated_at: "2025-01-01T00:00:00Z",
+          })),
+          total: scheduledTasks.length,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduler/tasks/*/history", (route) => {
+    if (route.request().method() === "GET") {
+      const url = route.request().url();
+      const task = scheduledTasks.find((item) =>
+        url.includes(`/api/scheduler/tasks/${item.id}/history`),
+      );
+      if (!task) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Task not found" }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          task,
+          runs:
+            task.last_run_id && task.last_run_status
+              ? [
+                  {
+                    run_id: task.last_run_id,
+                    thread_id: task.last_run_thread_id ?? null,
+                    status: task.last_run_status,
+                    created_at: task.last_run_at ?? "2025-01-01T00:00:00Z",
+                    updated_at: task.last_run_at ?? "2025-01-01T00:00:00Z",
+                    error: null,
+                  },
+                ]
+              : [],
+        }),
+      });
+    }
+    return route.fallback();
   });
 }
 

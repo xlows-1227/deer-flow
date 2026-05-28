@@ -171,8 +171,19 @@ export const enUS: Translations = {
     newChat: "New chat",
     chats: "Chats",
     recentChats: "Recent chats",
+    viewAllChats: "View all",
     demoChats: "Demo chats",
     agents: "Agents",
+    taskRecords: "Task records",
+    taskRecordsEmpty: "No task runs yet",
+    taskRecordsLoadFailed: "Could not load task records.",
+    taskRecordsOpen: "Open task conversation",
+    taskRunStatus: {
+      running: "Running",
+      success: "Success",
+      error: "Failed",
+      cancelled: "Cancelled",
+    },
   },
 
   // Agents
@@ -354,7 +365,7 @@ export const enUS: Translations = {
       account: "Account",
       appearance: "Appearance",
       memory: "Memory",
-      tools: "Tools",
+      tools: "MCP",
       skills: "Skills",
       notification: "Notification",
       about: "About",
@@ -452,8 +463,9 @@ export const enUS: Translations = {
       languageDescription: "Switch between languages.",
     },
     tools: {
-      title: "Tools",
-      description: "Manage the configuration and enabled status of MCP tools.",
+      title: "MCP",
+      description:
+        "Manage MCP server configuration, imports, exports, and enabled status.",
     },
     skills: {
       title: "Agent Skills",

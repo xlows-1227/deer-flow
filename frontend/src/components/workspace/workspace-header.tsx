@@ -20,7 +20,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
     <>
       <div
         className={cn(
-          "group/workspace-header flex h-12 flex-col justify-center",
+          "group/workspace-header flex h-10 flex-col justify-center",
           className,
         )}
       >
@@ -46,7 +46,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           )}
         </div>
       </div>
-      <SidebarMenu className="px-3 pb-3">
+      <SidebarMenu className="gap-1 px-3 pb-1">
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname === "/workspace/chats/new"}

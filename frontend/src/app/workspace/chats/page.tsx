@@ -31,7 +31,7 @@ export default function ChatsPage() {
   }, [threads, search]);
   return (
     <WorkspaceContainer>
-      <WorkspaceHeader></WorkspaceHeader>
+      <WorkspaceHeader showGithubLink={false}></WorkspaceHeader>
       <WorkspaceBody>
         <div className="flex size-full flex-col">
           <header className="flex shrink-0 items-center justify-center pt-8">

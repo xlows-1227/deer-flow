@@ -36,6 +36,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { loadMCPConfig, updateMCPConfig } from "@/core/mcp/api";
 import type { MCPConfig, MCPServerConfig } from "@/core/mcp/types";
+import { cn } from "@/lib/utils";
 
 type MCPForm = {
   originalName: string | null;
@@ -127,7 +128,11 @@ function toServerConfig(form: MCPForm): MCPServerConfig {
   };
 }
 
-export default function WorkspaceMCPPage() {
+export function MCPManagementPage({
+  embedded = false,
+}: {
+  embedded?: boolean;
+}) {
   const [config, setConfig] = useState<MCPConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -266,8 +271,13 @@ export default function WorkspaceMCPPage() {
   }
 
   return (
-    <div className="flex size-full flex-col">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b px-6 py-4">
+    <div className={cn("flex flex-col", embedded ? "min-h-0" : "size-full")}>
+      <header
+        className={cn(
+          "flex shrink-0 flex-wrap items-center justify-between gap-4 border-b",
+          embedded ? "px-0 pb-4" : "px-6 py-4",
+        )}
+      >
         <div>
           <h1 className="text-xl font-semibold">MCP 管理</h1>
           <p className="text-muted-foreground mt-0.5 text-sm">
@@ -290,7 +300,7 @@ export default function WorkspaceMCPPage() {
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto p-6">
+      <main className={cn(embedded ? "pt-4" : "flex-1 overflow-y-auto p-6")}>
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
           <div className="grid gap-3 sm:grid-cols-3">
             <Card className="rounded-lg py-4">
@@ -575,4 +585,8 @@ export default function WorkspaceMCPPage() {
       </Dialog>
     </div>
   );
+}
+
+export default function WorkspaceMCPPage() {
+  return <MCPManagementPage />;
 }

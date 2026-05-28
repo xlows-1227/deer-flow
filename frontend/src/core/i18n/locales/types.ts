@@ -113,10 +113,21 @@ export interface Translations {
   // Sidebar
   sidebar: {
     recentChats: string;
+    viewAllChats: string;
     newChat: string;
     chats: string;
     demoChats: string;
     agents: string;
+    taskRecords: string;
+    taskRecordsEmpty: string;
+    taskRecordsLoadFailed: string;
+    taskRecordsOpen: string;
+    taskRunStatus: {
+      running: string;
+      success: string;
+      error: string;
+      cancelled: string;
+    };
   };
 
   // Agents

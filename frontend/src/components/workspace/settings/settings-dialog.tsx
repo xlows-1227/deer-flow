@@ -4,9 +4,9 @@ import {
   BellIcon,
   BrainIcon,
   PaletteIcon,
+  PlugIcon,
   SparklesIcon,
   UserIcon,
-  WrenchIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -74,7 +74,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.memory,
         icon: BrainIcon,
       },
-      { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
+      { id: "tools", label: t.settings.sections.tools, icon: PlugIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
     ],
     [

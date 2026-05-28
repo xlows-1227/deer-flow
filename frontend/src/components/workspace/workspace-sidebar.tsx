@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/sidebar";
 
 import { RecentChatList } from "./recent-chat-list";
+import { ScheduledTaskRunList } from "./scheduled-task-run-list";
 import { WorkspaceHeader } from "./workspace-header";
 import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
 import { WorkspaceNavMenu } from "./workspace-nav-menu";
@@ -20,17 +21,22 @@ export function WorkspaceSidebar({
       <Sidebar
         variant="sidebar"
         collapsible="none"
-        className="border-r border-gray-200 bg-background"
+        className="bg-background border-r border-gray-200"
         {...props}
       >
-        <SidebarHeader className="border-b border-gray-200 bg-background px-0 py-1">
+        <SidebarHeader className="bg-background border-b border-gray-200 px-0 py-0.5">
           <WorkspaceHeader />
         </SidebarHeader>
-        <SidebarContent className="gap-0 bg-background">
-          <WorkspaceNavChatList />
-          <RecentChatList />
+        <SidebarContent className="bg-background gap-0 overflow-hidden">
+          <div className="shrink-0">
+            <WorkspaceNavChatList />
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <RecentChatList />
+            <ScheduledTaskRunList />
+          </div>
         </SidebarContent>
-        <SidebarFooter className="border-t border-gray-200 bg-background p-3">
+        <SidebarFooter className="bg-background border-t border-gray-200 px-2 py-1.5">
           <WorkspaceNavMenu />
         </SidebarFooter>
       </Sidebar>

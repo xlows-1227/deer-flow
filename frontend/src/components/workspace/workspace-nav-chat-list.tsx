@@ -5,7 +5,6 @@ import {
   BrainIcon,
   ClockIcon,
   FolderIcon,
-  PlugIcon,
   SparklesIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -27,7 +26,7 @@ export function WorkspaceNavChatList() {
   const pathname = usePathname();
 
   return (
-    <SidebarGroup className="border-b border-gray-100 px-3 py-3">
+    <SidebarGroup className="border-b border-gray-100 px-3 pt-1 pb-2">
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton
@@ -65,18 +64,6 @@ export function WorkspaceNavChatList() {
             <Link href="/workspace/files">
               <FolderIcon />
               <span>文件</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/mcp")}
-            asChild
-            className={itemClassName}
-          >
-            <Link href="/workspace/mcp">
-              <PlugIcon />
-              <span>MCP</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

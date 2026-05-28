@@ -4,6 +4,7 @@ import {
   Download,
   FileJson,
   FileText,
+  ListIcon,
   MoreHorizontal,
   Pencil,
   Share2,
@@ -57,6 +58,8 @@ import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
+
+const RECENT_CHAT_LIMIT = 4;
 
 export function RecentChatList() {
   const { t } = useI18n();
@@ -163,9 +166,12 @@ export function RecentChatList() {
   if (threads.length === 0) {
     return null;
   }
+
+  const recentThreads = threads.slice(0, RECENT_CHAT_LIMIT);
+
   return (
     <>
-      <SidebarGroup>
+      <SidebarGroup className="px-2 pt-2 pb-1">
         <SidebarGroupLabel>
           {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true"
             ? t.sidebar.recentChats
@@ -174,7 +180,7 @@ export function RecentChatList() {
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
+              {recentThreads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
                 return (
                   <SidebarMenuItem
@@ -261,6 +267,18 @@ export function RecentChatList() {
                   </SidebarMenuItem>
                 );
               })}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname === "/workspace/chats"}
+                  className="text-muted-foreground mt-1 h-8 rounded-lg border border-gray-100 bg-gray-50 text-xs hover:bg-gray-100 data-[active=true]:bg-gray-100 data-[active=true]:text-gray-900"
+                >
+                  <Link href="/workspace/chats">
+                    <ListIcon className="size-3.5" />
+                    <span>{t.sidebar.viewAllChats}</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
             </div>
           </SidebarMenu>
         </SidebarGroupContent>

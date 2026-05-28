@@ -12,14 +12,10 @@ import { useI18n } from "@/core/i18n/hooks";
 
 import { SettingsDialog } from "./settings";
 
-function NavMenuButtonContent({
-  t,
-}: {
-  t: ReturnType<typeof useI18n>["t"];
-}) {
+function NavMenuButtonContent({ t }: { t: ReturnType<typeof useI18n>["t"] }) {
   return (
     <div className="text-muted-foreground flex w-full items-center gap-2 text-left text-sm">
-      <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-blue-100 text-xs font-semibold text-blue-600">
+      <div className="flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-100 text-[11px] font-semibold text-blue-600">
         U
       </div>
       <span>{t.workspace.settingsAndMore}</span>
@@ -57,13 +53,13 @@ export function WorkspaceNavMenu() {
           {mounted ? (
             <SidebarMenuButton
               size="lg"
-              className="rounded-lg text-gray-700 hover:bg-gray-200 data-[state=open]:bg-gray-200 data-[state=open]:text-gray-900"
+              className="h-10 rounded-lg text-gray-700 hover:bg-gray-200 data-[state=open]:bg-gray-200 data-[state=open]:text-gray-900"
               onClick={handleOpenSettings}
             >
               <NavMenuButtonContent t={t} />
             </SidebarMenuButton>
           ) : (
-            <SidebarMenuButton size="lg" className="pointer-events-none">
+            <SidebarMenuButton size="lg" className="pointer-events-none h-10">
               <NavMenuButtonContent t={t} />
             </SidebarMenuButton>
           )}
