@@ -18,7 +18,15 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 ``create_chat_model`` call must add to this list and pass the flag.
 """
 
+import hashlib
+import json
 import logging
+import os
+from collections import OrderedDict
+from collections.abc import Callable, Hashable, Sequence
+from pathlib import Path
+from threading import RLock
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -38,14 +46,125 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import SOUL_FILENAME, load_agent_config, resolve_agent_dir, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
+
+
+def _read_agent_graph_cache_max_size() -> int:
+    raw = os.environ.get("DEERFLOW_AGENT_GRAPH_CACHE_SIZE", "16")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid DEERFLOW_AGENT_GRAPH_CACHE_SIZE=%r; using 16", raw)
+        return 16
+
+
+_AGENT_GRAPH_CACHE_MAX_SIZE = _read_agent_graph_cache_max_size()
+_AGENT_GRAPH_CACHE: OrderedDict[Hashable, object] = OrderedDict()
+_AGENT_GRAPH_CACHE_LOCK = RLock()
+
+
+def clear_agent_graph_cache() -> None:
+    """Clear the in-process compiled agent graph cache."""
+    with _AGENT_GRAPH_CACHE_LOCK:
+        _AGENT_GRAPH_CACHE.clear()
+
+
+def _fingerprint_value(value: Any) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _path_signature(path: Path) -> tuple[str, int | None, int | None]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), None, None)
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _agent_files_signature(agent_name: str | None, *, user_id: str) -> tuple[object, ...]:
+    if agent_name:
+        agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
+        config_signature: object = _path_signature(agent_dir / "config.yaml")
+    else:
+        agent_dir = get_paths().base_dir
+        config_signature = None
+
+    return (
+        user_id,
+        config_signature,
+        _path_signature(agent_dir / SOUL_FILENAME),
+    )
+
+
+def _skills_cache_signature(skills: Sequence[Skill]) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (
+            skill.name,
+            skill.description,
+            str(skill.category),
+            skill.skill_path,
+            tuple(skill.allowed_tools or ()),
+            bool(skill.enabled),
+            _path_signature(skill.skill_file),
+        )
+        for skill in sorted(skills, key=lambda item: item.name)
+    )
+
+
+def _tool_cache_signature(tools: Sequence[Any]) -> tuple[tuple[object, ...], ...]:
+    signature: list[tuple[object, ...]] = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            name = tool.get("name") or tool.get("type")
+            description = tool.get("description")
+            module = None
+            qualname = None
+        else:
+            name = getattr(tool, "name", None) or getattr(tool, "__name__", None) or tool.__class__.__name__
+            description = getattr(tool, "description", None)
+            module = getattr(tool, "__module__", tool.__class__.__module__)
+            qualname = getattr(tool, "__qualname__", tool.__class__.__qualname__)
+        signature.append((name, description, module, qualname))
+    return tuple(signature)
+
+
+def _agent_graph_cache_key_label(key: Hashable) -> str:
+    return hashlib.sha256(repr(key).encode("utf-8")).hexdigest()[:12]
+
+
+def _get_cached_agent_graph(key: Hashable, build: Callable[[], object]) -> object:
+    if _AGENT_GRAPH_CACHE_MAX_SIZE <= 0:
+        return build()
+
+    label = _agent_graph_cache_key_label(key)
+    with _AGENT_GRAPH_CACHE_LOCK:
+        cached = _AGENT_GRAPH_CACHE.get(key)
+        if cached is not None:
+            _AGENT_GRAPH_CACHE.move_to_end(key)
+            logger.info("Agent graph cache hit: %s", label)
+            return cached
+
+        logger.info("Agent graph cache miss: %s", label)
+        graph = build()
+        _AGENT_GRAPH_CACHE[key] = graph
+        _AGENT_GRAPH_CACHE.move_to_end(key)
+
+        while len(_AGENT_GRAPH_CACHE) > _AGENT_GRAPH_CACHE_MAX_SIZE:
+            evicted_key, _ = _AGENT_GRAPH_CACHE.popitem(last=False)
+            logger.debug("Agent graph cache evicted: %s", _agent_graph_cache_key_label(evicted_key))
+
+        return graph
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -315,7 +434,7 @@ def _build_middlewares(
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
+    if model_config is not None and getattr(model_config, "supports_vision", False):
         middlewares.append(ViewImageMiddleware())
 
     # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
@@ -398,6 +517,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
+    runtime_cache_key = cfg.get("__agent_graph_runtime_key")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
@@ -457,21 +577,63 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         config["callbacks"] = [*existing, *tracing_callbacks]
 
     skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    skills_signature = _skills_cache_signature(skills_for_tool_policy)
+
+    try:
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        effective_user_id = get_effective_user_id()
+    except Exception:
+        effective_user_id = "default"
+
+    base_cache_key = (
+        "lead_agent",
+        _fingerprint_value(resolved_app_config),
+        _fingerprint_value(agent_config) if agent_config is not None else None,
+        _agent_files_signature(agent_name, user_id=effective_user_id),
+        agent_name or "default",
+        model_name,
+        bool(thinking_enabled),
+        reasoning_effort,
+        bool(is_plan_mode),
+        bool(subagent_enabled),
+        max_concurrent_subagents,
+        bool(is_bootstrap),
+        tuple(agent_config.tool_groups or ()) if agent_config else None,
+        tuple(sorted(available_skills)) if available_skills is not None else None,
+        bool(getattr(model_config, "supports_vision", False)),
+        skills_signature,
+        runtime_cache_key,
+        id(create_agent),
+        id(create_chat_model),
+        id(_build_middlewares),
+        id(apply_prompt_template),
+        id(get_available_tools),
+        id(filter_tools_by_skill_allowed_tools),
+    )
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
-        return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
-            tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
-            system_prompt=apply_prompt_template(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
-                available_skills=set(["bootstrap"]),
-                app_config=resolved_app_config,
+        filtered_tools = filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy)
+        cache_key = (
+            *base_cache_key,
+            _tool_cache_signature(filtered_tools),
+        )
+        return _get_cached_agent_graph(
+            cache_key,
+            lambda: create_agent(
+                model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
+                tools=filtered_tools,
+                middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+                system_prompt=apply_prompt_template(
+                    subagent_enabled=subagent_enabled,
+                    max_concurrent_subagents=max_concurrent_subagents,
+                    available_skills=set(["bootstrap"]),
+                    app_config=resolved_app_config,
+                ),
+                state_schema=ThreadState,
             ),
-            state_schema=ThreadState,
         )
 
     # Custom agents can update their own SOUL.md / config via update_agent.
@@ -479,16 +641,24 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
     tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
-    return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
-        tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
-        system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled,
-            max_concurrent_subagents=max_concurrent_subagents,
-            agent_name=agent_name,
-            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
-            app_config=resolved_app_config,
+    filtered_tools = filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy)
+    cache_key = (
+        *base_cache_key,
+        _tool_cache_signature(filtered_tools),
+    )
+    return _get_cached_agent_graph(
+        cache_key,
+        lambda: create_agent(
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
+            tools=filtered_tools,
+            middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+            system_prompt=apply_prompt_template(
+                subagent_enabled=subagent_enabled,
+                max_concurrent_subagents=max_concurrent_subagents,
+                agent_name=agent_name,
+                available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+                app_config=resolved_app_config,
+            ),
+            state_schema=ThreadState,
         ),
-        state_schema=ThreadState,
     )

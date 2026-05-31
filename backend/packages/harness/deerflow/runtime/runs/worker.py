@@ -249,6 +249,12 @@ async def run_agent(
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
+        config.setdefault("configurable", {})["__agent_graph_runtime_key"] = (
+            id(checkpointer) if checkpointer is not None else None,
+            id(store) if store is not None else None,
+            tuple(interrupt_before or ()),
+            tuple(interrupt_after or ()),
+        )
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
