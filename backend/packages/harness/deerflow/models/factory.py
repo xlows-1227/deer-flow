@@ -207,3 +207,65 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             model_instance.callbacks = [*existing_callbacks, *callbacks]
             logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
     return model_instance
+
+
+# ---------------------------------------------------------------------------
+# Cached model instance factory — avoids the ~2 s penalty of repeatedly
+# instantiating ChatOpenAI (which recreates httpx.AsyncClient and re-detects
+# system proxies on every call).
+# ---------------------------------------------------------------------------
+
+_chat_model_instance_cache: dict[tuple, BaseChatModel] = {}
+
+
+def get_cached_chat_model(
+    name: str | None = None,
+    thinking_enabled: bool = False,
+    *,
+    app_config: AppConfig | None = None,
+    **kwargs,
+) -> BaseChatModel:
+    """Return a cached chat model instance, creating only on cache miss.
+
+    The cache key is derived from the resolved model name, ``thinking_enabled``,
+    ``reasoning_effort``, and the model config identity.  This is safe because
+    ``BaseChatModel`` instances are stateless w.r.t. inference — the underlying
+    HTTP client can be reused across concurrent calls.
+
+    Callers that need distinct ``.with_config()`` or callback overrides should
+    apply those *after* retrieving the cached instance so the overrides do not
+    pollute the cached object.
+    """
+    config = app_config or get_app_config()
+    resolved_name = name or (config.models[0].name if config.models else None)
+    if resolved_name is None:
+        raise ValueError("No chat model is configured.")
+
+    model_config = config.get_model_config(resolved_name)
+    if model_config is None:
+        raise ValueError(f"Model {resolved_name!r} not found in config") from None
+
+    reasoning_effort = kwargs.get("reasoning_effort")
+    cache_key = (
+        resolved_name,
+        thinking_enabled,
+        reasoning_effort,
+        model_config.use,
+        id(model_config),
+    )
+
+    cached = _chat_model_instance_cache.get(cache_key)
+    if cached is not None:
+        logger.debug("Chat model cache hit: %s (thinking=%s, effort=%s)", resolved_name, thinking_enabled, reasoning_effort)
+        return cached
+
+    logger.info("Chat model cache miss: %s (thinking=%s, effort=%s)", resolved_name, thinking_enabled, reasoning_effort)
+    instance = create_chat_model(
+        name=resolved_name,
+        thinking_enabled=thinking_enabled,
+        app_config=config,
+        attach_tracing=False,
+        **kwargs,
+    )
+    _chat_model_instance_cache[cache_key] = instance
+    return instance

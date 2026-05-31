@@ -765,7 +765,7 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
-def apply_prompt_template(
+def _apply_prompt_template_impl(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
     *,
@@ -773,6 +773,7 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
 ) -> str:
+    """Internal prompt builder — not cached; callers should use ``apply_prompt_template``."""
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
     subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
@@ -820,4 +821,59 @@ def apply_prompt_template(
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
+    )
+
+
+@lru_cache(maxsize=32)
+def _cached_apply_prompt_template(
+    subagent_enabled: bool,
+    max_concurrent_subagents: int,
+    agent_name: str | None,
+    available_skills: frozenset[str] | None,
+) -> str:
+    """Cached variant that uses the global app_config singleton.
+
+    ``app_config`` is omitted from the cache key because ``get_app_config()``
+    returns a cached singleton in production.  Callers that inject a custom
+    config (e.g. tests) bypass this cache via ``apply_prompt_template``.
+    """
+    return _apply_prompt_template_impl(
+        subagent_enabled=subagent_enabled,
+        max_concurrent_subagents=max_concurrent_subagents,
+        agent_name=agent_name,
+        available_skills=set(available_skills) if available_skills is not None else None,
+    )
+
+
+def apply_prompt_template(
+    subagent_enabled: bool = False,
+    max_concurrent_subagents: int = 3,
+    *,
+    agent_name: str | None = None,
+    available_skills: set[str] | None = None,
+    app_config: AppConfig | None = None,
+) -> str:
+    """Build the system prompt, caching the result for identical parameters.
+
+    When *app_config* is omitted or matches the global singleton the result
+    is memoised via ``lru_cache``.  Explicit custom configs bypass the cache
+    so tests and config-reload paths stay correct.
+    """
+    if app_config is not None:
+        from deerflow.config import get_app_config
+
+        if app_config is not get_app_config():
+            return _apply_prompt_template_impl(
+                subagent_enabled=subagent_enabled,
+                max_concurrent_subagents=max_concurrent_subagents,
+                agent_name=agent_name,
+                available_skills=available_skills,
+                app_config=app_config,
+            )
+
+    return _cached_apply_prompt_template(
+        subagent_enabled=subagent_enabled,
+        max_concurrent_subagents=max_concurrent_subagents,
+        agent_name=agent_name,
+        available_skills=frozenset(available_skills) if available_skills is not None else None,
     )

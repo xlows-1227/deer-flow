@@ -196,6 +196,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to start scheduled task loop")
 
+        # Warm caches for the hot path (flash direct model) so the first
+        # user request does not pay the cold-start penalty of loading skills
+        # and constructing chat model instances.
+        try:
+            from deerflow.agents.lead_agent.prompt import warm_enabled_skills_cache
+            from deerflow.models.factory import get_cached_chat_model
+
+            warm_enabled_skills_cache(timeout_seconds=10)
+
+            # Pre-warm every configured model so the first request hits cache
+            # regardless of which model the frontend has selected.
+            warmed_models: list[str] = []
+            for model_cfg in startup_config.models:
+                try:
+                    get_cached_chat_model(
+                        name=model_cfg.name,
+                        thinking_enabled=False,
+                        app_config=startup_config,
+                    )
+                    warmed_models.append(model_cfg.name)
+                except Exception:
+                    logger.warning(
+                        "Failed to warm model %s (non-fatal)",
+                        model_cfg.name,
+                        exc_info=True,
+                    )
+
+            logger.info(
+                "Flash direct path warmed (skills + %d model(s): %s)",
+                len(warmed_models),
+                ", ".join(warmed_models),
+            )
+        except Exception:
+            logger.warning("Flash direct path warm-up failed (non-fatal)", exc_info=True)
+
         # Start IM channel service if any channels are configured
         try:
             from app.channels.service import start_channel_service

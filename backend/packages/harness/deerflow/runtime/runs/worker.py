@@ -247,6 +247,44 @@ def _checkpoint_channel_versions(ckpt_tuple: Any | None) -> dict[str, Any]:
     return dict(versions) if isinstance(versions, dict) else {}
 
 
+def _extract_fallback_title(messages: list[Any]) -> str | None:
+    """Return a short fallback title from the first genuine human message."""
+    for msg in messages:
+        msg_type = getattr(msg, "type", None)
+        if msg_type != "human":
+            continue
+
+        # Skip dynamic-context reminders injected by DynamicContextMiddleware.
+        # They carry an additional_kwargs flag; if the object is a plain dict,
+        # fall back to a content-heuristic.
+        additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+        if isinstance(additional_kwargs, dict) and additional_kwargs.get("dynamic_context_reminder"):
+            continue
+
+        content = getattr(msg, "content", "") or ""
+        if isinstance(content, list):
+            # Extract text from multimodal content blocks
+            texts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            content = " ".join(texts)
+        elif not isinstance(content, str):
+            content = str(content)
+
+        text = content.strip().replace("\n", " ")
+        if not text:
+            continue
+
+        max_len = 50
+        if len(text) > max_len:
+            return text[:max_len].rstrip() + "..."
+        return text
+
+    return None
+
+
 def _next_channel_version(checkpointer: Any, current: Any) -> Any:
     get_next_version = getattr(checkpointer, "get_next_version", None)
     if callable(get_next_version):
@@ -325,7 +363,7 @@ async def _run_flash_direct_model(
     from deerflow.agents.lead_agent.prompt import apply_prompt_template
     from deerflow.config.agents_config import load_agent_config, validate_agent_name
     from deerflow.config.app_config import get_app_config
-    from deerflow.models import create_chat_model
+    from deerflow.models.factory import get_cached_chat_model
 
     cfg = _get_runtime_config(config)
     app_config = ctx.app_config or get_app_config()
@@ -354,12 +392,11 @@ async def _run_flash_direct_model(
         app_config=app_config,
     )
     model_messages = [SystemMessage(content=system_prompt), *conversation_messages]
-    model = create_chat_model(
+    model = get_cached_chat_model(
         name=model_name,
         thinking_enabled=False,
         reasoning_effort=cfg.get("reasoning_effort"),
         app_config=app_config,
-        attach_tracing=False,
     ).with_config(tags=["lead_agent"])
 
     lg_modes = _normalize_lg_modes(requested_modes)
@@ -732,18 +769,35 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        # Sync title from checkpoint to threads_meta.display_name
+        # Sync title from checkpoint to threads_meta.display_name.
+        # For paths that bypass the agent graph (e.g. flash direct), fall back
+        # to a local title derived from the first human message.
         if checkpointer is not None and thread_store is not None:
             try:
                 ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
                 if ckpt_tuple is not None:
                     ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
-                    title = ckpt.get("channel_values", {}).get("title")
+                    channel_values = dict(ckpt.get("channel_values") or {})
+                    title = channel_values.get("title")
+
+                    if not title:
+                        fallback = _extract_fallback_title(channel_values.get("messages", []))
+                        if fallback:
+                            title = fallback
+                            channel_values["title"] = title
+                            await _persist_flash_direct_checkpoint(
+                                checkpointer=checkpointer,
+                                thread_id=thread_id,
+                                ckpt_tuple=ckpt_tuple,
+                                channel_values=channel_values,
+                                changed_channels={"title"},
+                            )
+
                     if title:
                         await thread_store.update_display_name(thread_id, title)
             except Exception:
-                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id, exc_info=True)
 
         # Update threads_meta status based on run outcome
         if thread_store is not None:
