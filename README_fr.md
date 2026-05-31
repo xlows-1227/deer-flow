@@ -469,32 +469,32 @@ Les suggestions de suivi générées par le Gateway normalisent désormais aussi
 
 #### Intégration Claude Code
 
-Le skill `claude-to-deerflow` vous permet d'interagir avec une instance DeerFlow en cours d'exécution directement depuis [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Envoyez des tâches de recherche, vérifiez le statut, gérez les threads — le tout sans quitter le terminal.
+Le skill `claude-to-friday` vous permet d'interagir avec une instance Friday en cours d'exécution directement depuis [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Envoyez des tâches de recherche, vérifiez le statut, gérez les threads — le tout sans quitter le terminal.
 
 **Installer le skill** :
 
 ```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+npx skills add https://github.com/bytedance/deer-flow --skill claude-to-friday
 ```
 
-Assurez-vous ensuite que DeerFlow tourne (par défaut sur `http://localhost:2026`) et utilisez la commande `/claude-to-deerflow` dans Claude Code.
+Assurez-vous ensuite que Friday tourne (par défaut sur `http://localhost:2026`) et utilisez la commande `/claude-to-friday` dans Claude Code.
 
 **Ce que vous pouvez faire** :
-- Envoyer des messages à DeerFlow et recevoir des réponses en streaming
+- Envoyer des messages à Friday et recevoir des réponses en streaming
 - Choisir le mode d'exécution : flash (rapide), standard, pro (planification), ultra (sub-agents)
-- Vérifier la santé de DeerFlow, lister les modèles/skills/agents
+- Vérifier la santé de Friday, lister les modèles/skills/agents
 - Gérer les threads et l'historique des conversations
 - Upload des fichiers pour analyse
 
 **Variables d'environnement** (optionnel, pour des endpoints custom) :
 
 ```bash
-DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
+FRIDAY_URL=http://localhost:2026            # Unified proxy base URL
+FRIDAY_GATEWAY_URL=http://localhost:2026    # Gateway API
+FRIDAY_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 ```
 
-Voir [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) pour la référence API complète.
+Voir [`skills/public/claude-to-friday/SKILL.md`](skills/public/claude-to-friday/SKILL.md) pour la référence API complète.
 
 ### Sub-Agents
 

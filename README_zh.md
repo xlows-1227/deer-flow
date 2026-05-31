@@ -448,32 +448,32 @@ Gateway 生成后续建议时，现在会先把普通字符串输出和 block/li
 
 #### Claude Code 集成
 
-借助 `claude-to-deerflow` skill，你可以直接在 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 里和正在运行的 DeerFlow 实例交互。不用离开终端，就能下发研究任务、查看状态、管理 threads。
+借助 `claude-to-friday` skill，你可以直接在 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 里和正在运行的 Friday 实例交互。不用离开终端，就能下发研究任务、查看状态、管理 threads。
 
 **安装这个 skill：**
 
 ```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+npx skills add https://github.com/bytedance/deer-flow --skill claude-to-friday
 ```
 
-然后确认 DeerFlow 已经启动（默认地址是 `http://localhost:2026`），在 Claude Code 里使用 `/claude-to-deerflow` 命令即可。
+然后确认 Friday 已经启动（默认地址是 `http://localhost:2026`），在 Claude Code 里使用 `/claude-to-friday` 命令即可。
 
 **你可以做的事情包括：**
-- 给 DeerFlow 发送消息，并接收流式响应
+- 给 Friday 发送消息，并接收流式响应
 - 选择执行模式：flash（更快）、standard、pro（规划模式）、ultra（sub-agents 模式）
-- 检查 DeerFlow 健康状态，列出 models / skills / agents
+- 检查 Friday 健康状态，列出 models / skills / agents
 - 管理 threads 和会话历史
 - 上传文件做分析
 
 **环境变量**（可选，用于自定义端点）：
 
 ```bash
-DEERFLOW_URL=http://localhost:2026            # 统一代理基地址
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
+FRIDAY_URL=http://localhost:2026            # 统一代理基地址
+FRIDAY_GATEWAY_URL=http://localhost:2026    # Gateway API
+FRIDAY_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 ```
 
-完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
+完整 API 说明见 [`skills/public/claude-to-friday/SKILL.md`](skills/public/claude-to-friday/SKILL.md)。
 
 ### Sub-Agents
 

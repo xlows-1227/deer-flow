@@ -365,22 +365,22 @@ Skills загружаются по мере необходимости, толь
 
 #### Интеграция с Claude Code
 
-Skill `claude-to-deerflow` позволяет работать с DeerFlow прямо из [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Отправляйте задачи, проверяйте статус, управляйте тредами, не выходя из терминала.
+Skill `claude-to-friday` позволяет работать с Friday прямо из [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Отправляйте задачи, проверяйте статус, управляйте тредами, не выходя из терминала.
 
 **Установка скилла**:
 
 ```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+npx skills add https://github.com/bytedance/deer-flow --skill claude-to-friday
 ```
 
 **Что можно делать**:
-- Отправлять сообщения в DeerFlow и получать потоковые ответы
+- Отправлять сообщения в Friday и получать потоковые ответы
 - Выбирать режимы выполнения: flash (быстро), standard, pro (planning), ultra (sub-agents)
-- Проверять статус DeerFlow, просматривать модели, скиллы, агентов
+- Проверять статус Friday, просматривать модели, скиллы, агентов
 - Управлять тредами и историей диалога
 - Загружать файлы для анализа
 
-Полный справочник API в [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md).
+Полный справочник API в [`skills/public/claude-to-friday/SKILL.md`](skills/public/claude-to-friday/SKILL.md).
 
 ### Sub-Agents
 
