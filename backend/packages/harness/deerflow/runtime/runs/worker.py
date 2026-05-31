@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from langgraph.checkpoint.base import empty_checkpoint
 
 if TYPE_CHECKING:
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import BaseMessage, HumanMessage
 
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
@@ -101,6 +101,72 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     config["context"] = dict(runtime_context)
 
 
+def _get_runtime_config(config: dict) -> dict[str, Any]:
+    """Merge legacy configurable options with LangGraph runtime context."""
+    cfg = dict(config.get("configurable", {}) or {})
+    context = config.get("context", {}) or {}
+    if isinstance(context, dict):
+        cfg.update(context)
+    return cfg
+
+
+def _current_turn_has_attachment(graph_input: dict) -> bool:
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    for message in messages:
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if additional_kwargs is None and isinstance(message, dict):
+            additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict) and additional_kwargs.get("files"):
+            return True
+
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") not in (None, "text"):
+                    return True
+    return False
+
+
+def _thread_has_historical_uploads(thread_id: str) -> bool:
+    try:
+        from deerflow.config.paths import get_paths
+
+        uploads_dir = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+        return uploads_dir.exists() and any(path.is_file() for path in uploads_dir.iterdir())
+    except Exception:
+        logger.debug("Failed to inspect uploads for flash fast path", exc_info=True)
+        return True
+
+
+def _should_use_flash_direct_path(
+    *,
+    graph_input: dict,
+    config: dict,
+    thread_id: str,
+    interrupt_before: list[str] | Literal["*"] | None,
+    interrupt_after: list[str] | Literal["*"] | None,
+) -> bool:
+    cfg = _get_runtime_config(config)
+    if cfg.get("is_bootstrap"):
+        return False
+    if interrupt_before or interrupt_after:
+        return False
+    if cfg.get("mode") != "flash":
+        return False
+    if cfg.get("is_plan_mode", False) or cfg.get("subagent_enabled", False):
+        return False
+    if _current_turn_has_attachment(graph_input):
+        return False
+    if _thread_has_historical_uploads(thread_id):
+        return False
+    return True
+
+
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
     try:
         return "app_config" in inspect.signature(agent_factory).parameters
@@ -119,6 +185,219 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
     except TypeError:
         # Some callable instances are unhashable; fall back to a direct check.
         return _compute_agent_factory_supports_app_config(agent_factory)
+
+
+def _normalize_lg_modes(requested_modes: set[str]) -> list[str]:
+    lg_modes: list[str] = []
+    for m in requested_modes:
+        if m == "messages-tuple":
+            lg_modes.append("messages")
+        elif m == "events":
+            continue
+        elif m in _VALID_LG_MODES:
+            lg_modes.append(m)
+    if not lg_modes:
+        lg_modes = ["values"]
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for m in lg_modes:
+        if m not in seen:
+            seen.add(m)
+            deduped.append(m)
+    return deduped
+
+
+def _coerce_messages(raw_messages: Any) -> list[BaseMessage]:
+    from langchain_core.messages import BaseMessage
+    from langchain_core.messages.utils import convert_to_messages
+
+    if not raw_messages:
+        return []
+    if not isinstance(raw_messages, list):
+        raw_messages = [raw_messages]
+
+    messages: list[BaseMessage] = []
+    for message in raw_messages:
+        if isinstance(message, BaseMessage):
+            messages.append(message)
+        else:
+            try:
+                converted = convert_to_messages([message])
+            except (TypeError, ValueError, NotImplementedError):
+                logger.debug("Skipping non-coercible message in flash direct path: %r", message, exc_info=True)
+                continue
+            messages.extend(converted)
+    return messages
+
+
+def _checkpoint_channel_values(ckpt_tuple: Any | None) -> dict[str, Any]:
+    checkpoint = getattr(ckpt_tuple, "checkpoint", None) if ckpt_tuple is not None else None
+    if not isinstance(checkpoint, dict):
+        return {}
+    values = checkpoint.get("channel_values")
+    return dict(values) if isinstance(values, dict) else {}
+
+
+def _checkpoint_channel_versions(ckpt_tuple: Any | None) -> dict[str, Any]:
+    checkpoint = getattr(ckpt_tuple, "checkpoint", None) if ckpt_tuple is not None else None
+    if not isinstance(checkpoint, dict):
+        return {}
+    versions = checkpoint.get("channel_versions")
+    return dict(versions) if isinstance(versions, dict) else {}
+
+
+def _next_channel_version(checkpointer: Any, current: Any) -> Any:
+    get_next_version = getattr(checkpointer, "get_next_version", None)
+    if callable(get_next_version):
+        return get_next_version(current, None)
+    if isinstance(current, int):
+        return current + 1
+    return 1
+
+
+async def _persist_flash_direct_checkpoint(
+    *,
+    checkpointer: Any | None,
+    thread_id: str,
+    ckpt_tuple: Any | None,
+    channel_values: dict[str, Any],
+    changed_channels: set[str],
+) -> None:
+    if checkpointer is None:
+        return
+
+    previous_checkpoint = getattr(ckpt_tuple, "checkpoint", None) if ckpt_tuple is not None else None
+    previous_versions = _checkpoint_channel_versions(ckpt_tuple)
+    checkpoint = empty_checkpoint()
+    if isinstance(previous_checkpoint, dict):
+        checkpoint["versions_seen"] = copy.deepcopy(previous_checkpoint.get("versions_seen", {}))
+        checkpoint["pending_sends"] = copy.deepcopy(previous_checkpoint.get("pending_sends", []))
+
+    new_versions: dict[str, Any] = {}
+    channel_versions = dict(previous_versions)
+    for channel in changed_channels:
+        next_version = _next_channel_version(checkpointer, previous_versions.get(channel))
+        channel_versions[channel] = next_version
+        new_versions[channel] = next_version
+
+    checkpoint["channel_values"] = channel_values
+    checkpoint["channel_versions"] = channel_versions
+    checkpoint["updated_channels"] = sorted(changed_channels)
+
+    base_config = getattr(ckpt_tuple, "config", None) if ckpt_tuple is not None else None
+    if not isinstance(base_config, dict):
+        base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    else:
+        base_config = copy.deepcopy(base_config)
+        base_config.setdefault("configurable", {})
+        base_config["configurable"].setdefault("thread_id", thread_id)
+        base_config["configurable"].setdefault("checkpoint_ns", "")
+
+    await _call_checkpointer_method(
+        checkpointer,
+        "aput",
+        "put",
+        base_config,
+        checkpoint,
+        {"source": "flash_direct"},
+        new_versions,
+    )
+
+
+async def _run_flash_direct_model(
+    *,
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    record: RunRecord,
+    ctx: RunContext,
+    graph_input: dict,
+    config: dict,
+    runnable_config: Any,
+    requested_modes: set[str],
+    stream_subgraphs: bool,
+    checkpointer: Any | None,
+    pre_run_checkpoint_tuple: Any | None,
+) -> bool:
+    from langchain_core.messages import AIMessage, SystemMessage, message_chunk_to_message
+
+    from deerflow.agents.lead_agent.agent import _available_skill_names, _resolve_model_name
+    from deerflow.agents.lead_agent.prompt import apply_prompt_template
+    from deerflow.config.agents_config import load_agent_config, validate_agent_name
+    from deerflow.config.app_config import get_app_config
+    from deerflow.models import create_chat_model
+
+    cfg = _get_runtime_config(config)
+    app_config = ctx.app_config or get_app_config()
+
+    agent_name = validate_agent_name(cfg.get("agent_name"))
+    agent_config = load_agent_config(agent_name)
+    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
+    agent_model_name = agent_config.model if agent_config and agent_config.model else None
+    model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=app_config)
+    model_config = app_config.get_model_config(model_name)
+    if model_config is None:
+        raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+    if record.model_name is not None and model_name != record.model_name:
+        await run_manager.update_model_name(record.run_id, model_name)
+
+    existing_values = _checkpoint_channel_values(pre_run_checkpoint_tuple)
+    historical_messages = _coerce_messages(existing_values.get("messages"))
+    input_messages = _coerce_messages(graph_input.get("messages"))
+    conversation_messages = [*historical_messages, *input_messages]
+
+    system_prompt = apply_prompt_template(
+        subagent_enabled=False,
+        max_concurrent_subagents=cfg.get("max_concurrent_subagents", 3),
+        agent_name=agent_name,
+        available_skills=_available_skill_names(agent_config, False),
+        app_config=app_config,
+    )
+    model_messages = [SystemMessage(content=system_prompt), *conversation_messages]
+    model = create_chat_model(
+        name=model_name,
+        thinking_enabled=False,
+        reasoning_effort=cfg.get("reasoning_effort"),
+        app_config=app_config,
+        attach_tracing=False,
+    ).with_config(tags=["lead_agent"])
+
+    lg_modes = _normalize_lg_modes(requested_modes)
+    logger.info("Run %s: flash direct streaming with modes %s (requested: %s)", record.run_id, lg_modes, requested_modes)
+
+    accumulated_chunk: Any | None = None
+    metadata = {"langgraph_node": "agent", "tags": ["lead_agent"], "flash_direct": True}
+    async for chunk in model.astream(model_messages, config=runnable_config):
+        if record.abort_event.is_set():
+            logger.info("Run %s abort requested - stopping flash direct stream", record.run_id)
+            break
+        accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
+        if "messages" in lg_modes:
+            await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize((chunk, metadata), mode="messages"))
+
+    final_ai_message = message_chunk_to_message(accumulated_chunk) if accumulated_chunk is not None else AIMessage(content="")
+    final_messages = [*conversation_messages, final_ai_message]
+    channel_values = {
+        **existing_values,
+        "messages": final_messages,
+        "artifacts": existing_values.get("artifacts") or [],
+    }
+
+    if "values" in lg_modes:
+        await bridge.publish(record.run_id, "values", serialize(channel_values, mode="values"))
+
+    if not record.abort_event.is_set():
+        await _persist_flash_direct_checkpoint(
+            checkpointer=checkpointer,
+            thread_id=record.thread_id,
+            ckpt_tuple=pre_run_checkpoint_tuple,
+            channel_values=channel_values,
+            changed_channels={"messages", "artifacts"},
+        )
+
+    if stream_subgraphs:
+        logger.debug("Run %s: flash direct path ignores stream_subgraphs because no graph/subgraphs are created", record.run_id)
+    return True
 
 
 async def run_agent(
@@ -149,6 +428,7 @@ async def run_agent(
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
+    pre_run_checkpoint_tuple: Any | None = None
     snapshot_capture_failed = False
 
     journal = None
@@ -186,6 +466,7 @@ async def run_agent(
             try:
                 config_for_check = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(config_for_check)
+                pre_run_checkpoint_tuple = ckpt_tuple
                 if ckpt_tuple is not None:
                     ckpt_config = getattr(ckpt_tuple, "config", {}).get("configurable", {})
                     pre_run_checkpoint_id = ckpt_config.get("checkpoint_id")
@@ -256,6 +537,48 @@ async def run_agent(
             tuple(interrupt_after or ()),
         )
         runnable_config = RunnableConfig(**config)
+        if _should_use_flash_direct_path(
+            graph_input=graph_input,
+            config=config,
+            thread_id=thread_id,
+            interrupt_before=interrupt_before,
+            interrupt_after=interrupt_after,
+        ):
+            await _run_flash_direct_model(
+                bridge=bridge,
+                run_manager=run_manager,
+                record=record,
+                ctx=ctx,
+                graph_input=graph_input,
+                config=config,
+                runnable_config=runnable_config,
+                requested_modes=requested_modes,
+                stream_subgraphs=stream_subgraphs,
+                checkpointer=checkpointer,
+                pre_run_checkpoint_tuple=pre_run_checkpoint_tuple,
+            )
+            if record.abort_event.is_set():
+                action = record.abort_action
+                if action == "rollback":
+                    await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                    try:
+                        await _rollback_to_pre_run_checkpoint(
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            pre_run_checkpoint_id=pre_run_checkpoint_id,
+                            pre_run_snapshot=pre_run_snapshot,
+                            snapshot_capture_failed=snapshot_capture_failed,
+                        )
+                        logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+                    except Exception:
+                        logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+                else:
+                    await run_manager.set_status(run_id, RunStatus.interrupted)
+            else:
+                await run_manager.set_status(run_id, RunStatus.success)
+            return
+
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
         else:

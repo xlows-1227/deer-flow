@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -161,6 +162,126 @@ async def test_run_agent_defaults_root_run_name_from_context_agent_name():
 
     assert captured["factory_run_name"] == "finalis"
     assert captured["astream_run_name"] == "finalis"
+
+
+@pytest.mark.anyio
+async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkeypatch):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    record.model_name = "flash-model"
+    published: list[tuple[str, object]] = []
+    bridge = SimpleNamespace(
+        publish=AsyncMock(side_effect=lambda _run_id, event, data: published.append((event, data))),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class MockModelConfig:
+        supports_thinking = False
+        supports_vision = False
+
+    app_config = SimpleNamespace(get_model_config=lambda _name: MockModelConfig())
+
+    class FakeModel:
+        def with_config(self, **_kwargs):
+            return self
+
+        async def astream(self, messages, config=None):
+            assert messages[0].type == "system"
+            yield AIMessageChunk(content="hello")
+            yield AIMessageChunk(content="!")
+
+    def forbidden_factory(**_kwargs):
+        raise AssertionError("agent_factory should not be called for flash direct path")
+
+    monkeypatch.setattr("deerflow.agents.lead_agent.agent._resolve_model_name", lambda requested=None, *, app_config=None: requested or "flash-model")
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", lambda **_kwargs: "system prompt")
+    monkeypatch.setattr("deerflow.models.create_chat_model", lambda **_kwargs: FakeModel())
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=forbidden_factory,
+        graph_input={"messages": [HumanMessage(content="hi")]},
+        config={
+            "context": {
+                "mode": "flash",
+                "thinking_enabled": False,
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+            }
+        },
+        stream_modes=["values", "messages-tuple"],
+        stream_subgraphs=True,
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert [event for event, _data in published].count("messages") == 2
+    values_events = [data for event, data in published if event == "values"]
+    assert values_events
+    assert values_events[-1]["messages"][-1]["content"] == "hello!"
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_flash_direct_path_persists_checkpoint_history(monkeypatch):
+    run_manager = RunManager()
+    checkpointer = InMemorySaver()
+    captured_model_messages: list[list[str]] = []
+
+    class MockModelConfig:
+        supports_thinking = False
+        supports_vision = False
+
+    app_config = SimpleNamespace(get_model_config=lambda _name: MockModelConfig())
+
+    class FakeModel:
+        async def astream(self, messages, config=None):
+            captured_model_messages.append([getattr(message, "content", "") for message in messages])
+            yield AIMessageChunk(content=f"response-{len(captured_model_messages)}")
+
+        def with_config(self, **_kwargs):
+            return self
+
+    def forbidden_factory(**_kwargs):
+        raise AssertionError("agent_factory should not be called for flash direct path")
+
+    monkeypatch.setattr("deerflow.agents.lead_agent.agent._resolve_model_name", lambda requested=None, *, app_config=None: requested or "flash-model")
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", lambda **_kwargs: "system prompt")
+    monkeypatch.setattr("deerflow.models.create_chat_model", lambda **_kwargs: FakeModel())
+
+    for text in ("first", "second"):
+        record = await run_manager.create("thread-1", assistant_id="lead_agent")
+        record.model_name = "flash-model"
+        bridge = SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(),
+            cleanup=AsyncMock(),
+        )
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=checkpointer, app_config=app_config),
+            agent_factory=forbidden_factory,
+            graph_input={"messages": [HumanMessage(content=text)]},
+            config={
+                "context": {
+                    "mode": "flash",
+                    "thinking_enabled": False,
+                    "is_plan_mode": False,
+                    "subagent_enabled": False,
+                }
+            },
+            stream_modes=["values"],
+        )
+
+    assert captured_model_messages[0] == ["system prompt", "first"]
+    assert captured_model_messages[1] == ["system prompt", "first", "response-1", "second"]
 
 
 @pytest.mark.anyio
