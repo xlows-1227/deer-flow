@@ -715,6 +715,7 @@ export function useThreadStream({
                       ? "low"
                       : undefined),
               thread_id: threadId,
+              skill_name: context.skill_name,
             },
           },
         );

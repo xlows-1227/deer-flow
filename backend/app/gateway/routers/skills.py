@@ -26,6 +26,8 @@ class SkillResponse(BaseModel):
 
     name: str = Field(..., description="Name of the skill")
     description: str = Field(..., description="Description of what the skill does")
+    display_name: str | None = Field(None, description="Display name of the skill (e.g. Chinese name)")
+    description_zh: str | None = Field(None, description="Chinese description of the skill")
     license: str | None = Field(None, description="License information")
     category: SkillCategory = Field(..., description="Category of the skill (public or custom)")
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
@@ -79,6 +81,8 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
     return SkillResponse(
         name=skill.name,
         description=skill.description,
+        display_name=skill.display_name,
+        description_zh=skill.description_zh,
         license=skill.license,
         category=skill.category,
         enabled=skill.enabled,

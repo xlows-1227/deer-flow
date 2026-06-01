@@ -1,5 +1,6 @@
 ---
 name: claude-to-friday
+display_name: Friday 智能体交互（claude-to-friday）
 description: "Interact with Friday AI agent platform via its HTTP API. Use this skill when the user wants to send messages or questions to Friday for research/analysis, start a Friday conversation thread, check Friday status or health, list available models/skills/agents in Friday, manage Friday memory, upload files to Friday threads, or delegate complex research tasks to Friday. Also use when the user mentions friday or wants to run a deep research task that Friday can handle."
 ---
 

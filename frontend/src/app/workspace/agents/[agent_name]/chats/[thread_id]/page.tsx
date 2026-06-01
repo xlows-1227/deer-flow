@@ -201,7 +201,7 @@ export default function AgentChatPage() {
                   "relative w-full",
                   isWelcomeMode && "-translate-y-[calc(50vh-96px)]",
                   isWelcomeMode
-                    ? "max-w-(--container-width-sm)"
+                    ? "max-w-[720px]"
                     : "max-w-(--container-width-md)",
                 )}
               >

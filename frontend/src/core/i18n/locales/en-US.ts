@@ -106,6 +106,9 @@ export const enUS: Translations = {
     reasoningEffortHigh: "High",
     reasoningEffortHighDescription:
       "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
+    skill: "Skill",
+    noSkill: "Auto",
+    noSkillDescription: "Let the model choose the appropriate skill automatically",
     searchModels: "Search models...",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",

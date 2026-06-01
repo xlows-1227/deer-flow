@@ -521,6 +521,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+    # If user explicitly selected a skill, force-only that skill
+    forced_skill = cfg.get("skill_name")
+    if forced_skill:
+        available_skills = {forced_skill}
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 

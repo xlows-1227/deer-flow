@@ -87,6 +87,14 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         if license_text is not None:
             license_text = str(license_text).strip() or None
 
+        display_name = metadata.get("display_name")
+        if display_name is not None:
+            display_name = str(display_name).strip() or None
+
+        description_zh = metadata.get("description_zh")
+        if description_zh is not None:
+            description_zh = str(description_zh).strip() or None
+
         try:
             allowed_tools = parse_allowed_tools(metadata.get("allowed-tools"), skill_file)
         except ValueError as exc:
@@ -96,6 +104,8 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         return Skill(
             name=name,
             description=description,
+            display_name=display_name,
+            description_zh=description_zh,
             license=license_text,
             skill_dir=skill_file.parent,
             skill_file=skill_file,

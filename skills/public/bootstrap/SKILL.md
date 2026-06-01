@@ -1,5 +1,6 @@
 ---
 name: bootstrap
+display_name: 智能体初始化引导（bootstrap）
 description: >-
   Generate a personalized SOUL.md through a warm, adaptive onboarding conversation.
   Trigger when the user wants to create, set up, or initialize their AI partner's

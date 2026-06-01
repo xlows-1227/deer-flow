@@ -102,7 +102,7 @@ function SkillSettingsList({
           <Item className="w-full" variant="outline" key={skill.name}>
             <ItemContent>
               <ItemTitle>
-                <div className="flex items-center gap-2">{skill.name}</div>
+                <div className="flex items-center gap-2">{skill.display_name ?? skill.name}</div>
               </ItemTitle>
               <ItemDescription className="line-clamp-4">
                 {skill.description}

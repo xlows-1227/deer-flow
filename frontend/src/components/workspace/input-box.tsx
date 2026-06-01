@@ -9,6 +9,7 @@ import {
   PlusIcon,
   SparklesIcon,
   RocketIcon,
+  WrenchIcon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -59,6 +60,7 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import { useSkills } from "@/core/skills/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -124,6 +126,7 @@ export function InputBox({
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    skill_name?: string;
   };
   extraHeader?: React.ReactNode;
   /**
@@ -141,6 +144,7 @@ export function InputBox({
     > & {
       mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
       reasoning_effort?: "minimal" | "low" | "medium" | "high";
+      skill_name?: string;
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
@@ -150,7 +154,9 @@ export function InputBox({
   const { t } = useI18n();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   const { models } = useModels();
+  const { skills } = useSkills();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -248,6 +254,24 @@ export function InputBox({
         ...context,
         reasoning_effort: effort,
       });
+    },
+    [onContextChange, context],
+  );
+
+  const handleSkillSelect = useCallback(
+    (skillName: string | undefined) => {
+      onContextChange?.({
+        ...context,
+        skill_name: skillName,
+      });
+      setSkillMenuOpen(false);
+      // Focus back to textarea so user can keep typing
+      setTimeout(() => {
+        const ta = document.querySelector<HTMLTextAreaElement>(
+          "textarea[name='message']",
+        );
+        ta?.focus();
+      }, 0);
     },
     [onContextChange, context],
   );
@@ -706,7 +730,7 @@ export function InputBox({
                       " " + t.inputBox.reasoningEffortHigh}
                   </div>
                 </PromptInputActionMenuTrigger>
-                <PromptInputActionMenuContent className="w-70">
+                <PromptInputActionMenuContent className="w-48">
                   <DropdownMenuGroup>
                     <DropdownMenuLabel className="text-muted-foreground text-xs">
                       {t.inputBox.reasoningEffort}
@@ -802,6 +826,84 @@ export function InputBox({
                           <div className="ml-auto size-4" />
                         )}
                       </PromptInputActionMenuItem>
+                    </PromptInputActionMenu>
+                  </DropdownMenuGroup>
+                </PromptInputActionMenuContent>
+              </PromptInputActionMenu>
+            )}
+            {skills.length > 0 && (
+              <PromptInputActionMenu open={skillMenuOpen} onOpenChange={setSkillMenuOpen}>
+                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                  <WrenchIcon className="size-3" />
+                  <div className="text-xs font-normal">
+                    {context.skill_name
+                      ? (skills.find((s) => s.name === context.skill_name) as
+                          | { name: string; display_name: string | null }
+                          | undefined)?.display_name
+                        ?? (skills.find((s) => s.name === context.skill_name) as
+                          | { name: string }
+                          | undefined)?.name
+                        ?? context.skill_name
+                      : t.inputBox.skill}
+                  </div>
+                  {context.skill_name && (
+                    <span
+                      className="ml-1 inline-flex cursor-pointer items-center"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSkillSelect(undefined);
+                      }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    >
+                      <XIcon className="text-muted-foreground hover:text-foreground size-3" />
+                    </span>
+                  )}
+                </PromptInputActionMenuTrigger>
+                <PromptInputActionMenuContent className="w-70">
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel className="text-muted-foreground text-xs">
+                      {t.inputBox.skill}
+                    </DropdownMenuLabel>
+                    <PromptInputActionMenu>
+                      <PromptInputActionMenuItem
+                        className={cn(
+                          !context.skill_name
+                            ? "text-accent-foreground"
+                            : "text-muted-foreground/65",
+                        )}
+                        onSelect={() => handleSkillSelect(undefined)}
+                      >
+                        <div className="flex items-center gap-1 text-xs">
+                          {t.inputBox.noSkill}
+                        </div>
+                        {!context.skill_name ? (
+                          <CheckIcon className="ml-auto size-4" />
+                        ) : (
+                          <div className="ml-auto size-4" />
+                        )}
+                      </PromptInputActionMenuItem>
+                      {skills
+                        .filter((s) => s.enabled)
+                        .map((skill) => (
+                          <PromptInputActionMenuItem
+                            key={skill.name}
+                            className={cn(
+                              context.skill_name === skill.name
+                                ? "text-accent-foreground"
+                                : "text-muted-foreground/65",
+                            )}
+                            onSelect={() => handleSkillSelect(skill.name)}
+                          >
+                            <div className="flex items-center gap-1 text-xs">
+                              {skill.display_name ?? skill.name}
+                            </div>
+                            {context.skill_name === skill.name ? (
+                              <CheckIcon className="ml-auto size-4" />
+                            ) : (
+                              <div className="ml-auto size-4" />
+                            )}
+                          </PromptInputActionMenuItem>
+                        ))}
                     </PromptInputActionMenu>
                   </DropdownMenuGroup>
                 </PromptInputActionMenuContent>

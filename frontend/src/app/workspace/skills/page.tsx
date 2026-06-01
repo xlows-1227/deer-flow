@@ -54,8 +54,9 @@ export default function WorkspaceSkillsPage() {
       const matchesFilter = filter === "all" || skill.category === filter;
       const matchesQuery =
         !normalizedQuery ||
+        (skill.display_name ?? skill.name).toLowerCase().includes(normalizedQuery) ||
         skill.name.toLowerCase().includes(normalizedQuery) ||
-        skill.description.toLowerCase().includes(normalizedQuery);
+        (skill.description_zh ?? skill.description).toLowerCase().includes(normalizedQuery);
       return matchesFilter && matchesQuery;
     });
   }, [filter, query, skills]);
@@ -166,7 +167,7 @@ export default function WorkspaceSkillsPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <CardTitle className="truncate text-base">
-                          {skill.name}
+                          {skill.display_name ?? skill.name}
                         </CardTitle>
                         <CardDescription className="mt-2 line-clamp-3">
                           {skill.description}

@@ -29,6 +29,8 @@ class Skill:
     category: SkillCategory  # 'public' or 'custom'
     allowed_tools: list[str] | None = None
     enabled: bool = False  # Whether this skill is enabled
+    display_name: str | None = None
+    description_zh: str | None = None
 
     @property
     def skill_path(self) -> str:
