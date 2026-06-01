@@ -155,19 +155,19 @@ function SkillDetailDialog({
 
   return (
     <Dialog open={!!skill} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex h-[90vh] max-h-[1200px] w-[96vw] max-w-[2400px] flex-col overflow-hidden p-0">
-        <DialogHeader className="shrink-0 border-b border-gray-100 px-6 py-4">
-          <DialogTitle className="text-lg">
+      <DialogContent className="flex h-[86vh] max-h-[980px] w-[calc(100vw-2rem)] max-w-none flex-col overflow-hidden p-0 sm:max-w-6xl">
+        <DialogHeader className="shrink-0 border-b border-gray-100 px-8 py-5">
+          <DialogTitle className="text-xl">
             {displaySkill?.name ?? skill?.name}
           </DialogTitle>
         </DialogHeader>
         <div className="flex min-h-0 flex-1">
           {/* 左侧：Skill 说明 */}
-          <div className="w-72 shrink-0 border-r border-gray-100 bg-gray-50/50 p-6">
+          <div className="w-80 shrink-0 border-r border-gray-100 bg-gray-50/60 p-8">
             {!displaySkill ? (
               <div className="text-sm text-gray-500">加载中...</div>
             ) : (
-              <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-6">
                 <div>
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
                     描述
@@ -203,7 +203,7 @@ function SkillDetailDialog({
           </div>
 
           {/* 右侧：详细文件 */}
-          <div className="min-h-0 flex-1 px-6 py-5">
+          <div className="min-h-0 flex-1 px-8 py-6">
             {isCustom ? (
               <ScrollArea className="h-full">
                 {isLoading ? (
@@ -216,7 +216,7 @@ function SkillDetailDialog({
                     {error instanceof Error ? error.message : "未知错误"}
                   </div>
                 ) : customSkill ? (
-                  <pre className="whitespace-pre-wrap rounded-xl bg-gray-50 p-5 text-sm leading-relaxed text-gray-800">
+                  <pre className="min-h-full whitespace-pre-wrap rounded-xl border border-gray-100 bg-gray-50/80 p-6 text-sm leading-relaxed text-gray-800">
                     {customSkill.content}
                   </pre>
                 ) : null}

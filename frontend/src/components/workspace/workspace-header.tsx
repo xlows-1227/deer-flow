@@ -1,6 +1,7 @@
 "use client";
 
 import { MessageSquarePlus, SearchIcon } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -12,6 +13,32 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+
+function FridayBrand() {
+  return (
+    <>
+      <Image
+        src="/images/friday-icon.png"
+        alt=""
+        width={32}
+        height={32}
+        className="size-8 rounded-lg object-cover shadow-sm"
+      />
+      <span
+        className="flex items-center gap-px text-[17px] leading-none font-black tracking-[0.02em] text-gray-950 uppercase"
+        aria-label="Friday"
+      >
+        <span>Frid</span>
+        <span className="relative ml-0.5 inline-block h-[13px] w-[14px] translate-y-px">
+          <span className="absolute bottom-0 left-0 h-[3px] w-[13px] rounded-full bg-gray-950" />
+          <span className="absolute bottom-[1px] left-[1px] h-[3px] w-[12px] origin-left rotate-[-58deg] rounded-full bg-gray-950" />
+          <span className="absolute right-0 bottom-[1px] h-[3px] w-[12px] origin-right rotate-[58deg] rounded-full bg-gray-950" />
+        </span>
+        <span>y</span>
+      </span>
+    </>
+  );
+}
 
 export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -27,21 +54,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
         <div className="flex items-center justify-between gap-2">
           {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ? (
             <Link href="/" className="ml-1 flex items-center gap-2">
-              <span className="flex size-8 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">
-                WA
-              </span>
-              <span className="text-sm font-semibold text-gray-900">
-                Work-Agent
-              </span>
+              <FridayBrand />
             </Link>
           ) : (
             <div className="ml-1 flex cursor-default items-center gap-2">
-              <span className="flex size-8 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">
-                WA
-              </span>
-              <span className="text-sm font-semibold text-gray-900">
-                Work-Agent
-              </span>
+              <FridayBrand />
             </div>
           )}
         </div>

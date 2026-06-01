@@ -115,6 +115,20 @@ export default function AgentChatPage() {
     },
     [sendMessage, threadId, agent_name],
   );
+  const handleChoiceSelect = useCallback(
+    (choice: string) => {
+      if (
+        isUploading ||
+        thread.isLoading ||
+        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+      ) {
+        return;
+      }
+
+      void sendMessage(threadId, { text: choice, files: [] }, { agent_name });
+    },
+    [agent_name, isUploading, sendMessage, thread.isLoading, threadId],
+  );
 
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -187,6 +201,7 @@ export default function AgentChatPage() {
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
                 tokenUsageInlineMode={tokenUsageInlineMode}
+                onChoiceSelect={handleChoiceSelect}
               />
             </div>
 

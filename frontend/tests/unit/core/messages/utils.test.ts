@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
+import { extractMessageChoiceOptions } from "@/core/messages/choice-options";
 import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
@@ -8,6 +9,44 @@ import {
   getStreamingMessageLookup,
   isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
+
+test("extracts trailing numbered clarification choices", () => {
+  const parsed = extractMessageChoiceOptions(
+    [
+      "需要你的协助",
+      "",
+      "你希望这期科技简报覆盖哪些方向？",
+      "",
+      "1. AI/大模型行业动态（周报，中等篇幅）",
+      "2. 综合科技要闻（周报，覆盖 AI、芯片、互联网等）",
+      "3. 国内科技动态为主（周报）",
+      "4. 深度分析型简报（聚焦 1-2 个热点话题）",
+    ].join("\n"),
+  );
+
+  expect(parsed?.prompt).toContain("你希望这期科技简报覆盖哪些方向？");
+  expect(parsed?.options).toEqual([
+    { index: 1, value: "AI/大模型行业动态（周报，中等篇幅）" },
+    { index: 2, value: "综合科技要闻（周报，覆盖 AI、芯片、互联网等）" },
+    { index: 3, value: "国内科技动态为主（周报）" },
+    { index: 4, value: "深度分析型简报（聚焦 1-2 个热点话题）" },
+  ]);
+});
+
+test("does not extract non-terminal numbered steps as choices", () => {
+  expect(
+    extractMessageChoiceOptions(
+      [
+        "Follow these steps:",
+        "",
+        "1. Install deps",
+        "2. Run tests",
+        "",
+        "Done.",
+      ].join("\n"),
+    ),
+  ).toBeNull();
+});
 
 test("aggregates token usage messages once per assistant turn", () => {
   const messages = [

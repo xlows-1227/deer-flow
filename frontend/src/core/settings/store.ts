@@ -1,12 +1,14 @@
 import {
   DEFAULT_LOCAL_SETTINGS,
   LOCAL_SETTINGS_KEY,
+  THREAD_CONTEXT_KEY_PREFIX,
   THREAD_MODEL_KEY_PREFIX,
+  getThreadContext,
   getLocalSettings,
-  getThreadModelName,
   saveLocalSettings,
-  saveThreadModelName,
+  saveThreadContext,
   type LocalSettings,
+  type ThreadContextSettings,
 } from "./local";
 
 type Listener = () => void;
@@ -17,7 +19,7 @@ export type LocalSettingsSetter = <K extends keyof LocalSettings>(
 ) => void;
 
 const listeners = new Set<Listener>();
-const threadModelNames = new Map<string, string | undefined>();
+const threadContexts = new Map<string, ThreadContextSettings | undefined>();
 
 let baseSettings: LocalSettings = DEFAULT_LOCAL_SETTINGS;
 let baseSettingsLoaded = false;
@@ -70,7 +72,7 @@ function handleStorage(event: StorageEvent) {
 
   if (event.key === null) {
     baseSettings = getLocalSettings();
-    threadModelNames.clear();
+    threadContexts.clear();
     emitChange();
     return;
   }
@@ -81,12 +83,17 @@ function handleStorage(event: StorageEvent) {
     return;
   }
 
-  if (!event.key.startsWith(THREAD_MODEL_KEY_PREFIX)) {
+  if (
+    !event.key.startsWith(THREAD_CONTEXT_KEY_PREFIX) &&
+    !event.key.startsWith(THREAD_MODEL_KEY_PREFIX)
+  ) {
     return;
   }
 
-  const threadId = event.key.slice(THREAD_MODEL_KEY_PREFIX.length);
-  threadModelNames.set(threadId, getThreadModelName(threadId));
+  const threadId = event.key.startsWith(THREAD_CONTEXT_KEY_PREFIX)
+    ? event.key.slice(THREAD_CONTEXT_KEY_PREFIX.length)
+    : event.key.slice(THREAD_MODEL_KEY_PREFIX.length);
+  threadContexts.set(threadId, getThreadContext(threadId));
   emitChange();
 }
 
@@ -105,14 +112,16 @@ export function getBaseSettingsSnapshot(): LocalSettings {
   return baseSettings;
 }
 
-export function getThreadModelSnapshot(threadId: string): string | undefined {
+export function getThreadContextSnapshot(
+  threadId: string,
+): ThreadContextSettings | undefined {
   ensureBaseSettingsLoaded();
 
-  if (!threadModelNames.has(threadId)) {
-    threadModelNames.set(threadId, getThreadModelName(threadId));
+  if (!threadContexts.has(threadId)) {
+    threadContexts.set(threadId, getThreadContext(threadId));
   }
 
-  return threadModelNames.get(threadId);
+  return threadContexts.get(threadId);
 }
 
 export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
@@ -132,19 +141,21 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
 
+  if (key === "context") {
+    const current = getThreadContextSnapshot(threadId) ?? {};
+    const nextContext = {
+      ...current,
+      ...(value as ThreadContextSettings),
+    };
+    threadContexts.set(threadId, nextContext);
+    saveThreadContext(threadId, nextContext);
+    emitChange();
+    return;
+  }
+
   const nextBaseSettings = mergeSettingsSection(baseSettings, key, value);
   baseSettings = nextBaseSettings;
   saveLocalSettings(baseSettings);
-
-  if (
-    key === "context" &&
-    Object.prototype.hasOwnProperty.call(value, "model_name")
-  ) {
-    const contextValue = value as Partial<LocalSettings["context"]>;
-    const threadModelName = contextValue.model_name;
-    threadModelNames.set(threadId, threadModelName);
-    saveThreadModelName(threadId, threadModelName);
-  }
 
   emitChange();
 }

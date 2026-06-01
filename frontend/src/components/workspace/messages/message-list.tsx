@@ -10,6 +10,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  extractMessageChoiceOptions,
+  type MessageChoiceOptions as ParsedMessageChoiceOptions,
+} from "@/core/messages/choice-options";
+import {
   buildTokenDebugSteps,
   type TokenUsageInlineMode,
 } from "@/core/messages/usage-model";
@@ -40,6 +44,7 @@ import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
 
 import { MarkdownContent } from "./markdown-content";
+import { MessageChoiceOptions } from "./message-choice-options";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import {
@@ -167,6 +172,7 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  onChoiceSelect,
 }: {
   className?: string;
   threadId: string;
@@ -176,12 +182,59 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  onChoiceSelect?: (choice: string) => void;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
+  const parsedChoicesByGroupId = useMemo(() => {
+    const parsed = new Map<string, ParsedMessageChoiceOptions>();
+
+    for (const group of groupedMessages) {
+      if (group.type !== "assistant:clarification" || !group.id) {
+        continue;
+      }
+      const message = group.messages[0];
+      if (!message || !hasContent(message)) {
+        continue;
+      }
+      const choices = extractMessageChoiceOptions(
+        extractContentFromMessage(message),
+      );
+      if (choices) {
+        parsed.set(group.id, choices);
+      }
+    }
+
+    return parsed;
+  }, [groupedMessages]);
+  const activeChoiceGroupId = useMemo(() => {
+    if (thread.isLoading || !onChoiceSelect) {
+      return null;
+    }
+
+    for (let index = groupedMessages.length - 1; index >= 0; index -= 1) {
+      const group = groupedMessages[index];
+      if (!group) {
+        continue;
+      }
+      if (group.type === "human") {
+        return null;
+      }
+      if (group.id && parsedChoicesByGroupId.has(group.id)) {
+        return group.id;
+      }
+    }
+
+    return null;
+  }, [
+    groupedMessages,
+    onChoiceSelect,
+    parsedChoicesByGroupId,
+    thread.isLoading,
+  ]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
   const tokenDebugSteps = useMemo(
@@ -352,13 +405,26 @@ export function MessageList({
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {
+              const parsedChoices = group.id
+                ? parsedChoicesByGroupId.get(group.id)
+                : undefined;
               return (
                 <div key={group.id} className="w-full">
                   <MarkdownContent
-                    content={extractContentFromMessage(message)}
+                    content={
+                      parsedChoices?.prompt ??
+                      extractContentFromMessage(message)
+                    }
                     isLoading={thread.isLoading}
                     rehypePlugins={rehypePlugins}
                   />
+                  {parsedChoices && (
+                    <MessageChoiceOptions
+                      options={parsedChoices.options}
+                      disabled={group.id !== activeChoiceGroupId}
+                      onSelect={onChoiceSelect}
+                    />
+                  )}
                   {renderTokenUsage({
                     messages: group.messages,
                     turnUsageMessages,

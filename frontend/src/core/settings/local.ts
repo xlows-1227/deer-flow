@@ -17,6 +17,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
 };
 
 export const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
+export const THREAD_CONTEXT_KEY_PREFIX = "deerflow.thread-context.";
 export const THREAD_MODEL_KEY_PREFIX = "deerflow.thread-model.";
 
 function isBrowser(): boolean {
@@ -46,6 +47,8 @@ export interface LocalSettings {
   };
 }
 
+export type ThreadContextSettings = Partial<LocalSettings["context"]>;
+
 function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
   return {
     ...DEFAULT_LOCAL_SETTINGS,
@@ -66,6 +69,10 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
 
 function getThreadModelStorageKey(threadId: string): string {
   return `${THREAD_MODEL_KEY_PREFIX}${threadId}`;
+}
+
+function getThreadContextStorageKey(threadId: string): string {
+  return `${THREAD_CONTEXT_KEY_PREFIX}${threadId}`;
 }
 
 export function getThreadModelName(threadId: string): string | undefined {
@@ -90,18 +97,55 @@ export function saveThreadModelName(
   localStorage.setItem(key, modelName);
 }
 
-export function applyThreadModelOverride(
-  settings: LocalSettings,
-  threadModelName: string | undefined,
-): LocalSettings {
-  if (!threadModelName) {
-    return settings;
+export function getThreadContext(
+  threadId: string,
+): ThreadContextSettings | undefined {
+  if (!isBrowser()) {
+    return undefined;
   }
+
+  const json = localStorage.getItem(getThreadContextStorageKey(threadId));
+  if (json) {
+    try {
+      const context = JSON.parse(json) as ThreadContextSettings;
+      return {
+        ...context,
+      };
+    } catch {}
+  }
+
+  const modelName = getThreadModelName(threadId);
+  return modelName ? { model_name: modelName } : undefined;
+}
+
+export function saveThreadContext(
+  threadId: string,
+  context: ThreadContextSettings | undefined,
+) {
+  if (!isBrowser()) {
+    return;
+  }
+
+  const key = getThreadContextStorageKey(threadId);
+  if (!context || Object.keys(context).length === 0) {
+    localStorage.removeItem(key);
+    saveThreadModelName(threadId, undefined);
+    return;
+  }
+
+  localStorage.setItem(key, JSON.stringify(context));
+  saveThreadModelName(threadId, context.model_name);
+}
+
+export function applyThreadContextOverride(
+  settings: LocalSettings,
+  threadContext: ThreadContextSettings | undefined,
+): LocalSettings {
   return {
     ...settings,
     context: {
-      ...settings.context,
-      model_name: threadModelName,
+      ...DEFAULT_LOCAL_SETTINGS.context,
+      ...threadContext,
     },
   };
 }
