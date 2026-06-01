@@ -3,7 +3,11 @@
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
+  CommandIcon,
+  CpuIcon,
+  EraserIcon,
   GraduationCapIcon,
+  HelpCircleIcon,
   LightbulbIcon,
   PaperclipIcon,
   PlusIcon,
@@ -21,6 +25,7 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type ReactNode,
 } from "react";
 
 import {
@@ -61,6 +66,16 @@ import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useSkills } from "@/core/skills/hooks";
+import {
+  detectSlashCommand,
+  nextPickerIndex,
+} from "@/core/skills/slash-picker";
+import {
+  filterSlashCommands,
+  getBuiltinSlashCommands,
+  getSlashCommands,
+  type SlashCommand,
+} from "@/core/slash-commands";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -155,6 +170,7 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const { models } = useModels();
   const { skills } = useSkills();
   const { thread, isMock } = useThread();
@@ -172,6 +188,57 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+
+  // ---- Slash command picker --------------------------------------------------
+  // Tracks the live state of an in-progress `/` token at the trailing caret
+  // position. The picker overlay reads from this to decide whether to show.
+  //
+  // The candidate list is sourced from the global slash-command registry
+  // (built-in commands + any team-registered custom commands) filtered by
+  // the trailing query. The registry is module-scoped, so we just call
+  // `getSlashCommands()` to snapshot it on every render.
+  const [slashActive, setSlashActive] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
+  const [slashIndex, setSlashIndex] = useState(0);
+
+  // Combined command set: built-in + third-party, deduplicated by id
+  // (built-ins win since they are registered first and registry is
+  // idempotent on id).
+  const slashCommands = useMemo<SlashCommand[]>(() => {
+    if (!slashActive) {
+      return [];
+    }
+    const builtins = getBuiltinSlashCommands({
+      skills,
+      modeLabels: {
+        flash: t.inputBox.flashMode,
+        thinking: t.inputBox.reasoningMode,
+        pro: t.inputBox.proMode,
+        ultra: t.inputBox.ultraMode,
+      },
+      noSkillLabel: t.inputBox.noSkill,
+      noSkillDescription: t.inputBox.noSkillDescription,
+      modelLabel: t.inputBox.slashCommandModel,
+      modelDescription: t.inputBox.slashCommandModelDescription,
+      clearLabel: t.inputBox.slashCommandClear,
+      clearDescription: t.inputBox.slashCommandClearDescription,
+      helpLabel: t.inputBox.slashCommandHelp,
+      helpDescription: t.inputBox.slashCommandHelpDescription,
+    });
+    const custom = getSlashCommands().filter(
+      (c) => !builtins.some((b) => b.id === c.id),
+    );
+    return [...builtins, ...custom];
+    // We intentionally re-derive when the user types or when skills/i18n
+    // change, so any of these in deps is correct.
+  }, [slashActive, skills, t.inputBox]);
+  // Filtered view used by the picker rows.
+  const slashCandidates = useMemo(
+    () => filterSlashCommands(slashQuery, slashCommands),
+    [slashCommands, slashQuery],
+  );
+  const slashTotalRows = slashActive ? slashCandidates.length : 0;
+  const slashHasNone = slashActive && slashCandidates.length === 0;
 
   useEffect(() => {
     if (models.length === 0) {
@@ -274,6 +341,87 @@ export function InputBox({
       }, 0);
     },
     [onContextChange, context],
+  );
+
+  // Apply the slash command at `slashIndex`. Routes by `kind`:
+  //   - skill:   set/clear the active skill via `handleSkillSelect`
+  //   - mode:    change the agent mode via `handleModeSelect`
+  //   - model:   open the model picker dialog
+  //   - clear:   input is already being cleared below
+  //   - help:    surface a help dialog (we toast a summary here; richer
+  //              help screen can be a follow-up)
+  //   - custom:  invoke `command.run(query)`; the command decides what
+  //              happens to the input
+  const selectSlashCandidateByIndex = useCallback(
+    (index: number) => {
+      if (!slashActive) {
+        return;
+      }
+      const command = slashCandidates[index];
+      if (!command) {
+        return;
+      }
+      // Run the command's effect first; some commands may want to keep
+      // the query (e.g. /standup with a date suffix). The default
+      // behavior is to clear the input.
+      let nextInput: string | null | undefined = "";
+      switch (command.kind) {
+        case "skill":
+          handleSkillSelect(command.value ?? undefined);
+          break;
+        case "mode":
+          if (
+            command.value === "flash" ||
+            command.value === "thinking" ||
+            command.value === "pro" ||
+            command.value === "ultra"
+          ) {
+            handleModeSelect(command.value);
+          }
+          break;
+        case "model":
+          setModelDialogOpen(true);
+          break;
+        case "clear":
+          // No-op: input is cleared below.
+          break;
+        case "help":
+          setHelpDialogOpen(true);
+          break;
+        case "custom": {
+          // For custom commands, the handler may return the next input.
+          if (command.run) {
+            const result = command.run(slashQuery);
+            if (typeof result === "string") {
+              nextInput = result;
+            }
+          }
+          break;
+        }
+        default: {
+          // Exhaustive check — if a new kind is added, this will fail
+          // to compile until we handle it.
+          const _exhaustive: never = command.kind;
+          void _exhaustive;
+        }
+      }
+      if (nextInput === undefined || nextInput === null) {
+        textInput.setInput("");
+      } else {
+        textInput.setInput(nextInput);
+      }
+      setSlashActive(false);
+      setSlashQuery("");
+      setSlashIndex(0);
+    },
+    [
+      handleSkillSelect,
+      handleModeSelect,
+      slashActive,
+      slashCandidates,
+      slashQuery,
+      textInput,
+    ],
   );
 
   const handleSubmit = useCallback(
@@ -389,6 +537,95 @@ export function InputBox({
     messagesRef.current = thread.messages;
   }, [thread.messages]);
 
+  // Keep the slash picker in sync with the current text input value.
+  useEffect(() => {
+    const match = detectSlashCommand(textInput.value ?? "");
+    if (!match.active) {
+      if (slashActive) {
+        setSlashActive(false);
+        setSlashQuery("");
+        setSlashIndex(0);
+      }
+      return;
+    }
+    if (!slashActive) {
+      setSlashActive(true);
+    }
+    if (match.query !== slashQuery) {
+      setSlashQuery(match.query);
+      // Reset highlight to first match when the query changes.
+      setSlashIndex(0);
+    }
+  }, [textInput.value, slashActive, slashQuery]);
+
+  // When the candidate list shrinks (e.g. user types more), clamp the
+  // highlighted index so it always points at a valid item.
+  useEffect(() => {
+    if (!slashActive) {
+      return;
+    }
+    // slashTotalRows includes the reserved "Auto" row at index 0.
+    if (slashIndex >= slashTotalRows) {
+      setSlashIndex(slashTotalRows > 0 ? 0 : -1);
+    }
+  }, [slashActive, slashTotalRows, slashIndex]);
+
+  // Capture-phase keydown handler. The textarea has its own onKeyDown that
+  // calls `preventDefault()` on Enter, so we need capture to run first and
+  // decide whether the keypress should belong to the slash picker instead.
+  useEffect(() => {
+    const root = promptRootRef.current;
+    if (!root) {
+      return;
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!slashActive) {
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        setSlashIndex((prev) => nextPickerIndex(prev, slashTotalRows, "down"));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setSlashIndex((prev) => nextPickerIndex(prev, slashTotalRows, "up"));
+      } else if (e.key === "Enter") {
+        // Always intercept Enter while the picker is open — if there are
+        // zero matches the user almost certainly doesn't want to send `/foo`
+        // as a literal message.
+        e.preventDefault();
+        e.stopPropagation();
+        const target = slashIndex === -1 ? 0 : slashIndex;
+        // If everything is filtered out, fall back to "Auto" (index 0).
+        if (slashHasNone) {
+          selectSlashCandidateByIndex(0);
+        } else {
+          selectSlashCandidateByIndex(target);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        textInput.setInput("");
+        setSlashActive(false);
+        setSlashQuery("");
+        setSlashIndex(0);
+      }
+    };
+    root.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      root.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [
+    promptRootRef,
+    selectSlashCandidateByIndex,
+    slashActive,
+    slashHasNone,
+    slashIndex,
+    slashTotalRows,
+    textInput,
+  ]);
+
   useEffect(() => {
     const streaming = status === "streaming";
     const wasStreaming = wasStreamingRef.current;
@@ -499,6 +736,42 @@ export function InputBox({
                 </Button>
               </Suggestions>
             )}
+          </div>
+        </div>
+      )}
+      {slashActive && (
+        <div
+          aria-label={t.inputBox.slashSkillPickerTitle}
+          className="bg-popover text-popover-foreground absolute right-0 bottom-full left-0 z-50 mb-2 max-h-72 overflow-y-auto rounded-lg border p-1 shadow-md"
+          data-testid="slash-skill-picker"
+          role="listbox"
+        >
+          <div className="text-muted-foreground flex items-center px-2 py-1 text-[11px] font-medium">
+            <span>{t.inputBox.slashSkillPickerTitle}</span>
+            <span className="ml-2 font-normal">
+              {slashQuery ? `/ ${slashQuery}` : "/"}
+            </span>
+          </div>
+          {slashCandidates.length === 0 ? (
+            <div className="text-muted-foreground px-2 py-2 text-xs">
+              {t.inputBox.slashSkillPickerEmpty}
+            </div>
+          ) : (
+            slashCandidates.map((command, i) => (
+              <SlashPickerRow
+                key={command.id}
+                active={slashIndex === i}
+                description={command.description}
+                icon={slashCommandIcon(command.kind)}
+                label={command.label}
+                onHover={() => setSlashIndex(i)}
+                onSelect={() => selectSlashCandidateByIndex(i)}
+                testId={`slash-cmd-row-${command.id}`}
+              />
+            ))
+          )}
+          <div className="text-muted-foreground border-t px-2 pt-1 pb-0.5 text-[10px]">
+            {t.inputBox.slashSkillPickerHint}
           </div>
         </div>
       )}
@@ -832,18 +1105,25 @@ export function InputBox({
               </PromptInputActionMenu>
             )}
             {skills.length > 0 && (
-              <PromptInputActionMenu open={skillMenuOpen} onOpenChange={setSkillMenuOpen}>
+              <PromptInputActionMenu
+                open={skillMenuOpen}
+                onOpenChange={setSkillMenuOpen}
+              >
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">
                   <WrenchIcon className="size-3" />
                   <div className="text-xs font-normal">
                     {context.skill_name
-                      ? (skills.find((s) => s.name === context.skill_name) as
-                          | { name: string; display_name: string | null }
-                          | undefined)?.display_name
-                        ?? (skills.find((s) => s.name === context.skill_name) as
-                          | { name: string }
-                          | undefined)?.name
-                        ?? context.skill_name
+                      ? ((
+                          skills.find((s) => s.name === context.skill_name) as
+                            | { name: string; display_name: string | null }
+                            | undefined
+                        )?.display_name ??
+                        (
+                          skills.find((s) => s.name === context.skill_name) as
+                            | { name: string }
+                            | undefined
+                        )?.name ??
+                        context.skill_name)
                       : t.inputBox.skill}
                   </div>
                   {context.skill_name && (
@@ -989,6 +1269,27 @@ export function InputBox({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t.inputBox.slashCommandHelpTitle}</DialogTitle>
+            <DialogDescription>
+              {t.inputBox.slashCommandHelpIntro}
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="text-muted-foreground space-y-1 text-xs">
+            <li>{t.inputBox.slashCommandHelpSkillRow}</li>
+            <li>{t.inputBox.slashCommandHelpModeRow}</li>
+            <li>{t.inputBox.slashCommandHelpModelRow}</li>
+            <li>{t.inputBox.slashCommandHelpClearRow}</li>
+          </ul>
+          <DialogFooter>
+            <Button onClick={() => setHelpDialogOpen(false)}>
+              {t.common.close}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1075,4 +1376,80 @@ function AddAttachmentsButton({ className }: { className?: string }) {
       </PromptInputButton>
     </Tooltip>
   );
+}
+
+type SlashPickerRowProps = {
+  label: string;
+  description?: string;
+  icon: ReactNode;
+  active: boolean;
+  testId: string;
+  onSelect: () => void;
+  onHover: () => void;
+};
+
+function SlashPickerRow({
+  label,
+  description,
+  icon,
+  active,
+  testId,
+  onSelect,
+  onHover,
+}: SlashPickerRowProps) {
+  return (
+    <button
+      className={cn(
+        "flex w-full cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+        active
+          ? "bg-accent text-accent-foreground"
+          : "text-popover-foreground hover:bg-accent/60",
+      )}
+      data-active={active ? "true" : "false"}
+      data-testid={testId}
+      onClick={onSelect}
+      onMouseEnter={onHover}
+      type="button"
+    >
+      <div className="mt-0.5 shrink-0">{icon}</div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate font-medium">{label}</div>
+        {description && (
+          <div className="text-muted-foreground mt-0.5 line-clamp-2 text-[11px] leading-tight">
+            {description}
+          </div>
+        )}
+      </div>
+      {active && <CheckIcon className="mt-0.5 size-4 shrink-0" />}
+    </button>
+  );
+}
+
+/**
+ * Pick a Lucide icon for a slash command based on its `kind`. We keep this
+ * in the view layer (rather than letting each command carry its own
+ * icon component) so the icon set stays visually consistent — built-in
+ * and team-registered commands end up looking the same.
+ */
+function slashCommandIcon(kind: SlashCommand["kind"]): ReactNode {
+  const cls = "size-4 opacity-60";
+  switch (kind) {
+    case "skill":
+      return <WrenchIcon className={cls} />;
+    case "mode":
+      return <SparklesIcon className={cls} />;
+    case "model":
+      return <CpuIcon className={cls} />;
+    case "clear":
+      return <EraserIcon className={cls} />;
+    case "help":
+      return <HelpCircleIcon className={cls} />;
+    case "custom":
+      return <CommandIcon className={cls} />;
+    default: {
+      const _exhaustive: never = kind;
+      void _exhaustive;
+      return null;
+    }
+  }
 }
