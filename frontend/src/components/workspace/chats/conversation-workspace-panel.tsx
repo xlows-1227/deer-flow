@@ -14,7 +14,7 @@ import {
   RefreshCwIcon,
   PanelRightCloseIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useSandboxFiles, type SandboxFileInfo } from "@/core/sandbox";
 import { getFileName } from "@/core/utils/files";

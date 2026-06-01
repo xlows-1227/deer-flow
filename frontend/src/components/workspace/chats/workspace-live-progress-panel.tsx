@@ -10,17 +10,17 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
+import { useI18n } from "@/core/i18n/hooks";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
 } from "@/core/messages/utils";
 import type { Todo } from "@/core/todos";
-import { useI18n } from "@/core/i18n/hooks";
 import { explainToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
-import { StreamingIndicator } from "../streaming-indicator";
 import { useThread } from "../messages/context";
+import { StreamingIndicator } from "../streaming-indicator";
 
 const STATUS_LABELS: Record<NonNullable<Todo["status"]>, string> = {
   pending: "待执行",
@@ -109,7 +109,10 @@ export function WorkspaceLiveProgressPanel() {
   const { thread } = useThread();
   const scrollRef = useRef<HTMLDivElement>(null);
   const isStreaming = thread.isLoading;
-  const todos = thread.values.todos ?? [];
+  const todos = useMemo(
+    () => thread.values.todos ?? [],
+    [thread.values.todos],
+  );
   const lastAssistant = useMemo(
     () => getLastAssistantMessage(thread.messages),
     [thread.messages],

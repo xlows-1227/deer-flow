@@ -1,6 +1,6 @@
+import { PanelRightOpenIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { PanelRightOpenIcon } from "lucide-react";
 
 import { env } from "@/env";
 import { cn } from "@/lib/utils";

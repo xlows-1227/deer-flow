@@ -444,7 +444,7 @@ export function useThreadStream({
     async function tryJoinRunning() {
       try {
         const apiClient = getAPIClient(isMock);
-        const runs = await apiClient.runs.list(currentThreadId as string);
+        const runs = await apiClient.runs.list(currentThreadId!);
         if (cancelled) return;
         const activeRun = runs.find(
           (r) => r.status === "pending" || r.status === "running",
