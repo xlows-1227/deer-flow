@@ -66,7 +66,7 @@ export const zhCN: Translations = {
 
     createYourOwnSkill: "创建你自己的 Agent SKill",
     createYourOwnSkillDescription:
-      "创建你的 Agent Skill 来释放 DeerFlow 的潜力。通过自定义技能，DeerFlow\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
+      "创建你的 Agent Skill 来释放 Friday 的潜力。通过自定义技能，Friday\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
   },
 
   // Clipboard
@@ -81,7 +81,7 @@ export const zhCN: Translations = {
   inputBox: {
     placeholder: "今天我能为你做些什么？",
     createSkillPrompt:
-      "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
+      "我们一起用 skill-creator 技能来创建一个技能吧。写出你要做的事情：",
     addAttachments: "添加附件",
     mode: "模式",
     flashMode: "闪速",
@@ -157,7 +157,7 @@ export const zhCN: Translations = {
       {
         suggestion: "技能",
         prompt:
-          "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
+          "我们一起用 skill-creator 技能来创建一个技能吧。写出你要做的事情：",
         icon: SparklesIcon,
       },
     ],
