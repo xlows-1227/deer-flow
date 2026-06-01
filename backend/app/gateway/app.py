@@ -23,6 +23,7 @@ from app.gateway.routers import (
     models,
     runs,
     scheduler,
+    shares,
     skills,
     suggestions,
     thread_runs,
@@ -423,6 +424,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Share API is mounted at /api/threads/{thread_id}/share and /api/share/{token}
+    app.include_router(shares.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)

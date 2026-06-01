@@ -4,6 +4,8 @@ import {
   BookOpenIcon,
   CheckCircleIcon,
   Code2Icon,
+  EyeIcon,
+  FileLockIcon,
   SearchIcon,
   SparklesIcon,
 } from "lucide-react";
@@ -19,10 +21,18 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useEnableSkill, useSkills } from "@/core/skills/hooks";
+import { useCustomSkill, useEnableSkill, useSkills } from "@/core/skills/hooks";
+import type { Skill } from "@/core/skills/type";
 
 const FILTERS = [
   { value: "all", label: "全部" },
@@ -36,6 +46,7 @@ export default function WorkspaceSkillsPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] =
     useState<(typeof FILTERS)[number]["value"]>("all");
+  const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
 
   const filteredSkills = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -175,6 +186,15 @@ export default function WorkspaceSkillsPage() {
                     {skill.license ? (
                       <Badge variant="outline">{skill.license}</Badge>
                     ) : null}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-7 gap-1 text-xs text-gray-500 hover:text-gray-900"
+                      onClick={() => setSelectedSkill(skill)}
+                    >
+                      <EyeIcon className="h-3.5 w-3.5" />
+                      查看
+                    </Button>
                   </CardContent>
                 </Card>
               ))}
@@ -182,6 +202,108 @@ export default function WorkspaceSkillsPage() {
           )}
         </div>
       </main>
+
+      <SkillDetailDialog
+        skill={selectedSkill}
+        onClose={() => setSelectedSkill(null)}
+      />
     </div>
+  );
+}
+
+function SkillDetailDialog({
+  skill,
+  onClose,
+}: {
+  skill: Skill | null;
+  onClose: () => void;
+}) {
+  const isCustom = skill?.category === "custom";
+  const {
+    skill: customSkill,
+    isLoading,
+    error,
+  } = useCustomSkill(isCustom ? skill.name : null);
+
+  const displaySkill = isCustom && customSkill ? customSkill : skill;
+
+  return (
+    <Dialog open={!!skill} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="flex h-[90vh] max-h-[1200px] w-[96vw] max-w-[2400px] flex-col overflow-hidden p-0">
+        <DialogHeader className="shrink-0 border-b border-gray-100 px-6 py-4">
+          <DialogTitle className="text-lg">
+            {displaySkill?.name ?? skill?.name}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex min-h-0 flex-1">
+          {/* 左侧：Skill 说明 */}
+          <div className="w-72 shrink-0 border-r border-gray-100 bg-gray-50/50 p-6">
+            {!displaySkill ? (
+              <div className="text-sm text-gray-500">加载中...</div>
+            ) : (
+              <div className="flex flex-col gap-5">
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    描述
+                  </h4>
+                  <p className="mt-1.5 text-sm leading-relaxed text-gray-700">
+                    {displaySkill.description}
+                  </p>
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    分类
+                  </h4>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    <Badge variant="secondary">{displaySkill.category}</Badge>
+                    {displaySkill.license ? (
+                      <Badge variant="outline">{displaySkill.license}</Badge>
+                    ) : null}
+                  </div>
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    状态
+                  </h4>
+                  <div className="mt-1.5 flex items-center gap-2 text-sm text-gray-700">
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${displaySkill.enabled ? "bg-emerald-500" : "bg-gray-300"}`}
+                    />
+                    {displaySkill.enabled ? "已启用" : "已禁用"}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 右侧：详细文件 */}
+          <div className="min-h-0 flex-1 px-6 py-5">
+            {isCustom ? (
+              <ScrollArea className="h-full">
+                {isLoading ? (
+                  <div className="py-12 text-center text-sm text-gray-500">
+                    加载内容中...
+                  </div>
+                ) : error ? (
+                  <div className="py-12 text-center text-sm text-red-600">
+                    加载失败：
+                    {error instanceof Error ? error.message : "未知错误"}
+                  </div>
+                ) : customSkill ? (
+                  <pre className="whitespace-pre-wrap rounded-xl bg-gray-50 p-5 text-sm leading-relaxed text-gray-800">
+                    {customSkill.content}
+                  </pre>
+                ) : null}
+              </ScrollArea>
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-4 text-gray-400">
+                <FileLockIcon className="h-12 w-12" />
+                <p className="text-sm">公共 Skill 的详细文件内容不可查看</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

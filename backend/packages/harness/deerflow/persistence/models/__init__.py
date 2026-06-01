@@ -21,6 +21,7 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task.model import ScheduledTaskRow
 from deerflow.persistence.scheduled_task_run.model import ScheduledTaskRunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_share.model import ThreadShareRow
 from deerflow.persistence.user.model import UserRow
 
 __all__ = [
@@ -30,5 +31,6 @@ __all__ = [
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "ThreadMetaRow",
+    "ThreadShareRow",
     "UserRow",
 ]

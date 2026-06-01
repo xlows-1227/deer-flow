@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { enableSkill } from "./api";
+import { enableSkill, loadCustomSkill } from "./api";
 
 import { loadSkills } from ".";
 
@@ -10,6 +10,15 @@ export function useSkills() {
     queryFn: () => loadSkills(),
   });
   return { skills: data ?? [], isLoading, error };
+}
+
+export function useCustomSkill(skillName: string | null) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["skills", "custom", skillName],
+    queryFn: () => loadCustomSkill(skillName!),
+    enabled: !!skillName,
+  });
+  return { skill: data ?? null, isLoading, error };
 }
 
 export function useEnableSkill() {

@@ -5,3 +5,7 @@ export interface Skill {
   license: string;
   enabled: boolean;
 }
+
+export interface CustomSkill extends Skill {
+  content: string;
+}

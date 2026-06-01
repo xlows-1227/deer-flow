@@ -1,12 +1,23 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { Skill } from "./type";
+import type { CustomSkill, Skill } from "./type";
 
 export async function loadSkills() {
   const skills = await fetch(`${getBackendBaseURL()}/api/skills`);
   const json = await skills.json();
   return json.skills as Skill[];
+}
+
+export async function loadCustomSkill(skillName: string): Promise<CustomSkill> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to load custom skill: ${response.statusText}`);
+  }
+  const json = await response.json();
+  return json as CustomSkill;
 }
 
 export async function enableSkill(skillName: string, enabled: boolean) {
