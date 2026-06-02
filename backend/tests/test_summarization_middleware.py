@@ -126,13 +126,15 @@ def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
                 HumanMessage(content="user-1"),
                 AIMessage(content="assistant-1"),
                 HumanMessage(content="user-2"),
+                AIMessage(content="assistant-2"),
+                HumanMessage(content="user-3"),
             ]
         },
         _runtime(),
     )
 
     assert len(captured) == 1
-    assert [message.content for message in captured[0].messages_to_summarize] == ["user-1"]
+    assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
     assert captured[0].preserved_messages[0] is reminder
 
     emitted = result["messages"]
@@ -144,6 +146,28 @@ def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
     with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
         assert DynamicContextMiddleware().before_agent(followup_state, _runtime()) is None
+
+
+def test_dynamic_context_only_cutoff_skips_empty_compaction() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    reminder = _dynamic_context_reminder()
+
+    result = middleware.before_model(
+        {
+            "messages": [
+                reminder,
+                HumanMessage(content="user-1"),
+                AIMessage(content="assistant-1"),
+                HumanMessage(content="user-2"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert result is None
+    assert captured == []
+    middleware.model.invoke.assert_not_called()
 
 
 def test_before_summarization_hook_not_called_when_threshold_not_met() -> None:
@@ -191,6 +215,18 @@ async def test_abefore_model_calls_hooks_same_as_sync() -> None:
 
     assert len(captured) == 1
     assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+
+
+def test_runtime_compact_instructions_are_added_to_summary_prompt() -> None:
+    middleware = _middleware()
+    runtime = _runtime()
+    runtime.context["compact_instructions"] = "Focus on files with braces: {path}"
+
+    middleware.before_model({"messages": _messages()}, runtime)
+
+    prompt = middleware.model.invoke.call_args.args[0]
+    assert "<custom_instructions>" in prompt
+    assert "Focus on files with braces: {path}" in prompt
 
 
 def test_memory_flush_hook_skips_when_memory_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

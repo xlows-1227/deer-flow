@@ -14,13 +14,21 @@ from __future__ import annotations
 import abc
 
 
+DISPLAYABLE_MIDDLEWARE_EVENT_TYPES = frozenset({"middleware:compaction"})
+
+
+def is_displayable_message_event(event: dict) -> bool:
+    """Return True for events that should be rendered in chat history."""
+    return event.get("category") == "message" or event.get("event_type") in DISPLAYABLE_MIDDLEWARE_EVENT_TYPES
+
+
 class RunEventStore(abc.ABC):
     """Run event stream storage interface.
 
     All implementations must guarantee:
     1. put() events are retrievable in subsequent queries
     2. seq is strictly increasing within the same thread
-    3. list_messages() only returns category="message" events
+    3. list_messages() returns chat-displayable events
     4. list_events() returns all events for the specified run
     5. Returned dicts match the RunEvent field structure
     """
@@ -56,7 +64,7 @@ class RunEventStore(abc.ABC):
         before_seq: int | None = None,
         after_seq: int | None = None,
     ) -> list[dict]:
-        """Return displayable messages (category=message) for a thread, ordered by seq ascending.
+        """Return displayable chat-history events for a thread, ordered by seq ascending.
 
         Supports bidirectional cursor pagination:
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
@@ -88,7 +96,7 @@ class RunEventStore(abc.ABC):
         before_seq: int | None = None,
         after_seq: int | None = None,
     ) -> list[dict]:
-        """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
+        """Return displayable chat-history events for a specific run, ordered by seq ascending.
 
         Supports bidirectional cursor pagination:
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
@@ -98,7 +106,7 @@ class RunEventStore(abc.ABC):
 
     @abc.abstractmethod
     async def count_messages(self, thread_id: str) -> int:
-        """Count displayable messages (category=message) in a thread."""
+        """Count persisted chat message records (category=message) in a thread."""
 
     @abc.abstractmethod
     async def delete_by_thread(self, thread_id: str) -> int:

@@ -1,4 +1,4 @@
-﻿import {
+import {
   CompassIcon,
   GraduationCapIcon,
   ImageIcon,
@@ -510,5 +510,12 @@ export const zhCN: Translations = {
       emptyTitle: "致谢",
       emptyDescription: "相关的致谢信息会展示在这里。",
     },
+  },
+  compaction: {
+    title: "上下文已压缩",
+    expand: "显示详情",
+    collapse: "隐藏详情",
+    readFiles: "读取文件",
+    modifiedFiles: "修改文件",
   },
 };

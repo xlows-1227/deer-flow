@@ -18,13 +18,16 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
+interface CompactionGroup extends GenericMessageGroup<"compaction"> {}
+
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
-  | AssistantSubagentGroup;
+  | AssistantSubagentGroup
+  | CompactionGroup;
 
 const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "summary",
@@ -32,6 +35,10 @@ const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "todo_reminder",
   "todo_completion_reminder",
 ]);
+
+export function isCompactionMessage(message: Message): boolean {
+  return message.name === "compaction" && message.type === "human";
+}
 
 export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
@@ -56,7 +63,12 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   }
 
   for (const message of messages) {
-    if (isHiddenFromUIMessage(message)) {
+    if (isHiddenFromUIMessage(message) && !isCompactionMessage(message)) {
+      continue;
+    }
+
+    if (isCompactionMessage(message)) {
+      groups.push({ id: message.id, type: "compaction", messages: [message] });
       continue;
     }
 

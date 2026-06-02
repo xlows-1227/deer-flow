@@ -1,4 +1,18 @@
-"""Summarization middleware extensions for DeerFlow."""
+"""Summarization middleware extensions for DeerFlow.
+
+This module implements Pi-agent-style compaction on top of LangChain's
+SummarizationMiddleware:
+
+- Structured summaries (Goal / Progress / Decisions / Next Steps / Files)
+- Non-destructive history: raw messages remain in RunEventStore; only the
+  LLM-facing ``messages`` channel is compacted.
+- Compaction events are recorded via RunJournal so the frontend can render
+  summary cards.
+- Skill Rescue: recently-loaded skill file reads are preserved across
+  summarization to avoid re-fetching.
+- Dynamic Context Reminder protection: system-reminder injections are never
+  summarized away.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +23,7 @@ from typing import Any, Protocol, override, runtime_checkable
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage, get_buffer_string
 from langgraph.config import get_config
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
@@ -19,6 +33,73 @@ from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Structured summary prompt (Pi-agent style)
+# ---------------------------------------------------------------------------
+
+STRUCTURED_SUMMARY_PROMPT = """<role>
+Context Extraction Assistant
+</role>
+
+<primary_objective>
+Your sole objective is to extract the highest-quality, most relevant context from the conversation history below and produce a structured summary.
+</primary_objective>
+
+<objective_information>
+You're nearing the total number of input tokens you can accept, so you must extract only the most important information to continue working toward the overall goal.
+This structured summary will replace the conversation history presented below.
+</objective_information>
+
+<instructions>
+Structure your summary using the following sections. Each section acts as a checklist — you must populate it with relevant information or explicitly state "None" if there is nothing to report:
+
+## Goal
+What is the user's primary goal or request? What overall task are you trying to accomplish? Be concise but complete.
+
+## Constraints & Preferences
+- [Requirements, constraints, or preferences mentioned by the user]
+
+## Progress
+### Done
+- [x] [Completed tasks with enough detail to avoid re-doing them]
+
+### In Progress
+- [ ] [Current work that is partially done]
+
+### Blocked
+- [Issues or blockers, if any]
+
+## Key Decisions
+- **[Decision]**: [Rationale and context]
+
+## Next Steps
+1. [What should happen next, in priority order]
+
+## Critical Context
+- [Data, IDs, paths, or context needed to continue]
+
+<read-files>
+[List files that were READ during the conversation, one per line]
+</read-files>
+
+<modified-files>
+[List files that were CREATED or MODIFIED during the conversation, one per line]
+</modified-files>
+
+Respond ONLY with the structured summary above. Do not include any additional text before or after it.
+</instructions>
+
+<messages>
+Messages to summarize:
+{messages}
+</messages>"""  # noqa: E501
+
+DEFAULT_SUMMARY_PROMPT = STRUCTURED_SUMMARY_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Event / hook types
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class SummarizationEvent:
@@ -36,6 +117,11 @@ class BeforeSummarizationHook(Protocol):
     """Hook invoked before summarization removes messages from state."""
 
     def __call__(self, event: SummarizationEvent) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:
@@ -84,6 +170,81 @@ def _clone_ai_message(
     return clone_ai_message_with_tool_calls(message, tool_calls, content=content)
 
 
+def _extract_file_ops(messages: list[AnyMessage]) -> tuple[list[str], list[str]]:
+    """Scan messages for read/write file operations and return (read_files, modified_files)."""
+    read_files: set[str] = set()
+    modified_files: set[str] = set()
+
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                name = tc.get("name") or ""
+                path = _tool_call_path(tc)
+                if not path:
+                    continue
+                if name in {"read_file", "read", "view", "cat"}:
+                    read_files.add(path)
+                elif name in {"write", "write_file", "edit", "edit_file"}:
+                    modified_files.add(path)
+
+    return sorted(read_files), sorted(modified_files)
+
+
+def _record_compaction_event(
+    runtime: Runtime,
+    *,
+    compacted_ids: list[str],
+    preserved_count: int,
+    summary: str,
+    total_tokens_before: int,
+    read_files: list[str],
+    modified_files: list[str],
+) -> None:
+    """Write a compaction event to RunJournal so the frontend can render it."""
+    if not runtime.context:
+        return
+    journal = runtime.context.get("__run_journal")
+    if journal is None:
+        return
+
+    try:
+        journal.record_middleware(
+            tag="compaction",
+            name="DeerFlowSummarizationMiddleware",
+            hook="before_model",
+            action="summarize",
+            changes={
+                "compacted_message_ids": compacted_ids,
+                "preserved_message_count": preserved_count,
+                "summary": summary,
+                "total_tokens_before": total_tokens_before,
+                "read_files": read_files,
+                "modified_files": modified_files,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to record compaction event to journal", exc_info=True)
+
+
+def _summary_prompt_for_runtime(base_prompt: str, runtime: Runtime) -> str:
+    """Return the active summary prompt, including optional manual-focus instructions."""
+    instructions = runtime.context.get("compact_instructions") if runtime.context else None
+    if not isinstance(instructions, str) or not instructions.strip():
+        return base_prompt
+
+    escaped_instructions = instructions.strip().replace("{", "{{").replace("}", "}}")
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        "<custom_instructions>\n"
+        f"{escaped_instructions}\n"
+        "</custom_instructions>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Skill bundle tracking
+# ---------------------------------------------------------------------------
+
 @dataclass
 class _SkillBundle:
     """Skill-related tool calls and tool results associated with one AIMessage."""
@@ -95,8 +256,12 @@ class _SkillBundle:
     skill_key: str
 
 
+# ---------------------------------------------------------------------------
+# Main middleware
+# ---------------------------------------------------------------------------
+
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
-    """Summarization middleware with pre-compression hook dispatch and skill rescue."""
+    """Summarization middleware with structured summaries and compaction events."""
 
     def __init__(
         self,
@@ -117,29 +282,72 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self._preserve_recent_skill_tokens = max(0, preserve_recent_skill_tokens)
         self._preserve_recent_skill_tokens_per_skill = max(0, preserve_recent_skill_tokens_per_skill)
 
+    # -- Lifecycle hooks --
+
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)
 
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
 
-    def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
+    # -- Core summarization flow --
+
+    def _prepare_compaction(
+        self,
+        state: AgentState,
+        runtime: Runtime,
+    ) -> tuple[list[AnyMessage], list[AnyMessage], int] | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
         total_tokens = self.token_counter(messages)
-        if not self._should_summarize(messages, total_tokens):
+        force_compact = runtime.context.get("force_compact", False) if runtime.context else False
+
+        if not force_compact and not self._should_summarize(messages, total_tokens):
             return None
 
         cutoff_index = self._determine_cutoff_index(messages)
         if cutoff_index <= 0:
+            if force_compact:
+                logger.info(
+                    "Force-compact requested but no safe turn boundary found "
+                    "(recent turn too long or too few messages). Skipping compaction."
+                )
             return None
 
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
         messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
+
+        if not messages_to_summarize:
+            logger.info(
+                "Compaction skipped because the safe cutoff only selected protected messages."
+            )
+            return None
+
+        return messages_to_summarize, preserved_messages, total_tokens
+
+    def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
+        prepared = self._prepare_compaction(state, runtime)
+        if prepared is None:
+            return None
+
+        messages_to_summarize, preserved_messages, total_tokens = prepared
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
-        summary = self._create_summary(messages_to_summarize)
+        summary = self._create_summary_for_runtime(messages_to_summarize, runtime)
         new_messages = self._build_new_messages(summary)
+
+        # --- Pi-style: record compaction event for the frontend ---
+        compacted_ids = [m.id for m in messages_to_summarize if getattr(m, "id", None)]
+        read_files, modified_files = _extract_file_ops(messages_to_summarize)
+        _record_compaction_event(
+            runtime,
+            compacted_ids=compacted_ids,
+            preserved_count=len(preserved_messages),
+            summary=summary,
+            total_tokens_before=total_tokens,
+            read_files=read_files,
+            modified_files=modified_files,
+        )
 
         return {
             "messages": [
@@ -150,22 +358,27 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
-        messages = state["messages"]
-        self._ensure_message_ids(messages)
-
-        total_tokens = self.token_counter(messages)
-        if not self._should_summarize(messages, total_tokens):
+        prepared = self._prepare_compaction(state, runtime)
+        if prepared is None:
             return None
 
-        cutoff_index = self._determine_cutoff_index(messages)
-        if cutoff_index <= 0:
-            return None
-
-        messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
+        messages_to_summarize, preserved_messages, total_tokens = prepared
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
-        summary = await self._acreate_summary(messages_to_summarize)
+        summary = await self._acreate_summary_for_runtime(messages_to_summarize, runtime)
         new_messages = self._build_new_messages(summary)
+
+        # --- Pi-style: record compaction event for the frontend ---
+        compacted_ids = [m.id for m in messages_to_summarize if getattr(m, "id", None)]
+        read_files, modified_files = _extract_file_ops(messages_to_summarize)
+        _record_compaction_event(
+            runtime,
+            compacted_ids=compacted_ids,
+            preserved_count=len(preserved_messages),
+            summary=summary,
+            total_tokens_before=total_tokens,
+            read_files=read_files,
+            modified_files=modified_files,
+        )
 
         return {
             "messages": [
@@ -181,6 +394,101 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         And this message will be ignored to display in the frontend, but still can be used as context for the model.
         """
         return [HumanMessage(content=f"Here is a summary of the conversation to date:\n\n{summary}", name="summary")]
+
+    def _create_summary_for_runtime(self, messages_to_summarize: list[AnyMessage], runtime: Runtime) -> str:
+        """Generate a summary with any runtime-provided manual compact instructions."""
+        return self._create_summary_with_prompt(
+            messages_to_summarize,
+            _summary_prompt_for_runtime(self.summary_prompt, runtime),
+        )
+
+    async def _acreate_summary_for_runtime(self, messages_to_summarize: list[AnyMessage], runtime: Runtime) -> str:
+        """Async variant of :meth:`_create_summary_for_runtime`."""
+        return await self._acreate_summary_with_prompt(
+            messages_to_summarize,
+            _summary_prompt_for_runtime(self.summary_prompt, runtime),
+        )
+
+    def _create_summary_with_prompt(self, messages_to_summarize: list[AnyMessage], summary_prompt: str) -> str:
+        if not messages_to_summarize:
+            return "No previous conversation history."
+
+        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        if not trimmed_messages:
+            return "Previous conversation was too long to summarize."
+
+        formatted_messages = get_buffer_string(trimmed_messages)
+        try:
+            response = self.model.invoke(
+                summary_prompt.format(messages=formatted_messages).rstrip(),
+                config={"metadata": {"lc_source": "summarization"}},
+            )
+            return response.text.strip()
+        except Exception as exc:
+            return f"Error generating summary: {exc!s}"
+
+    async def _acreate_summary_with_prompt(self, messages_to_summarize: list[AnyMessage], summary_prompt: str) -> str:
+        if not messages_to_summarize:
+            return "No previous conversation history."
+
+        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        if not trimmed_messages:
+            return "Previous conversation was too long to summarize."
+
+        formatted_messages = get_buffer_string(trimmed_messages)
+        try:
+            response = await self.model.ainvoke(
+                summary_prompt.format(messages=formatted_messages).rstrip(),
+                config={"metadata": {"lc_source": "summarization"}},
+            )
+            return response.text.strip()
+        except Exception as exc:
+            return f"Error generating summary: {exc!s}"
+
+    # -- Split-turn protection (Pi-agent style) --
+
+    def _find_safe_cutoff_point(
+        self,
+        messages: list[AnyMessage],
+        cutoff_index: int,
+    ) -> int:
+        """Find safe cutoff that never splits a turn.
+
+        In addition to the parent class AI/Tool pair protection, this ensures
+        the cutoff always lands on a turn boundary (HumanMessage).
+
+        A *turn* starts with a HumanMessage and includes all subsequent messages
+        until the next HumanMessage.  If the raw cutoff falls inside a turn,
+        it is pulled backward to the turn's start so the entire turn is
+        preserved (not summarized).
+
+        This matches Pi-agent behaviour where compaction only happens at
+        turn boundaries, preventing orphaned tool-call / tool-result pairs
+        and mid-turn context loss.
+        """
+        # 1. Apply parent class AI/Tool pair protection
+        safe_cutoff = SummarizationMiddleware._find_safe_cutoff_point(messages, cutoff_index)
+
+        if safe_cutoff <= 0 or safe_cutoff >= len(messages):
+            return safe_cutoff
+
+        # 2. Turn boundary protection: cutoff must land on a HumanMessage.
+        if isinstance(messages[safe_cutoff], HumanMessage):
+            return safe_cutoff
+
+        # 3. Cutoff falls inside a turn. Walk backward to the turn boundary.
+        for i in range(safe_cutoff - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                logger.debug(
+                    "Split-turn protection: adjusted cutoff %d → %d (turn boundary)",
+                    safe_cutoff,
+                    i,
+                )
+                return i
+
+        return 0
+
+    # -- Dynamic context protection --
 
     def _preserve_dynamic_context_reminders(
         self,
@@ -199,6 +507,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
         remaining = [msg for msg in messages_to_summarize if not is_dynamic_context_reminder(msg)]
         return remaining, reminders + preserved_messages
+
+    # -- Skill rescue --
 
     def _partition_with_skill_rescue(
         self,

@@ -19,7 +19,7 @@ function isExternalUrl(href: string | undefined): boolean {
 export type MarkdownContentProps = {
   content: string;
   isLoading: boolean;
-  rehypePlugins: MessageResponseProps["rehypePlugins"];
+  rehypePlugins?: MessageResponseProps["rehypePlugins"];
   className?: string;
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];

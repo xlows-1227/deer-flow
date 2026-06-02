@@ -500,6 +500,29 @@ def test_create_summarization_middleware_threads_resolved_app_config_to_model(mo
     assert captured["app_config"] is fallback_app_config
 
 
+def test_create_summarization_middleware_adds_reserve_token_trigger(monkeypatch):
+    app_config = _make_app_config([_make_model("summary-model", supports_thinking=False)])
+    app_config.summarization = SummarizationConfig(
+        enabled=True,
+        model_name="summary-model",
+        reserve_tokens=10_000,
+    )
+    app_config.memory = MemoryConfig(enabled=False)
+
+    from unittest.mock import MagicMock
+
+    fake_model = MagicMock()
+    fake_model.profile = {"max_input_tokens": 128_000}
+    fake_model.with_config.return_value = fake_model
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: fake_model)
+    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+
+    middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
+
+    assert middleware["trigger"] == ("tokens", 118_000)
+
+
 def test_memory_middleware_uses_explicit_memory_config_without_global_read(monkeypatch):
     from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
     from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware

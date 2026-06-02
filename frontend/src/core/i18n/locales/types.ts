@@ -303,6 +303,15 @@ export interface Translations {
     toggleSidebar: string;
   };
 
+  // Compaction
+  compaction: {
+    title: string;
+    expand: string;
+    collapse: string;
+    readFiles: string;
+    modifiedFiles: string;
+  };
+
   // Settings
   settings: {
     title: string;

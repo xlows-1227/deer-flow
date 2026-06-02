@@ -43,6 +43,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
 
+import { CompactionSummary } from "./compaction-summary";
 import { MarkdownContent } from "./markdown-content";
 import { MessageChoiceOptions } from "./message-choice-options";
 import { MessageGroup } from "./message-group";
@@ -547,6 +548,25 @@ export function MessageList({
               </div>
             );
           }
+          if (group.type === "compaction") {
+            const msg = group.messages[0];
+            if (!msg) return null;
+            const ak = msg.additional_kwargs as Record<string, unknown> | undefined;
+            return (
+              <CompactionSummary
+                key={group.id}
+                data={{
+                  summary: extractTextFromMessage(msg),
+                  compacted_message_ids: (ak?.compacted_message_ids as string[]) ?? [],
+                  preserved_message_count: (ak?.preserved_message_count as number) ?? 0,
+                  total_tokens_before: (ak?.total_tokens_before as number) ?? 0,
+                  read_files: (ak?.read_files as string[]) ?? [],
+                  modified_files: (ak?.modified_files as string[]) ?? [],
+                }}
+              />
+            );
+          }
+
           return (
             <div key={"group-" + group.id} className="w-full">
               <MessageGroup

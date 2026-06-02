@@ -96,6 +96,43 @@ function withMessageTimestamp(message: Message, timestamp?: string | null): Mess
   } as Message;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringArrayFrom(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function numberFrom(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function compactionMessageFromRunMessage(message: RunMessage): Message {
+  const content: unknown = message.content;
+  const rawChanges = isRecord(content) ? content.changes : undefined;
+  const changes = isRecord(rawChanges) ? rawChanges : {};
+  const summary = typeof changes.summary === "string" ? changes.summary : "";
+
+  return {
+    type: "human",
+    id: `compaction-${message.seq}`,
+    content: summary,
+    name: "compaction",
+    additional_kwargs: {
+      __compaction: true,
+      compacted_message_ids: stringArrayFrom(changes.compacted_message_ids),
+      preserved_message_count: numberFrom(changes.preserved_message_count),
+      total_tokens_before: numberFrom(changes.total_tokens_before),
+      read_files: stringArrayFrom(changes.read_files),
+      modified_files: stringArrayFrom(changes.modified_files),
+      timestamp: message.created_at,
+    },
+  };
+}
+
 function mergeMissingTimestamps(
   sourceMessages: Message[],
   targetMessages: Message[],
@@ -835,8 +872,17 @@ export function useThreadHistory(threadId: string) {
           return res.json();
         });
         const _messages = result.data
-          .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
-          .map((m) => withMessageTimestamp(m.content, m.created_at));
+          .filter((m) => {
+            // Allow compaction events through; filter other middleware events
+            if (m.event_type === "middleware:compaction") return true;
+            return !m.metadata?.caller?.startsWith("middleware:");
+          })
+          .map((m) => {
+            if (m.event_type === "middleware:compaction") {
+              return compactionMessageFromRunMessage(m);
+            }
+            return withMessageTimestamp(m.content as Message, m.created_at);
+          });
         if (threadIdRef.current !== requestThreadId) {
           return;
         }

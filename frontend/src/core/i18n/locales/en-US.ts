@@ -533,4 +533,11 @@ export const enUS: Translations = {
       emptyDescription: "Credits and acknowledgements will show here.",
     },
   },
+  compaction: {
+    title: "Context Compacted",
+    expand: "Show details",
+    collapse: "Hide details",
+    readFiles: "Read files",
+    modifiedFiles: "Modified files",
+  },
 };

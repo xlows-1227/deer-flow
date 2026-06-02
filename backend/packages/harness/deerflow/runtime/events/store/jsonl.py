@@ -19,7 +19,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventStore, is_displayable_message_event
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
         all_events = self._read_thread_events(thread_id)
-        messages = [e for e in all_events if e.get("category") == "message"]
+        messages = [e for e in all_events if is_displayable_message_event(e)]
 
         if before_seq is not None:
             messages = [e for e in messages if e["seq"] < before_seq]
@@ -154,7 +154,7 @@ class JsonlRunEventStore(RunEventStore):
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
         events = self._read_run_events(thread_id, run_id)
-        filtered = [e for e in events if e.get("category") == "message"]
+        filtered = [e for e in events if is_displayable_message_event(e)]
         if before_seq is not None:
             filtered = [e for e in filtered if e.get("seq", 0) < before_seq]
         if after_seq is not None:

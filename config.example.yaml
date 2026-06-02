@@ -822,12 +822,18 @@ summarization:
     # type: fraction
     # value: 0.3
 
+  # Tokens to reserve for the LLM response.
+  # When using proactive triggers, compaction runs when
+  # contextTokens > contextWindow - reserveTokens.
+  reserve_tokens: 16384
+
   # Maximum tokens to keep when preparing messages for summarization
   # Set to null to skip trimming (not recommended for very long conversations)
   trim_tokens_to_summarize: 15564
 
-  # Custom summary prompt template (null = use default LangChain prompt)
-  # The prompt should guide the model to extract important context
+  # Custom summary prompt template (null = use default structured prompt)
+  # The default prompt produces Pi-agent-style structured summaries
+  # (Goal / Progress / Decisions / Next Steps / Files).
   summary_prompt: null
 
   # Recently-loaded skill files are excluded from summarization so the agent

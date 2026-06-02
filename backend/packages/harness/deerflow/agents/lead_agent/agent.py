@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from collections import OrderedDict
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -39,7 +39,7 @@ from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionM
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
-from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
+from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware, STRUCTURED_SUMMARY_PROMPT
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
@@ -222,6 +222,28 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
         model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     else:
         model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
+
+    if config.reserve_tokens > 0:
+        profile = getattr(model, "profile", None)
+        max_input_tokens = profile.get("max_input_tokens") if isinstance(profile, Mapping) else None
+        if isinstance(max_input_tokens, int):
+            proactive_threshold = max_input_tokens - config.reserve_tokens
+            if proactive_threshold > 0:
+                proactive_trigger = ("tokens", proactive_threshold)
+                if trigger is None:
+                    trigger = proactive_trigger
+                elif isinstance(trigger, list):
+                    trigger = [*trigger, proactive_trigger]
+                else:
+                    trigger = [trigger, proactive_trigger]
+            else:
+                logger.warning(
+                    "summarization.reserve_tokens=%d is not smaller than model max_input_tokens=%d; "
+                    "skipping reserve-token trigger.",
+                    config.reserve_tokens,
+                    max_input_tokens,
+                )
+
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
@@ -234,8 +256,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     if config.trim_tokens_to_summarize is not None:
         kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
 
-    if config.summary_prompt is not None:
-        kwargs["summary_prompt"] = config.summary_prompt
+    # Use structured summary prompt by default (Pi-agent style).
+    # Custom prompt from config overrides it.
+    kwargs["summary_prompt"] = config.summary_prompt or STRUCTURED_SUMMARY_PROMPT
 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled:

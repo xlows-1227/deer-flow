@@ -73,6 +73,23 @@ class TestListMessages:
         assert messages[0]["category"] == "message"
 
     @pytest.mark.anyio
+    async def test_returns_compaction_events_but_does_not_count_them_as_messages(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="middleware:compaction",
+            category="middleware",
+            content={"changes": {"summary": "compressed"}},
+        )
+        await store.put(thread_id="t1", run_id="r1", event_type="middleware:title", category="middleware")
+
+        messages = await store.list_messages("t1")
+
+        assert [m["event_type"] for m in messages] == ["human_message", "middleware:compaction"]
+        assert await store.count_messages("t1") == 1
+
+    @pytest.mark.anyio
     async def test_ascending_seq_order(self, store):
         await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="first")
         await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content="second")
@@ -166,6 +183,16 @@ class TestListMessagesByRun:
         assert len(messages) == 1
         assert messages[0]["run_id"] == "r1"
         assert messages[0]["category"] == "message"
+
+    @pytest.mark.anyio
+    async def test_compaction_events_are_displayable_by_run(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await store.put(thread_id="t1", run_id="r1", event_type="middleware:compaction", category="middleware")
+        await store.put(thread_id="t1", run_id="r2", event_type="middleware:compaction", category="middleware")
+
+        messages = await store.list_messages_by_run("t1", "r1")
+
+        assert [m["event_type"] for m in messages] == ["human_message", "middleware:compaction"]
 
 
 # -- count_messages --
@@ -320,6 +347,26 @@ class TestDbRunEventStore:
 
         count = await s.count_messages("t1")
         assert count == 2
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_compaction_events_are_displayable_by_run(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await s.put(thread_id="t1", run_id="r1", event_type="middleware:compaction", category="middleware")
+        await s.put(thread_id="t1", run_id="r1", event_type="middleware:title", category="middleware")
+
+        messages = await s.list_messages_by_run("t1", "r1")
+
+        assert [m["event_type"] for m in messages] == ["human_message", "middleware:compaction"]
+        assert await s.count_messages("t1") == 1
 
         await close_engine()
 
@@ -590,6 +637,20 @@ class TestJsonlRunEventStore:
         messages = await s.list_messages("t1")
         assert len(messages) == 2
         assert [m["seq"] for m in messages] == [1, 2]
+
+    @pytest.mark.anyio
+    async def test_compaction_events_are_displayable_by_run(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await s.put(thread_id="t1", run_id="r1", event_type="middleware:compaction", category="middleware")
+        await s.put(thread_id="t1", run_id="r1", event_type="middleware:title", category="middleware")
+
+        messages = await s.list_messages_by_run("t1", "r1")
+
+        assert [m["event_type"] for m in messages] == ["human_message", "middleware:compaction"]
+        assert await s.count_messages("t1") == 1
 
     @pytest.mark.anyio
     async def test_delete_by_run(self, tmp_path):

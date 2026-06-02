@@ -23,10 +23,11 @@ from langgraph.checkpoint.base import empty_checkpoint
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
+from deerflow.runtime.compaction_service import compact_thread_checkpoint
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -163,6 +164,12 @@ class ThreadStateUpdateRequest(BaseModel):
     checkpoint_id: str | None = Field(default=None, description="Checkpoint to branch from")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
     as_node: str | None = Field(default=None, description="Node identity for the update")
+
+
+class ThreadCompactRequest(BaseModel):
+    """Request body for manually compacting conversation history."""
+
+    custom_instructions: str | None = Field(default=None, description="Optional instructions to focus the summary")
 
 
 class HistoryEntry(BaseModel):
@@ -732,3 +739,47 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
         raise HTTPException(status_code=500, detail="Failed to get thread history")
 
     return entries
+
+
+@router.post("/{thread_id}/compact", response_model=ThreadStateResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Request) -> ThreadStateResponse:
+    """Manually compact conversation history.
+
+    Triggers summarization immediately, regardless of token thresholds.
+    The full history remains in RunEventStore; only the LLM-facing
+    ``messages`` channel is compacted.
+    """
+    checkpointer = get_checkpointer(request)
+    event_store = get_run_event_store(request)
+    run_manager = get_run_manager(request)
+
+    latest_run_id: str | None = None
+    try:
+        runs = await run_manager.list_by_thread(thread_id, user_id=get_effective_user_id(), limit=1)
+        if runs:
+            latest_run_id = runs[0].run_id
+    except Exception:
+        logger.debug("Failed to resolve latest run for manual compaction on %s", sanitize_log_param(thread_id), exc_info=True)
+
+    try:
+        compacted_values = await compact_thread_checkpoint(
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            custom_instructions=body.custom_instructions,
+            event_store=event_store,
+            run_id=latest_run_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to compact thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to compact thread") from exc
+
+    return ThreadStateResponse(
+        values=compacted_values,
+        next=[],
+        metadata={"source": "compaction"},
+    )

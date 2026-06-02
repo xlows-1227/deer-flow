@@ -43,13 +43,19 @@ class SummarizationConfig(BaseModel):
         "{'type': 'tokens', 'value': 3000} keeps 3000 tokens, "
         "{'type': 'fraction', 'value': 0.3} keeps 30% of model's max input tokens",
     )
+    reserve_tokens: int = Field(
+        default=16384,
+        ge=0,
+        description="Tokens to reserve for the LLM response. When used with proactive triggers, "
+        "compaction runs when contextTokens > contextWindow - reserveTokens.",
+    )
     trim_tokens_to_summarize: int | None = Field(
         default=4000,
         description="Maximum tokens to keep when preparing messages for summarization. Pass null to skip trimming.",
     )
     summary_prompt: str | None = Field(
         default=None,
-        description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",
+        description="Custom prompt template for generating summaries. If not provided, uses the default structured prompt.",
     )
     preserve_recent_skill_count: int = Field(
         default=5,

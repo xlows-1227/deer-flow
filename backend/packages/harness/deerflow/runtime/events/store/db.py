@@ -11,11 +11,11 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import DISPLAYABLE_MIDDLEWARE_EVENT_TYPES, RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -58,6 +58,13 @@ class DbRunEventStore(RunEventStore):
                 content = encoded[: self._max_trace_content].decode("utf-8", errors="ignore")
                 metadata = {**(metadata or {}), "content_truncated": True, "original_byte_length": len(encoded)}
         return content, metadata or {}
+
+    @staticmethod
+    def _displayable_condition():
+        return or_(
+            RunEventRow.category == "message",
+            RunEventRow.event_type.in_(DISPLAYABLE_MIDDLEWARE_EVENT_TYPES),
+        )
 
     @staticmethod
     def _content_to_db(content: Any, metadata: dict | None) -> tuple[str, dict]:
@@ -184,7 +191,11 @@ class DbRunEventStore(RunEventStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages")
-        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
+
+        stmt = select(RunEventRow).where(
+            RunEventRow.thread_id == thread_id,
+            self._displayable_condition(),
+        )
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         if before_seq is not None:
@@ -240,7 +251,7 @@ class DbRunEventStore(RunEventStore):
         stmt = select(RunEventRow).where(
             RunEventRow.thread_id == thread_id,
             RunEventRow.run_id == run_id,
-            RunEventRow.category == "message",
+            self._displayable_condition(),
         )
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)

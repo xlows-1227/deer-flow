@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventStore, is_displayable_message_event
 
 
 class MemoryRunEventStore(RunEventStore):
@@ -77,7 +77,7 @@ class MemoryRunEventStore(RunEventStore):
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
         all_events = self._events.get(thread_id, [])
-        messages = [e for e in all_events if e["category"] == "message"]
+        messages = [e for e in all_events if is_displayable_message_event(e)]
 
         if before_seq is not None:
             messages = [e for e in messages if e["seq"] < before_seq]
@@ -99,7 +99,7 @@ class MemoryRunEventStore(RunEventStore):
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
         all_events = self._events.get(thread_id, [])
-        filtered = [e for e in all_events if e["run_id"] == run_id and e["category"] == "message"]
+        filtered = [e for e in all_events if e["run_id"] == run_id and is_displayable_message_event(e)]
         if before_seq is not None:
             filtered = [e for e in filtered if e["seq"] < before_seq]
         if after_seq is not None:
@@ -111,7 +111,7 @@ class MemoryRunEventStore(RunEventStore):
 
     async def count_messages(self, thread_id):
         all_events = self._events.get(thread_id, [])
-        return sum(1 for e in all_events if e["category"] == "message")
+        return sum(1 for e in all_events if e.get("category") == "message")
 
     async def delete_by_thread(self, thread_id):
         events = self._events.pop(thread_id, [])

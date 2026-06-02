@@ -26,10 +26,13 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
-  content: Message;
+  content: Message | Record<string, unknown>;
   metadata: {
-    caller: string;
+    caller?: string;
   };
+  event_type: string;
+  category: string;
+  seq: number;
   created_at: string;
 }
 
