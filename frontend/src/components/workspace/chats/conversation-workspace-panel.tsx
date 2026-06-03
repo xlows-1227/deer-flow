@@ -10,13 +10,19 @@ import {
   FileSpreadsheetIcon,
   FileTextIcon,
   FileXIcon,
+  FolderIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
   PanelRightCloseIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { useSandboxFiles, type SandboxFileInfo } from "@/core/sandbox";
+import {
+  buildSandboxFileTree,
+  useSandboxFiles,
+  type SandboxFileInfo,
+  type SandboxFileTreeNode,
+} from "@/core/sandbox";
 import { getFileName } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
 
@@ -109,7 +115,94 @@ function mergeSandboxAndArtifacts(
   });
 }
 
-function WorkspaceFileList({
+function WorkspaceFileTreeRow({
+  node,
+  depth,
+  selectedPath,
+  collapsedPaths,
+  onToggleDirectory,
+  onSelect,
+}: {
+  node: SandboxFileTreeNode;
+  depth: number;
+  selectedPath: string | null;
+  collapsedPaths: Set<string>;
+  onToggleDirectory: (path: string) => void;
+  onSelect: (path: string) => void;
+}) {
+  if (node.type === "directory") {
+    const collapsed = collapsedPaths.has(node.path);
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => onToggleDirectory(node.path)}
+          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-50"
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
+        >
+          {collapsed ? (
+            <ChevronRightIcon className="size-3.5 shrink-0 text-slate-400" />
+          ) : (
+            <ChevronDownIcon className="size-3.5 shrink-0 text-slate-400" />
+          )}
+          <FolderIcon className="size-4 shrink-0 text-amber-500" />
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700">
+            {node.name}
+          </span>
+          <span className="shrink-0 text-xs text-slate-400">
+            {node.children.length}
+          </span>
+        </button>
+        {!collapsed &&
+          node.children.map((child) => (
+            <WorkspaceFileTreeRow
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              selectedPath={selectedPath}
+              collapsedPaths={collapsedPaths}
+              onToggleDirectory={onToggleDirectory}
+              onSelect={onSelect}
+            />
+          ))}
+      </div>
+    );
+  }
+
+  const file = node.file;
+  if (!file) return null;
+
+  const Icon = fileIcon(file);
+  const selected = selectedPath === file.path;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(file.path)}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors",
+        selected
+          ? "border-indigo-200 bg-indigo-50"
+          : "border-transparent hover:border-slate-200 hover:bg-slate-50",
+      )}
+      style={{ paddingLeft: `${22 + depth * 14}px` }}
+    >
+      <Icon className="size-4 shrink-0 text-slate-500" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-slate-800">
+          {file.name}
+        </span>
+        <span className="block truncate text-xs text-slate-500">
+          {sourceLabel(file.source)} · {shortPath(file.path)}
+        </span>
+      </span>
+      <span className="shrink-0 text-xs text-slate-400">
+        {formatFileSize(file.size)}
+      </span>
+    </button>
+  );
+}
+
+function WorkspaceFileTree({
   files,
   selectedPath,
   isLoading,
@@ -120,6 +213,22 @@ function WorkspaceFileList({
   isLoading: boolean;
   onSelect: (path: string) => void;
 }) {
+  const tree = buildSandboxFileTree(files);
+  const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const handleToggleDirectory = useCallback((path: string) => {
+    setCollapsedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }, []);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-6">
@@ -134,9 +243,7 @@ function WorkspaceFileList({
         <div className="text-center text-slate-400">
           <FileTextIcon className="mx-auto mb-2 size-12" />
           <p className="text-sm">暂无文件</p>
-          <p className="mt-1 text-xs">
-            上传文件或让 Agent 在工作区中创建文件
-          </p>
+          <p className="mt-1 text-xs">上传文件或让 Agent 在工作区中创建文件</p>
         </div>
       </div>
     );
@@ -144,36 +251,17 @@ function WorkspaceFileList({
 
   return (
     <div className="space-y-0.5 p-1">
-      {files.map((file) => {
-        const Icon = fileIcon(file);
-        const selected = selectedPath === file.path;
-        return (
-          <button
-            key={file.path}
-            type="button"
-            onClick={() => onSelect(file.path)}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors",
-              selected
-                ? "border-indigo-200 bg-indigo-50"
-                : "border-transparent hover:border-slate-200 hover:bg-slate-50",
-            )}
-          >
-            <Icon className="size-4 shrink-0 text-slate-500" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium text-slate-800">
-                {file.name}
-              </span>
-              <span className="block truncate text-xs text-slate-500">
-                {sourceLabel(file.source)} · {shortPath(file.path)}
-              </span>
-            </span>
-            <span className="shrink-0 text-xs text-slate-400">
-              {formatFileSize(file.size)}
-            </span>
-          </button>
-        );
-      })}
+      {tree.map((node) => (
+        <WorkspaceFileTreeRow
+          key={node.path}
+          node={node}
+          depth={0}
+          selectedPath={selectedPath}
+          collapsedPaths={collapsedPaths}
+          onToggleDirectory={handleToggleDirectory}
+          onSelect={onSelect}
+        />
+      ))}
     </div>
   );
 }
@@ -248,8 +336,8 @@ export function ConversationWorkspacePanel({
     );
 
   return (
-    <div className="flex size-full min-w-0 flex-col border-l border-slate-200 bg-background">
-      <header className="flex shrink-0 items-center justify-between border-b border-slate-100 bg-background px-4 py-3">
+    <div className="bg-background flex size-full min-w-0 flex-col border-l border-slate-200">
+      <header className="bg-background flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-800">工作空间</h2>
         <button
           type="button"
@@ -284,7 +372,7 @@ export function ConversationWorkspacePanel({
           <>
             <div
               className={cn(
-                "flex flex-col border-b border-slate-100 bg-background",
+                "bg-background flex flex-col border-b border-slate-100",
                 !previewSectionOpen && "min-h-0 flex-1",
               )}
             >
@@ -355,7 +443,7 @@ export function ConversationWorkspacePanel({
                       文件较多，当前只显示前 {files.length} 个。
                     </div>
                   )}
-                  <WorkspaceFileList
+                  <WorkspaceFileTree
                     files={files}
                     selectedPath={selectedFilePath}
                     isLoading={isFetching && files.length === 0}
@@ -381,8 +469,9 @@ export function ConversationWorkspacePanel({
                 </span>
               </button>
               {previewSectionOpen && (
-                <div className="min-h-0 flex-1 overflow-hidden bg-background">
-                  {selectedFilePath || selectedArtifact?.startsWith("write-file:") ? (
+                <div className="bg-background min-h-0 flex-1 overflow-hidden">
+                  {selectedFilePath ||
+                  selectedArtifact?.startsWith("write-file:") ? (
                     <ArtifactFileDetail
                       className="size-full overflow-hidden"
                       filepath={selectedArtifact ?? selectedFilePath!}
@@ -407,7 +496,6 @@ export function ConversationWorkspacePanel({
             <WorkspaceToolExecutionPanel />
           </div>
         )}
-
       </div>
     </div>
   );

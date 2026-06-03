@@ -11,10 +11,8 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import {
-  getMessageTimestamp,
-  type FileInMessage,
-} from "../messages/utils";
+import { getMessageTimestamp, type FileInMessage } from "../messages/utils";
+import { sandboxFilesQueryKey } from "../sandbox";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
@@ -82,7 +80,10 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   });
 }
 
-function withMessageTimestamp(message: Message, timestamp?: string | null): Message {
+function withMessageTimestamp(
+  message: Message,
+  timestamp?: string | null,
+): Message {
   if (!timestamp || getMessageTimestamp(message)) {
     return message;
   }
@@ -415,6 +416,9 @@ export function useThreadStream({
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
+          queryKey: sandboxFilesQueryKey(threadIdRef.current),
+        });
+        void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
         });
       }
@@ -449,11 +453,7 @@ export function useThreadStream({
         const activeRun = runs.find(
           (r) => r.status === "pending" || r.status === "running",
         );
-        if (
-          activeRun &&
-          threadRef.current &&
-          !threadRef.current.isLoading
-        ) {
+        if (activeRun && threadRef.current && !threadRef.current.isLoading) {
           await threadRef.current.joinStream(activeRun.run_id);
         }
       } catch {
@@ -625,6 +625,9 @@ export function useThreadStream({
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
               uploadedFileInfo = uploadResponse.files;
+              void queryClient.invalidateQueries({
+                queryKey: sandboxFilesQueryKey(threadId),
+              });
 
               // Update optimistic human message with uploaded status + paths
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(

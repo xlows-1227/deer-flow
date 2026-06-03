@@ -5,6 +5,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
+import { sandboxFilesQueryKey } from "../sandbox";
+
 import {
   deleteUploadedFile,
   listUploadedFiles,
@@ -25,6 +27,9 @@ export function useUploadFiles(threadId: string) {
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
         queryKey: ["uploads", "list", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: sandboxFilesQueryKey(threadId),
       });
     },
   });
