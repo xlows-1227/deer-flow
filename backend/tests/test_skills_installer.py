@@ -378,9 +378,9 @@ class TestInstallSkillFromArchive:
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
     def test_invalid_extension(self, tmp_path):
-        bad_path = tmp_path / "bad.zip"
+        bad_path = tmp_path / "bad.txt"
         bad_path.write_text("not a skill")
-        with pytest.raises(ValueError, match=".skill"):
+        with pytest.raises(ValueError, match=".skill or .zip"):
             get_or_new_skill_storage(skills_path=tmp_path).install_skill_from_archive(bad_path)
 
     def test_bad_frontmatter(self, tmp_path):

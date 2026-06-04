@@ -585,7 +585,9 @@ A standard Agent Skill is a structured capability module — a Markdown file tha
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
-When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
+The web workspace includes a `New Skill` menu with three creation paths: write a `SKILL.md` directly, ask AI Create to draft one from a brief and optional reference files, or upload an existing `.zip` / `.skill` archive. Custom skills are saved under `skills/custom/` after frontmatter validation and security scanning.
+
+When you install `.skill` or `.zip` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
 

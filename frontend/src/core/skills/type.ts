@@ -4,7 +4,7 @@ export interface Skill {
   display_name: string | null;
   description_zh: string | null;
   category: string;
-  license: string;
+  license: string | null;
   enabled: boolean;
 }
 

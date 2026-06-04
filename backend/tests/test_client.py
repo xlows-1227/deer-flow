@@ -1319,10 +1319,10 @@ class TestSkillsManagement:
             client.install_skill("/nonexistent/path.skill")
 
     def test_install_skill_bad_extension(self, client):
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
             tmp_path = Path(f.name)
         try:
-            with pytest.raises(ValueError, match=".skill extension"):
+            with pytest.raises(ValueError, match=".skill or .zip extension"):
                 client.install_skill(tmp_path)
         finally:
             tmp_path.unlink()

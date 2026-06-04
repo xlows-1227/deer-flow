@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { enableSkill, loadCustomSkill } from "./api";
+import { enableSkill, loadCustomSkill, loadPublicSkill } from "./api";
 import type { Skill } from "./type";
 
 import { loadSkills } from ".";
@@ -17,6 +17,15 @@ export function useCustomSkill(skillName: string | null) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["skills", "custom", skillName],
     queryFn: () => loadCustomSkill(skillName!),
+    enabled: !!skillName,
+  });
+  return { skill: data ?? null, isLoading, error };
+}
+
+export function usePublicSkill(skillName: string | null) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["skills", "public", skillName],
+    queryFn: () => loadPublicSkill(skillName!),
     enabled: !!skillName,
   });
   return { skill: data ?? null, isLoading, error };

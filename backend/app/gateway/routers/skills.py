@@ -1,17 +1,22 @@
 import json
 import logging
+import re
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import require_admin
 from app.gateway.deps import get_config
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.models import create_chat_model
 from deerflow.skills import Skill
-from deerflow.skills.installer import SkillAlreadyExistsError
+from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -64,8 +69,29 @@ class CustomSkillContentResponse(SkillResponse):
     content: str = Field(..., description="Raw SKILL.md content")
 
 
+class CustomSkillCreateRequest(BaseModel):
+    name: str = Field(..., description="Hyphen-case custom skill name")
+    description: str = Field(..., min_length=1, description="Short skill description")
+    content: str | None = Field(None, description="Optional SKILL.md content. If omitted, a starter document is generated.")
+    allowed_tools: list[str] = Field(default_factory=list, description="Optional tool names to mention in the starter SKILL.md")
+
+
 class CustomSkillUpdateRequest(BaseModel):
     content: str = Field(..., description="Replacement SKILL.md content")
+
+
+class SkillAIDraftRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, description="User brief for the skill to draft")
+    name_hint: str | None = Field(None, description="Optional hyphen-case skill name hint")
+    description_hint: str | None = Field(None, description="Optional short description hint")
+    deep_thinking: bool = Field(False, description="Whether to request a more deliberate draft")
+    skill_creator_name: str | None = Field(None, description="Optional creator profile name")
+
+
+class SkillAIDraftResponse(BaseModel):
+    name: str = Field(..., description="Suggested hyphen-case skill name")
+    description: str = Field(..., description="Suggested skill description")
+    content: str = Field(..., description="Generated SKILL.md draft")
 
 
 class CustomSkillHistoryResponse(BaseModel):
@@ -74,6 +100,79 @@ class CustomSkillHistoryResponse(BaseModel):
 
 class SkillRollbackRequest(BaseModel):
     history_index: int = Field(default=-1, description="History entry index to restore from, defaulting to the latest change.")
+
+
+def _slugify_skill_name(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    return normalized[:64].strip("-") or "custom-skill"
+
+
+def _extract_skill_markdown(raw: str) -> str:
+    raw = raw.strip()
+    fence_match = re.match(r"^```(?:markdown|md)?\s*\n?(.*?)\n?\s*```$", raw, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    start = raw.find("---")
+    if start > 0:
+        raw = raw[start:]
+    return raw.strip()
+
+
+def _build_default_skill_content(name: str, description: str, allowed_tools: list[str] | None = None) -> str:
+    tool_section = ""
+    tools = [tool.strip() for tool in allowed_tools or [] if tool.strip()]
+    if tools:
+        tool_lines = "\n".join(f"- `{tool}`" for tool in tools)
+        tool_section = f"\n## Tool Guidance\n{tool_lines}\n"
+    return f"""---
+name: {name}
+description: {description}
+---
+
+Use this skill when the user asks for {description}.
+
+## Workflow
+1. Clarify the user's target outcome when the request is ambiguous.
+2. Gather only the context needed for the task.
+3. Execute the task using the repository's existing conventions.
+4. Verify the result before reporting completion.
+{tool_section}
+## Output
+- Keep the final answer concise.
+- Include file paths, commands, or artifacts that are useful for review.
+"""
+
+
+async def _generate_ai_skill_draft(request: SkillAIDraftRequest, config: AppConfig) -> SkillAIDraftResponse:
+    name_hint = _slugify_skill_name(request.name_hint or request.prompt[:48])
+    description_hint = (request.description_hint or request.prompt).strip()[:160]
+    system_prompt = (
+        "You create DeerFlow SKILL.md files. Return only one markdown document. "
+        "The document must start with YAML frontmatter containing exactly a hyphen-case name and a short description. "
+        "Then write concise instructions with sections that explain when to use the skill, workflow, and output expectations. "
+        "Do not include code fences around the document."
+    )
+    user_prompt = (
+        f"Draft a SKILL.md.\nName hint: {name_hint}\nDescription hint: {description_hint}\nCreator profile: {request.skill_creator_name or 'default'}\nDeep thinking requested: {request.deep_thinking}\n\nUser brief:\n{request.prompt}"
+    )
+    model = create_chat_model(thinking_enabled=request.deep_thinking, app_config=config, attach_tracing=False)
+    response = await model.ainvoke(
+        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
+        config={"run_name": "skill_ai_draft"},
+    )
+    content = _extract_skill_markdown(str(getattr(response, "content", "") or ""))
+    if not content:
+        content = _build_default_skill_content(name_hint, description_hint)
+    parsed_name = name_hint
+    description = description_hint
+    name_match = re.search(r"^name:\s*([a-z0-9][a-z0-9-]*)\s*$", content, re.MULTILINE)
+    description_match = re.search(r"^description:\s*(.+?)\s*$", content, re.MULTILINE)
+    if name_match:
+        parsed_name = _slugify_skill_name(name_match.group(1))
+    if description_match:
+        description = description_match.group(1).strip().strip("\"'")
+    return SkillAIDraftResponse(name=parsed_name, description=description, content=content)
 
 
 def _skill_to_response(skill: Skill) -> SkillResponse:
@@ -137,6 +236,109 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+
+
+@router.post("/skills/custom", response_model=CustomSkillContentResponse, summary="Create Custom Skill")
+async def create_custom_skill(request: CustomSkillCreateRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
+    try:
+        storage = get_or_new_skill_storage(app_config=config)
+        skill_name = storage.validate_skill_name(request.name)
+        if storage.custom_skill_exists(skill_name) or storage.public_skill_exists(skill_name):
+            raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
+
+        content = request.content or _build_default_skill_content(skill_name, request.description.strip(), request.allowed_tools)
+        storage.validate_skill_markdown_content(skill_name, content)
+        scan = await scan_skill_content(content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
+        if scan.decision == "block":
+            raise HTTPException(status_code=400, detail=f"Security scan blocked the create: {scan.reason}")
+
+        storage.write_custom_skill(skill_name, SKILL_MD_FILE, content)
+        storage.append_history(
+            skill_name,
+            {
+                "action": "human_create",
+                "author": "human",
+                "thread_id": None,
+                "file_path": SKILL_MD_FILE,
+                "prev_content": None,
+                "new_content": content,
+                "scanner": {"decision": scan.decision, "reason": scan.reason},
+            },
+        )
+        await refresh_skills_system_prompt_cache_async()
+        return await get_custom_skill(skill_name, config)
+    except SkillAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to create custom skill %s: %s", request.name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create custom skill: {str(e)}")
+
+
+@router.post("/skills/custom/ai-draft", response_model=SkillAIDraftResponse, summary="Draft Custom Skill With AI")
+async def draft_custom_skill_with_ai(request: SkillAIDraftRequest, config: AppConfig = Depends(get_config)) -> SkillAIDraftResponse:
+    try:
+        return await _generate_ai_skill_draft(request, config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to draft custom skill with AI: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to draft custom skill: {str(e)}")
+
+
+@router.post("/skills/upload", response_model=SkillInstallResponse, summary="Upload Skill Archive")
+async def upload_skill_archive(file: UploadFile = File(...), config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
+    filename = file.filename or "skill.skill"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".skill", ".zip"}:
+        raise HTTPException(status_code=400, detail="File must have .skill or .zip extension")
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            while chunk := await file.read(1024 * 1024):
+                tmp_file.write(chunk)
+        try:
+            result = await get_or_new_skill_storage(app_config=config).ainstall_skill_from_archive(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        await refresh_skills_system_prompt_cache_async()
+        return SkillInstallResponse(**result)
+    except SkillAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except (SkillSecurityScanError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to upload skill archive: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload skill archive: {str(e)}")
+    finally:
+        await file.close()
+
+
+@router.get(
+    "/skills/public/{skill_name}",
+    response_model=CustomSkillContentResponse,
+    summary="Get Public Skill Content (Admin)",
+    description="Read SKILL.md for a public skill. Restricted to admin users.",
+)
+@require_admin
+async def get_public_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.PUBLIC), None)
+        if skill is None:
+            raise HTTPException(status_code=404, detail=f"Public skill '{skill_name}' not found")
+        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=get_or_new_skill_storage(app_config=config).read_public_skill(skill_name))
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to get public skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get public skill: {str(e)}")
 
 
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")

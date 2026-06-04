@@ -3,11 +3,13 @@
 import {
   BookOpenIcon,
   CheckCircleIcon,
+  ChevronDownIcon,
   Code2Icon,
   EyeIcon,
-  FileLockIcon,
+  PlusIcon,
   SearchIcon,
   SparklesIcon,
+  UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
@@ -16,22 +18,24 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useCustomSkill, useEnableSkill, useSkills } from "@/core/skills/hooks";
+import { SkillDetailDialog } from "@/components/workspace/skills/skill-detail-dialog";
+import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 
 const FILTERS = [
@@ -54,9 +58,13 @@ export default function WorkspaceSkillsPage() {
       const matchesFilter = filter === "all" || skill.category === filter;
       const matchesQuery =
         !normalizedQuery ||
-        (skill.display_name ?? skill.name).toLowerCase().includes(normalizedQuery) ||
+        (skill.display_name ?? skill.name)
+          .toLowerCase()
+          .includes(normalizedQuery) ||
         skill.name.toLowerCase().includes(normalizedQuery) ||
-        (skill.description_zh ?? skill.description).toLowerCase().includes(normalizedQuery);
+        (skill.description_zh ?? skill.description)
+          .toLowerCase()
+          .includes(normalizedQuery);
       return matchesFilter && matchesQuery;
     });
   }, [filter, query, skills]);
@@ -75,12 +83,35 @@ export default function WorkspaceSkillsPage() {
             浏览、搜索并启用 DeerFlow 可调用的 Agent Skills。
           </p>
         </div>
-        <Button asChild>
-          <Link href="/workspace/chats/new?mode=skill">
-            <SparklesIcon className="h-4 w-4" />
-            新建 Skill
-          </Link>
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button>
+              <PlusIcon className="h-4 w-4" />
+              新建 Skill
+              <ChevronDownIcon className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem asChild>
+              <Link href="/workspace/skills/create">
+                <PlusIcon className="h-4 w-4" />
+                Manual 创建
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/workspace/skills/ai-create/new">
+                <SparklesIcon className="h-4 w-4" />
+                AI 创建
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/workspace/skills/upload">
+                <UploadIcon className="h-4 w-4" />
+                上传 ZIP
+              </Link>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </header>
 
       <main className="flex-1 overflow-y-auto p-6">
@@ -161,18 +192,16 @@ export default function WorkspaceSkillsPage() {
               {filteredSkills.map((skill) => (
                 <Card
                   key={skill.name}
-                  className="rounded-lg border-gray-200 bg-white shadow-none"
+                  className="flex h-full flex-col rounded-lg border-gray-200 bg-white shadow-none"
                 >
-                  <CardHeader className="gap-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <CardTitle className="truncate text-base">
-                          {skill.display_name ?? skill.name}
-                        </CardTitle>
-                        <CardDescription className="mt-2 line-clamp-3">
-                          {skill.description}
-                        </CardDescription>
-                      </div>
+                  <CardHeader className="flex-1 gap-3">
+                    <CardTitle className="min-w-0 truncate pr-2 text-base">
+                      {skill.display_name ?? skill.name}
+                    </CardTitle>
+                    <CardDescription className="line-clamp-3 min-w-0">
+                      {skill.description}
+                    </CardDescription>
+                    <CardAction>
                       <Switch
                         checked={skill.enabled}
                         disabled={isPending}
@@ -180,23 +209,25 @@ export default function WorkspaceSkillsPage() {
                           enableSkill({ skillName: skill.name, enabled })
                         }
                       />
-                    </div>
+                    </CardAction>
                   </CardHeader>
-                  <CardContent className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary">{skill.category}</Badge>
-                    {skill.license ? (
-                      <Badge variant="outline">{skill.license}</Badge>
-                    ) : null}
+                  <CardFooter className="mt-auto flex items-center justify-between gap-2 pt-0">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                      <Badge variant="secondary">{skill.category}</Badge>
+                      {skill.license ? (
+                        <Badge variant="outline">{skill.license}</Badge>
+                      ) : null}
+                    </div>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="ml-auto h-7 gap-1 text-xs text-gray-500 hover:text-gray-900"
+                      className="h-7 shrink-0 gap-1 text-xs text-gray-500 hover:text-gray-900"
                       onClick={() => setSelectedSkill(skill)}
                     >
                       <EyeIcon className="h-3.5 w-3.5" />
                       查看
                     </Button>
-                  </CardContent>
+                  </CardFooter>
                 </Card>
               ))}
             </div>
@@ -209,102 +240,5 @@ export default function WorkspaceSkillsPage() {
         onClose={() => setSelectedSkill(null)}
       />
     </div>
-  );
-}
-
-function SkillDetailDialog({
-  skill,
-  onClose,
-}: {
-  skill: Skill | null;
-  onClose: () => void;
-}) {
-  const isCustom = skill?.category === "custom";
-  const {
-    skill: customSkill,
-    isLoading,
-    error,
-  } = useCustomSkill(isCustom ? skill.name : null);
-
-  const displaySkill = isCustom && customSkill ? customSkill : skill;
-
-  return (
-    <Dialog open={!!skill} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex h-[86vh] max-h-[980px] w-[calc(100vw-2rem)] max-w-none flex-col overflow-hidden p-0 sm:max-w-6xl">
-        <DialogHeader className="shrink-0 border-b border-gray-100 px-8 py-5">
-          <DialogTitle className="text-xl">
-            {displaySkill?.name ?? skill?.name}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex min-h-0 flex-1">
-          {/* 左侧：Skill 说明 */}
-          <div className="w-80 shrink-0 border-r border-gray-100 bg-gray-50/60 p-8">
-            {!displaySkill ? (
-              <div className="text-sm text-gray-500">加载中...</div>
-            ) : (
-              <div className="flex flex-col gap-6">
-                <div>
-                  <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    描述
-                  </h4>
-                  <p className="mt-1.5 text-sm leading-relaxed text-gray-700">
-                    {displaySkill.description}
-                  </p>
-                </div>
-                <div>
-                  <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    分类
-                  </h4>
-                  <div className="mt-1.5 flex flex-wrap gap-2">
-                    <Badge variant="secondary">{displaySkill.category}</Badge>
-                    {displaySkill.license ? (
-                      <Badge variant="outline">{displaySkill.license}</Badge>
-                    ) : null}
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    状态
-                  </h4>
-                  <div className="mt-1.5 flex items-center gap-2 text-sm text-gray-700">
-                    <span
-                      className={`inline-block h-2 w-2 rounded-full ${displaySkill.enabled ? "bg-emerald-500" : "bg-gray-300"}`}
-                    />
-                    {displaySkill.enabled ? "已启用" : "已禁用"}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* 右侧：详细文件 */}
-          <div className="min-h-0 flex-1 px-8 py-6">
-            {isCustom ? (
-              <ScrollArea className="h-full">
-                {isLoading ? (
-                  <div className="py-12 text-center text-sm text-gray-500">
-                    加载内容中...
-                  </div>
-                ) : error ? (
-                  <div className="py-12 text-center text-sm text-red-600">
-                    加载失败：
-                    {error instanceof Error ? error.message : "未知错误"}
-                  </div>
-                ) : customSkill ? (
-                  <pre className="min-h-full whitespace-pre-wrap rounded-xl border border-gray-100 bg-gray-50/80 p-6 text-sm leading-relaxed text-gray-800">
-                    {customSkill.content}
-                  </pre>
-                ) : null}
-              </ScrollArea>
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center gap-4 text-gray-400">
-                <FileLockIcon className="h-12 w-12" />
-                <p className="text-sm">公共 Skill 的详细文件内容不可查看</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }

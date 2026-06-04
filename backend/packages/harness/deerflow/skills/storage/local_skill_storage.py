@@ -78,6 +78,12 @@ class LocalSkillStorage(SkillStorage):
             raise FileNotFoundError(f"Custom skill '{name}' not found.")
         return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
 
+    def read_public_skill(self, name: str) -> str:
+        if not self.public_skill_exists(name):
+            raise FileNotFoundError(f"Public skill '{name}' not found.")
+        normalized_name = self.validate_skill_name(name)
+        return (self._host_root / SkillCategory.PUBLIC.value / normalized_name / SKILL_MD_FILE).read_text(encoding="utf-8")
+
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
         target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -109,8 +115,8 @@ class LocalSkillStorage(SkillStorage):
             if not path.exists():
                 raise FileNotFoundError(f"Skill file not found: {archive_path}")
             raise ValueError(f"Path is not a file: {archive_path}")
-        if path.suffix != ".skill":
-            raise ValueError("File must have .skill extension")
+        if path.suffix not in {".skill", ".zip"}:
+            raise ValueError("File must have .skill or .zip extension")
 
         custom_dir = self._host_root / "custom"
         custom_dir.mkdir(parents=True, exist_ok=True)

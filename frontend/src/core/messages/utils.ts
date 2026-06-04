@@ -40,19 +40,68 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
 
   const groups: MessageGroup[] = [];
 
-  // Returns the last group if it can still accept tool messages
-  // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  function isOpenToolGroup(group: MessageGroup) {
+    return (
+      group.type !== "human" &&
+      group.type !== "assistant" &&
+      group.type !== "assistant:clarification"
+    );
+  }
+
+  // Returns the most recent group that can still accept tool messages
+  // (i.e. an in-flight processing/subagent/present-files group).
   function lastOpenGroup() {
-    const last = groups[groups.length - 1];
-    if (
-      last &&
-      last.type !== "human" &&
-      last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
-    ) {
-      return last;
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const group = groups[i];
+      if (group && isOpenToolGroup(group)) {
+        return group;
+      }
     }
     return null;
+  }
+
+  function findGroupForToolCallId(toolCallId: string) {
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const group = groups[i];
+      if (!group) {
+        continue;
+      }
+      for (const groupMessage of group.messages) {
+        if (
+          groupMessage.type === "ai" &&
+          groupMessage.tool_calls?.some(
+            (toolCall) => toolCall.id === toolCallId,
+          )
+        ) {
+          return group;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findGroupForToolMessage(message: Message) {
+    if (message.type !== "tool") {
+      return null;
+    }
+
+    if (message.tool_call_id) {
+      const matchedGroup = findGroupForToolCallId(message.tool_call_id);
+      if (matchedGroup) {
+        return matchedGroup;
+      }
+    }
+
+    return lastOpenGroup();
+  }
+
+  function isIncompleteToolMessage(message: Message) {
+    return (
+      message.type === "tool" &&
+      !message.tool_call_id &&
+      typeof message.name !== "string" &&
+      extractTextFromMessage(message).length === 0
+    );
   }
 
   for (const message of messages) {
@@ -66,24 +115,23 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
     }
 
     if (message.type === "tool") {
+      if (isIncompleteToolMessage(message)) {
+        continue;
+      }
+
       if (isClarificationToolMessage(message)) {
-        // Add to the preceding processing group to preserve tool-call association,
-        // then also open a standalone clarification group for prominent display.
-        lastOpenGroup()?.messages.push(message);
+        // Add to the processing group that owns the tool call, then also open a
+        // standalone clarification group for prominent display.
+        findGroupForToolMessage(message)?.messages.push(message);
         groups.push({
           id: message.id,
           type: "assistant:clarification",
           messages: [message],
         });
       } else {
-        const open = lastOpenGroup();
-        if (open) {
-          open.messages.push(message);
-        } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+        const targetGroup = findGroupForToolMessage(message);
+        if (targetGroup) {
+          targetGroup.messages.push(message);
         }
       }
       continue;
@@ -449,7 +497,9 @@ export function getMessageTimestamp(message: Message): string | null {
 /**
  * Format an ISO timestamp to a locale datetime string (MM-DD HH:mm:ss).
  */
-export function formatMessageTime(isoString: string | null | undefined): string {
+export function formatMessageTime(
+  isoString: string | null | undefined,
+): string {
   if (!isoString) return "";
   try {
     return new Date(isoString).toLocaleString("zh-CN", {

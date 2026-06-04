@@ -125,6 +125,10 @@ class SkillStorage(ABC):
         """
 
     @abstractmethod
+    def read_public_skill(self, name: str) -> str:
+        """Read SKILL.md content for a public skill."""
+
+    @abstractmethod
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
         """Atomically write a text file under ``custom/<name>/<relative_path>``.
 
