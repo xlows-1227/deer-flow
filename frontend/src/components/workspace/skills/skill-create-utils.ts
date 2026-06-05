@@ -59,16 +59,84 @@ Use this skill when the user asks for ${description || "this custom workflow"}.
 export function parseSkillMarkdown(content: string) {
   const frontmatter = /^---\n([\s\S]*?)\n---/.exec(content.trimStart())?.[1];
   if (!frontmatter) {
-    return { name: "", displayName: "", description: "" };
+    return {
+      name: "",
+      displayName: "",
+      description: "",
+      descriptionZh: "",
+    };
   }
   const name = readFrontmatterString(frontmatter, "name");
-  const displayName = readFrontmatterString(frontmatter, "display_name");
+  const displayNameRaw = readFrontmatterString(frontmatter, "display_name");
   const description = readFrontmatterString(frontmatter, "description");
+  const descriptionZh = readFrontmatterString(frontmatter, "description_zh");
   return {
     name,
-    displayName: displayName ? extractDisplayLabel(displayName, name) : "",
+    displayName: displayNameRaw
+      ? extractDisplayLabel(displayNameRaw, name)
+      : "",
     description,
+    descriptionZh,
   };
+}
+
+export function resolveSkillDisplayName(
+  parsed: ReturnType<typeof parseSkillMarkdown>,
+  settingsName?: string,
+  draftDisplayName?: string,
+) {
+  const explicit = settingsName?.trim();
+  if (explicit) return explicit;
+  if (parsed.displayName.trim()) return parsed.displayName.trim();
+  if (draftDisplayName?.trim()) return draftDisplayName.trim();
+  return parsed.name.trim() || "未命名技能";
+}
+
+export function resolveSkillDisplayDescription(
+  parsed: ReturnType<typeof parseSkillMarkdown>,
+  settingsDescription?: string,
+) {
+  const explicit = settingsDescription?.trim();
+  if (explicit) return explicit;
+  if (parsed.descriptionZh.trim()) return parsed.descriptionZh.trim();
+  return parsed.description.trim();
+}
+
+/** Update only display_name / description_zh; leaves name and description unchanged. */
+export function syncSkillDisplayFrontmatter({
+  content,
+  displayName,
+  descriptionZh,
+}: {
+  content: string;
+  displayName: string;
+  descriptionZh: string;
+}) {
+  const match = /^---\n([\s\S]*?)\n---/.exec(content.trimStart());
+  const frontmatterBody = match?.[1];
+  if (!match || !frontmatterBody) {
+    return content;
+  }
+
+  const name =
+    readFrontmatterString(frontmatterBody, "name").trim() || "custom-skill";
+  const formattedDisplayName = displayName.trim()
+    ? formatSkillDisplayName(displayName.trim(), name)
+    : "";
+
+  let frontmatter = frontmatterBody;
+  frontmatter = upsertFrontmatterField(
+    frontmatter,
+    "display_name",
+    formattedDisplayName,
+  );
+  frontmatter = upsertFrontmatterField(
+    frontmatter,
+    "description_zh",
+    descriptionZh.trim(),
+  );
+
+  return content.replace(match[0], `---\n${frontmatter}\n---`);
 }
 
 export function syncSkillFrontmatter({
@@ -98,6 +166,24 @@ ${displayNameLine}description: ${description || "Custom DeerFlow skill"}
 }
 
 function readFrontmatterString(frontmatter: string, key: string) {
-  const match = new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m").exec(frontmatter);
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escaped}:\\s*(.+?)\\s*$`, "m").exec(frontmatter);
   return match?.[1]?.replace(/^["']|["']$/g, "") ?? "";
+}
+
+function upsertFrontmatterField(
+  frontmatter: string,
+  key: string,
+  value: string,
+) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^${escaped}:\\s*.+?\\s*$\\n?`, "m");
+  if (!value) {
+    return frontmatter.replace(pattern, "");
+  }
+  const line = `${key}: ${value}\n`;
+  if (pattern.test(frontmatter)) {
+    return frontmatter.replace(pattern, line);
+  }
+  return `${frontmatter.trimEnd()}\n${line}`;
 }

@@ -60,4 +60,6 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
-work-agent-v4/
+chrome-headless-shell-mac-arm64.zip
+chrome-mac-arm64.zip
+.local-browsers/

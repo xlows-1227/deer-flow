@@ -5,14 +5,18 @@ import {
   CheckCircleIcon,
   ChevronDownIcon,
   Code2Icon,
-  EyeIcon,
+  Edit3Icon,
+  Loader2Icon,
+  MoreHorizontalIcon,
   PlusIcon,
   SearchIcon,
   SparklesIcon,
+  Trash2Icon,
   UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,7 +39,11 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SkillDetailDialog } from "@/components/workspace/skills/skill-detail-dialog";
-import { useEnableSkill, useSkills } from "@/core/skills/hooks";
+import {
+  useDeleteCustomSkill,
+  useEnableSkill,
+  useSkills,
+} from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 
 const FILTERS = [
@@ -47,6 +55,8 @@ const FILTERS = [
 export default function WorkspaceSkillsPage() {
   const { skills, isLoading, error } = useSkills();
   const { mutate: enableSkill, isPending } = useEnableSkill();
+  const { mutateAsync: deleteCustomSkill, isPending: isDeleting } =
+    useDeleteCustomSkill();
   const [query, setQuery] = useState("");
   const [filter, setFilter] =
     useState<(typeof FILTERS)[number]["value"]>("all");
@@ -74,6 +84,26 @@ export default function WorkspaceSkillsPage() {
     (skill) => skill.category === "custom",
   ).length;
 
+  async function handleDeleteSkill(skill: Skill) {
+    if (skill.category !== "custom") return;
+    if (
+      !window.confirm(
+        `确定删除自定义 Skill「${skill.display_name ?? skill.name}」吗？后端会保留历史记录，但当前 Skill 文件会被移除。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteCustomSkill(skill.name);
+      toast.success("Skill 已删除");
+      if (selectedSkill?.name === skill.name) {
+        setSelectedSkill(null);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除 Skill 失败");
+    }
+  }
+
   return (
     <div className="flex size-full flex-col bg-[#fafafa]">
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-b border-gray-200 bg-white px-6 py-4">
@@ -95,13 +125,13 @@ export default function WorkspaceSkillsPage() {
             <DropdownMenuItem asChild>
               <Link href="/workspace/skills/create">
                 <PlusIcon className="h-4 w-4" />
-                Manual 创建
+                快速
               </Link>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
               <Link href="/workspace/skills/ai-create/new">
                 <SparklesIcon className="h-4 w-4" />
-                AI 创建
+                Chat 创建
               </Link>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
@@ -192,7 +222,16 @@ export default function WorkspaceSkillsPage() {
               {filteredSkills.map((skill) => (
                 <Card
                   key={skill.name}
-                  className="flex h-full flex-col rounded-lg border-gray-200 bg-white shadow-none"
+                  role="button"
+                  tabIndex={0}
+                  className="flex h-full cursor-pointer flex-col rounded-lg border-gray-200 bg-white shadow-none transition-colors hover:border-gray-300 hover:bg-gray-50/70"
+                  onClick={() => setSelectedSkill(skill)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelectedSkill(skill);
+                    }
+                  }}
                 >
                   <CardHeader className="flex-1 gap-3">
                     <CardTitle className="min-w-0 truncate pr-2 text-base">
@@ -202,13 +241,15 @@ export default function WorkspaceSkillsPage() {
                       {skill.description}
                     </CardDescription>
                     <CardAction>
-                      <Switch
-                        checked={skill.enabled}
-                        disabled={isPending}
-                        onCheckedChange={(enabled) =>
-                          enableSkill({ skillName: skill.name, enabled })
-                        }
-                      />
+                      <div onClick={(event) => event.stopPropagation()}>
+                        <Switch
+                          checked={skill.enabled}
+                          disabled={isPending}
+                          onCheckedChange={(enabled) =>
+                            enableSkill({ skillName: skill.name, enabled })
+                          }
+                        />
+                      </div>
                     </CardAction>
                   </CardHeader>
                   <CardFooter className="mt-auto flex items-center justify-between gap-2 pt-0">
@@ -218,15 +259,44 @@ export default function WorkspaceSkillsPage() {
                         <Badge variant="outline">{skill.license}</Badge>
                       ) : null}
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 shrink-0 gap-1 text-xs text-gray-500 hover:text-gray-900"
-                      onClick={() => setSelectedSkill(skill)}
-                    >
-                      <EyeIcon className="h-3.5 w-3.5" />
-                      查看
-                    </Button>
+                    {skill.category === "custom" ? (
+                      <div onClick={(event) => event.stopPropagation()}>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="size-8 text-gray-500 hover:bg-white hover:text-gray-900"
+                              aria-label={`${skill.display_name ?? skill.name} 操作`}
+                            >
+                              {isDeleting ? (
+                                <Loader2Icon className="size-4 animate-spin" />
+                              ) : (
+                                <MoreHorizontalIcon className="size-4" />
+                              )}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-36">
+                            <DropdownMenuItem asChild>
+                              <Link
+                                href={`/workspace/skills/editor/${encodeURIComponent(skill.name)}`}
+                              >
+                                <Edit3Icon className="size-4" />
+                                编辑
+                              </Link>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              variant="destructive"
+                              disabled={isDeleting}
+                              onClick={() => void handleDeleteSkill(skill)}
+                            >
+                              <Trash2Icon className="size-4" />
+                              删除
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    ) : null}
                   </CardFooter>
                 </Card>
               ))}

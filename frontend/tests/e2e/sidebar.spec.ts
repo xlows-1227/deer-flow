@@ -16,6 +16,32 @@ test.describe("Sidebar navigation", () => {
     await expect(sidebar.locator("a[href='/workspace/agents']")).toBeVisible();
   });
 
+  test("desktop sidebar can collapse to icon mode", async ({ page }) => {
+    mockLangGraphAPI(page);
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']").first();
+    await expect(sidebar.locator("a[href='/workspace/agents']")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const expandedBox = await sidebar.boundingBox();
+    expect(expandedBox).not.toBeNull();
+
+    await page.getByRole("button", { name: "收起侧边栏" }).click();
+
+    await expect(sidebar.locator("a[href='/workspace/agents']")).toHaveCSS(
+      "width",
+      "32px",
+    );
+    await expect(sidebar.getByText("智能体")).toBeHidden();
+
+    const collapsedBox = await sidebar.boundingBox();
+    expect(collapsedBox).not.toBeNull();
+    expect(collapsedBox!.width).toBeLessThan(expandedBox!.width);
+  });
+
   test("keeps navigation fixed while recent chats and task records scroll", async ({
     page,
   }) => {

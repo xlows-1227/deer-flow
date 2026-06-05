@@ -18,8 +18,10 @@ function NavMenuButtonContent({ t }: { t: ReturnType<typeof useI18n>["t"] }) {
       <div className="flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-100 text-[11px] font-semibold text-blue-600">
         U
       </div>
-      <span>{t.workspace.settingsAndMore}</span>
-      <SettingsIcon className="text-muted-foreground ml-auto size-4" />
+      <span className="group-data-[collapsible=icon]:hidden">
+        {t.workspace.settingsAndMore}
+      </span>
+      <SettingsIcon className="text-muted-foreground ml-auto size-4 group-data-[collapsible=icon]:hidden" />
     </div>
   );
 }
@@ -53,6 +55,7 @@ export function WorkspaceNavMenu() {
           {mounted ? (
             <SidebarMenuButton
               size="lg"
+              tooltip={t.workspace.settingsAndMore}
               className="h-10 rounded-lg text-gray-700 hover:bg-gray-200 data-[state=open]:bg-gray-200 data-[state=open]:text-gray-900"
               onClick={handleOpenSettings}
             >

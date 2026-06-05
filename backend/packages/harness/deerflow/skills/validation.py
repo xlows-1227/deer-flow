@@ -12,7 +12,18 @@ from deerflow.skills.parser import parse_allowed_tools
 from deerflow.skills.types import SKILL_MD_FILE
 
 # Allowed properties in SKILL.md frontmatter
-ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "display_name", "description_zh", "license", "allowed-tools", "metadata", "compatibility", "version", "author"}
+ALLOWED_FRONTMATTER_PROPERTIES = {
+    "name",
+    "description",
+    "display_name",
+    "description_zh",
+    "license",
+    "allowed-tools",
+    "metadata",
+    "compatibility",
+    "version",
+    "author",
+}
 
 
 def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:

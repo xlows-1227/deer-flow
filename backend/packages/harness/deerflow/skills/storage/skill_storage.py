@@ -76,27 +76,50 @@ class SkillStorage(ABC):
             if parsed_name != name:
                 raise ValueError(f"Frontmatter name '{parsed_name}' must match requested skill name '{name}'.")
 
-    def ensure_safe_support_path(self, name: str, relative_path: str) -> Path:
-        """Validate and return the resolved absolute path for a support file."""
-        _ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
+    _ALLOWED_SUPPORT_SUBDIRS = frozenset({"skills", "references", "templates", "scripts", "assets"})
+
+    def _resolve_safe_support_path(
+        self,
+        name: str,
+        relative_path: str,
+        *,
+        require_filename: bool,
+    ) -> Path:
+        """Validate and return the resolved absolute path under an allowed support directory."""
         skill_dir = self.get_custom_skill_dir(self.validate_skill_name(name)).resolve()
-        if not relative_path or relative_path.endswith("/"):
+        normalized_path = relative_path.replace("\\", "/").strip("/")
+        if not normalized_path:
+            raise ValueError("Path must not be empty.")
+        if require_filename and (normalized_path.endswith("/") or normalized_path in self._ALLOWED_SUPPORT_SUBDIRS):
             raise ValueError("Supporting file path must include a filename.")
-        relative = Path(relative_path)
+        relative = Path(normalized_path)
         if relative.is_absolute():
-            raise ValueError("Supporting file path must be relative.")
+            raise ValueError("Path must be relative.")
         if any(part in {"..", ""} for part in relative.parts):
-            raise ValueError("Supporting file path must not contain parent-directory traversal.")
+            raise ValueError("Path must not contain parent-directory traversal.")
         top_level = relative.parts[0] if relative.parts else ""
-        if top_level not in _ALLOWED_SUPPORT_SUBDIRS:
-            raise ValueError(f"Supporting files must live under one of: {', '.join(sorted(_ALLOWED_SUPPORT_SUBDIRS))}.")
+        if top_level not in self._ALLOWED_SUPPORT_SUBDIRS:
+            raise ValueError(
+                f"Paths must live under one of: {', '.join(sorted(self._ALLOWED_SUPPORT_SUBDIRS))}.",
+            )
         target = (skill_dir / relative).resolve()
         allowed_root = (skill_dir / top_level).resolve()
         try:
             target.relative_to(allowed_root)
         except ValueError as exc:
-            raise ValueError("Supporting file path must stay within the selected support directory.") from exc
+            raise ValueError("Path must stay within the selected support directory.") from exc
         return target
+
+    def ensure_safe_support_path(self, name: str, relative_path: str) -> Path:
+        """Validate and return the resolved absolute path for a support file."""
+        normalized_path = relative_path.replace("\\", "/").strip("/")
+        if not normalized_path or normalized_path.endswith("/"):
+            raise ValueError("Supporting file path must include a filename.")
+        return self._resolve_safe_support_path(name, normalized_path, require_filename=True)
+
+    def ensure_safe_support_dir_path(self, name: str, relative_path: str) -> Path:
+        """Validate and return the resolved absolute path for a support directory."""
+        return self._resolve_safe_support_path(name, relative_path, require_filename=False)
 
     # ------------------------------------------------------------------
     # Abstract atomic operations (storage-medium specific)
@@ -136,17 +159,17 @@ class SkillStorage(ABC):
         """
 
     @abstractmethod
-    async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
+    async def ainstall_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
         """Async install of a skill from a ``.skill`` ZIP archive.
 
         Origin: ``deerflow.skills.installer.ainstall_skill_from_archive``.
         """
 
-    def install_skill_from_archive(self, archive_path: str | Path) -> dict:
+    def install_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
         """Sync wrapper — delegates to :meth:`ainstall_skill_from_archive`."""
         from deerflow.skills.installer import _run_async_install
 
-        return _run_async_install(self.ainstall_skill_from_archive(archive_path))
+        return _run_async_install(self.ainstall_skill_from_archive(archive_path, skip_security_scan=skip_security_scan))
 
     @abstractmethod
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
@@ -175,6 +198,51 @@ class SkillStorage(ABC):
         """Return all history records for ``name``, oldest first.
 
         Origin: ``deerflow.skills.manager.read_history``.
+        """
+
+    # ------------------------------------------------------------------
+    # Versions (protocol-level; storage-medium specific persistence)
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def create_skill_version(
+        self,
+        name: str,
+        *,
+        action: str,
+        author: str,
+        message: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict:
+        """Create an immutable snapshot version for a custom skill.
+
+        Implementations should return the created version metadata.
+        """
+
+    @abstractmethod
+    def list_skill_versions(self, name: str) -> list[dict]:
+        """List versions for a custom skill, newest-first."""
+
+    @abstractmethod
+    def list_skill_version_files(self, name: str, seq: int) -> list[dict[str, str | int | None]]:
+        """List files for a specific version snapshot, same shape as list_custom_skill_files()."""
+
+    @abstractmethod
+    def read_skill_version_file(self, name: str, seq: int, relative_path: str) -> str:
+        """Read a text file from a specific version snapshot."""
+
+    @abstractmethod
+    def restore_skill_version(
+        self,
+        name: str,
+        seq: int,
+        *,
+        author: str,
+        thread_id: str | None = None,
+    ) -> dict:
+        """Restore a custom skill directory from a version snapshot.
+
+        Implementations should be careful to preserve history/version metadata stores.
         """
 
     # ------------------------------------------------------------------
@@ -208,6 +276,24 @@ class SkillStorage(ABC):
         """
         normalized_name = self.validate_skill_name(name)
         return self.get_skills_root_path() / SkillCategory.CUSTOM.value / ".history" / f"{normalized_name}.jsonl"
+
+    def get_skill_versions_dir(self, name: str) -> Path:
+        """Path to ``custom/.versions/<name>``. Does not create parents."""
+        normalized_name = self.validate_skill_name(name)
+        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / ".versions" / normalized_name
+
+    def get_skill_versions_index_file(self, name: str) -> Path:
+        """Path to ``custom/.versions/<name>/index.jsonl``. Does not create parents."""
+        return self.get_skill_versions_dir(name) / "index.jsonl"
+
+    @staticmethod
+    def validate_skill_version_seq(seq: int) -> int:
+        """Validate a version sequence id and return the normalised int."""
+        if not isinstance(seq, int):
+            raise ValueError("Version seq must be an integer.")
+        if seq <= 0:
+            raise ValueError("Version seq must be >= 1.")
+        return seq
 
     # ------------------------------------------------------------------
     # Final template-method flows
@@ -251,8 +337,102 @@ class SkillStorage(ABC):
 
     def ensure_custom_skill_is_editable(self, name: str) -> None:
         """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``."""
-        if self.custom_skill_exists(name):
+        normalized_name = self.validate_skill_name(name)
+        if self.custom_skill_exists(normalized_name):
             return
-        if self.public_skill_exists(name):
-            raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
+        # A custom directory may already contain in-progress files before SKILL.md exists.
+        if self.get_custom_skill_dir(normalized_name).exists():
+            return
+        if self.public_skill_exists(normalized_name):
+            # Bootstrap an empty custom override directory; SKILL.md may arrive in the same apply batch.
+            self.get_custom_skill_dir(normalized_name).mkdir(parents=True, exist_ok=True)
+            return
         raise FileNotFoundError(f"Custom skill '{name}' not found.")
+
+    def list_custom_skill_files(self, name: str) -> list[dict[str, str | int | None]]:
+        """Return a flat list of files and directories under custom/<name>/.
+
+        Each entry contains ``path`` (relative), ``type`` (``file`` | ``directory``),
+        and ``size`` (bytes, files only).
+        """
+        import os
+
+        normalized_name = self.validate_skill_name(name)
+        skill_dir = self.get_custom_skill_dir(normalized_name)
+        if not skill_dir.exists():
+            raise FileNotFoundError(f"Custom skill '{normalized_name}' not found.")
+
+        entries: list[dict[str, str | int | None]] = []
+        for current_root, dir_names, file_names in os.walk(skill_dir, followlinks=False):
+            dir_names[:] = sorted(d for d in dir_names if not d.startswith("."))
+            rel_root = Path(current_root).relative_to(skill_dir)
+            for directory in sorted(dir_names):
+                rel_path = str(rel_root / directory) if rel_root.parts else directory
+                entries.append({"path": rel_path.replace("\\", "/"), "type": "directory", "size": None})
+            for filename in sorted(file_names):
+                if filename.startswith("."):
+                    continue
+                rel_path = str(rel_root / filename) if rel_root.parts else filename
+                file_path = Path(current_root) / filename
+                entries.append(
+                    {
+                        "path": rel_path.replace("\\", "/"),
+                        "type": "file",
+                        "size": file_path.stat().st_size,
+                    }
+                )
+        return entries
+
+    _BINARY_READ_SUFFIXES = frozenset(
+        {".skill", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"},
+    )
+
+    def read_custom_skill_file(self, name: str, relative_path: str) -> str:
+        """Read a text file under custom/<name>/ by relative path."""
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        normalized_path = relative_path.replace("\\", "/").lstrip("/")
+        if normalized_path == SKILL_MD_FILE:
+            return self.read_custom_skill(name)
+        if Path(normalized_path).suffix.lower() in self._BINARY_READ_SUFFIXES:
+            raise ValueError(f"Binary file '{normalized_path}' cannot be read as text.")
+        target = self.validate_relative_path(normalized_path, self.get_custom_skill_dir(normalized_name))
+        if not target.is_file():
+            raise FileNotFoundError(f"File '{normalized_path}' not found for skill '{normalized_name}'.")
+        return target.read_text(encoding="utf-8")
+
+    def mkdir_custom_skill_directory(self, name: str, relative_path: str) -> None:
+        """Create a directory under an allowed support subdirectory."""
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        target = self.ensure_safe_support_dir_path(normalized_name, relative_path)
+        target.mkdir(parents=True, exist_ok=True)
+
+    def write_custom_skill_bytes(self, name: str, relative_path: str, data: bytes) -> None:
+        """Write raw bytes to a support file path."""
+        import tempfile
+
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        target = self.ensure_safe_support_path(normalized_name, relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(target.parent)) as tmp_file:
+            tmp_file.write(data)
+            tmp_path = Path(tmp_file.name)
+        tmp_path.replace(target)
+
+    def delete_custom_skill_file(self, name: str, relative_path: str) -> str:
+        """Delete a support file under custom/<name>/ and return its previous content."""
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        normalized_path = relative_path.replace("\\", "/").strip("/")
+        if normalized_path == SKILL_MD_FILE:
+            raise ValueError("SKILL.md cannot be deleted.")
+        target = self.ensure_safe_support_path(normalized_name, normalized_path)
+        if not target.is_file():
+            raise FileNotFoundError(
+                f"File '{normalized_path}' not found for skill '{normalized_name}'.",
+            )
+        prev_content = target.read_text(encoding="utf-8")
+        target.unlink()
+        return prev_content

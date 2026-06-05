@@ -3,6 +3,7 @@
 import {
   ArrowLeftIcon,
   ArchiveIcon,
+  AlertTriangleIcon,
   CheckCircleIcon,
   FileArchiveIcon,
   Loader2Icon,
@@ -13,9 +14,10 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { uploadSkillArchive } from "@/core/skills/api";
+import type { SkillUploadErrorDetail } from "@/core/skills/api";
 import { cn } from "@/lib/utils";
 
 function isSupportedArchive(file: File | null) {
@@ -30,30 +32,57 @@ export default function UploadSkillPage() {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isForceUpload, setIsForceUpload] = useState(false);
+  const [uploadError, setUploadError] = useState<SkillUploadErrorDetail | null>(
+    null,
+  );
 
   const canUpload = isSupportedArchive(file) && !isUploading;
 
-  async function handleUpload() {
+  async function handleUpload(force = false) {
     if (!file || !canUpload) return;
     setIsUploading(true);
+    setIsForceUpload(force);
+    if (!force) {
+      setUploadError(null);
+    }
     try {
-      const result = await uploadSkillArchive(file);
+      const result = await uploadSkillArchive(file, { force });
       if (!result.success) {
+        const error = "error" in result ? result.error : undefined;
+        setUploadError(
+          error ?? {
+            code: "upload_failed",
+            message: result.message || "上传失败",
+            reason: result.message || "上传失败",
+            can_force: false,
+          },
+        );
         toast.error(result.message || "上传失败");
         return;
       }
+      setUploadError(null);
       toast.success(result.message || "Skill 已上传");
       router.push("/workspace/skills");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "上传失败");
+      const message = error instanceof Error ? error.message : "上传失败";
+      setUploadError({
+        code: "upload_failed",
+        message,
+        reason: message,
+        can_force: false,
+      });
+      toast.error(message);
     } finally {
       setIsUploading(false);
+      setIsForceUpload(false);
     }
   }
 
   function selectFile(nextFile: File | null) {
     if (isUploading) return;
     setFile(nextFile);
+    setUploadError(null);
     if (nextFile && !isSupportedArchive(nextFile)) {
       toast.error("请上传 .zip 或 .skill 文件");
     }
@@ -86,7 +115,11 @@ export default function UploadSkillPage() {
           ) : (
             <UploadIcon className="h-4 w-4" />
           )}
-          {isUploading ? "上传中" : "安装 skill"}
+          {isUploading
+            ? isForceUpload
+              ? "继续上传中"
+              : "上传中"
+            : "安装 skill"}
         </Button>
       </header>
 
@@ -174,6 +207,41 @@ export default function UploadSkillPage() {
                 ) : null}
               </div>
             </section>
+          ) : null}
+
+          {uploadError ? (
+            <Alert className="border-red-200 bg-red-50 text-red-950">
+              <AlertTriangleIcon className="h-4 w-4" />
+              <AlertTitle>上传失败</AlertTitle>
+              <AlertDescription className="text-red-900">
+                <p>{uploadError.message}</p>
+                {uploadError.reason !== uploadError.message ? (
+                  <p>原因：{uploadError.reason}</p>
+                ) : null}
+                {uploadError.can_force ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="border-red-300 bg-white text-red-900 hover:bg-red-100"
+                      disabled={!file || isUploading}
+                      onClick={() => void handleUpload(true)}
+                    >
+                      {isUploading && isForceUpload ? (
+                        <Loader2Icon className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <UploadIcon className="h-4 w-4" />
+                      )}
+                      仍然上传
+                    </Button>
+                    <span className="text-xs text-red-800">
+                      仅在你确认该 Skill 来源可信时继续。
+                    </span>
+                  </div>
+                ) : null}
+              </AlertDescription>
+            </Alert>
           ) : null}
 
           <Alert className="border-blue-200 bg-blue-50 text-blue-900">

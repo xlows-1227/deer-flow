@@ -4,7 +4,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
@@ -65,6 +65,13 @@ class SkillInstallResponse(BaseModel):
     message: str = Field(..., description="Installation result message")
 
 
+class SkillUploadErrorDetail(BaseModel):
+    code: str = Field(..., description="Machine-readable upload error code")
+    message: str = Field(..., description="Human-readable upload error message")
+    reason: str = Field(..., description="Specific failure reason")
+    can_force: bool = Field(False, description="Whether the user may retry with force=true")
+
+
 class CustomSkillContentResponse(SkillResponse):
     content: str = Field(..., description="Raw SKILL.md content")
 
@@ -96,6 +103,48 @@ class SkillAIDraftResponse(BaseModel):
 
 class CustomSkillHistoryResponse(BaseModel):
     history: list[dict]
+
+
+class CustomSkillVersionsResponse(BaseModel):
+    versions: list[dict]
+
+
+class CustomSkillVersionCreateRequest(BaseModel):
+    action: str = Field(default="edit", description="Version action label, e.g. edit/publish/install/create/restore.")
+    message: str | None = Field(None, description="Optional human note for this snapshot.")
+    thread_id: str | None = Field(None, description="Optional thread id that produced this snapshot.")
+
+
+class CustomSkillVersionRestoreResponse(BaseModel):
+    version: dict = Field(..., description="Created version record representing the restored state.")
+
+
+class CustomSkillFileEntry(BaseModel):
+    path: str = Field(..., description="Relative path from the skill root")
+    type: str = Field(..., description="Either file or directory")
+    size: int | None = Field(None, description="File size in bytes")
+
+
+class CustomSkillFilesResponse(BaseModel):
+    files: list[CustomSkillFileEntry]
+
+
+class CustomSkillFileContentResponse(BaseModel):
+    path: str = Field(..., description="Relative path from the skill root")
+    content: str = Field(..., description="File text content")
+
+
+class CustomSkillFileWriteRequest(BaseModel):
+    path: str = Field(..., description="Relative path from the skill root")
+    content: str = Field(default="", description="File text content")
+
+
+class CustomSkillDirectoryCreateRequest(BaseModel):
+    path: str = Field(..., description="Relative directory path from the skill root")
+
+
+class CustomSkillUploadResponse(BaseModel):
+    paths: list[str] = Field(default_factory=list, description="Uploaded relative paths")
 
 
 class SkillRollbackRequest(BaseModel):
@@ -212,7 +261,20 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
 async def install_skill(request: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
     try:
         skill_file_path = resolve_thread_virtual_path(request.thread_id, request.path)
-        result = await get_or_new_skill_storage(app_config=config).ainstall_skill_from_archive(skill_file_path)
+        storage = get_or_new_skill_storage(app_config=config)
+        result = await storage.ainstall_skill_from_archive(skill_file_path)
+        skill_name = result.get("skill_name")
+        if skill_name:
+            try:
+                storage.create_skill_version(
+                    skill_name,
+                    action="install",
+                    author="human",
+                    message=f"installed from thread artifact: {request.path}",
+                    thread_id=request.thread_id,
+                )
+            except Exception as e:
+                logger.warning("Failed to create install version snapshot for %s: %s", skill_name, e, exc_info=True)
         await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except FileNotFoundError as e:
@@ -265,6 +327,16 @@ async def create_custom_skill(request: CustomSkillCreateRequest, config: AppConf
                 "scanner": {"decision": scan.decision, "reason": scan.reason},
             },
         )
+        try:
+            storage.create_skill_version(
+                skill_name,
+                action="create",
+                author="human",
+                message="created via API",
+                thread_id=None,
+            )
+        except Exception as e:
+            logger.warning("Failed to create create-version snapshot for %s: %s", skill_name, e, exc_info=True)
         await refresh_skills_system_prompt_cache_async()
         return await get_custom_skill(skill_name, config)
     except SkillAlreadyExistsError as e:
@@ -290,7 +362,11 @@ async def draft_custom_skill_with_ai(request: SkillAIDraftRequest, config: AppCo
 
 
 @router.post("/skills/upload", response_model=SkillInstallResponse, summary="Upload Skill Archive")
-async def upload_skill_archive(file: UploadFile = File(...), config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
+async def upload_skill_archive(
+    file: UploadFile = File(...),
+    force: bool = Query(False, description="Skip user-overridable skill security scan checks after explicit user confirmation."),
+    config: AppConfig = Depends(get_config),
+) -> SkillInstallResponse:
     filename = file.filename or "skill.skill"
     suffix = Path(filename).suffix.lower()
     if suffix not in {".skill", ".zip"}:
@@ -301,14 +377,35 @@ async def upload_skill_archive(file: UploadFile = File(...), config: AppConfig =
             while chunk := await file.read(1024 * 1024):
                 tmp_file.write(chunk)
         try:
-            result = await get_or_new_skill_storage(app_config=config).ainstall_skill_from_archive(tmp_path)
+            storage = get_or_new_skill_storage(app_config=config)
+            result = await storage.ainstall_skill_from_archive(tmp_path, skip_security_scan=force)
+            skill_name = result.get("skill_name")
+            if skill_name:
+                try:
+                    storage.create_skill_version(
+                        skill_name,
+                        action="install",
+                        author="human",
+                        message=f"uploaded archive: {filename}",
+                        thread_id=None,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to create upload-install version snapshot for %s: %s", skill_name, e, exc_info=True)
         finally:
             tmp_path.unlink(missing_ok=True)
         await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except SkillAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    except (SkillSecurityScanError, ValueError) as e:
+    except SkillSecurityScanError as e:
+        detail = SkillUploadErrorDetail(
+            code="security_scan_failed",
+            message=str(e),
+            reason=e.reason,
+            can_force=e.can_force,
+        )
+        raise HTTPException(status_code=400, detail=detail.model_dump())
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error("Failed to upload skill archive: %s", e, exc_info=True)
@@ -357,6 +454,226 @@ async def get_custom_skill(skill_name: str, config: AppConfig = Depends(get_conf
         raise HTTPException(status_code=500, detail=f"Failed to get custom skill: {str(e)}")
 
 
+@router.get("/skills/custom/{skill_name}/files", response_model=CustomSkillFilesResponse, summary="List Custom Skill Files")
+async def list_custom_skill_files(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillFilesResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        files = storage.list_custom_skill_files(skill_name)
+        return CustomSkillFilesResponse(files=[CustomSkillFileEntry(**entry) for entry in files])
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to list files for custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list custom skill files: {str(e)}")
+
+
+async def _write_custom_skill_support_file(
+    *,
+    storage,
+    skill_name: str,
+    path: str,
+    content: str,
+    config: AppConfig,
+    author: str,
+) -> str:
+    normalized_path = path.replace("\\", "/").lstrip("/")
+    executable = normalized_path.startswith("scripts/") or "/scripts/" in f"/{normalized_path}/"
+    scan = await scan_skill_content(content, executable=executable, location=f"{skill_name}/{normalized_path}", app_config=config)
+    if scan.decision == "block":
+        raise HTTPException(status_code=400, detail=f"Security scan blocked the write: {scan.reason}")
+    if executable and scan.decision != "allow":
+        raise HTTPException(status_code=400, detail=f"Security scan rejected executable content: {scan.reason}")
+    target = storage.ensure_safe_support_path(skill_name, normalized_path)
+    prev_content = target.read_text(encoding="utf-8") if target.exists() else None
+    storage.write_custom_skill(skill_name, normalized_path, content)
+    storage.append_history(
+        skill_name,
+        {
+            "action": "human_write_file",
+            "author": author,
+            "thread_id": None,
+            "file_path": normalized_path,
+            "prev_content": prev_content,
+            "new_content": content,
+            "scanner": {"decision": scan.decision, "reason": scan.reason},
+        },
+    )
+    return normalized_path
+
+
+@router.get("/skills/custom/{skill_name}/file", response_model=CustomSkillFileContentResponse, summary="Read Custom Skill File")
+async def read_custom_skill_file(skill_name: str, path: str, config: AppConfig = Depends(get_config)) -> CustomSkillFileContentResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        content = storage.read_custom_skill_file(skill_name, path)
+        normalized_path = path.replace("\\", "/").lstrip("/")
+        return CustomSkillFileContentResponse(path=normalized_path, content=content)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to read file %s for custom skill %s: %s", path, skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to read custom skill file: {str(e)}")
+
+
+@router.put("/skills/custom/{skill_name}/file", response_model=CustomSkillFileContentResponse, summary="Write Custom Skill File")
+async def write_custom_skill_file(
+    skill_name: str,
+    request: CustomSkillFileWriteRequest,
+    config: AppConfig = Depends(get_config),
+) -> CustomSkillFileContentResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        storage.ensure_custom_skill_is_editable(skill_name)
+        normalized_path = await _write_custom_skill_support_file(
+            storage=storage,
+            skill_name=skill_name,
+            path=request.path,
+            content=request.content,
+            config=config,
+            author="human",
+        )
+        await refresh_skills_system_prompt_cache_async()
+        return CustomSkillFileContentResponse(path=normalized_path, content=request.content)
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to write file %s for custom skill %s: %s", request.path, skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to write custom skill file: {str(e)}")
+
+
+@router.delete("/skills/custom/{skill_name}/file", summary="Delete Custom Skill File")
+async def delete_custom_skill_file(skill_name: str, path: str, config: AppConfig = Depends(get_config)) -> dict[str, bool]:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        storage.ensure_custom_skill_is_editable(skill_name)
+        normalized_path = path.replace("\\", "/").strip("/")
+        prev_content = storage.delete_custom_skill_file(skill_name, normalized_path)
+        storage.append_history(
+            skill_name,
+            {
+                "action": "human_delete_file",
+                "author": "human",
+                "thread_id": None,
+                "file_path": normalized_path,
+                "prev_content": prev_content,
+                "new_content": None,
+                "scanner": {"decision": "allow", "reason": "File deletion requested."},
+            },
+        )
+        await refresh_skills_system_prompt_cache_async()
+        return {"success": True}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to delete file %s for custom skill %s: %s", path, skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete custom skill file: {str(e)}")
+
+
+@router.post("/skills/custom/{skill_name}/directories", response_model=CustomSkillFileEntry, summary="Create Custom Skill Directory")
+async def create_custom_skill_directory(
+    skill_name: str,
+    request: CustomSkillDirectoryCreateRequest,
+    config: AppConfig = Depends(get_config),
+) -> CustomSkillFileEntry:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        normalized_path = request.path.replace("\\", "/").strip("/")
+        storage.mkdir_custom_skill_directory(skill_name, normalized_path)
+        storage.append_history(
+            skill_name,
+            {
+                "action": "human_mkdir",
+                "author": "human",
+                "thread_id": None,
+                "file_path": normalized_path,
+                "prev_content": None,
+                "new_content": None,
+                "scanner": {"decision": "allow", "reason": "Directory creation requested."},
+            },
+        )
+        return CustomSkillFileEntry(path=normalized_path, type="directory", size=None)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to create directory %s for custom skill %s: %s", request.path, skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create custom skill directory: {str(e)}")
+
+
+@router.post("/skills/custom/{skill_name}/upload", response_model=CustomSkillUploadResponse, summary="Upload Custom Skill Files")
+async def upload_custom_skill_files(
+    skill_name: str,
+    files: list[UploadFile] = File(...),
+    paths: list[str] = Form(...),
+    config: AppConfig = Depends(get_config),
+) -> CustomSkillUploadResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        if len(files) != len(paths):
+            raise HTTPException(status_code=400, detail="Every uploaded file must include a matching path.")
+        storage = get_or_new_skill_storage(app_config=config)
+        storage.ensure_custom_skill_is_editable(skill_name)
+        uploaded_paths: list[str] = []
+        for upload, relative_path in zip(files, paths, strict=True):
+            data = await upload.read()
+            normalized_path = relative_path.replace("\\", "/").lstrip("/")
+            if not normalized_path or normalized_path.endswith("/"):
+                raise HTTPException(status_code=400, detail="Uploaded file paths must include a filename.")
+            try:
+                text_content = data.decode("utf-8")
+            except UnicodeDecodeError:
+                storage.write_custom_skill_bytes(skill_name, normalized_path, data)
+                storage.append_history(
+                    skill_name,
+                    {
+                        "action": "human_upload_file",
+                        "author": "human",
+                        "thread_id": None,
+                        "file_path": normalized_path,
+                        "prev_content": None,
+                        "new_content": None,
+                        "scanner": {"decision": "allow", "reason": "Binary upload."},
+                    },
+                )
+            else:
+                await _write_custom_skill_support_file(
+                    storage=storage,
+                    skill_name=skill_name,
+                    path=normalized_path,
+                    content=text_content,
+                    config=config,
+                    author="human",
+                )
+            uploaded_paths.append(normalized_path)
+        await refresh_skills_system_prompt_cache_async()
+        return CustomSkillUploadResponse(paths=uploaded_paths)
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to upload files for custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload custom skill files: {str(e)}")
+
+
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
 async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
@@ -367,7 +684,7 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
         scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
+        prev_content = storage.read_custom_skill(skill_name) if storage.custom_skill_exists(skill_name) else None
         storage.write_custom_skill(skill_name, SKILL_MD_FILE, request.content)
         storage.append_history(
             skill_name,
@@ -435,6 +752,103 @@ async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(
     except Exception as e:
         logger.error("Failed to read history for %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read history: {str(e)}")
+
+
+@router.get("/skills/custom/{skill_name}/versions", response_model=CustomSkillVersionsResponse, summary="List Custom Skill Versions")
+async def list_custom_skill_versions(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillVersionsResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_versions_dir(skill_name).exists():
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        return CustomSkillVersionsResponse(versions=storage.list_skill_versions(skill_name))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to list versions for %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list versions: {str(e)}")
+
+
+@router.post("/skills/custom/{skill_name}/versions", response_model=dict, summary="Create Custom Skill Version Snapshot")
+async def create_custom_skill_version_snapshot(
+    skill_name: str,
+    request: CustomSkillVersionCreateRequest,
+    config: AppConfig = Depends(get_config),
+) -> dict:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        storage.ensure_custom_skill_is_editable(skill_name)
+        record = storage.create_skill_version(
+            skill_name,
+            action=request.action,
+            author="human",
+            message=request.message,
+            thread_id=request.thread_id,
+        )
+        return record
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to create version snapshot for %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create version snapshot: {str(e)}")
+
+
+@router.get("/skills/custom/{skill_name}/versions/{seq}/files", response_model=CustomSkillFilesResponse, summary="List Custom Skill Version Files")
+async def list_custom_skill_version_files(skill_name: str, seq: int, config: AppConfig = Depends(get_config)) -> CustomSkillFilesResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        files = storage.list_skill_version_files(skill_name, seq)
+        return CustomSkillFilesResponse(files=[CustomSkillFileEntry(**entry) for entry in files])
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to list files for %s version %s: %s", skill_name, seq, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list version files: {str(e)}")
+
+
+@router.get("/skills/custom/{skill_name}/versions/{seq}/file", response_model=CustomSkillFileContentResponse, summary="Read Custom Skill Version File")
+async def read_custom_skill_version_file(
+    skill_name: str,
+    seq: int,
+    path: str,
+    config: AppConfig = Depends(get_config),
+) -> CustomSkillFileContentResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        content = storage.read_skill_version_file(skill_name, seq, path)
+        normalized_path = path.replace("\\", "/").lstrip("/")
+        return CustomSkillFileContentResponse(path=normalized_path, content=content)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to read version file %s for %s@%s: %s", path, skill_name, seq, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to read version file: {str(e)}")
+
+
+@router.post("/skills/custom/{skill_name}/versions/{seq}/restore", response_model=CustomSkillVersionRestoreResponse, summary="Restore Custom Skill Version")
+async def restore_custom_skill_version(skill_name: str, seq: int, config: AppConfig = Depends(get_config)) -> CustomSkillVersionRestoreResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        record = storage.restore_skill_version(skill_name, seq, author="human", thread_id=None)
+        await refresh_skills_system_prompt_cache_async()
+        return CustomSkillVersionRestoreResponse(version=record)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to restore %s to version %s: %s", skill_name, seq, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to restore version: {str(e)}")
 
 
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")

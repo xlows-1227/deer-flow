@@ -6,11 +6,14 @@ import errno
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+
+import yaml
 
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
@@ -19,6 +22,7 @@ from deerflow.skills.types import SkillCategory
 logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+MAX_SKILL_VERSION_SNAPSHOTS = 5
 
 
 class LocalSkillStorage(SkillStorage):
@@ -29,6 +33,7 @@ class LocalSkillStorage(SkillStorage):
         <root>/public/<name>/SKILL.md
         <root>/custom/<name>/SKILL.md
         <root>/custom/.history/<name>.jsonl
+        <root>/custom/.versions/<name>/index.jsonl
     """
 
     def __init__(
@@ -97,7 +102,7 @@ class LocalSkillStorage(SkillStorage):
             tmp_path = Path(tmp_file.name)
         tmp_path.replace(target)
 
-    async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
+    async def ainstall_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
         import zipfile
 
         from deerflow.skills.installer import (
@@ -146,7 +151,7 @@ class LocalSkillStorage(SkillStorage):
             if target.exists():
                 raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, skip_security_scan=skip_security_scan)
 
             with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
                 staging_target = Path(staging_root) / skill_name
@@ -199,3 +204,263 @@ class LocalSkillStorage(SkillStorage):
                 continue
             records.append(json.loads(line))
         return records
+
+    # ------------------------------------------------------------------
+    # Versions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_frontmatter_version_label(skill_md_content: str) -> str | None:
+        """Extract optional frontmatter 'version' from SKILL.md content."""
+        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", skill_md_content, re.DOTALL)
+        if not front_matter_match:
+            return None
+        try:
+            metadata = yaml.safe_load(front_matter_match.group(1))
+        except yaml.YAMLError:
+            return None
+        if not isinstance(metadata, dict):
+            return None
+        raw = metadata.get("version")
+        if raw is None:
+            return None
+        label = str(raw).strip()
+        return label or None
+
+    def _read_versions_index_records_oldest_first(self, name: str) -> list[dict]:
+        index_path = self.get_skill_versions_index_file(name)
+        if not index_path.exists():
+            return []
+        records: list[dict] = []
+        for line in index_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            records.append(json.loads(line))
+        return records
+
+    def _next_version_seq(self, name: str) -> int:
+        records = self._read_versions_index_records_oldest_first(name)
+        max_seq = 0
+        for record in records:
+            seq = record.get("seq")
+            if isinstance(seq, int) and seq > max_seq:
+                max_seq = seq
+        return max_seq + 1
+
+    @staticmethod
+    def _walk_dir_stats(root: Path) -> tuple[int, int]:
+        """Return (file_count, total_size_bytes) for non-hidden files under root."""
+        file_count = 0
+        total_size = 0
+        for current_root, dir_names, file_names in os.walk(root, followlinks=False):
+            dir_names[:] = [d for d in sorted(dir_names) if not d.startswith(".")]
+            for filename in file_names:
+                if filename.startswith("."):
+                    continue
+                file_count += 1
+                try:
+                    total_size += (Path(current_root) / filename).stat().st_size
+                except FileNotFoundError:
+                    continue
+        return file_count, total_size
+
+    def _append_versions_index_record(self, name: str, record: dict) -> None:
+        index_path = self.get_skill_versions_index_file(name)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with index_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False))
+            f.write("\n")
+
+    def _write_versions_index_records_oldest_first(self, name: str, records: list[dict]) -> None:
+        index_path = self.get_skill_versions_index_file(name)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        with index_path.open("w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record, ensure_ascii=False))
+                f.write("\n")
+
+    def _prune_skill_versions(self, name: str) -> None:
+        records = self._read_versions_index_records_oldest_first(name)
+        if len(records) <= MAX_SKILL_VERSION_SNAPSHOTS:
+            return
+
+        newest_records = sorted(
+            (record for record in records if isinstance(record.get("seq"), int)),
+            key=lambda record: record["seq"],
+            reverse=True,
+        )
+        kept_seqs = {record["seq"] for record in newest_records[:MAX_SKILL_VERSION_SNAPSHOTS]}
+        kept_records = [record for record in records if record.get("seq") in kept_seqs]
+        pruned_records = [record for record in records if record.get("seq") not in kept_seqs]
+
+        self._write_versions_index_records_oldest_first(name, kept_records)
+
+        versions_root = self.get_skill_versions_dir(name)
+        for record in pruned_records:
+            seq = record.get("seq")
+            if not isinstance(seq, int):
+                continue
+            version_dir = versions_root / str(seq)
+            if version_dir.exists():
+                shutil.rmtree(version_dir)
+
+    def _create_skill_version_snapshot(
+        self,
+        name: str,
+        *,
+        action: str,
+        author: str,
+        message: str | None = None,
+        thread_id: str | None = None,
+        extra_fields: dict | None = None,
+        prune_after: bool = True,
+    ) -> dict:
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+
+        skill_dir = self.get_custom_skill_dir(normalized_name)
+        if not skill_dir.exists():
+            raise FileNotFoundError(f"Custom skill '{normalized_name}' not found.")
+
+        seq = self._next_version_seq(normalized_name)
+        version_dir = self.get_skill_versions_dir(normalized_name) / str(seq)
+        if version_dir.exists():
+            raise FileExistsError(f"Version snapshot already exists: {version_dir}")
+
+        # Snapshot the full skill directory excluding hidden paths.
+        def _ignore_hidden(_dir: str, entries: list[str]) -> list[str]:
+            return [e for e in entries if e.startswith(".")]
+
+        shutil.copytree(skill_dir, version_dir, ignore=_ignore_hidden)
+
+        # Metadata
+        skill_md = self.read_custom_skill(normalized_name)
+        label = self._extract_frontmatter_version_label(skill_md)
+        file_count, size_bytes = self._walk_dir_stats(version_dir)
+        created_at = datetime.now(UTC).isoformat()
+
+        record: dict = {
+            "seq": seq,
+            "created_at": created_at,
+            "author": author,
+            "action": action,
+            "message": message,
+            "label": label,
+            "thread_id": thread_id,
+            "file_count": file_count,
+            "size_bytes": size_bytes,
+        }
+        if extra_fields:
+            record.update(extra_fields)
+        self._append_versions_index_record(normalized_name, record)
+        if prune_after:
+            self._prune_skill_versions(normalized_name)
+        return record
+
+    def create_skill_version(
+        self,
+        name: str,
+        *,
+        action: str,
+        author: str,
+        message: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict:
+        return self._create_skill_version_snapshot(
+            name,
+            action=action,
+            author=author,
+            message=message,
+            thread_id=thread_id,
+        )
+
+    def list_skill_versions(self, name: str) -> list[dict]:
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        records = self._read_versions_index_records_oldest_first(normalized_name)
+        records.reverse()
+        return records
+
+    def list_skill_version_files(self, name: str, seq: int) -> list[dict[str, str | int | None]]:
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        normalized_seq = self.validate_skill_version_seq(seq)
+        version_dir = self.get_skill_versions_dir(normalized_name) / str(normalized_seq)
+        if not version_dir.exists() or not version_dir.is_dir():
+            raise FileNotFoundError(f"Version {normalized_seq} not found for skill '{normalized_name}'.")
+
+        entries: list[dict[str, str | int | None]] = []
+        for current_root, dir_names, file_names in os.walk(version_dir, followlinks=False):
+            dir_names[:] = sorted(d for d in dir_names if not d.startswith("."))
+            rel_root = Path(current_root).relative_to(version_dir)
+            for directory in sorted(dir_names):
+                rel_path = str(rel_root / directory) if rel_root.parts else directory
+                entries.append({"path": rel_path.replace("\\", "/"), "type": "directory", "size": None})
+            for filename in sorted(file_names):
+                if filename.startswith("."):
+                    continue
+                rel_path = str(rel_root / filename) if rel_root.parts else filename
+                file_path = Path(current_root) / filename
+                entries.append({"path": rel_path.replace("\\", "/"), "type": "file", "size": file_path.stat().st_size})
+        return entries
+
+    def read_skill_version_file(self, name: str, seq: int, relative_path: str) -> str:
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        normalized_seq = self.validate_skill_version_seq(seq)
+        version_dir = self.get_skill_versions_dir(normalized_name) / str(normalized_seq)
+        if not version_dir.exists() or not version_dir.is_dir():
+            raise FileNotFoundError(f"Version {normalized_seq} not found for skill '{normalized_name}'.")
+
+        normalized_path = relative_path.replace("\\", "/").lstrip("/")
+        if Path(normalized_path).suffix.lower() in self._BINARY_READ_SUFFIXES:
+            raise ValueError(f"Binary file '{normalized_path}' cannot be read as text.")
+        target = self.validate_relative_path(normalized_path, version_dir)
+        if not target.is_file():
+            raise FileNotFoundError(f"File '{normalized_path}' not found for skill '{normalized_name}' version {normalized_seq}.")
+        return target.read_text(encoding="utf-8")
+
+    def restore_skill_version(
+        self,
+        name: str,
+        seq: int,
+        *,
+        author: str,
+        thread_id: str | None = None,
+    ) -> dict:
+        normalized_name = self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(normalized_name)
+        normalized_seq = self.validate_skill_version_seq(seq)
+
+        versions_root = self.get_skill_versions_dir(normalized_name)
+        source_dir = versions_root / str(normalized_seq)
+        if not source_dir.exists() or not source_dir.is_dir():
+            raise FileNotFoundError(f"Version {normalized_seq} not found for skill '{normalized_name}'.")
+
+        # Safety: snapshot current state first (if any).
+        if self.custom_skill_exists(normalized_name):
+            self._create_skill_version_snapshot(
+                normalized_name,
+                action="restore",
+                author=author,
+                message=f"pre-restore snapshot (restoring from {normalized_seq})",
+                thread_id=thread_id,
+                prune_after=False,
+            )
+
+        skill_dir = self.get_custom_skill_dir(normalized_name)
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+
+        # Restore current working directory from snapshot.
+        shutil.copytree(source_dir, skill_dir)
+
+        # Record the restored state as a new version snapshot (immutable).
+        return self._create_skill_version_snapshot(
+            normalized_name,
+            action="restore",
+            author=author,
+            message=f"restored from {normalized_seq}",
+            thread_id=thread_id,
+            extra_fields={"restored_from": normalized_seq},
+        )
