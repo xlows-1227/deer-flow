@@ -2,13 +2,19 @@
 
 import type { ChatStatus } from "ai";
 import {
+  AtSignIcon,
   CheckIcon,
   CommandIcon,
   CpuIcon,
+  DatabaseIcon,
   EraserIcon,
+  FileIcon,
+  FileTextIcon,
   GraduationCapIcon,
   HelpCircleIcon,
+  ImageIcon,
   LightbulbIcon,
+  Loader2Icon,
   PaperclipIcon,
   PlusIcon,
   SparklesIcon,
@@ -63,9 +69,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { useConnectors } from "@/core/connectors/hooks";
+import { useFiles } from "@/core/files/hooks";
+import type { FileItem, ReferencedFile } from "@/core/files/type";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useSkills } from "@/core/skills/hooks";
+import { detectMention } from "@/core/skills/mention-picker";
 import {
   detectSlashCommand,
   nextPickerIndex,
@@ -170,9 +180,11 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [connectorMenuOpen, setConnectorMenuOpen] = useState(false);
   const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const { models } = useModels();
   const { skills } = useSkills();
+  const { connectors, isLoading: connectorsLoading } = useConnectors();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -200,6 +212,55 @@ export function InputBox({
   const [slashActive, setSlashActive] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
+
+  // ---- @-mention (file) picker ---------------------------------------------
+  // Mirrors the slash picker, but the trigger is `@` and the candidate list
+  // is the user's file library. When a row is selected, the trailing `@query`
+  // token is removed from the input and the file is added to `referencedFiles`
+  // (rendered as a removable chip above the input, and shipped to the backend
+  // in the message's `referencedFiles` on submit).
+  const [mentionActive, setMentionActive] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionStart, setMentionStart] = useState(-1);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [referencedFiles, setReferencedFiles] = useState<ReferencedFile[]>([]);
+  // Persist the last non-empty mention query so the picker doesn't immediately
+  // flash "no files" while the user is still in the middle of typing.
+  const lastMentionQueryRef = useRef("");
+
+  // We cap the picker at 50 to keep the dropdown snappy. The backend
+  // already supports `q=` for server-side filtering, but client-side
+  // filtering is more responsive for typical library sizes.
+  const {
+    files: libraryFiles,
+    isLoading: libraryLoading,
+    error: libraryError,
+  } = useFiles({ limit: 50 });
+  const mentionCandidates = useMemo<FileItem[]>(() => {
+    if (!mentionActive) {
+      return [];
+    }
+    const needle = mentionQuery.trim().toLowerCase();
+    if (!needle) {
+      return libraryFiles;
+    }
+    return libraryFiles.filter((file) =>
+      file.name.toLowerCase().includes(needle),
+    );
+  }, [mentionActive, mentionQuery, libraryFiles]);
+  const mentionTotalRows = mentionActive ? mentionCandidates.length : 0;
+  const mentionHasNone = mentionActive && mentionCandidates.length === 0;
+  // Empty library state: the picker is up, no query, and the fetch returned
+  // no files. We use this to surface a friendlier "no files yet" hint.
+  const mentionLibraryEmpty =
+    mentionActive &&
+    !mentionQuery &&
+    !libraryLoading &&
+    !libraryError &&
+    libraryFiles.length === 0;
+  // Track which file is currently in flight so we can avoid double-adding on
+  // rapid Enter presses. The id is the library `path` — unique per file.
+  const mentionPickingRef = useRef(false);
 
   // Combined command set: built-in + third-party, deduplicated by id
   // (built-ins win since they are registered first and registry is
@@ -280,6 +341,37 @@ export function InputBox({
     [selectedModel],
   );
 
+  const activeConnectors = useMemo(
+    () => connectors.filter((connector) => connector.status === "active"),
+    [connectors],
+  );
+  const selectedConnectorId = context.connector_ids?.[0];
+  const selectedConnector = useMemo(
+    () =>
+      selectedConnectorId
+        ? activeConnectors.find(
+            (connector) => connector.id === selectedConnectorId,
+          )
+        : undefined,
+    [activeConnectors, selectedConnectorId],
+  );
+
+  useEffect(() => {
+    if (connectorsLoading || !selectedConnectorId || selectedConnector) {
+      return;
+    }
+    onContextChange?.({
+      ...context,
+      connector_ids: undefined,
+    });
+  }, [
+    connectorsLoading,
+    context,
+    onContextChange,
+    selectedConnector,
+    selectedConnectorId,
+  ]);
+
   const handleModelSelect = useCallback(
     (model_name: string) => {
       const model = models.find((m) => m.name === model_name);
@@ -333,6 +425,23 @@ export function InputBox({
       });
       setSkillMenuOpen(false);
       // Focus back to textarea so user can keep typing
+      setTimeout(() => {
+        const ta = document.querySelector<HTMLTextAreaElement>(
+          "textarea[name='message']",
+        );
+        ta?.focus();
+      }, 0);
+    },
+    [onContextChange, context],
+  );
+
+  const handleConnectorSelect = useCallback(
+    (connectorId: string | undefined) => {
+      onContextChange?.({
+        ...context,
+        connector_ids: connectorId ? [connectorId] : undefined,
+      });
+      setConnectorMenuOpen(false);
       setTimeout(() => {
         const ta = document.querySelector<HTMLTextAreaElement>(
           "textarea[name='message']",
@@ -430,7 +539,34 @@ export function InputBox({
         onStop?.();
         return;
       }
-      if (!message.text.trim() && message.files.length === 0) {
+      // Merge in the @-picked files. The form-level `message` only knows
+      // about the textarea text and the *uploaded* attachments; the
+      // mention-picker state lives here, so we tack it on at submit time.
+      // The recipient (`useThreadStream`) reads `referencedFiles` and
+      // forwards them as `additionalKwargs.referenced_files`.
+      //
+      // IMPORTANT: clear the chip strip *eagerly*, before the message even
+      // goes out. The message-list will surface the same picks in the
+      // human-message bubble (the optimistic message copies
+      // `additional_kwargs.referenced_files` straight through), so a
+      // delayed clear here causes a 1-frame "chip above input + chip in
+      // bubble" duplicate that the eye picks up on a new chat.
+      const submittedReferencedFiles = referencedFiles;
+      if (submittedReferencedFiles.length > 0) {
+        setReferencedFiles([]);
+      }
+      const enrichedMessage: PromptInputMessage = {
+        ...message,
+        referencedFiles:
+          submittedReferencedFiles.length > 0
+            ? submittedReferencedFiles
+            : undefined,
+      };
+      if (
+        !enrichedMessage.text.trim() &&
+        enrichedMessage.files.length === 0 &&
+        (enrichedMessage.referencedFiles?.length ?? 0) === 0
+      ) {
         return;
       }
       setFollowups([]);
@@ -450,18 +586,41 @@ export function InputBox({
         });
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
-            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+            Promise.resolve(onSubmit?.(enrichedMessage))
+              .then(() => {
+                resolve();
+              })
+              .catch((err: unknown) => {
+                // Restore the chip strip on failure so the user can
+                // retry without re-@ing the files.
+                if (submittedReferencedFiles.length > 0) {
+                  setReferencedFiles(submittedReferencedFiles);
+                }
+                reject(err instanceof Error ? err : new Error(String(err)));
+              });
           }, 0);
         });
       }
 
-      return onSubmit?.(message);
+      const result = onSubmit?.(enrichedMessage);
+      if (result instanceof Promise) {
+        return result.catch((err: unknown) => {
+          // Restore the chip strip on failure so the user can retry
+          // without re-@ing the files.
+          if (submittedReferencedFiles.length > 0) {
+            setReferencedFiles(submittedReferencedFiles);
+          }
+          throw err instanceof Error ? err : new Error(String(err));
+        });
+      }
+      return result;
     },
     [
       context,
       onContextChange,
       onSubmit,
       onStop,
+      referencedFiles,
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
@@ -558,6 +717,121 @@ export function InputBox({
     }
   }, [textInput.value, slashActive, slashQuery]);
 
+  // Keep the @-mention picker in sync with the current text input value.
+  // We deliberately give `/` priority over `@` — if the user is typing a
+  // slash command the mention picker stays closed to avoid double overlays.
+  useEffect(() => {
+    const match = detectMention(textInput.value ?? "");
+    if (!match.active || slashActive) {
+      if (mentionActive) {
+        setMentionActive(false);
+        setMentionQuery("");
+        setMentionStart(-1);
+        setMentionIndex(0);
+      }
+      return;
+    }
+    if (!mentionActive) {
+      setMentionActive(true);
+    }
+    if (match.query !== mentionQuery) {
+      setMentionQuery(match.query);
+      lastMentionQueryRef.current = match.query;
+      // Reset highlight to first match when the query changes.
+      setMentionIndex(0);
+    }
+    if (match.start !== mentionStart) {
+      setMentionStart(match.start);
+    }
+  }, [textInput.value, mentionActive, mentionQuery, mentionStart, slashActive]);
+
+  // When the candidate list shrinks (e.g. user types more), clamp the
+  // highlighted mention index so it always points at a valid item.
+  useEffect(() => {
+    if (!mentionActive) {
+      return;
+    }
+    if (mentionIndex >= mentionTotalRows) {
+      setMentionIndex(mentionTotalRows > 0 ? 0 : -1);
+    }
+  }, [mentionActive, mentionTotalRows, mentionIndex]);
+
+  // Remove a referenced file by id (the file's library `path`).
+  const removeReferencedFile = useCallback((id: string) => {
+    setReferencedFiles((prev) => prev.filter((f) => f.id !== id));
+  }, []);
+
+  // Apply the mention candidate at `mentionIndex`. Removes the typed
+  // `@<query>` token from the text input (replacing with a single trailing
+  // space so the user can keep typing their sentence), and adds the
+  // picked file to the referenced-files chip strip.
+  const selectMentionCandidateByIndex = useCallback(
+    (index: number) => {
+      if (!mentionActive || mentionPickingRef.current) {
+        return;
+      }
+      const file = mentionCandidates[index];
+      if (!file) {
+        return;
+      }
+      mentionPickingRef.current = true;
+      try {
+        const current = textInput.value ?? "";
+        // Drop the `@<query>` token, keep everything before and after it.
+        // We always append a single space after the deletion so the user's
+        // cursor doesn't sit glued to whatever the previous character was.
+        const before = current.slice(0, mentionStart);
+        const after = current.slice(mentionStart + 1 + mentionQuery.length);
+        // If the char right after our token is a space, don't add another
+        // one — keeps double-spaces out of the input.
+        const needsSpace = after.length > 0 && !/^\s/.test(after);
+        const trailing = needsSpace ? " " : "";
+        const newValue = before + trailing + after;
+        textInput.setInput(newValue);
+        // Focus the textarea and put the caret at the end of the trailing
+        // space we just inserted, so the user can keep typing naturally.
+        requestAnimationFrame(() => {
+          const ta = document.querySelector<HTMLTextAreaElement>(
+            "textarea[name='message']",
+          );
+          if (ta) {
+            const caret = (before + trailing).length;
+            ta.focus();
+            ta.setSelectionRange(caret, caret);
+          }
+        });
+        setReferencedFiles((prev) => {
+          if (prev.some((f) => f.id === file.id)) {
+            return prev;
+          }
+          const ref: ReferencedFile = {
+            id: file.id,
+            name: file.name,
+            path: file.path,
+            mime_type: file.mime_type,
+            extension: file.extension,
+            size: file.size,
+          };
+          return [...prev, ref];
+        });
+        // Close the picker; the `@<query>` is gone so it would auto-close
+        // on the next effect tick anyway, but doing it eagerly avoids a
+        // 1-frame flash of the overlay.
+        setMentionActive(false);
+        setMentionQuery("");
+        setMentionStart(-1);
+        setMentionIndex(0);
+      } finally {
+        // Release the lock on the next tick so rapid Enter presses after a
+        // pick don't get dropped.
+        requestAnimationFrame(() => {
+          mentionPickingRef.current = false;
+        });
+      }
+    },
+    [mentionActive, mentionCandidates, mentionQuery, mentionStart, textInput],
+  );
+
   // When the candidate list shrinks (e.g. user types more), clamp the
   // highlighted index so it always points at a valid item.
   useEffect(() => {
@@ -623,6 +897,79 @@ export function InputBox({
     slashHasNone,
     slashIndex,
     slashTotalRows,
+    textInput,
+  ]);
+
+  // Capture-phase keydown handler for the @-mention picker. Same pattern as
+  // the slash picker: run before the textarea's own Enter handler so the
+  // picker can claim the keystroke.
+  useEffect(() => {
+    const root = promptRootRef.current;
+    if (!root) {
+      return;
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!mentionActive) {
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        setMentionIndex((prev) =>
+          nextPickerIndex(prev, mentionTotalRows, "down"),
+        );
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setMentionIndex((prev) =>
+          nextPickerIndex(prev, mentionTotalRows, "up"),
+        );
+      } else if (e.key === "Enter") {
+        // Intercept Enter only when there's something to pick; if the
+        // library is empty or filtered to zero, let the textarea submit
+        // the message as usual.
+        if (mentionHasNone) {
+          // Close the picker so the user can submit their message.
+          e.preventDefault();
+          e.stopPropagation();
+          setMentionActive(false);
+          setMentionQuery("");
+          setMentionStart(-1);
+          setMentionIndex(0);
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const target = mentionIndex === -1 ? 0 : mentionIndex;
+        selectMentionCandidateByIndex(target);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        // Escape removes the typed `@<query>` so the user lands back on
+        // their message draft, same as it works for the slash picker.
+        const current = textInput.value ?? "";
+        const before = current.slice(0, mentionStart);
+        const after = current.slice(mentionStart + 1 + mentionQuery.length);
+        textInput.setInput(before + after);
+        setMentionActive(false);
+        setMentionQuery("");
+        setMentionStart(-1);
+        setMentionIndex(0);
+      }
+    };
+    root.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      root.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [
+    promptRootRef,
+    selectMentionCandidateByIndex,
+    mentionActive,
+    mentionHasNone,
+    mentionIndex,
+    mentionTotalRows,
+    mentionQuery,
+    mentionStart,
     textInput,
   ]);
 
@@ -775,6 +1122,54 @@ export function InputBox({
           </div>
         </div>
       )}
+      {mentionActive && (
+        <div
+          aria-label={t.inputBox.mentionFilePickerTitle}
+          className="bg-popover text-popover-foreground absolute right-0 bottom-full left-0 z-50 mb-2 max-h-72 overflow-y-auto rounded-lg border p-1 shadow-md"
+          data-testid="mention-file-picker"
+          role="listbox"
+        >
+          <div className="text-muted-foreground flex items-center px-2 py-1 text-[11px] font-medium">
+            <AtSignIcon className="mr-1 size-3" />
+            <span>{t.inputBox.mentionFilePickerTitle}</span>
+            <span className="ml-2 font-normal">
+              {mentionQuery ? `@ ${mentionQuery}` : "@"}
+            </span>
+          </div>
+          {libraryLoading ? (
+            <div className="text-muted-foreground flex items-center gap-2 px-2 py-2 text-xs">
+              <Loader2Icon className="size-3 animate-spin" />
+              <span>{t.inputBox.mentionFilePickerLoading}</span>
+            </div>
+          ) : libraryError ? (
+            <div className="text-muted-foreground px-2 py-2 text-xs">
+              {t.inputBox.mentionFilePickerError}
+            </div>
+          ) : mentionLibraryEmpty ? (
+            <div className="text-muted-foreground px-2 py-2 text-xs">
+              {t.inputBox.mentionFilePickerNoFiles}
+            </div>
+          ) : mentionCandidates.length === 0 ? (
+            <div className="text-muted-foreground px-2 py-2 text-xs">
+              {t.inputBox.mentionFilePickerEmpty}
+            </div>
+          ) : (
+            mentionCandidates.map((file, i) => (
+              <MentionFilePickerRow
+                key={file.id}
+                active={mentionIndex === i}
+                file={file}
+                onHover={() => setMentionIndex(i)}
+                onSelect={() => selectMentionCandidateByIndex(i)}
+                testId={`mention-file-row-${file.id}`}
+              />
+            ))
+          )}
+          <div className="text-muted-foreground border-t px-2 pt-1 pb-0.5 text-[10px]">
+            {t.inputBox.mentionFilePickerHint}
+          </div>
+        </div>
+      )}
       <PromptInput
         className={cn(
           "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
@@ -796,6 +1191,22 @@ export function InputBox({
         <PromptInputAttachments>
           {(attachment) => <PromptInputAttachment data={attachment} />}
         </PromptInputAttachments>
+        {referencedFiles.length > 0 && (
+          <div
+            aria-label={t.inputBox.mentionFilePickerTitle}
+            className="flex w-full flex-wrap items-center gap-1.5 px-3 pt-2"
+            data-testid="referenced-file-chips"
+          >
+            {referencedFiles.map((file) => (
+              <ReferencedFileChip
+                key={file.id}
+                file={file}
+                onRemove={() => removeReferencedFile(file.id)}
+                removeLabel={t.inputBox.referencedFileChipRemove}
+              />
+            ))}
+          </div>
+        )}
         <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
           <PromptInputTextarea
             className={cn("size-full")}
@@ -1099,6 +1510,93 @@ export function InputBox({
                           <div className="ml-auto size-4" />
                         )}
                       </PromptInputActionMenuItem>
+                    </PromptInputActionMenu>
+                  </DropdownMenuGroup>
+                </PromptInputActionMenuContent>
+              </PromptInputActionMenu>
+            )}
+            {activeConnectors.length > 0 && (
+              <PromptInputActionMenu
+                open={connectorMenuOpen}
+                onOpenChange={setConnectorMenuOpen}
+              >
+                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                  <DatabaseIcon className="size-3" />
+                  <div className="text-xs font-normal">
+                    {selectedConnector
+                      ? (selectedConnector.display_name ??
+                        selectedConnector.name)
+                      : t.inputBox.connector}
+                  </div>
+                  {selectedConnectorId && (
+                    <span
+                      className="ml-1 inline-flex cursor-pointer items-center"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleConnectorSelect(undefined);
+                      }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    >
+                      <XIcon className="text-muted-foreground hover:text-foreground size-3" />
+                    </span>
+                  )}
+                </PromptInputActionMenuTrigger>
+                <PromptInputActionMenuContent className="w-72">
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel className="text-muted-foreground text-xs">
+                      {t.inputBox.connector}
+                    </DropdownMenuLabel>
+                    <PromptInputActionMenu>
+                      <PromptInputActionMenuItem
+                        className={cn(
+                          !selectedConnectorId
+                            ? "text-accent-foreground"
+                            : "text-muted-foreground/65",
+                        )}
+                        onSelect={() => handleConnectorSelect(undefined)}
+                      >
+                        <div className="flex flex-col gap-1">
+                          <div className="text-xs">
+                            {t.inputBox.noConnector}
+                          </div>
+                          <div className="text-muted-foreground text-[11px]">
+                            {t.inputBox.noConnectorDescription}
+                          </div>
+                        </div>
+                        {!selectedConnectorId ? (
+                          <CheckIcon className="ml-auto size-4" />
+                        ) : (
+                          <div className="ml-auto size-4" />
+                        )}
+                      </PromptInputActionMenuItem>
+                      {activeConnectors.map((connector) => (
+                        <PromptInputActionMenuItem
+                          key={connector.id}
+                          className={cn(
+                            selectedConnectorId === connector.id
+                              ? "text-accent-foreground"
+                              : "text-muted-foreground/65",
+                          )}
+                          onSelect={() => handleConnectorSelect(connector.id)}
+                        >
+                          <div className="flex min-w-0 flex-col gap-1">
+                            <div className="truncate text-xs">
+                              {connector.display_name ?? connector.name}
+                            </div>
+                            <div className="text-muted-foreground truncate text-[11px]">
+                              {connector.type}
+                              {typeof connector.config.database === "string"
+                                ? ` / ${connector.config.database}`
+                                : ""}
+                            </div>
+                          </div>
+                          {selectedConnectorId === connector.id ? (
+                            <CheckIcon className="ml-auto size-4" />
+                          ) : (
+                            <div className="ml-auto size-4" />
+                          )}
+                        </PromptInputActionMenuItem>
+                      ))}
                     </PromptInputActionMenu>
                   </DropdownMenuGroup>
                 </PromptInputActionMenuContent>
@@ -1452,4 +1950,102 @@ function slashCommandIcon(kind: SlashCommand["kind"]): ReactNode {
       return null;
     }
   }
+}
+
+// ----------------------------------------------------------------------------
+// @-mention (file) picker UI
+// ----------------------------------------------------------------------------
+
+/**
+ * Pick a Lucide icon for a file based on its MIME type / extension. We use
+ * this in the picker row so the user can scan the list by shape, not just
+ * filename. Order: image -> audio -> pdf/markdown/text -> other.
+ */
+function mentionFileIcon(file: FileItem): ReactNode {
+  const mime = file.mime_type ?? "";
+  if (mime.startsWith("image/")) {
+    return <ImageIcon className="size-4 opacity-60" />;
+  }
+  if (mime.startsWith("audio/")) {
+    return <FileIcon className="size-4 opacity-60" />;
+  }
+  if (
+    mime.startsWith("text/") ||
+    file.extension === ".md" ||
+    file.extension === ".txt"
+  ) {
+    return <FileTextIcon className="size-4 opacity-60" />;
+  }
+  return <FileIcon className="size-4 opacity-60" />;
+}
+
+type MentionFilePickerRowProps = {
+  file: FileItem;
+  active: boolean;
+  testId: string;
+  onSelect: () => void;
+  onHover: () => void;
+};
+
+function MentionFilePickerRow({
+  file,
+  active,
+  testId,
+  onSelect,
+  onHover,
+}: MentionFilePickerRowProps) {
+  return (
+    <button
+      className={cn(
+        "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+        active
+          ? "bg-accent text-accent-foreground"
+          : "text-popover-foreground hover:bg-accent/60",
+      )}
+      data-active={active ? "true" : "false"}
+      data-testid={testId}
+      onClick={onSelect}
+      onMouseEnter={onHover}
+      type="button"
+    >
+      <div className="mt-0.5 shrink-0">{mentionFileIcon(file)}</div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate font-medium">{file.name}</div>
+        <div className="text-muted-foreground mt-0.5 line-clamp-1 font-mono text-[10px]">
+          {file.path}
+        </div>
+      </div>
+      {active && <CheckIcon className="mt-0.5 size-4 shrink-0" />}
+    </button>
+  );
+}
+
+type ReferencedFileChipProps = {
+  file: ReferencedFile;
+  onRemove: () => void;
+  removeLabel: string;
+};
+
+function ReferencedFileChip({
+  file,
+  onRemove,
+  removeLabel,
+}: ReferencedFileChipProps) {
+  return (
+    <span
+      className="group bg-accent/40 text-accent-foreground inline-flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium"
+      data-testid={`referenced-file-chip-${file.id}`}
+    >
+      <FileTextIcon className="size-3 shrink-0" />
+      <span className="truncate">{file.name}</span>
+      <button
+        aria-label={removeLabel}
+        className="text-muted-foreground hover:text-foreground -mr-0.5 ml-0.5 inline-flex shrink-0 items-center rounded-sm p-0.5"
+        onClick={onRemove}
+        type="button"
+      >
+        <XIcon className="size-3" />
+      </button>
+    </span>
+  );
 }

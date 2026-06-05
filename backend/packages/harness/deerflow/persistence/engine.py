@@ -54,6 +54,65 @@ async def _auto_create_postgres_db(url: str) -> None:
         await maint_engine.dispose()
 
 
+async def _run_pending_alembic_revisions(engine: AsyncEngine, backend: str) -> None:
+    """Run any pending Alembic revisions on the live engine.
+
+    The dev path (a SQLite file that has been around since before the
+    model gained new columns) needs the column to be physically added.
+    ``Base.metadata.create_all`` is a no-op for already-existing tables,
+    so it would leave the ORM referencing a column the database doesn't
+    have, and every query would 500. This helper applies any revisions
+    that the env.py scripts haven't already run, in place.
+
+    Implementation note: Alembic's env.py in this project is hard-coded
+    to ``create_async_engine`` and only supports online migrations
+    through async DBAPI. We hand the engine URL to ``command.upgrade``
+    directly — that triggers the full env.py online path (including
+    revision bookkeeping) without us needing to poke at the async
+    connection ourselves.
+    """
+    try:
+        from alembic import command
+        from alembic.config import Config
+    except ImportError:
+        # Alembic not installed in this environment (shouldn't happen in
+        # normal installs). Skip silently rather than fail startup.
+        logger.debug("Alembic not available; skipping auto-migration")
+        return
+
+    from pathlib import Path
+
+    migrations_dir = Path(__file__).resolve().parent / "migrations"
+    if not (migrations_dir / "alembic.ini").exists():
+        return
+
+    # Alembic's env.py is hard-coded to ``create_async_engine`` from
+    # ``sqlalchemy.ext.asyncio`` so we MUST hand it an async URL —
+    # stripping ``+aiosqlite`` to fall back to the sync driver would
+    # fail with "asyncio extension requires an async driver".
+    async_url = engine.url.render_as_string(hide_password=False)
+
+    cfg = Config(str(migrations_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(migrations_dir))
+    cfg.set_main_option("sqlalchemy.url", async_url)
+
+    try:
+        # ``command.upgrade`` is blocking; run it on a thread to keep
+        # the asyncio loop responsive. ``upgrade`` itself is a no-op
+        # when the database is already at head, so calling it on
+        # every startup is safe.
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, command.upgrade, cfg, "head")
+        logger.info("Auto-applied Alembic revisions on %s backend (url=%s)", backend, async_url)
+    except Exception as exc:
+        # Don't crash startup — the column may already be in place or the
+        # migration may be inapplicable. Surface the error so the operator
+        # can intervene but keep the service up.
+        logger.exception("Auto Alembic upgrade failed: %s", exc)
+
+
 async def init_engine(
     backend: str,
     *,
@@ -161,6 +220,13 @@ async def init_engine(
                 await conn.run_sync(Base.metadata.create_all)
         else:
             raise
+
+    # ``create_all`` only creates tables that don't exist; it does NOT
+    # add new columns to an already-existing table. For dev convenience
+    # we then run any pending Alembic revisions so that, e.g., a new
+    # ``credential_username`` column shows up on a SQLite database that
+    # was created before that field was added to the model.
+    await _run_pending_alembic_revisions(_engine, backend)
 
     logger.info("Persistence engine initialized: backend=%s", backend)
 

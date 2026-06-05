@@ -3,6 +3,7 @@
 import {
   BellIcon,
   BrainIcon,
+  DatabaseIcon,
   PaletteIcon,
   PlugIcon,
   SparklesIcon,
@@ -19,6 +20,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
+import { ConnectorSettingsPage } from "@/components/workspace/settings/connector-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
@@ -30,6 +32,7 @@ type SettingsSection =
   | "account"
   | "appearance"
   | "memory"
+  | "connectors"
   | "tools"
   | "skills"
   | "notification";
@@ -74,6 +77,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.memory,
         icon: BrainIcon,
       },
+      {
+        id: "connectors",
+        label: t.settings.sections.connectors,
+        icon: DatabaseIcon,
+      },
       { id: "tools", label: t.settings.sections.tools, icon: PlugIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
     ],
@@ -81,6 +89,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.account,
       t.settings.sections.appearance,
       t.settings.sections.memory,
+      t.settings.sections.connectors,
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
@@ -131,6 +140,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
+              {activeSection === "connectors" && <ConnectorSettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (
                 <SkillSettingsPage

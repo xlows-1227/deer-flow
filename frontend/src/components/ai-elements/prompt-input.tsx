@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/select";
 import type { PromptInputFilePart } from "@/core/uploads";
 import { splitUnsupportedUploadFiles } from "@/core/uploads";
+import type { ReferencedFile } from "@/core/files/type";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus } from "ai";
@@ -442,6 +443,17 @@ export const PromptInputActionAddAttachments = ({
 export type PromptInputMessage = {
   text: string;
   files: PromptInputFilePart[];
+  /**
+   * Files the user attached via the `@` mention picker. These are references
+   * to files that already exist in the user's library — they are *not*
+   * re-uploaded. The host can ship them to the backend via
+   * `additionalKwargs.referenced_files` so the model can read them.
+   *
+   * Optional: when absent, callers should treat the message as having no
+   * `@`-referenced files (this keeps the existing onSubmit contract
+   * backwards compatible).
+   */
+  referencedFiles?: ReferencedFile[];
 };
 
 export type PromptInputProps = Omit<

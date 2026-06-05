@@ -947,6 +947,30 @@ database:
   sqlite_dir: .deer-flow/data
 
 # ============================================================================
+# Connector Platform Configuration
+# ============================================================================
+# Connectors are user-managed external resources such as business databases,
+# document systems, internal APIs, or object stores. The first version ships
+# read-only database connectors for MySQL and StarRocks.
+#
+# Secrets are referenced, not stored in prompts or tool results. With the env
+# provider, set connection URLs in .env and reference the variable name here
+# when creating connector instances via API/UI.
+connectors:
+  enabled: false
+  enabled_types:
+    - mysql
+    - starrocks
+  secret_store:
+    provider: env
+  default_policy:
+    database:
+      mode: read_only
+      max_rows: 10000
+      statement_timeout_ms: 30000
+      require_limit: true
+
+# ============================================================================
 # Run Events Configuration
 # ============================================================================
 # Storage backend for run events (messages + execution traces).

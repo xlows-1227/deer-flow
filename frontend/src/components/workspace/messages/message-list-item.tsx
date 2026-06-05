@@ -1,6 +1,8 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
+  ExternalLinkIcon,
   FileIcon,
+  LibraryIcon,
   Loader2Icon,
   ThumbsDownIcon,
   ThumbsUpIcon,
@@ -35,6 +37,8 @@ import {
   type FeedbackData,
 } from "@/core/api/feedback";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { userFileUrl } from "@/core/files/api";
+import type { ReferencedFile } from "@/core/files/type";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -272,6 +276,25 @@ function MessageContent_({
     return files as FileInMessage[];
   }, [message.additional_kwargs?.files, rawContent]);
 
+  // `@`-picked files from the chat input. The frontend ships them in the
+  // human message's `additional_kwargs.referenced_files`; we surface them
+  // as chips above the message text so the user has a visual reminder of
+  // which library files they attached to this turn.
+  const referencedFiles = useMemo<ReferencedFile[]>(() => {
+    const raw = message.additional_kwargs?.referenced_files;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return [];
+    }
+    return raw.filter(
+      (entry): entry is ReferencedFile =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof entry.id === "string" &&
+        typeof entry.name === "string" &&
+        typeof entry.path === "string",
+    );
+  }, [message.additional_kwargs?.referenced_files]);
+
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
       return rawContent ? stripUploadedFilesTag(rawContent) : "";
@@ -282,6 +305,11 @@ function MessageContent_({
   const filesList =
     files && files.length > 0 ? (
       <RichFilesList files={files} threadId={threadId} />
+    ) : null;
+
+  const referencedFilesList =
+    referencedFiles.length > 0 ? (
+      <ReferencedFilesList files={referencedFiles} />
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
@@ -326,6 +354,7 @@ function MessageContent_({
     return (
       <div className={cn("ml-auto flex flex-col gap-2", className)}>
         {filesList}
+        {referencedFilesList}
         {messageResponse && (
           <AIElementMessageContent className="w-fit">
             {messageResponse}
@@ -511,6 +540,82 @@ function RichFileCard({
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * List of `@`-referenced files from the user document library. Mirrors
+ * {@link RichFilesList} visually but renders library files (no upload
+ * state, no per-message sandbox path) and links each card to the file
+ * URL on the backend rather than to a per-thread artifact.
+ */
+function ReferencedFilesList({ files }: { files: ReferencedFile[] }) {
+  if (files.length === 0) return null;
+  return (
+    <div className="flex flex-wrap justify-end gap-2" data-testid="referenced-files-in-message">
+      {files.map((file) => (
+        <ReferencedFileCard key={file.id} file={file} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Single library file card. Images get a thumbnail (clicking opens the
+ * file in a new tab); other files get a compact name + type + size card
+ * with a "From library" badge so the user can tell the source at a
+ * glance.
+ */
+function ReferencedFileCard({ file }: { file: ReferencedFile }) {
+  const { t } = useI18n();
+  const fileUrl = userFileUrl(file.path);
+  const isImage = isImageFile(file.name);
+
+  if (isImage) {
+    return (
+      <a
+        href={fileUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group border-border/40 relative block overflow-hidden rounded-lg border"
+      >
+        <img
+          src={fileUrl}
+          alt={file.name}
+          className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
+        />
+      </a>
+    );
+  }
+
+  return (
+    <a
+      href={fileUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="bg-background border-border/40 hover:border-border hover:bg-accent/30 flex max-w-50 min-w-30 cursor-pointer flex-col gap-1 rounded-lg border p-3 shadow-sm transition-colors"
+      title={t.inputBox.referencedFileOpenInLibrary}
+    >
+      <div className="flex items-start gap-2">
+        <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
+        <span className="text-foreground truncate text-sm font-medium" title={file.name}>
+          {file.name}
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <Badge
+          variant="secondary"
+          className="rounded px-1.5 py-0.5 text-[10px] font-normal"
+        >
+          <LibraryIcon className="mr-0.5 size-2.5" />
+          {t.inputBox.referencedFileFromLibrary}
+        </Badge>
+        <span className="text-muted-foreground flex items-center gap-0.5 text-[10px]">
+          {file.size > 0 ? formatBytes(file.size) : getFileTypeLabel(file.name)}
+          <ExternalLinkIcon className="size-2.5" />
+        </span>
+      </div>
+    </a>
   );
 }
 

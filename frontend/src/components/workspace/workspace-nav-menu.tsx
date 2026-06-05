@@ -27,7 +27,7 @@ function NavMenuButtonContent({ t }: { t: ReturnType<typeof useI18n>["t"] }) {
 export function WorkspaceNavMenu() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDefaultSection, setSettingsDefaultSection] = useState<
-    "appearance" | "memory" | "tools" | "skills" | "notification"
+    "appearance" | "memory" | "connectors" | "tools" | "skills" | "notification"
   >("appearance");
   const [mounted, setMounted] = useState(false);
   const { t } = useI18n();

@@ -202,6 +202,23 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    </details>
 
+   > [!IMPORTANT]
+   > If you enable database connectors and store connector credentials inline, set `DEERFLOW_CONNECTOR_KEY` before creating connectors. This Fernet key encrypts inline connector passwords at rest. Without it, DeerFlow falls back to a development-only fixed key, which is not safe for production.
+   >
+   > Generate a key:
+   >
+   > ```bash
+   > python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   > ```
+   >
+   > Then set it in the backend environment, for example in `.env`:
+   >
+   > ```env
+   > DEERFLOW_CONNECTOR_KEY=your-generated-fernet-key
+   > ```
+   >
+   > If you change this key after creating inline connectors, existing encrypted passwords cannot be decrypted with the new key. Re-enter the connector password or migrate/re-encrypt the stored credentials.
+
 ### Running the Application
 
 #### Deployment Sizing

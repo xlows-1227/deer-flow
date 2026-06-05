@@ -8,6 +8,8 @@ import {
   getMessageGroups,
   getStreamingMessageLookup,
   isAssistantMessageGroupStreaming,
+  stripInternalMarkers,
+  stripUploadedFilesTag,
 } from "@/core/messages/utils";
 
 test("extracts trailing numbered clarification choices", () => {
@@ -407,4 +409,72 @@ test("keeps streaming assistant hidden when a hidden control message follows it"
       ),
     ),
   ).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// stripUploadedFilesTag — covers the <uploaded_files> AND <referenced_files>
+// injection blocks. Both are produced by backend middlewares and addressed
+// at the model; they must never leak into the chat UI.
+// ---------------------------------------------------------------------------
+
+test("stripUploadedFilesTag removes <uploaded_files> blocks", () => {
+  const content = [
+    "<uploaded_files>The following files were uploaded in this message:",
+    "- notes.txt (1.0 KB)",
+    "</uploaded_files>",
+    "",
+    "summarise this",
+  ].join("\n");
+  expect(stripUploadedFilesTag(content)).toBe("summarise this");
+});
+
+test("stripUploadedFilesTag removes <referenced_files> blocks", () => {
+  // Mirrors what `ReferencedFilesMiddleware` injects for the chat
+  // `@`-mention picker.
+  const content = [
+    "<referenced_files>The following files were referenced from your library via `@` mentions.",
+    "### `notes.md` (1.0 KB)",
+    "```",
+    "hello world",
+    "```",
+    "</referenced_files>",
+    "",
+    "总结一下",
+  ].join("\n");
+  expect(stripUploadedFilesTag(content)).toBe("总结一下");
+});
+
+test("stripUploadedFilesTag removes both blocks in the same message", () => {
+  const content = [
+    "<uploaded_files>- a.txt (1 B)</uploaded_files>",
+    "<referenced_files>- b.md (1 B)</referenced_files>",
+    "",
+    "user text",
+  ].join("\n");
+  expect(stripUploadedFilesTag(content)).toBe("user text");
+});
+
+test("stripUploadedFilesTag is a no-op when no injection blocks are present", () => {
+  const content = "user wrote this themselves";
+  expect(stripUploadedFilesTag(content)).toBe(content);
+});
+
+test("stripUploadedFilesTag leaves a user-typed <memory> tag alone", () => {
+  // The narrow stripper intentionally does NOT touch user copy. The
+  // defence-in-depth ``stripInternalMarkers`` does — used by the export
+  // path. Tests below cover both.
+  const content = "why is <memory>empty in your reply?";
+  expect(stripUploadedFilesTag(content)).toBe(content);
+});
+
+test("stripInternalMarkers scrubs every backend marker (defence in depth)", () => {
+  const content = [
+    "<uploaded_files>x</uploaded_files>",
+    "<referenced_files>y</referenced_files>",
+    "<system-reminder>z</system-reminder>",
+    "<memory>w</memory>",
+    "<current_date>t</current_date>",
+    "tail",
+  ].join("\n");
+  expect(stripInternalMarkers(content)).toBe("tail");
 });
