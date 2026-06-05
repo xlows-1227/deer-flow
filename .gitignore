@@ -41,6 +41,7 @@ skills/custom/*
 logs/
 log/
 debug.log
+tmp/
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/

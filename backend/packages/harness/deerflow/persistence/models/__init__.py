@@ -16,6 +16,7 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.feedback.model import FeedbackRow
+from deerflow.persistence.connector.model import ConnectorAuditLogRow, ConnectorGrantRow, ConnectorInstanceRow, ConnectorMetadataCacheRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task.model import ScheduledTaskRow
@@ -26,6 +27,10 @@ from deerflow.persistence.user.model import UserRow
 
 __all__ = [
     "FeedbackRow",
+    "ConnectorAuditLogRow",
+    "ConnectorGrantRow",
+    "ConnectorInstanceRow",
+    "ConnectorMetadataCacheRow",
     "RunEventRow",
     "RunRow",
     "ScheduledTaskRow",

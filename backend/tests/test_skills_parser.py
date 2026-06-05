@@ -100,6 +100,27 @@ def test_parse_allowed_tools_list(tmp_path):
     assert skill.allowed_tools == ["bash", "read_file"]
 
 
+def test_parse_connector_requirements(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        """
+name: my-skill
+description: Test
+requires:
+  connectors:
+    - capability: database.query
+      purpose: Analyze metrics
+""".strip(),
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.connector_requirements is not None
+    assert skill.connector_requirements[0].capability == "database.query"
+    assert skill.connector_requirements[0].purpose == "Analyze metrics"
+
+
 def test_parse_empty_allowed_tools_list(tmp_path):
     skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: []")
     skill = parse_skill_file(skill_file, category="custom")

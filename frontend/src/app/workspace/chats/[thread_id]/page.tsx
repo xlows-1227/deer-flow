@@ -109,7 +109,19 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      const sendPromise = sendMessage(threadId, message);
+      // `@`-picked files travel as a separate `referencedFiles` field on
+      // the prompt message; the threads hook ships them to the backend as
+      // `additional_kwargs.referenced_files` so the agent knows which
+      // existing files in the user's library to read.
+      const { referencedFiles, ...rest } = message;
+      const sendPromise = sendMessage(
+        threadId,
+        rest,
+        undefined,
+        referencedFiles && referencedFiles.length > 0
+          ? { additionalKwargs: { referenced_files: referencedFiles } }
+          : undefined,
+      );
       if (message.files.length > 0) {
         return sendPromise;
       }

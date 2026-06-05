@@ -17,6 +17,12 @@ class SkillCategory(StrEnum):
 
 
 @dataclass
+class ConnectorRequirement:
+    capability: str
+    purpose: str | None = None
+
+
+@dataclass
 class Skill:
     """Represents a skill with its metadata and file path"""
 
@@ -31,6 +37,7 @@ class Skill:
     enabled: bool = False  # Whether this skill is enabled
     display_name: str | None = None
     description_zh: str | None = None
+    connector_requirements: list[ConnectorRequirement] | None = None
 
     @property
     def skill_path(self) -> str:

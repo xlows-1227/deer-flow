@@ -593,17 +593,26 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 
 @lru_cache(maxsize=32)
 def _get_cached_skills_prompt_section(
-    skill_signature: tuple[tuple[str, str, str, str], ...],
+    skill_signature: tuple[tuple[str, str, str, str, tuple[tuple[str, str | None], ...]], ...],
     available_skills_key: tuple[str, ...] | None,
     container_base_path: str,
     skill_evolution_section: str,
 ) -> str:
-    filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
+    filtered = [(name, description, category, location, connector_requirements) for name, description, category, location, connector_requirements in skill_signature if available_skills_key is None or name in available_skills_key]
     skills_list = ""
     if filtered:
+        def _connector_requirements_xml(requirements: tuple[tuple[str, str | None], ...]) -> str:
+            if not requirements:
+                return ""
+            items = "\n".join(
+                f"            <connector><capability>{capability}</capability><purpose>{purpose or ''}</purpose></connector>"
+                for capability, purpose in requirements
+            )
+            return f"\n        <connector_requirements>\n{items}\n        </connector_requirements>"
+
         skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
-            for name, description, category, location in filtered
+            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>{_connector_requirements_xml(connector_requirements)}\n    </skill>"
+            for name, description, category, location, connector_requirements in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
     return f"""<skill_system>
@@ -648,7 +657,16 @@ def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_c
     if available_skills is not None and not any(skill.name in available_skills for skill in skills):
         return ""
 
-    skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in skills)
+    skill_signature = tuple(
+        (
+            skill.name,
+            skill.description,
+            skill.category,
+            skill.get_container_file_path(container_base_path),
+            tuple((req.capability, req.purpose) for req in (skill.connector_requirements or [])),
+        )
+        for skill in skills
+    )
     available_key = tuple(sorted(available_skills)) if available_skills is not None else None
     if not skill_signature and available_key is not None:
         return ""
@@ -860,16 +878,13 @@ def apply_prompt_template(
     so tests and config-reload paths stay correct.
     """
     if app_config is not None:
-        from deerflow.config import get_app_config
-
-        if app_config is not get_app_config():
-            return _apply_prompt_template_impl(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
-                agent_name=agent_name,
-                available_skills=available_skills,
-                app_config=app_config,
-            )
+        return _apply_prompt_template_impl(
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            app_config=app_config,
+        )
 
     return _cached_apply_prompt_template(
         subagent_enabled=subagent_enabled,

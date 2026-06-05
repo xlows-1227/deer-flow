@@ -506,12 +506,26 @@ export interface FileInMessage {
 }
 
 /**
- * Strip <uploaded_files> tag from message content.
- * Returns the content with the tag removed.
+ * Strip backend-injected context tags from a human message's content
+ * before it's rendered to the user.
+ *
+ * These blocks are produced by LangGraph middlewares and addressed at the
+ * model — they shouldn't leak into the chat UI:
+ *
+ * - ``<uploaded_files>...</uploaded_files>`` from :class:`UploadsMiddleware`
+ * - ``<referenced_files>...</referenced_files>`` from
+ *   :class:`ReferencedFilesMiddleware` (chat `@`-mention picker content)
+ *
+ * The strip is intentionally narrow to avoid eating user-typed markup
+ * like ``<memory>`` (a user might legitimately ask the model about its
+ * own memory system). For a defence-in-depth sweep that covers every
+ * known backend marker — used by the export pipeline — see
+ * {@link stripInternalMarkers}.
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
     .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
+    .replace(/<referenced_files>[\s\S]*?<\/referenced_files>/g, "")
     .trim();
 }
 
@@ -522,6 +536,7 @@ export function stripUploadedFilesTag(content: string): string {
  * These markers are *not* user copy — they come from:
  *
  * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``ReferencedFilesMiddleware`` → ``<referenced_files>`` (chat `@` picker)
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
  *   ``<memory>`` / ``<current_date>`` inside)
  * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
@@ -535,6 +550,7 @@ export function stripUploadedFilesTag(content: string): string {
  */
 export const INTERNAL_MARKER_TAGS = [
   "uploaded_files",
+  "referenced_files",
   "system-reminder",
   "memory",
   "current_date",

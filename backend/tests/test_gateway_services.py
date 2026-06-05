@@ -318,7 +318,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode": True,
         "subagent_enabled": True,
         "max_concurrent_subagents": 5,
-        "thread_id": "should-be-ignored",
+        "thread_id": "should-not-override",
     }
 
     _CONTEXT_CONFIGURABLE_KEYS = {
@@ -329,6 +329,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "thread_id",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -344,8 +345,6 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["mode"] == "ultra"
     # thread_id from context should NOT override the one from build_run_config
     assert config["configurable"]["thread_id"] == "thread-1"
-    # Non-allowlisted keys should not appear
-    assert "thread_id" not in {k for k in context if k in _CONTEXT_CONFIGURABLE_KEYS}
 
 
 def test_merge_run_context_overrides_propagates_to_runtime_context():
@@ -359,14 +358,35 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    merge_run_context_overrides(config, {"agent_name": "my-agent", "is_bootstrap": True, "thread_id": "ignored"})
+    merge_run_context_overrides(
+        config,
+        {
+            "agent_name": "my-agent",
+            "is_bootstrap": True,
+            "connector_ids": ["conn_1"],
+            "thread_id": "should-not-override",
+        },
+    )
 
     assert config["configurable"]["agent_name"] == "my-agent"
     assert config["configurable"]["is_bootstrap"] is True
+    assert config["configurable"]["connector_ids"] == ["conn_1"]
     assert config["context"]["agent_name"] == "my-agent"
     assert config["context"]["is_bootstrap"] is True
-    # Non-whitelisted keys are not forwarded.
-    assert "thread_id" not in config["context"]
+    assert config["context"]["connector_ids"] == ["conn_1"]
+    # Runtime context must use the server-side thread id from build_run_config,
+    # not a client-supplied body.context override.
+    assert config["context"]["thread_id"] == "thread-1"
+
+
+def test_merge_run_context_overrides_prefers_explicit_thread_id_for_context_config():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"context": {"existing": True}}, None)
+    merge_run_context_overrides(config, {"thread_id": "client-thread"}, thread_id="server-thread")
+
+    assert config["context"]["thread_id"] == "server-thread"
+    assert "configurable" not in config or config["configurable"].get("thread_id") == "server-thread"
 
 
 def test_merge_run_context_overrides_noop_for_empty_context():

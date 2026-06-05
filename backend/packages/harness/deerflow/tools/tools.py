@@ -110,6 +110,21 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
+    connectors_config = getattr(config, "connectors", None)
+    if getattr(connectors_config, "enabled", False) is True:
+        try:
+            from deerflow.connectors.tools import (
+                call_connector_action_tool,
+                inspect_connector_tool,
+                list_connectors_tool,
+                query_database_tool,
+                sample_database_table_tool,
+            )
+
+            builtin_tools.extend([list_connectors_tool, inspect_connector_tool, query_database_tool, sample_database_table_tool, call_connector_action_tool])
+        except Exception as e:
+            logger.warning("Failed to load connector tools: %s", e)
+
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
     # to always read the latest configuration from disk. This ensures that changes

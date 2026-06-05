@@ -18,6 +18,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
   reasoning_effort?: "minimal" | "low" | "medium" | "high";
   agent_name?: string;
   skill_name?: string;
+  connector_ids?: string[];
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {

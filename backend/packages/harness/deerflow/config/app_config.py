@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
+from deerflow.config.connectors_config import ConnectorsConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
@@ -109,6 +110,7 @@ class AppConfig(BaseModel):
     run_events: RunEventsConfig = Field(default_factory=RunEventsConfig, description="Run event storage configuration")
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
+    connectors: ConnectorsConfig = Field(default_factory=ConnectorsConfig, description="Connector platform configuration")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:

@@ -21,8 +21,8 @@ def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
 
-def _fake_runtime():
-    return SimpleNamespace(context={})
+def _fake_runtime(context: dict | None = None):
+    return SimpleNamespace(context=context or {})
 
 
 def _reminder_msg(content: str, msg_id: str) -> HumanMessage:
@@ -86,6 +86,58 @@ def test_memory_included_when_present():
     assert result["messages"][1].content == "Hi"
 
 
+def test_selected_connectors_included_when_present():
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Count users", id="msg-1")]}
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime({"connector_ids": ["conn_mini_agent"]}))
+
+    reminder_content = result["messages"][0].content
+    assert "<selected_connectors>" in reminder_content
+    assert "<connector_id>conn_mini_agent</connector_id>" in reminder_content
+    assert "list_connectors" in reminder_content
+    assert "query_database" in reminder_content
+    assert "Count users" not in reminder_content
+    assert result["messages"][1].content == "Count users"
+
+
+def test_selected_connector_summary_includes_name_and_safe_connection(monkeypatch):
+    class _ConnectorService:
+        async def list_available_summaries(self, *, context, capability):  # noqa: ARG002
+            return [
+                {
+                    "id": "conn_mini_agent",
+                    "name": "mini_agent",
+                    "display_name": "Mini Agent",
+                    "type": "mysql",
+                    "status": "active",
+                    "connection": {"host": "127.0.0.1", "port": 3306, "database": "mini_agent"},
+                    "capabilities": ["database.query", "database.schema.inspect"],
+                    "policy_summary": {"mode": "read_only", "max_rows": 1000},
+                }
+            ]
+
+    monkeypatch.setattr("deerflow.connectors.service.make_connector_service", lambda app_config=None: _ConnectorService())
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="mini_agent 有多少用户", id="msg-1")]}
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime({"connector_ids": ["conn_mini_agent"], "user_id": "u1"}))
+
+    reminder_content = result["messages"][0].content
+    assert "<connector_name>mini_agent</connector_name>" in reminder_content
+    assert "<connector_display_name>Mini Agent</connector_display_name>" in reminder_content
+    assert "<connector_type>mysql</connector_type>" in reminder_content
+    assert "<host>127.0.0.1</host>" in reminder_content
+    assert "<port>3306</port>" in reminder_content
+    assert "<database>mini_agent</database>" in reminder_content
+    assert "password" not in reminder_content.lower()
+    assert "<credential" not in reminder_content.lower()
+
+
 # ---------------------------------------------------------------------------
 # Frozen-snapshot: no re-injection within a session
 # ---------------------------------------------------------------------------
@@ -109,6 +161,63 @@ def test_skips_injection_if_already_present():
         result = mw.before_agent(state, _fake_runtime())
 
     assert result is None  # no update needed
+
+
+def test_injects_connector_update_when_selected_after_first_turn():
+    mw = _make_middleware()
+    reminder_content = "<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>"
+    state = {
+        "messages": [
+            _reminder_msg(reminder_content, "msg-1"),
+            HumanMessage(content="Hello", id="msg-1__user"),
+            AIMessage(content="Hi there"),
+            HumanMessage(content="How many users?", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime({"connector_ids": ["conn_mini_agent"]}))
+
+    assert result is not None
+    reminder_content = result["messages"][0].content
+    assert result["messages"][0].id == "msg-2"
+    assert "<selected_connectors>" in reminder_content
+    assert "<connector_id>conn_mini_agent</connector_id>" in reminder_content
+    assert result["messages"][1].id == "msg-2__user"
+    assert result["messages"][1].content == "How many users?"
+
+
+def test_injects_connector_clear_update_when_deselected():
+    mw = _make_middleware()
+    reminder_content = "\n".join(
+        [
+            "<system-reminder>",
+            "<current_date>2026-05-08, Friday</current_date>",
+            "<selected_connectors>",
+            "<connector_id>conn_mini_agent</connector_id>",
+            "</selected_connectors>",
+            "</system-reminder>",
+        ]
+    )
+    state = {
+        "messages": [
+            _reminder_msg(reminder_content, "msg-1"),
+            HumanMessage(content="Hello", id="msg-1__user"),
+            AIMessage(content="Hi there"),
+            HumanMessage(content="Now answer without connector", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is not None
+    reminder_content = result["messages"][0].content
+    assert "<selected_connectors>" in reminder_content
+    assert "<connector_id>" not in reminder_content
+    assert "No connector is selected" in reminder_content
 
 
 def test_injects_only_into_first_human_message_not_later_ones():

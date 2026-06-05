@@ -149,6 +149,23 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
        api_key: your-actual-api-key-here  # 替换为真实 key
    ```
 
+> [!IMPORTANT]
+> 如果启用数据库连接器，并且在连接器里直接填写用户名/密码，请在创建连接器之前先在后端环境变量中配置 `DEERFLOW_CONNECTOR_KEY`。这个 Fernet key 用来加密保存 inline 连接器密码。没有配置时，DeerFlow 会使用仅适合开发环境的固定默认 key，不适合生产环境。
+>
+> 生成 key：
+>
+> ```bash
+> python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+> ```
+>
+> 然后写入 `.env` 或后端运行环境：
+>
+> ```env
+> DEERFLOW_CONNECTOR_KEY=your-generated-fernet-key
+> ```
+>
+> 不要把这个 key 提交到代码仓库，也不要写入共享日志。如果已经创建过 inline 连接器后再更换这个 key，旧密码将无法用新 key 解密，需要重新填写连接器密码，或者执行凭证迁移。使用 `credential.ref` 指向环境变量的连接器不会保存 inline 密码，`DEERFLOW_CONNECTOR_KEY` 主要用于 inline 凭证加密。
+
 ### 运行应用
 
 #### 部署建议与资源规划

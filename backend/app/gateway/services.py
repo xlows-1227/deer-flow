@@ -133,11 +133,13 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "agent_name",
         "is_bootstrap",
         "skill_name",
+        "connector_ids",
+        "thread_id",
     }
 )
 
 
-def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
+def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, thread_id: str | None = None) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
     to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
@@ -148,10 +150,15 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     runtime_context = config.setdefault("context", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
         if key in context:
+            value = context[key]
+            if key == "thread_id" and thread_id:
+                value = thread_id
+            if key == "thread_id" and isinstance(configurable, dict) and configurable.get("thread_id"):
+                value = configurable["thread_id"]
             if isinstance(configurable, dict):
-                configurable.setdefault(key, context[key])
+                configurable.setdefault(key, value)
             if isinstance(runtime_context, dict):
-                runtime_context.setdefault(key, context[key])
+                runtime_context.setdefault(key, value)
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
@@ -341,8 +348,8 @@ async def start_run(
     # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
-    # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-    merge_run_context_overrides(config, getattr(body, "context", None))
+    # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
+    merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
     inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)

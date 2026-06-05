@@ -12,12 +12,14 @@ import {
   Grid2X2Icon,
   ListIcon,
   LoaderCircleIcon,
+  MessageSquareIcon,
   MoreHorizontalIcon,
   SearchIcon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -45,19 +47,38 @@ import {
 import {
   createUserFolder,
   deleteUserFile,
-  listUserFiles,
+  threadUploadDownloadUrl,
   uploadUserFiles,
+  useAllUserFiles,
   userFileUrl,
 } from "@/core/files";
 import type { UserFileItem, UserFileTypeFilter } from "@/core/files";
+import { deleteUploadedFile } from "@/core/uploads/api";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "list" | "grid";
 
-const sourceLabels: Record<string, string> = {
+/** Filter for the existing "来源" dropdown (uploaded vs generated). */
+type SourceFilter = "all" | "uploaded" | "generated";
+
+const sourceLabels: Record<SourceFilter, string> = {
   all: "所有来源",
   uploaded: "已上传",
   generated: "已生成",
+};
+
+/**
+ * Filter for the new "位置" dropdown. Splits items between the user's
+ * document library (`/api/files`) and per-thread chat uploads
+ * (`/api/threads/{id}/uploads`). The two stores are stitched together
+ * by {@link useAllUserFiles} so the page can render a unified list.
+ */
+type SourceKindFilter = "all" | "library" | "thread";
+
+const sourceKindLabels: Record<SourceKindFilter, string> = {
+  all: "全部位置",
+  library: "资料库",
+  thread: "聊天对话",
 };
 
 const typeLabels: Record<UserFileTypeFilter, string> = {
@@ -170,45 +191,61 @@ function FolderBreadcrumb({
 }
 
 export default function WorkspaceFilesPage() {
-  const [items, setItems] = useState<UserFileItem[]>([]);
   const [folderPath, setFolderPath] = useState("");
-  const [source, setSource] = useState("all");
+  const [source, setSource] = useState<SourceFilter>("all");
+  const [sourceKind, setSourceKind] = useState<SourceKindFilter>("all");
   const [type, setType] = useState<UserFileTypeFilter>("all");
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
-  const [loading, setLoading] = useState(true);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderName, setFolderName] = useState("");
   const [savingFolder, setSavingFolder] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const loadFiles = useCallback(async () => {
-    setLoading(true);
-    try {
-      const result = await listUserFiles({
-        folderPath,
-        source,
-        type,
-        q: query,
-      });
-      setItems(result.items);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载文件失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [folderPath, query, source, type]);
+  // Library filters (folder/source/q) drive the backend request for
+  // the library half. The `type` switch is library-only and we apply
+  // it client-side on the merged list below; thread uploads are filtered
+  // client-side too because they live across many threads and we'd
+  // rather avoid per-thread re-requests when the user toggles a filter.
+  const { files: rawItems, isLoading, refetch } = useAllUserFiles({
+    folder_path: folderPath,
+    source: source === "all" ? "all" : source,
+    q: query,
+  });
 
-  useEffect(() => {
-    void loadFiles();
-  }, [loadFiles]);
+  // Apply the `sourceKind` switch, the `type` filter, and the
+  // case-insensitive `q` search to the merged list. The library
+  // backend already filters by `q` and `source`, but the thread half
+  // is matched client-side, so we re-apply `q` to both for a uniform
+  // experience. `type` and `sourceKind` are applied purely on the
+  // client because the hook only forwards library-shape filters to
+  // the backend.
+  const items = useMemo<UserFileItem[]>(() => {
+    const q = query.trim().toLowerCase();
+    return rawItems.filter((item) => {
+      if (sourceKind === "library" && item.source_thread_id) {
+        return false;
+      }
+      if (sourceKind === "thread" && !item.source_thread_id) {
+        return false;
+      }
+      if (q && !item.name.toLowerCase().includes(q)) {
+        return false;
+      }
+      if (type !== "all" && fileType(item) !== type) {
+        return false;
+      }
+      return true;
+    });
+  }, [rawItems, query, sourceKind, type]);
 
   const stats = useMemo(() => {
     const files = items.filter((item) => item.kind === "file").length;
     const folders = items.length - files;
-    return { files, folders };
-  }, [items]);
+    const fromThreads = rawItems.filter((item) => item.source_thread_id).length;
+    return { files, folders, fromThreads };
+  }, [items, rawItems]);
 
   const handleUpload = async (fileList: FileList | null) => {
     const files = Array.from(fileList ?? []);
@@ -217,7 +254,7 @@ export default function WorkspaceFilesPage() {
     try {
       await uploadUserFiles(files, folderPath);
       toast.success(`已上传 ${files.length} 个文件`);
-      await loadFiles();
+      refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "上传文件失败");
     } finally {
@@ -234,7 +271,7 @@ export default function WorkspaceFilesPage() {
       toast.success("文件夹已创建");
       setFolderDialogOpen(false);
       setFolderName("");
-      await loadFiles();
+      refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "新建文件夹失败");
     } finally {
@@ -243,11 +280,18 @@ export default function WorkspaceFilesPage() {
   };
 
   const handleDelete = async (item: UserFileItem) => {
-    if (!window.confirm(`确定删除「${item.name}」吗？`)) return;
+    const label = item.source_thread_id
+      ? `对话「${item.source_thread_title ?? item.source_thread_id.slice(0, 8)}」中的「${item.name}」`
+      : `「${item.name}」`;
+    if (!window.confirm(`确定删除${label}吗？`)) return;
     try {
-      await deleteUserFile(item.path);
+      if (item.source_thread_id) {
+        await deleteUploadedFile(item.source_thread_id, item.path);
+      } else {
+        await deleteUserFile(item.path);
+      }
       toast.success("已删除");
-      await loadFiles();
+      refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除失败");
     }
@@ -256,6 +300,14 @@ export default function WorkspaceFilesPage() {
   const openItem = (item: UserFileItem) => {
     if (item.kind === "folder") {
       setFolderPath(item.path);
+      return;
+    }
+    // For thread uploads, jump to the source chat so the file is seen
+    // in its conversational context (artifact URLs aren't directly
+    // browseable for non-SDK clients). For library files, open the
+    // managed-file URL straight in a new tab.
+    if (item.source_thread_id) {
+      window.open(`/workspace/chats/${item.source_thread_id}`, "_blank", "noopener,noreferrer");
       return;
     }
     window.open(userFileUrl(item.path), "_blank", "noopener,noreferrer");
@@ -269,12 +321,32 @@ export default function WorkspaceFilesPage() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        {item.kind === "file" && (
+        {item.kind === "file" && !item.source_thread_id && (
           <DropdownMenuItem asChild>
             <a href={userFileUrl(item.path, true)}>
               <DownloadIcon className="size-4" />
               下载
             </a>
+          </DropdownMenuItem>
+        )}
+        {item.kind === "file" && item.source_thread_id && (
+          <DropdownMenuItem asChild>
+            <a
+              href={threadUploadDownloadUrl(item.source_thread_id, item.path)}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <DownloadIcon className="size-4" />
+              下载
+            </a>
+          </DropdownMenuItem>
+        )}
+        {item.kind === "file" && item.source_thread_id && (
+          <DropdownMenuItem asChild>
+            <Link href={`/workspace/chats/${item.source_thread_id}`}>
+              <MessageSquareIcon className="size-4" />
+              在对话中查看
+            </Link>
           </DropdownMenuItem>
         )}
         <DropdownMenuItem
@@ -288,6 +360,23 @@ export default function WorkspaceFilesPage() {
     </DropdownMenu>
   );
 
+  const renderSourceLabel = (item: UserFileItem) => {
+    if (item.source_thread_id) {
+      const title = item.source_thread_title ?? item.source_thread_id.slice(0, 8);
+      return (
+        <span
+          className="text-muted-foreground inline-flex max-w-40 items-center gap-1 truncate text-xs"
+          title={`来自对话：${title}`}
+        >
+          <MessageSquareIcon className="size-3 shrink-0" />
+          <span className="truncate">{title}</span>
+        </span>
+      );
+    }
+    if (item.source === "generated") return <span className="text-gray-500">已生成</span>;
+    return <span className="text-gray-500">已上传</span>;
+  };
+
   return (
     <div className="flex size-full flex-col bg-[#fafafa]">
       <header className="shrink-0 px-12 pt-7 pb-4">
@@ -297,16 +386,38 @@ export default function WorkspaceFilesPage() {
               文件
             </h1>
             <div className="mt-5 flex flex-wrap items-center gap-2">
-              <Select value={source} onValueChange={setSource}>
+              <Select
+                value={sourceKind}
+                onValueChange={(value) => setSourceKind(value as SourceKindFilter)}
+              >
                 <SelectTrigger className="h-8 w-36 rounded-lg border-gray-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {Object.entries(sourceLabels).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
+                  {(Object.entries(sourceKindLabels) as [SourceKindFilter, string][]).map(
+                    ([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ),
+                  )}
+                </SelectContent>
+              </Select>
+              <Select
+                value={source}
+                onValueChange={(value) => setSource(value as SourceFilter)}
+              >
+                <SelectTrigger className="h-8 w-36 rounded-lg border-gray-200 bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.entries(sourceLabels) as [SourceFilter, string][]).map(
+                    ([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ),
+                  )}
                 </SelectContent>
               </Select>
               <Select
@@ -395,7 +506,7 @@ export default function WorkspaceFilesPage() {
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto px-12 pb-8">
-        {loading ? (
+        {isLoading ? (
           <div className="flex h-72 items-center justify-center text-sm text-gray-500">
             <LoaderCircleIcon className="mr-2 size-5 animate-spin" />
             正在加载文件
@@ -404,25 +515,29 @@ export default function WorkspaceFilesPage() {
           <div className="flex h-80 flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-white text-center">
             <FolderIcon className="size-12 text-gray-300" />
             <p className="mt-4 text-sm font-medium text-gray-950">
-              当前文件夹为空
+              {query.trim() || sourceKind !== "all"
+                ? "没有匹配的文件"
+                : "当前文件夹为空"}
             </p>
             <p className="mt-2 text-sm text-gray-500">
-              上传文件或新建文件夹后，会显示在这里。
+              {query.trim() || sourceKind !== "all"
+                ? "试试调整搜索关键字或筛选条件。"
+                : "上传文件、新建文件夹，或在聊天中上传文件后，会显示在这里。"}
             </p>
           </div>
         ) : viewMode === "list" ? (
           <div className="overflow-hidden">
-            <div className="grid grid-cols-[minmax(360px,1fr)_120px_80px_90px_44px] border-b border-gray-200 px-3 py-3 text-xs text-gray-500">
+            <div className="grid grid-cols-[minmax(360px,1fr)_120px_80px_180px_44px] border-b border-gray-200 px-3 py-3 text-xs text-gray-500">
               <div>名称</div>
               <div>修改时间</div>
               <div>大小</div>
-              <div>来源</div>
+              <div>位置</div>
               <div />
             </div>
             {items.map((item) => (
               <div
-                key={item.path}
-                className="grid min-h-15 grid-cols-[minmax(360px,1fr)_120px_80px_90px_44px] items-center px-3 py-2 text-sm hover:bg-white"
+                key={item.id}
+                className="grid min-h-15 grid-cols-[minmax(360px,1fr)_120px_80px_180px_44px] items-center px-3 py-2 text-sm hover:bg-white"
               >
                 <button
                   type="button"
@@ -434,13 +549,7 @@ export default function WorkspaceFilesPage() {
                 </button>
                 <div className="text-gray-500">{formatDate(item.modified_at)}</div>
                 <div className="text-gray-500">{formatSize(item.size)}</div>
-                <div className="text-gray-500">
-                  {item.kind === "folder"
-                    ? "-"
-                    : item.source === "generated"
-                      ? "已生成"
-                      : "已上传"}
-                </div>
+                <div>{renderSourceLabel(item)}</div>
                 <div>{renderActions(item)}</div>
               </div>
             ))}
@@ -449,7 +558,7 @@ export default function WorkspaceFilesPage() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
             {items.map((item) => (
               <div
-                key={item.path}
+                key={item.id}
                 className="group rounded-lg border border-gray-200 bg-white p-3"
               >
                 <div className="flex items-start justify-between">
@@ -465,17 +574,20 @@ export default function WorkspaceFilesPage() {
                   </button>
                   {renderActions(item)}
                 </div>
-                <div className="mt-4 flex justify-between text-xs text-gray-500">
+                <div className="mt-4 flex items-center justify-between text-xs text-gray-500">
                   <span>{formatSize(item.size)}</span>
-                  <span>{item.kind === "folder" ? "文件夹" : sourceLabels[item.source ?? "uploaded"]}</span>
+                  {renderSourceLabel(item)}
                 </div>
               </div>
             ))}
           </div>
         )}
-        {!loading && items.length > 0 && (
+        {!isLoading && items.length > 0 && (
           <div className="mt-4 text-xs text-gray-400">
             {stats.folders} 个文件夹，{stats.files} 个文件
+            {stats.fromThreads > 0 && (
+              <span className="ml-1">（其中 {stats.fromThreads} 个来自对话）</span>
+            )}
           </div>
         )}
       </main>

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from .types import SKILL_MD_FILE, Skill, SkillCategory
+from .types import SKILL_MD_FILE, ConnectorRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,31 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> list[str] | None:
             raise ValueError(f"allowed-tools in {skill_file} cannot contain empty tool names")
         allowed_tools.append(tool_name)
     return allowed_tools
+
+
+def parse_connector_requirements(raw: object, skill_file: Path) -> list[ConnectorRequirement] | None:
+    """Parse optional requires.connectors frontmatter metadata."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"requires in {skill_file} must be a mapping")
+    connectors = raw.get("connectors")
+    if connectors is None:
+        return None
+    if not isinstance(connectors, list):
+        raise ValueError(f"requires.connectors in {skill_file} must be a list")
+    requirements: list[ConnectorRequirement] = []
+    for item in connectors:
+        if not isinstance(item, dict):
+            raise ValueError(f"requires.connectors in {skill_file} must contain mappings")
+        capability = item.get("capability")
+        if not isinstance(capability, str) or not capability.strip():
+            raise ValueError(f"requires.connectors entries in {skill_file} must include a non-empty capability")
+        purpose = item.get("purpose")
+        if purpose is not None:
+            purpose = str(purpose).strip() or None
+        requirements.append(ConnectorRequirement(capability=capability.strip(), purpose=purpose))
+    return requirements
 
 
 def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
@@ -97,8 +122,9 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
 
         try:
             allowed_tools = parse_allowed_tools(metadata.get("allowed-tools"), skill_file)
+            connector_requirements = parse_connector_requirements(metadata.get("requires"), skill_file)
         except ValueError as exc:
-            logger.error("Invalid allowed-tools in %s: %s", skill_file, exc)
+            logger.error("Invalid skill frontmatter in %s: %s", skill_file, exc)
             return None
 
         return Skill(
@@ -112,6 +138,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
             allowed_tools=allowed_tools,
+            connector_requirements=connector_requirements,
             enabled=True,  # Actual state comes from the extensions config file.
         )
 
