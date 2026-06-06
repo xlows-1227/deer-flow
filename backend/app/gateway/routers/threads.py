@@ -25,6 +25,10 @@ from pydantic import BaseModel, Field, field_validator
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.memory.capture import capture_rollup_input
+from deerflow.agents.memory.consolidation import ProfileConsolidator
+from deerflow.agents.memory.models import DailyPersonSummary
+from deerflow.agents.memory.rollup import DailyRollupService
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
 from deerflow.runtime.user_context import get_effective_user_id
@@ -568,6 +572,34 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
         created_at=coerce_iso(metadata.get("created_at", "")),
         tasks=tasks,
     )
+
+
+@router.post("/{thread_id}/memory/rollup", response_model=DailyPersonSummary | None)
+@require_permission("threads", "read", owner_check=True)
+async def rollup_thread_memory(thread_id: str, request: Request) -> DailyPersonSummary | None:
+    """Summarize only this thread and incrementally merge it into user memory."""
+    checkpointer = get_checkpointer(request)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+    except Exception:
+        logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to get thread state")
+
+    if checkpoint_tuple is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    messages = checkpoint.get("channel_values", {}).get("messages", [])
+    user_id = get_effective_user_id()
+    captured = capture_rollup_input(user_id=user_id, thread_id=thread_id, messages=messages)
+    if captured is None:
+        return None
+
+    summary = DailyRollupService().rollup_thread_incremental(user_id, thread_id, captured.date)
+    if summary is not None:
+        ProfileConsolidator().rebuild_profile(user_id)
+    return summary
 
 
 @router.post("/{thread_id}/state", response_model=ThreadStateResponse)

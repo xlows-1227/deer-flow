@@ -1,4 +1,5 @@
 import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -9,6 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.routers import threads
+from deerflow.agents.memory.models import DailyPersonSummary, MemoryRollupInput
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
@@ -428,6 +430,50 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     body = response.json()
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["checkpoint"]["ts"]), body["checkpoint"]
+
+
+def test_rollup_thread_memory_captures_checkpoint_messages_and_rebuilds_profile() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "memory-target"
+    messages = [
+        SimpleNamespace(type="human", content="I prefer concise answers."),
+        SimpleNamespace(type="ai", content="Understood."),
+    ]
+
+    class _Checkpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(checkpoint={"channel_values": {"messages": messages}})
+
+    captured = MemoryRollupInput(
+        id="rollup-input",
+        userId="test-user",
+        date="2026-06-06",
+        threadId=thread_id,
+        messages=[{"role": "conversation", "content": "I prefer concise answers."}],
+    )
+    summary = DailyPersonSummary(
+        id="daily-2026-06-06-test-user",
+        personId="test-user",
+        date="2026-06-06",
+        sourceThreads=[thread_id],
+    )
+
+    with (
+        patch("app.gateway.routers.threads.get_checkpointer", return_value=_Checkpointer()),
+        patch("app.gateway.routers.threads.capture_rollup_input", return_value=captured) as capture,
+        patch("app.gateway.routers.threads.DailyRollupService") as rollup_service,
+        patch("app.gateway.routers.threads.ProfileConsolidator") as consolidator,
+        TestClient(app) as client,
+    ):
+        rollup_service.return_value.rollup_thread_incremental.return_value = summary
+        response = client.post(f"/api/threads/{thread_id}/memory/rollup")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["sourceThreads"] == [thread_id]
+    assert capture.call_args.kwargs["thread_id"] == thread_id
+    assert len(capture.call_args.kwargs["messages"]) == 2
+    rollup_service.return_value.rollup_thread_incremental.assert_called_once()
+    consolidator.return_value.rebuild_profile.assert_called_once()
 
 
 def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None:

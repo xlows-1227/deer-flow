@@ -60,6 +60,43 @@ class MemoryConfig(BaseModel):
         le=8000,
         description="Maximum tokens to use for memory injection",
     )
+    v2_enabled: bool = Field(
+        default=True,
+        description="Whether to use the v2 daily-person memory architecture",
+    )
+    daily_rollup_enabled: bool = Field(
+        default=True,
+        description="Whether scheduled/manual daily memory rollups are enabled",
+    )
+    daily_rollup_time: str = Field(
+        default="23:55",
+        description="Local time for scheduled daily rollup in HH:MM format",
+    )
+    retention_days: int | None = Field(
+        default=None,
+        ge=1,
+        description="Number of days to retain daily summaries; null keeps them indefinitely",
+    )
+    migrate_legacy_on_startup: bool = Field(
+        default=True,
+        description="Whether to back up and migrate legacy memory.json when v2 is first used",
+    )
+    relevance_strategy: str = Field(
+        default="rules",
+        description="Daily snippet relevance strategy; first version supports 'rules'",
+    )
+    max_daily_snippets: int = Field(
+        default=3,
+        ge=0,
+        le=20,
+        description="Maximum daily snippets to inject alongside the profile",
+    )
+    max_daily_snippet_tokens: int = Field(
+        default=600,
+        ge=0,
+        le=4000,
+        description="Token budget for daily memory snippets",
+    )
 
 
 # Global configuration instance

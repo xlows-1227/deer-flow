@@ -1,6 +1,6 @@
 import threading
 import time
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.queue import ConversationContext, MemoryUpdateQueue
 from deerflow.config.memory_config import MemoryConfig
@@ -28,7 +28,7 @@ def test_queue_add_preserves_existing_correction_flag_for_same_thread() -> None:
     assert queue._queue[0].correction_detected is True
 
 
-def test_process_queue_forwards_correction_flag_to_updater() -> None:
+def test_process_queue_captures_rollup_input_with_correction_context() -> None:
     queue = MemoryUpdateQueue()
     queue._queue = [
         ConversationContext(
@@ -38,19 +38,15 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
             correction_detected=True,
         )
     ]
-    mock_updater = MagicMock()
-    mock_updater.update_memory.return_value = True
+    captured = MagicMock(return_value=object())
 
-    with patch("deerflow.agents.memory.updater.MemoryUpdater", return_value=mock_updater):
+    with patch("deerflow.agents.memory.capture.capture_rollup_input", captured):
         queue._process_queue()
 
-    mock_updater.update_memory.assert_called_once_with(
-        messages=["conversation"],
+    captured.assert_called_once_with(
+        user_id="default",
         thread_id="thread-1",
-        agent_name="lead_agent",
-        correction_detected=True,
-        reinforcement_detected=False,
-        user_id=None,
+        messages=["conversation"],
     )
 
 
@@ -69,7 +65,7 @@ def test_queue_add_preserves_existing_reinforcement_flag_for_same_thread() -> No
     assert queue._queue[0].reinforcement_detected is True
 
 
-def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
+def test_process_queue_captures_rollup_input_with_reinforcement_context() -> None:
     queue = MemoryUpdateQueue()
     queue._queue = [
         ConversationContext(
@@ -79,19 +75,15 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
             reinforcement_detected=True,
         )
     ]
-    mock_updater = MagicMock()
-    mock_updater.update_memory.return_value = True
+    captured = MagicMock(return_value=object())
 
-    with patch("deerflow.agents.memory.updater.MemoryUpdater", return_value=mock_updater):
+    with patch("deerflow.agents.memory.capture.capture_rollup_input", captured):
         queue._process_queue()
 
-    mock_updater.update_memory.assert_called_once_with(
-        messages=["conversation"],
+    captured.assert_called_once_with(
+        user_id="default",
         thread_id="thread-1",
-        agent_name="lead_agent",
-        correction_detected=False,
-        reinforcement_detected=True,
-        user_id=None,
+        messages=["conversation"],
     )
 
 
@@ -166,7 +158,7 @@ def test_flush_nowait_is_non_blocking() -> None:
     assert finished.wait(1.0) is True
 
 
-def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
+def test_queue_coalesces_updates_for_different_agents_in_same_thread() -> None:
     queue = MemoryUpdateQueue()
 
     with (
@@ -176,8 +168,8 @@ def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
-    assert queue.pending_count == 2
-    assert [context.agent_name for context in queue._queue] == ["agent-a", "agent-b"]
+    assert queue.pending_count == 1
+    assert queue._queue[0].messages == ["agent-b"]
 
 
 def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
@@ -206,7 +198,7 @@ def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
     assert queue._queue[0].correction_detected is True
 
 
-def test_process_queue_updates_different_agents_in_same_thread_separately() -> None:
+def test_process_queue_captures_user_level_memory_once_for_different_agents() -> None:
     queue = MemoryUpdateQueue()
 
     with (
@@ -216,33 +208,32 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
-    mock_updater = MagicMock()
-    mock_updater.update_memory.return_value = True
+    captured = MagicMock(return_value=object())
 
     with (
-        patch("deerflow.agents.memory.updater.MemoryUpdater", return_value=mock_updater),
+        patch("deerflow.agents.memory.capture.capture_rollup_input", captured),
         patch("deerflow.agents.memory.queue.time.sleep"),
     ):
         queue.flush()
 
-    assert mock_updater.update_memory.call_count == 2
-    mock_updater.update_memory.assert_has_calls(
-        [
-            call(
-                messages=["agent-a"],
-                thread_id="thread-1",
-                agent_name="agent-a",
-                correction_detected=False,
-                reinforcement_detected=False,
-                user_id=None,
-            ),
-            call(
-                messages=["agent-b"],
-                thread_id="thread-1",
-                agent_name="agent-b",
-                correction_detected=False,
-                reinforcement_detected=False,
-                user_id=None,
-            ),
-        ]
+    captured.assert_called_once_with(
+        user_id="default",
+        thread_id="thread-1",
+        messages=["agent-b"],
     )
+
+
+def test_flush_user_processes_only_target_users_pending_contexts() -> None:
+    queue = MemoryUpdateQueue()
+    queue._queue = [
+        ConversationContext(thread_id="thread-a", messages=["a"], user_id="user-a"),
+        ConversationContext(thread_id="thread-b", messages=["b"], user_id="user-b"),
+    ]
+    captured = MagicMock(return_value=object())
+
+    with patch("deerflow.agents.memory.capture.capture_rollup_input", captured):
+        queue.flush_user("user-a")
+
+    captured.assert_called_once_with(user_id="user-a", thread_id="thread-a", messages=["a"])
+    assert queue.pending_count == 1
+    assert queue._queue[0].user_id == "user-b"

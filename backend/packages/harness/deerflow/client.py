@@ -1121,6 +1121,11 @@ class DeerFlowClient:
         from deerflow.config.memory_config import get_memory_config
 
         config = get_memory_config()
+
+        def _cfg_value(name: str, default, expected_type):
+            value = getattr(config, name, default)
+            return value if isinstance(value, expected_type) else default
+
         return {
             "enabled": config.enabled,
             "storage_path": config.storage_path,
@@ -1129,6 +1134,13 @@ class DeerFlowClient:
             "fact_confidence_threshold": config.fact_confidence_threshold,
             "injection_enabled": config.injection_enabled,
             "max_injection_tokens": config.max_injection_tokens,
+            "v2_enabled": _cfg_value("v2_enabled", True, bool),
+            "daily_rollup_enabled": _cfg_value("daily_rollup_enabled", True, bool),
+            "daily_rollup_time": _cfg_value("daily_rollup_time", "23:55", str),
+            "retention_days": _cfg_value("retention_days", None, (int, type(None))),
+            "relevance_strategy": _cfg_value("relevance_strategy", "rules", str),
+            "max_daily_snippets": _cfg_value("max_daily_snippets", 3, int),
+            "max_daily_snippet_tokens": _cfg_value("max_daily_snippet_tokens", 600, int),
         }
 
     def get_memory_status(self) -> dict:

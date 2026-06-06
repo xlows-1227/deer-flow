@@ -5,9 +5,11 @@ import {
   FileJson,
   FileText,
   ListIcon,
+  LoaderCircle,
   MoreHorizontal,
   Pencil,
   Share2,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
@@ -45,6 +47,7 @@ import {
 } from "@/components/ui/sidebar";
 import { getAPIClient } from "@/core/api";
 import { useI18n } from "@/core/i18n/hooks";
+import { useRollupThreadMemory } from "@/core/memory/hooks";
 import {
   exportThreadAsJSON,
   exportThreadAsMarkdown,
@@ -76,6 +79,9 @@ export function RecentChatList() {
   );
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
+  const { mutateAsync: rollupThreadMemory, isPending: isRollingUpMemory } =
+    useRollupThreadMemory();
+  const [rollupThreadId, setRollupThreadId] = useState<string | null>(null);
 
   // Rename dialog state
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -166,6 +172,29 @@ export function RecentChatList() {
     [t],
   );
 
+  const handleRollupMemory = useCallback(
+    async (threadId: string) => {
+      setRollupThreadId(threadId);
+      try {
+        const summary = await rollupThreadMemory(threadId);
+        toast.success(
+          summary
+            ? t.conversation.memoryRollupSuccess
+            : t.conversation.memoryRollupEmpty,
+        );
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : t.conversation.memoryRollupFailed,
+        );
+      } finally {
+        setRollupThreadId(null);
+      }
+    },
+    [rollupThreadMemory, t],
+  );
+
   if (nonScheduledThreads.length === 0) {
     return null;
   }
@@ -230,6 +259,19 @@ export function RecentChatList() {
                               >
                                 <Share2 className="text-muted-foreground" />
                                 <span>{t.common.share}</span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={isRollingUpMemory}
+                                onSelect={() =>
+                                  void handleRollupMemory(thread.thread_id)
+                                }
+                              >
+                                {rollupThreadId === thread.thread_id ? (
+                                  <LoaderCircle className="text-muted-foreground animate-spin" />
+                                ) : (
+                                  <Sparkles className="text-muted-foreground" />
+                                )}
+                                <span>{t.conversation.memoryRollup}</span>
                               </DropdownMenuItem>
                               <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>

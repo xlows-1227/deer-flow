@@ -198,6 +198,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to start scheduled task loop")
 
+        try:
+            from app.gateway.memory_scheduler import start_memory_rollup_loop
+
+            start_memory_rollup_loop(app)
+        except Exception:
+            logger.exception("Failed to start daily memory rollup loop")
+
         # Warm caches for the hot path (flash direct model) so the first
         # user request does not pay the cold-start penalty of loading skills
         # and constructing chat model instances.
@@ -274,6 +281,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop scheduled task loop")
+
+        try:
+            from app.gateway.memory_scheduler import stop_memory_rollup_loop
+
+            await asyncio.wait_for(
+                stop_memory_rollup_loop(app),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Daily memory rollup loop shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to stop daily memory rollup loop")
 
     logger.info("Shutting down API Gateway")
 

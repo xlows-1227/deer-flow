@@ -857,6 +857,14 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+  v2_enabled: true # Use the daily-person memory architecture
+  daily_rollup_enabled: true # Enable scheduled/manual daily rollups
+  daily_rollup_time: "23:55" # UTC HH:MM time for scheduled rollups
+  retention_days: null # null keeps daily summaries indefinitely
+  migrate_legacy_on_startup: true # Backup and migrate legacy memory.json
+  relevance_strategy: rules # First version uses rules/recency, not vector search
+  max_daily_snippets: 3 # Maximum daily snippets injected with the profile
+  max_daily_snippet_tokens: 600 # Token budget for daily snippets
 
 # ============================================================================
 # Custom Agent Management API

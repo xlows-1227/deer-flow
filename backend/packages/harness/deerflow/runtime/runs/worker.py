@@ -167,6 +167,33 @@ def _should_use_flash_direct_path(
     return True
 
 
+def _queue_flash_memory_capture(
+    *,
+    thread_id: str,
+    messages: list[Any],
+    app_config: AppConfig,
+) -> None:
+    """Queue a completed flash-direct conversation for the shared memory pipeline."""
+    memory_config = getattr(app_config, "memory", None)
+    if memory_config is None or not memory_config.enabled:
+        return
+
+    from deerflow.agents.memory.message_processing import filter_messages_for_memory
+    from deerflow.agents.memory.queue import get_memory_queue
+
+    filtered_messages = filter_messages_for_memory(messages)
+    has_user = any(getattr(message, "type", None) == "human" for message in filtered_messages)
+    has_assistant = any(getattr(message, "type", None) == "ai" for message in filtered_messages)
+    if not has_user or not has_assistant:
+        return
+
+    get_memory_queue().add(
+        thread_id=thread_id,
+        messages=filtered_messages,
+        user_id=get_effective_user_id(),
+    )
+
+
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
     try:
         return "app_config" in inspect.signature(agent_factory).parameters
@@ -430,6 +457,11 @@ async def _run_flash_direct_model(
             ckpt_tuple=pre_run_checkpoint_tuple,
             channel_values=channel_values,
             changed_channels={"messages", "artifacts"},
+        )
+        _queue_flash_memory_capture(
+            thread_id=record.thread_id,
+            messages=final_messages,
+            app_config=app_config,
         )
 
     if stream_subgraphs:
