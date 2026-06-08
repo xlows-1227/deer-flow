@@ -200,6 +200,8 @@ make up     # 构建镜像并启动全部生产服务
 make down   # 停止并移除容器
 ```
 
+完整服务器部署、环境变量、更新、日志和排障流程见 [Docker 生产部署手册](docs/DOCKER_PRODUCTION_DEPLOYMENT_zh.md)。
+
 > [!NOTE]
 > 当前 Agent 运行时嵌入在 Gateway 中运行，`/api/langgraph/*` 会由 nginx 重写到 Gateway 的 LangGraph-compatible API。
 

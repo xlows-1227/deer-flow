@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor detect-thread-boundaries dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor detect-thread-boundaries dev dev-daemon start start-daemon stop up down prod-config prod-status prod-logs prod-restart clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -36,6 +36,10 @@ help:
 	@echo "Docker Production Commands:"
 	@echo "  make up              - Build and start production Docker services (localhost:2026)"
 	@echo "  make down            - Stop and remove production Docker containers"
+	@echo "  make prod-config     - Show resolved production Docker deployment config"
+	@echo "  make prod-status     - Show production Docker container status"
+	@echo "  make prod-logs       - Tail production Docker logs"
+	@echo "  make prod-restart    - Restart production Docker services"
 	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Pull the sandbox image"
@@ -72,7 +76,7 @@ install:
 	@echo "Installing frontend dependencies..."
 	@cd frontend && pnpm install
 	@echo "Installing pre-commit hooks..."
-	@$(BACKEND_UV_RUN) --with pre-commit pre-commit install
+	@$(BACKEND_UV_RUN) pre-commit install
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="
@@ -185,3 +189,19 @@ up:
 # Stop and remove production containers
 down:
 	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh down
+
+# Show resolved production Docker deployment config
+prod-config:
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh config
+
+# Show production Docker container status
+prod-status:
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh status
+
+# Tail production Docker logs
+prod-logs:
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh logs
+
+# Restart production Docker services
+prod-restart:
+	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh restart

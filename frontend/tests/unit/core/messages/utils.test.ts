@@ -478,3 +478,123 @@ test("stripInternalMarkers scrubs every backend marker (defence in depth)", () =
   ].join("\n");
   expect(stripInternalMarkers(content)).toBe("tail");
 });
+
+test("routes tool results to processing group after clarification group", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Research AI news",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        { id: "tool-search", name: "web_search", args: {} },
+        {
+          id: "tool-clarify",
+          name: "ask_clarification",
+          args: { question: "Which region?" },
+        },
+      ],
+    },
+    {
+      id: "tool-clarify-result",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "tool-clarify",
+      content: "Which region?",
+    },
+    {
+      id: "tool-search-result",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-search",
+      content: "[]",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+  const processingGroup = groups.find(
+    (group) => group.type === "assistant:processing",
+  );
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant:clarification",
+  ]);
+  expect(
+    processingGroup?.messages
+      .filter((message) => message.type === "tool")
+      .map((message) => message.id),
+  ).toEqual(["tool-clarify-result", "tool-search-result"]);
+});
+
+test("routes late tool results to the group that owns the tool call", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Visible answer",
+    },
+    {
+      id: "tool-1-result",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-1",
+      content: "[]",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+  const processingGroup = groups.find(
+    (group) => group.type === "assistant:processing",
+  );
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+  expect(
+    processingGroup?.messages
+      .filter((message) => message.type === "tool")
+      .map((message) => message.id),
+  ).toEqual(["tool-1-result"]);
+});
+
+test("ignores incomplete streaming tool placeholders", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Done",
+    },
+    {
+      type: "tool",
+    },
+  ] as Message[];
+
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "human",
+    "assistant",
+  ]);
+});

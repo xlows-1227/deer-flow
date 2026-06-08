@@ -227,7 +227,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
-| **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
+| **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /custom` - create custom `SKILL.md`; `POST /custom/ai-draft` - generate an AI draft without saving; `POST /upload` - multipart install from `.zip` / `.skill`; `POST /install` - install from thread artifact archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
@@ -315,7 +315,8 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - **Format**: Directory with `SKILL.md` (YAML frontmatter: name, description, license, allowed-tools)
 - **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
 - **Injection**: Enabled skills listed in agent system prompt with container paths
-- **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
+- **Creation**: `POST /api/skills/custom` validates and writes a custom `SKILL.md`; `POST /api/skills/custom/ai-draft` calls the configured chat model to produce an editable draft only
+- **Installation**: `POST /api/skills/install` extracts thread artifact archives; `POST /api/skills/upload` accepts multipart `.zip` and `.skill` uploads; both install into `custom/` through the shared safe ZIP extraction, frontmatter validation, duplicate-name rejection, and security scan path
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 

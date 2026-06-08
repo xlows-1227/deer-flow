@@ -601,11 +601,11 @@ class TestSkillInstallation:
             c.install_skill(archive)
 
     def test_install_skill_invalid_extension(self, e2e_env, tmp_path):
-        """A file without .skill extension is rejected."""
-        bad_file = tmp_path / "not_a_skill.zip"
+        """A file without .skill or .zip extension is rejected."""
+        bad_file = tmp_path / "not_a_skill.txt"
         bad_file.write_bytes(b"PK\x03\x04")  # ZIP magic bytes
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(ValueError, match=".skill extension"):
+        with pytest.raises(ValueError, match=".skill or .zip extension"):
             c.install_skill(bad_file)
 
     def test_install_skill_missing_frontmatter(self, e2e_env, tmp_path):

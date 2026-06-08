@@ -11,6 +11,10 @@ export const userSchema = z.object({
 
 export type User = z.infer<typeof userSchema>;
 
+export function isAdminUser(user: User | null | undefined): boolean {
+  return user?.system_role === "admin";
+}
+
 // ── SSR auth result (tagged union) ────────────────────────────────
 
 export type AuthResult =

@@ -26,15 +26,16 @@ export function WorkspaceNavChatList() {
   const pathname = usePathname();
 
   return (
-    <SidebarGroup className="border-b border-gray-100 px-3 pt-1 pb-2">
+    <SidebarGroup className="border-b border-gray-100 px-3 pt-1 pb-2 group-data-[collapsible=icon]:px-2">
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/agents")}
             asChild
+            tooltip={t.sidebar.agents}
             className={itemClassName}
           >
-            <Link href="/workspace/agents">
+            <Link href="/workspace/agents" prefetch={false}>
               <BotIcon />
               <span>{t.sidebar.agents}</span>
             </Link>
@@ -44,9 +45,10 @@ export function WorkspaceNavChatList() {
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/skills")}
             asChild
+            tooltip="Skill 管理"
             className={itemClassName}
           >
-            <Link href="/workspace/skills">
+            <Link href="/workspace/skills" prefetch={false}>
               <SparklesIcon />
               <span>Skill 管理</span>
             </Link>
@@ -59,9 +61,10 @@ export function WorkspaceNavChatList() {
               pathname.startsWith("/workspace/knowledge")
             }
             asChild
+            tooltip="文件"
             className={itemClassName}
           >
-            <Link href="/workspace/files">
+            <Link href="/workspace/files" prefetch={false}>
               <FolderIcon />
               <span>文件</span>
             </Link>
@@ -71,9 +74,10 @@ export function WorkspaceNavChatList() {
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/memory")}
             asChild
+            tooltip="记忆"
             className={itemClassName}
           >
-            <Link href="/workspace/memory">
+            <Link href="/workspace/memory" prefetch={false}>
               <BrainIcon />
               <span>记忆</span>
             </Link>
@@ -83,9 +87,10 @@ export function WorkspaceNavChatList() {
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/scheduled-tasks")}
             asChild
+            tooltip="定时任务"
             className={itemClassName}
           >
-            <Link href="/workspace/scheduled-tasks">
+            <Link href="/workspace/scheduled-tasks" prefetch={false}>
               <ClockIcon />
               <span>定时任务</span>
             </Link>
