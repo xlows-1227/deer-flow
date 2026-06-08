@@ -140,6 +140,9 @@ export function InputBox({
   onFollowupsVisibilityChange,
   onSubmit,
   onStop,
+  lockedSkillName,
+  showWelcomeSuggestions = true,
+  footerExtensionClassName,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -175,6 +178,12 @@ export function InputBox({
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
+  /** When set, skill is fixed and cannot be changed or cleared. */
+  lockedSkillName?: string;
+  /** Whether to show welcome quick suggestion chips under the input. */
+  showWelcomeSuggestions?: boolean;
+  /** Background for the footer extension strip under the input (defaults to theme background). */
+  footerExtensionClassName?: string;
 }) {
   const { t } = useI18n();
   const searchParams = useSearchParams();
@@ -187,7 +196,15 @@ export function InputBox({
   const { connectors, isLoading: connectorsLoading } = useConnectors();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
+  const appliedInitialValueRef = useRef<string | undefined>(undefined);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!initialValue) return;
+    if (appliedInitialValueRef.current === initialValue) return;
+    appliedInitialValueRef.current = initialValue;
+    textInput.setInput(initialValue);
+  }, [initialValue, textInput]);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -417,8 +434,20 @@ export function InputBox({
     [onContextChange, context],
   );
 
+  useEffect(() => {
+    if (!lockedSkillName || !onContextChange) return;
+    if (context.skill_name === lockedSkillName) return;
+    onContextChange({
+      ...context,
+      skill_name: lockedSkillName,
+    });
+  }, [context, lockedSkillName, onContextChange]);
+
   const handleSkillSelect = useCallback(
     (skillName: string | undefined) => {
+      if (lockedSkillName) {
+        if (skillName !== lockedSkillName) return;
+      }
       onContextChange?.({
         ...context,
         skill_name: skillName,
@@ -432,7 +461,7 @@ export function InputBox({
         ta?.focus();
       }, 0);
     },
-    [onContextChange, context],
+    [lockedSkillName, onContextChange, context],
   );
 
   const handleConnectorSelect = useCallback(
@@ -451,6 +480,12 @@ export function InputBox({
     },
     [onContextChange, context],
   );
+
+  const lockedSkillLabel = useMemo(() => {
+    if (!lockedSkillName) return lockedSkillName;
+    const skill = skills.find((item) => item.name === lockedSkillName);
+    return skill?.display_name ?? lockedSkillName;
+  }, [lockedSkillName, skills]);
 
   // Apply the slash command at `slashIndex`. Routes by `kind`:
   //   - skill:   set/clear the active skill via `handleSkillSelect`
@@ -476,7 +511,9 @@ export function InputBox({
       let nextInput: string | null | undefined = "";
       switch (command.kind) {
         case "skill":
-          handleSkillSelect(command.value ?? undefined);
+          if (!lockedSkillName) {
+            handleSkillSelect(command.value ?? undefined);
+          }
           break;
         case "mode":
           if (
@@ -1213,7 +1250,6 @@ export function InputBox({
             disabled={disabled}
             placeholder={t.inputBox.placeholder}
             autoFocus={autoFocus}
-            defaultValue={initialValue}
           />
         </PromptInputBody>
         <PromptInputFooter className="flex">
@@ -1602,90 +1638,102 @@ export function InputBox({
                 </PromptInputActionMenuContent>
               </PromptInputActionMenu>
             )}
-            {skills.length > 0 && (
-              <PromptInputActionMenu
-                open={skillMenuOpen}
-                onOpenChange={setSkillMenuOpen}
+            {lockedSkillName ? (
+              <div
+                className="inline-flex h-8 max-w-[200px] items-center gap-1.5 rounded-md border border-violet-200/80 bg-violet-50 px-2.5 text-xs font-normal text-violet-900"
+                title={lockedSkillName}
               >
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
-                  <WrenchIcon className="size-3" />
-                  <div className="text-xs font-normal">
-                    {context.skill_name
-                      ? ((
-                          skills.find((s) => s.name === context.skill_name) as
-                            | { name: string; display_name: string | null }
-                            | undefined
-                        )?.display_name ??
-                        (
-                          skills.find((s) => s.name === context.skill_name) as
-                            | { name: string }
-                            | undefined
-                        )?.name ??
-                        context.skill_name)
-                      : t.inputBox.skill}
-                  </div>
-                  {context.skill_name && (
-                    <span
-                      className="ml-1 inline-flex cursor-pointer items-center"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSkillSelect(undefined);
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                    >
-                      <XIcon className="text-muted-foreground hover:text-foreground size-3" />
-                    </span>
-                  )}
-                </PromptInputActionMenuTrigger>
-                <PromptInputActionMenuContent className="w-70">
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel className="text-muted-foreground text-xs">
-                      {t.inputBox.skill}
-                    </DropdownMenuLabel>
-                    <PromptInputActionMenu>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          !context.skill_name
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleSkillSelect(undefined)}
+                <WrenchIcon className="size-3 shrink-0" />
+                <span className="truncate">{lockedSkillLabel}</span>
+              </div>
+            ) : (
+              skills.length > 0 && (
+                <PromptInputActionMenu
+                  open={skillMenuOpen}
+                  onOpenChange={setSkillMenuOpen}
+                >
+                  <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                    <WrenchIcon className="size-3" />
+                    <div className="text-xs font-normal">
+                      {context.skill_name
+                        ? ((
+                            skills.find(
+                              (s) => s.name === context.skill_name,
+                            ) as
+                              | { name: string; display_name: string | null }
+                              | undefined
+                          )?.display_name ??
+                          (
+                            skills.find(
+                              (s) => s.name === context.skill_name,
+                            ) as { name: string } | undefined
+                          )?.name ??
+                          context.skill_name)
+                        : t.inputBox.skill}
+                    </div>
+                    {context.skill_name && (
+                      <span
+                        className="ml-1 inline-flex cursor-pointer items-center"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSkillSelect(undefined);
+                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
                       >
-                        <div className="flex items-center gap-1 text-xs">
-                          {t.inputBox.noSkill}
-                        </div>
-                        {!context.skill_name ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      {skills
-                        .filter((s) => s.enabled)
-                        .map((skill) => (
-                          <PromptInputActionMenuItem
-                            key={skill.name}
-                            className={cn(
-                              context.skill_name === skill.name
-                                ? "text-accent-foreground"
-                                : "text-muted-foreground/65",
-                            )}
-                            onSelect={() => handleSkillSelect(skill.name)}
-                          >
-                            <div className="flex items-center gap-1 text-xs">
-                              {skill.display_name ?? skill.name}
-                            </div>
-                            {context.skill_name === skill.name ? (
-                              <CheckIcon className="ml-auto size-4" />
-                            ) : (
-                              <div className="ml-auto size-4" />
-                            )}
-                          </PromptInputActionMenuItem>
-                        ))}
-                    </PromptInputActionMenu>
-                  </DropdownMenuGroup>
-                </PromptInputActionMenuContent>
-              </PromptInputActionMenu>
+                        <XIcon className="text-muted-foreground hover:text-foreground size-3" />
+                      </span>
+                    )}
+                  </PromptInputActionMenuTrigger>
+                  <PromptInputActionMenuContent className="w-70">
+                    <DropdownMenuGroup>
+                      <DropdownMenuLabel className="text-muted-foreground text-xs">
+                        {t.inputBox.skill}
+                      </DropdownMenuLabel>
+                      <PromptInputActionMenu>
+                        <PromptInputActionMenuItem
+                          className={cn(
+                            !context.skill_name
+                              ? "text-accent-foreground"
+                              : "text-muted-foreground/65",
+                          )}
+                          onSelect={() => handleSkillSelect(undefined)}
+                        >
+                          <div className="flex items-center gap-1 text-xs">
+                            {t.inputBox.noSkill}
+                          </div>
+                          {!context.skill_name ? (
+                            <CheckIcon className="ml-auto size-4" />
+                          ) : (
+                            <div className="ml-auto size-4" />
+                          )}
+                        </PromptInputActionMenuItem>
+                        {skills
+                          .filter((s) => s.enabled)
+                          .map((skill) => (
+                            <PromptInputActionMenuItem
+                              key={skill.name}
+                              className={cn(
+                                context.skill_name === skill.name
+                                  ? "text-accent-foreground"
+                                  : "text-muted-foreground/65",
+                              )}
+                              onSelect={() => handleSkillSelect(skill.name)}
+                            >
+                              <div className="flex items-center gap-1 text-xs">
+                                {skill.display_name ?? skill.name}
+                              </div>
+                              {context.skill_name === skill.name ? (
+                                <CheckIcon className="ml-auto size-4" />
+                              ) : (
+                                <div className="ml-auto size-4" />
+                              )}
+                            </PromptInputActionMenuItem>
+                          ))}
+                      </PromptInputActionMenu>
+                    </DropdownMenuGroup>
+                  </PromptInputActionMenuContent>
+                </PromptInputActionMenu>
+              )
             )}
           </PromptInputTools>
           <PromptInputTools>
@@ -1736,15 +1784,22 @@ export function InputBox({
           </PromptInputTools>
         </PromptInputFooter>
         {!isWelcomeMode && (
-          <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
+          <div
+            className={cn(
+              "bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4",
+              footerExtensionClassName,
+            )}
+          />
         )}
       </PromptInput>
 
-      {isWelcomeMode && searchParams.get("mode") !== "skill" && (
-        <div className="flex items-center justify-center pt-2">
-          <SuggestionList />
-        </div>
-      )}
+      {isWelcomeMode &&
+        showWelcomeSuggestions &&
+        searchParams.get("mode") !== "skill" && (
+          <div className="flex items-center justify-center pt-2">
+            <SuggestionList />
+          </div>
+        )}
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>

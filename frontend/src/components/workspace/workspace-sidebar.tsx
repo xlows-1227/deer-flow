@@ -20,7 +20,7 @@ export function WorkspaceSidebar({
     <>
       <Sidebar
         variant="sidebar"
-        collapsible="none"
+        collapsible="icon"
         className="bg-background border-r border-gray-200"
         {...props}
       >

@@ -195,6 +195,7 @@ export function RecentChatList() {
                         <Link
                           className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                           href={pathOfThread(thread)}
+                          prefetch={false}
                         >
                           {titleOfThread(thread)}
                         </Link>
@@ -276,7 +277,7 @@ export function RecentChatList() {
                   isActive={pathname === "/workspace/chats"}
                   className="text-muted-foreground mt-1 h-8 rounded-lg border border-gray-100 bg-gray-50 text-xs hover:bg-gray-100 data-[active=true]:bg-gray-100 data-[active=true]:text-gray-900"
                 >
-                  <Link href="/workspace/chats">
+                  <Link href="/workspace/chats" prefetch={false}>
                     <ListIcon className="size-3.5" />
                     <span>{t.sidebar.viewAllChats}</span>
                   </Link>

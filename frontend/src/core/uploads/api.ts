@@ -7,7 +7,7 @@ import { getBackendBaseURL } from "../config";
 
 export interface UploadedFileInfo {
   filename: string;
-  size: number;
+  size: number | string;
   path: string;
   virtual_path: string;
   artifact_url: string;

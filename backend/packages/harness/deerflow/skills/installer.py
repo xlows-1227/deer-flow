@@ -28,6 +28,11 @@ class SkillAlreadyExistsError(ValueError):
 class SkillSecurityScanError(ValueError):
     """Raised when a skill archive fails security scanning."""
 
+    def __init__(self, message: str, *, reason: str | None = None, can_force: bool = False) -> None:
+        super().__init__(message)
+        self.reason = reason or message
+        self.can_force = can_force
+
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
     """Return True if the zip member path is absolute or attempts directory traversal."""
@@ -153,29 +158,30 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as e:
-        raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
+        raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8", can_force=True) from e
 
     try:
         result = await scan_skill_content(content, executable=executable, location=location)
     except Exception as e:
-        raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
+        raise SkillSecurityScanError(f"Security scan failed for {location}: {e}", reason=str(e), can_force=True) from e
 
     decision = getattr(result, "decision", None)
     reason = str(getattr(result, "reason", "") or "No reason provided.")
     if decision == "block":
         if rel_path == "SKILL.md":
-            raise SkillSecurityScanError(f"Security scan blocked skill '{skill_name}': {reason}")
-        raise SkillSecurityScanError(f"Security scan blocked {location}: {reason}")
+            raise SkillSecurityScanError(f"Security scan blocked skill '{skill_name}': {reason}", reason=reason, can_force=True)
+        raise SkillSecurityScanError(f"Security scan blocked {location}: {reason}", reason=reason, can_force=True)
     if executable and decision != "allow":
-        raise SkillSecurityScanError(f"Security scan rejected executable {location}: {reason}")
+        raise SkillSecurityScanError(f"Security scan rejected executable {location}: {reason}", reason=reason, can_force=True)
     if decision not in {"allow", "warn"}:
-        raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
+        raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}", reason=reason, can_force=True)
 
 
-async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
+async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, skip_security_scan: bool = False) -> None:
     """Run the skill security scanner against all installable text and script files."""
     skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
+    if not skip_security_scan:
+        await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
 
     for path in sorted(skill_dir.rglob("*")):
         if not path.is_file():
@@ -186,6 +192,8 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
             continue
         if path.name == "SKILL.md":
             raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
+        if skip_security_scan:
+            continue
         if not _should_scan_support_file(rel_path):
             continue
 
