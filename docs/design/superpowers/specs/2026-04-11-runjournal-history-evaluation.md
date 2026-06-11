@@ -2,7 +2,7 @@
 
 **日期**：2026-04-11
 **分支**：`rayhpeng/fix-persistence-new`
-**相关 plan**：[`docs/superpowers/plans/2026-04-10-event-store-history.md`](../plans/2026-04-10-event-store-history.md)（尚未落地）
+**相关 plan**：[`docs/execution/superpowers/plans/2026-04-10-event-store-history.md`](../../../execution/superpowers/plans/2026-04-10-event-store-history.md)（尚未落地）
 
 ---
 
@@ -96,7 +96,7 @@
 
 ## 5. 推荐执行顺序
 
-1. 按本文档 §4 修订 `docs/superpowers/plans/2026-04-10-event-store-history.md`（主要是 Task 1 的 helper 实现 + 分页）
+1. 按本文档 §4 修订 `docs/execution/superpowers/plans/2026-04-10-event-store-history.md`（主要是 Task 1 的 helper 实现 + 分页）
 2. 按修订后的 plan 执行（走 `superpowers:executing-plans`）
 3. 合并后立即建 Standard mode follow-up issue
 

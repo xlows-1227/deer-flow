@@ -219,6 +219,10 @@ export interface Translations {
   conversation: {
     noMessages: string;
     startConversation: string;
+    memoryRollup: string;
+    memoryRollupSuccess: string;
+    memoryRollupEmpty: string;
+    memoryRollupFailed: string;
   };
 
   // Chats
@@ -365,27 +369,17 @@ export interface Translations {
       factValidationContent: string;
       factValidationConfidence: string;
       noFacts: string;
-      summaryReadOnly: string;
       memoryFullyEmpty: string;
       factPreviewLabel: string;
-      searchPlaceholder: string;
-      filterAll: string;
-      filterFacts: string;
-      filterSummaries: string;
-      noMatches: string;
+      rollupDaily: string;
+      rollupDailySuccess: string;
+      rollupDailyEmpty: string;
+      dailyDeleteConfirmTitle: string;
+      dailyDeleteConfirmDescription: string;
+      dailyDeleteSuccess: string;
+      dailyDeletePreviewLabel: string;
       markdown: {
-        overview: string;
-        userContext: string;
-        work: string;
-        personal: string;
-        topOfMind: string;
-        historyBackground: string;
-        recentMonths: string;
-        earlierContext: string;
-        longTermBackground: string;
-        updatedAt: string;
         facts: string;
-        empty: string;
         table: {
           category: string;
           confidence: string;
@@ -395,10 +389,8 @@ export interface Translations {
             normal: string;
             unknown: string;
           };
-          content: string;
           source: string;
           createdAt: string;
-          view: string;
         };
       };
     };

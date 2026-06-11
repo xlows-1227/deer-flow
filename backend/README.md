@@ -34,6 +34,51 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
 
+### External API V1
+
+业务系统可以通过用户级 Bearer API Key 调用稳定的 `/api/v1/external/*` 接口。External API Key 只代表所属用户访问外部接口，不能访问模型、Skill、Connector 等管理接口。
+
+使用前需要：
+
+1. 使用浏览器登录会话调用 `POST /api/v1/api-keys/current/rotate`，生成或轮换 API Key；完整 Key 只返回一次。
+2. 通过 `PUT /api/v1/api-keys/current/policy` 配置允许调用的 Skill 白名单。
+3. 外部系统携带 `Authorization: Bearer dfk_<key_id>_<secret>` 创建 Conversation，再在 Conversation 中创建异步 Run。
+
+主要接口：
+
+```text
+GET    /api/v1/external/skills
+POST   /api/v1/external/conversations
+GET    /api/v1/external/conversations/{conversation_id}
+POST   /api/v1/external/conversations/{conversation_id}/runs
+GET    /api/v1/external/runs/{run_id}
+POST   /api/v1/external/runs/{run_id}/cancel
+```
+
+创建新对话并启动异步 Run：
+
+```bash
+export DEERFLOW_API_KEY='dfk_<key_id>_<secret>'
+
+curl -X POST 'http://localhost:8001/api/v1/external/conversations' \
+  -H "Authorization: Bearer ${DEERFLOW_API_KEY}" \
+  -H 'Idempotency-Key: create-crm-session-789' \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"crm","external_conversation_id":"crm-session-789","default_skill":"customer-summary"}'
+
+curl -X POST 'http://localhost:8001/api/v1/external/conversations/<conversation_id>/runs' \
+  -H "Authorization: Bearer ${DEERFLOW_API_KEY}" \
+  -H 'Idempotency-Key: run-crm-session-789-1' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"总结这个客户的历史信息","skill":"customer-summary","mode":"standard"}'
+```
+
+相同对话的后续请求继续使用原 `conversation_id`，因此会复用内部 Thread 历史。要开启不继承历史的新对话，应重新调用 Conversation 创建接口。`skill` 只覆盖当前 Run，不会修改 Conversation 的默认 Skill。创建 Conversation 和 Run 时建议始终提供稳定且唯一的 `Idempotency-Key`；同一用户默认最多同时运行 3 个 External Run。
+
+`Idempotency-Key` 只保证同一业务请求不会重复创建 Conversation 或 Run，不保证 Agent 输出内容完全确定。涉及付款、审批、删除等确定性业务操作时，应由业务系统继续执行权限校验、状态机校验和去重，不应仅依赖模型输出触发。
+
+建议在生产环境显式设置稳定的 `EXTERNAL_API_KEY_PEPPER`。更换 Pepper 会导致已有 API Key 全部失效。External API V1 依赖 SQLite 或 PostgreSQL 持久化，在 `database.backend=memory` 模式下关闭失败。
+
 ---
 
 ## Core Components

@@ -68,6 +68,16 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
 
 class TestRunRepository:
     @pytest.mark.anyio
+    async def test_count_inflight_by_user(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("a1", thread_id="t1", user_id="alice", status="pending")
+        await repo.put("a2", thread_id="t2", user_id="alice", status="running")
+        await repo.put("a3", thread_id="t3", user_id="alice", status="success")
+        await repo.put("b1", thread_id="t4", user_id="bob", status="running")
+        assert await repo.count_inflight_by_user("alice") == 2
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_put_and_get(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="pending")

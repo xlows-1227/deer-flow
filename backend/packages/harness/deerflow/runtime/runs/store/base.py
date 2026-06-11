@@ -131,6 +131,10 @@ class RunStore(abc.ABC):
         """Return persisted runs that are still ``pending`` or ``running``."""
         pass
 
+    async def count_inflight_by_user(self, user_id: str) -> int:
+        """Count active runs owned by one user."""
+        return sum(1 for row in await self.list_inflight() if row.get("user_id") == user_id)
+
     @abc.abstractmethod
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage for completed runs in a thread.

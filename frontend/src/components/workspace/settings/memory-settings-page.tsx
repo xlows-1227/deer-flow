@@ -4,11 +4,11 @@ import {
   DownloadIcon,
   PenLineIcon,
   PlusIcon,
+  RefreshCwIcon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
-import Link from "next/link";
-import { useDeferredValue, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
@@ -23,41 +23,34 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
   useClearMemory,
   useCreateMemoryFact,
+  useDeleteDailyMemory,
   useDeleteMemoryFact,
+  useDailyMemory,
   useImportMemory,
   useMemory,
+  useMemoryProfile,
+  useRollupDailyMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
 import type {
+  DailyPersonSummary,
   MemoryFactInput,
   MemoryFactPatchInput,
+  MemoryProfile,
+  MemoryProfileItem,
   UserMemory,
 } from "@/core/memory/types";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
-import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
 
-type MemoryViewFilter = "all" | "facts" | "summaries";
 type MemoryFact = UserMemory["facts"][number];
-
-type MemorySection = {
-  title: string;
-  summary: string;
-  updatedAt?: string;
-};
-
-type MemorySectionGroup = {
-  title: string;
-  sections: MemorySection[];
-};
 
 type PendingImport = {
   fileName: string;
@@ -144,117 +137,49 @@ function confidenceToLevelKey(confidence: unknown): {
   return { key: "normal", value };
 }
 
-function formatMemorySection(
-  section: MemorySection,
-  t: ReturnType<typeof useI18n>["t"],
-): string {
-  const content =
-    section.summary.trim() ||
-    `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`;
+function profileItemsToMarkdown(title: string, items: MemoryProfileItem[]) {
+  const activeItems = items.filter((item) => item.status === "active");
+  if (activeItems.length === 0) return "";
   return [
-    `### ${section.title}`,
-    content,
+    `### ${title}`,
+    ...activeItems.map((item) => `- ${item.content}`),
     "",
-    section.updatedAt &&
-      `> ${t.settings.memory.markdown.updatedAt}: \`${formatTimeAgo(section.updatedAt)}\``,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].join("\n");
 }
 
-function buildMemorySectionGroups(
-  memory: UserMemory,
-  t: ReturnType<typeof useI18n>["t"],
-): MemorySectionGroup[] {
-  return [
-    {
-      title: t.settings.memory.markdown.userContext,
-      sections: [
-        {
-          title: t.settings.memory.markdown.work,
-          summary: memory.user.workContext.summary,
-          updatedAt: memory.user.workContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.personal,
-          summary: memory.user.personalContext.summary,
-          updatedAt: memory.user.personalContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.topOfMind,
-          summary: memory.user.topOfMind.summary,
-          updatedAt: memory.user.topOfMind.updatedAt,
-        },
-      ],
-    },
-    {
-      title: t.settings.memory.markdown.historyBackground,
-      sections: [
-        {
-          title: t.settings.memory.markdown.recentMonths,
-          summary: memory.history.recentMonths.summary,
-          updatedAt: memory.history.recentMonths.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.earlierContext,
-          summary: memory.history.earlierContext.summary,
-          updatedAt: memory.history.earlierContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.longTermBackground,
-          summary: memory.history.longTermBackground.summary,
-          updatedAt: memory.history.longTermBackground.updatedAt,
-        },
-      ],
-    },
-  ];
+function memoryProfileToMarkdown(profile: MemoryProfile | null) {
+  if (!profile) return "";
+  const sections = [
+    profile.overview || "",
+    profileItemsToMarkdown("偏好", profile.preferences),
+    profileItemsToMarkdown("沟通风格", profile.communicationStyle),
+    profileItemsToMarkdown("Skill 与工具使用习惯", profile.skillUsagePatterns),
+    profileItemsToMarkdown("兴趣与画像", profile.interests),
+    profileItemsToMarkdown("近期关注", profile.topOfMind),
+    profileItemsToMarkdown("纠正与避免", profile.corrections),
+  ].filter((part) => part.trim().length > 0);
+  if (sections.length === 0) return "";
+  return ["## 长期画像", ...sections].join("\n");
 }
 
-function summariesToMarkdown(
-  memory: UserMemory,
-  sectionGroups: MemorySectionGroup[],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  const parts: string[] = [];
-
-  parts.push(`## ${t.settings.memory.markdown.overview}`);
-  parts.push(
-    `- **${t.common.lastUpdated}**: \`${formatTimeAgo(memory.lastUpdated)}\``,
-  );
-
-  for (const group of sectionGroups) {
-    parts.push(`\n## ${group.title}`);
-    for (const section of group.sections) {
-      parts.push(formatMemorySection(section, t));
-    }
+function dailyMemoryToMarkdown(dailyMemory: DailyPersonSummary[]) {
+  if (dailyMemory.length === 0) return "";
+  const parts = ["## 每日总结"];
+  for (const daily of dailyMemory.slice(0, 7)) {
+    parts.push(`### ${daily.date}`);
+    if (daily.summary.trim()) parts.push(daily.summary);
+    const lines = [
+      ...daily.preferences.map((item) => `- 偏好: ${item}`),
+      ...daily.recentFocus.map((item) => `- 近期关注: ${item}`),
+      ...daily.skillUsagePatterns.map((item) => `- 使用习惯: ${item}`),
+      ...daily.interests.map((item) => `- 兴趣/画像: ${item}`),
+      ...daily.corrections.map((item) => `- 纠正: ${item}`),
+    ];
+    if (lines.length > 0) parts.push(lines.join("\n"));
+    if (daily.updatedAt)
+      parts.push(`> 更新于: \`${formatTimeAgo(daily.updatedAt)}\``);
   }
-
-  const markdown = parts.join("\n\n");
-  const lines = markdown.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  for (const line of lines) {
-    i++;
-    if (i !== 1 && line.startsWith("## ")) {
-      if (out.length === 0 || out[out.length - 1] !== "---") {
-        out.push("---");
-      }
-    }
-    out.push(line);
-  }
-
-  return out.join("\n");
-}
-
-function isMemorySummaryEmpty(memory: UserMemory) {
-  return (
-    memory.user.workContext.summary.trim() === "" &&
-    memory.user.personalContext.summary.trim() === "" &&
-    memory.user.topOfMind.summary.trim() === "" &&
-    memory.history.recentMonths.summary.trim() === "" &&
-    memory.history.earlierContext.summary.trim() === "" &&
-    memory.history.longTermBackground.summary.trim() === ""
-  );
+  return parts.join("\n\n");
 }
 
 function truncateFactPreview(content: string, maxLength = 140) {
@@ -276,27 +201,30 @@ function upperFirst(str: string) {
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
+  const { profile } = useMemoryProfile();
+  const { dailyMemory } = useDailyMemory(30);
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
+  const deleteDailyMemory = useDeleteDailyMemory();
   const deleteMemoryFact = useDeleteMemoryFact();
   const importMemoryMutation = useImportMemory();
+  const rollupDailyMemory = useRollupDailyMemory();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const updateMemoryFact = useUpdateMemoryFact();
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const [dailyToDelete, setDailyToDelete] = useState<DailyPersonSummary | null>(
+    null,
+  );
   const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
   const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
   const [factEditorOpen, setFactEditorOpen] = useState(false);
   const [factForm, setFactForm] = useState<FactFormState>(
     DEFAULT_FACT_FORM_STATE,
   );
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<MemoryViewFilter>("all");
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
   const [isExporting, setIsExporting] = useState(false);
-  const deferredQuery = useDeferredValue(query);
-  const normalizedQuery = deferredQuery.trim().toLowerCase();
   const factContentInputId = useId();
   const factCategoryInputId = useId();
   const factConfidenceInputId = useId();
@@ -332,58 +260,38 @@ export function MemorySettingsPage() {
   const factValidationContent = t.settings.memory.factValidationContent;
   const factValidationConfidence = t.settings.memory.factValidationConfidence;
   const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
-  const summaryReadOnly = t.settings.memory.summaryReadOnly;
   const memoryFullyEmpty =
     t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
   const factPreviewLabel =
     t.settings.memory.factPreviewLabel ?? "Fact to delete";
-  const searchPlaceholder =
-    t.settings.memory.searchPlaceholder ?? "Search memory";
-  const filterAll = t.settings.memory.filterAll ?? "All";
-  const filterFacts = t.settings.memory.filterFacts ?? "Facts";
-  const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
-  const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
+  const rollupDailyLabel = t.settings.memory.rollupDaily ?? "Roll up now";
+  const rollupDailySuccess =
+    t.settings.memory.rollupDailySuccess ?? "Daily summary updated";
+  const rollupDailyEmpty =
+    t.settings.memory.rollupDailyEmpty ??
+    "No session content is ready to summarize";
+  const dailyDeleteConfirmTitle =
+    t.settings.memory.dailyDeleteConfirmTitle ?? "Delete this daily summary?";
+  const dailyDeleteConfirmDescription =
+    t.settings.memory.dailyDeleteConfirmDescription ??
+    "This soft-deletes the daily summary immediately.";
+  const dailyDeleteSuccess =
+    t.settings.memory.dailyDeleteSuccess ?? "Daily summary deleted";
+  const dailyDeletePreviewLabel =
+    t.settings.memory.dailyDeletePreviewLabel ?? "Date to delete";
   const exportButton = t.settings.memory.exportButton ?? t.common.export;
   const exportSuccess =
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
-  const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
-  const filteredSectionGroups = sectionGroups
-    .map((group) => ({
-      ...group,
-      sections: group.sections.filter((section) =>
-        normalizedQuery
-          ? `${section.title} ${section.summary}`
-              .toLowerCase()
-              .includes(normalizedQuery)
-          : true,
-      ),
-    }))
-    .filter((group) => group.sections.length > 0);
-
-  const filteredFacts = memory
-    ? memory.facts.filter((fact) =>
-        normalizedQuery
-          ? `${fact.content} ${fact.category}`
-              .toLowerCase()
-              .includes(normalizedQuery)
-          : true,
-      )
+  const manualFacts = memory
+    ? memory.facts.filter((fact) => fact.source === "manual")
     : [];
-
-  const showSummaries = filter !== "facts";
-  const showFacts = filter !== "summaries";
-  const shouldRenderSummariesBlock =
-    showSummaries && (filteredSectionGroups.length > 0 || !normalizedQuery);
-  const shouldRenderFactsBlock =
-    showFacts &&
-    (filteredFacts.length > 0 || !normalizedQuery || filter === "facts");
-  const hasMatchingVisibleContent =
-    !memory ||
-    (showSummaries && filteredSectionGroups.length > 0) ||
-    (showFacts && filteredFacts.length > 0);
+  const profileMarkdown = memoryProfileToMarkdown(profile);
+  const dailyMarkdown = dailyMemoryToMarkdown(dailyMemory);
+  const isMemoryEmpty =
+    !profileMarkdown && !dailyMarkdown && manualFacts.length === 0;
 
   async function handleExportMemory() {
     try {
@@ -452,6 +360,27 @@ export function MemorySettingsPage() {
       await clearMemory.mutateAsync();
       toast.success(clearAllSuccess);
       setClearDialogOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleRollupDailyMemory() {
+    try {
+      const summary = await rollupDailyMemory.mutateAsync({});
+      toast.success(summary ? rollupDailySuccess : rollupDailyEmpty);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDeleteDailyMemory() {
+    if (!dailyToDelete) return;
+
+    try {
+      await deleteDailyMemory.mutateAsync(dailyToDelete.date);
+      toast.success(dailyDeleteSuccess);
+      setDailyToDelete(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -549,191 +478,190 @@ export function MemorySettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
+            {isMemoryEmpty ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
             ) : null}
 
-            <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
-                <Input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder={searchPlaceholder}
-                  className="sm:max-w-xs"
-                />
-                <ToggleGroup
-                  type="single"
-                  value={filter}
-                  onValueChange={(value) => {
-                    if (value) setFilter(value as MemoryViewFilter);
-                  }}
-                  variant="outline"
-                >
-                  <ToggleGroupItem value="all">{filterAll}</ToggleGroupItem>
-                  <ToggleGroupItem value="facts">{filterFacts}</ToggleGroupItem>
-                  <ToggleGroupItem value="summaries">
-                    {filterSummaries}
-                  </ToggleGroupItem>
-                </ToggleGroup>
-              </div>
-
-              <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".json,application/json"
-                  className="hidden"
-                  onChange={(event) => void handleImportFileSelection(event)}
-                />
-                <Button
-                  variant="outline"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={importMemoryMutation.isPending}
-                >
-                  <UploadIcon className="mr-2 h-4 w-4" />
-                  {importButton}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => void handleExportMemory()}
-                  disabled={isExporting}
-                >
-                  <DownloadIcon className="mr-2 h-4 w-4" />
-                  {isExporting ? t.common.loading : exportButton}
-                </Button>
-                <Button variant="outline" onClick={openCreateFactDialog}>
-                  <PlusIcon className="mr-2 h-4 w-4" />
-                  {addFactLabel}
-                </Button>
-                <Button
-                  variant="destructive"
-                  onClick={() => setClearDialogOpen(true)}
-                  disabled={clearMemory.isPending}
-                >
-                  {clearMemory.isPending ? t.common.loading : clearAllLabel}
-                </Button>
-              </div>
+            <div className="flex min-w-0 flex-wrap gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={(event) => void handleImportFileSelection(event)}
+              />
+              <Button
+                variant="outline"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importMemoryMutation.isPending}
+              >
+                <UploadIcon className="mr-2 h-4 w-4" />
+                {importButton}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void handleExportMemory()}
+                disabled={isExporting}
+              >
+                <DownloadIcon className="mr-2 h-4 w-4" />
+                {isExporting ? t.common.loading : exportButton}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void handleRollupDailyMemory()}
+                disabled={rollupDailyMemory.isPending}
+              >
+                <RefreshCwIcon className="mr-2 h-4 w-4" />
+                {rollupDailyMemory.isPending
+                  ? t.common.loading
+                  : rollupDailyLabel}
+              </Button>
+              <Button variant="outline" onClick={openCreateFactDialog}>
+                <PlusIcon className="mr-2 h-4 w-4" />
+                {addFactLabel}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => setClearDialogOpen(true)}
+                disabled={clearMemory.isPending}
+              >
+                {clearMemory.isPending ? t.common.loading : clearAllLabel}
+              </Button>
             </div>
 
-            {!hasMatchingVisibleContent && normalizedQuery ? (
-              <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                {noMatches}
-              </div>
-            ) : null}
-
-            {shouldRenderSummariesBlock ? (
+            {profileMarkdown ? (
               <div className="min-w-0 rounded-lg border p-4">
-                <div className="text-muted-foreground mb-4 text-sm">
-                  {summaryReadOnly}
-                </div>
                 <Streamdown
                   className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                   {...streamdownPlugins}
                 >
-                  {summariesToMarkdown(memory, filteredSectionGroups, t)}
+                  {profileMarkdown}
                 </Streamdown>
               </div>
             ) : null}
 
-            {shouldRenderFactsBlock ? (
+            {dailyMarkdown ? (
               <div className="min-w-0 rounded-lg border p-4">
-                <div className="mb-4">
-                  <h3 className="text-base font-medium">
-                    {t.settings.memory.markdown.facts}
-                  </h3>
-                </div>
-
-                {filteredFacts.length === 0 ? (
-                  <div className="text-muted-foreground text-sm">
-                    {normalizedQuery ? noMatches : noFacts}
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {filteredFacts.map((fact) => {
-                      const { key } = confidenceToLevelKey(fact.confidence);
-                      const confidenceText =
-                        t.settings.memory.markdown.table.confidenceLevel[key];
-
-                      return (
-                        <div
-                          key={fact.id}
-                          className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
+                <Streamdown
+                  className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                  {...streamdownPlugins}
+                >
+                  {dailyMarkdown}
+                </Streamdown>
+                {dailyMemory.length > 0 ? (
+                  <div className="mt-4 space-y-2 border-t pt-4">
+                    {dailyMemory.slice(0, 7).map((daily) => (
+                      <div
+                        key={daily.id}
+                        className="flex min-h-10 items-center justify-between gap-3 rounded-md border px-3 py-2"
+                      >
+                        <span className="text-sm font-medium">
+                          {daily.date}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive shrink-0"
+                          onClick={() => setDailyToDelete(daily)}
+                          disabled={deleteDailyMemory.isPending}
+                          title={t.common.delete}
+                          aria-label={t.common.delete}
                         >
-                          <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.category}:
-                                </span>{" "}
-                                {upperFirst(fact.category)}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.confidence}:
-                                </span>{" "}
-                                {confidenceText}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.createdAt}:
-                                </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.source}:
-                                </span>{" "}
-                                {fact.source === "manual" ? (
-                                  t.settings.memory.manualFactSource
-                                ) : (
-                                  <Link
-                                    href={pathOfThread(fact.source)}
-                                    className="text-primary underline-offset-4 hover:underline"
-                                  >
-                                    {t.settings.memory.markdown.table.view}
-                                  </Link>
-                                )}
-                              </span>
-                            </div>
-                            <p className="text-sm [overflow-wrap:anywhere]">
-                              {fact.content}
-                            </p>
-                          </div>
-
-                          <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="shrink-0"
-                              onClick={() => openEditFactDialog(fact)}
-                              disabled={deleteMemoryFact.isPending}
-                              title={t.common.edit}
-                              aria-label={t.common.edit}
-                            >
-                              <PenLineIcon className="h-4 w-4" />
-                            </Button>
-
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="text-destructive hover:text-destructive shrink-0"
-                              onClick={() => setFactToDelete(fact)}
-                              disabled={deleteMemoryFact.isPending}
-                              title={t.common.delete}
-                              aria-label={t.common.delete}
-                            >
-                              <Trash2Icon className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      );
-                    })}
+                          <Trash2Icon className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
                   </div>
-                )}
+                ) : null}
               </div>
             ) : null}
+
+            <div className="min-w-0 rounded-lg border p-4">
+              <div className="mb-4">
+                <h3 className="text-base font-medium">
+                  {t.settings.memory.markdown.facts}
+                </h3>
+              </div>
+
+              {manualFacts.length === 0 ? (
+                <div className="text-muted-foreground text-sm">{noFacts}</div>
+              ) : (
+                <div className="space-y-3">
+                  {manualFacts.map((fact) => {
+                    const { key } = confidenceToLevelKey(fact.confidence);
+                    const confidenceText =
+                      t.settings.memory.markdown.table.confidenceLevel[key];
+
+                    return (
+                      <div
+                        key={fact.id}
+                        className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
+                      >
+                        <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.category}:
+                              </span>{" "}
+                              {upperFirst(fact.category)}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.confidence}:
+                              </span>{" "}
+                              {confidenceText}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.createdAt}:
+                              </span>{" "}
+                              {formatTimeAgo(fact.createdAt)}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.source}:
+                              </span>{" "}
+                              {t.settings.memory.manualFactSource}
+                            </span>
+                          </div>
+                          <p className="text-sm [overflow-wrap:anywhere]">
+                            {fact.content}
+                          </p>
+                        </div>
+
+                        <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="shrink-0"
+                            onClick={() => openEditFactDialog(fact)}
+                            disabled={deleteMemoryFact.isPending}
+                            title={t.common.edit}
+                            aria-label={t.common.edit}
+                          >
+                            <PenLineIcon className="h-4 w-4" />
+                          </Button>
+
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive shrink-0"
+                            onClick={() => setFactToDelete(fact)}
+                            disabled={deleteMemoryFact.isPending}
+                            title={t.common.delete}
+                            aria-label={t.common.delete}
+                          >
+                            <Trash2Icon className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </SettingsSection>
@@ -914,6 +842,48 @@ export function MemorySettingsPage() {
               disabled={deleteMemoryFact.isPending}
             >
               {deleteMemoryFact.isPending ? t.common.loading : t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={dailyToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDailyToDelete(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{dailyDeleteConfirmTitle}</DialogTitle>
+            <DialogDescription>
+              {dailyDeleteConfirmDescription}
+            </DialogDescription>
+          </DialogHeader>
+          {dailyToDelete ? (
+            <div className="bg-muted rounded-md border p-3 text-sm">
+              <div className="text-muted-foreground mb-1 font-medium">
+                {dailyDeletePreviewLabel}
+              </div>
+              <p className="break-words">{dailyToDelete.date}</p>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDailyToDelete(null)}
+              disabled={deleteDailyMemory.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleDeleteDailyMemory()}
+              disabled={deleteDailyMemory.isPending}
+            >
+              {deleteDailyMemory.isPending ? t.common.loading : t.common.delete}
             </Button>
           </DialogFooter>
         </DialogContent>

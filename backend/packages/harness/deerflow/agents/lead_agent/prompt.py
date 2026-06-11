@@ -564,6 +564,8 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
     """
     try:
         from deerflow.agents.memory import format_memory_for_injection, get_memory_data
+        from deerflow.agents.memory.migration import migrate_legacy_memory
+        from deerflow.agents.memory.selection import format_memory_v2_for_injection
         from deerflow.runtime.user_context import get_effective_user_id
 
         if app_config is None:
@@ -576,8 +578,16 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
+        user_id = get_effective_user_id()
+        memory_content = ""
+        if getattr(config, "v2_enabled", False):
+            if getattr(config, "migrate_legacy_on_startup", True):
+                migrate_legacy_memory(user_id)
+            memory_content = format_memory_v2_for_injection(user_id, max_tokens=config.max_injection_tokens)
+
+        if not memory_content.strip():
+            memory_data = get_memory_data(agent_name, user_id=user_id)
+            memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
 
         if not memory_content.strip():
             return ""

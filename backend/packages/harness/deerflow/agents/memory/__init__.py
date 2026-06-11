@@ -7,6 +7,7 @@ This module provides a global memory mechanism that:
 """
 
 from deerflow.agents.memory.prompt import (
+    DAILY_ROLLUP_PROMPT,
     FACT_EXTRACTION_PROMPT,
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
@@ -18,11 +19,13 @@ from deerflow.agents.memory.queue import (
     get_memory_queue,
     reset_memory_queue,
 )
+from deerflow.agents.memory.selection import format_memory_v2_for_injection
 from deerflow.agents.memory.storage import (
     FileMemoryStorage,
     MemoryStorage,
     get_memory_storage,
 )
+from deerflow.agents.memory.storage_v2 import MemoryStorageV2, get_memory_storage_v2
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     clear_memory_data,
@@ -35,6 +38,7 @@ from deerflow.agents.memory.updater import (
 __all__ = [
     # Prompt utilities
     "MEMORY_UPDATE_PROMPT",
+    "DAILY_ROLLUP_PROMPT",
     "FACT_EXTRACTION_PROMPT",
     "format_memory_for_injection",
     "format_conversation_for_update",
@@ -47,6 +51,9 @@ __all__ = [
     "MemoryStorage",
     "FileMemoryStorage",
     "get_memory_storage",
+    "MemoryStorageV2",
+    "get_memory_storage_v2",
+    "format_memory_v2_for_injection",
     # Updater
     "MemoryUpdater",
     "clear_memory_data",
