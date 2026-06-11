@@ -54,6 +54,72 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+class ImageGenerationProviderConfig(BaseModel):
+    """Configuration for one image generation provider."""
+
+    enabled: bool = Field(default=False, description="Whether this provider is available to the image generation tool")
+    provider: str | None = Field(default=None, description="Provider adapter id. Defaults to the map key.")
+    display_name: str | None = Field(default=None, description="Human-readable provider label")
+    api_key: str | None = Field(default=None, description="Provider API key or an environment variable reference")
+    base_url: str | None = Field(default=None, description="Provider API base URL override")
+    model: str | None = Field(default=None, description="Default image generation model")
+    timeout_seconds: float = Field(default=120.0, description="Request timeout for image generation calls")
+    trust_env: bool = Field(default=False, description="Whether HTTP calls should use proxy settings from environment variables")
+    params: dict[str, Any] = Field(default_factory=dict, description="Provider-specific default request parameters")
+    model_config = ConfigDict(extra="allow")
+
+
+def _default_image_generation_providers() -> dict[str, ImageGenerationProviderConfig]:
+    """Return provider defaults shown in Settings before users add secrets."""
+    return {
+        "openai": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="openai",
+            display_name="OpenAI",
+            model="gpt-image-1",
+            base_url="https://api.openai.com/v1",
+        ),
+        "stability": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="stability",
+            display_name="Stability AI",
+            model="sd3.5-large",
+            base_url="https://api.stability.ai/v2beta",
+        ),
+        "volcengine": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="volcengine",
+            display_name="Volcengine Ark",
+            model="doubao-seedream-3-0-t2i-250415",
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+        ),
+        "aihubmix": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="aihubmix",
+            display_name="Aihubmix",
+            model="openai/gpt-image-2-free",
+            base_url="https://aihubmix.com/v1",
+        ),
+        "custom_openai_compatible": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="custom_openai_compatible",
+            display_name="OpenAI-compatible",
+            model="",
+            base_url="",
+        ),
+    }
+
+
+class ImageGenerationConfig(BaseModel):
+    """Configuration for the built-in image generation tool."""
+
+    enabled: bool = Field(default=False, description="Whether the built-in image generation tool may call providers")
+    default_provider: str | None = Field(default="openai", alias="defaultProvider", description="Provider used when tool calls omit provider")
+    output_subdir: str = Field(default="generated-images", alias="outputSubdir", description="Subdirectory under /mnt/user-data/outputs for generated images")
+    providers: dict[str, ImageGenerationProviderConfig] = Field(default_factory=_default_image_generation_providers, description="Map of provider name to configuration")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
@@ -65,6 +131,11 @@ class ExtensionsConfig(BaseModel):
     skills: dict[str, SkillStateConfig] = Field(
         default_factory=dict,
         description="Map of skill name to state configuration",
+    )
+    image_generation: ImageGenerationConfig = Field(
+        default_factory=ImageGenerationConfig,
+        alias="imageGeneration",
+        description="Built-in image generation tool configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

@@ -6,8 +6,9 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
+from deerflow.tools.builtins import ask_clarification_tool, generate_image_tool, present_file_tool, task_tool, view_image_tool
 from deerflow.tools.builtins.tool_search import get_deferred_registry
+from deerflow.tools.image_generation import has_enabled_image_generation_provider
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,20 @@ def get_available_tools(
         from deerflow.tools.skill_manage_tool import skill_manage_tool
 
         builtin_tools.append(skill_manage_tool)
+
+    # Read the latest extensions config from disk for image generation.
+    # Settings are saved through the Gateway API while agent runs may happen
+    # in another process with a cached app_config, so app_config.extensions can
+    # be stale immediately after the user enables the tool.
+    if app_config is None:
+        from deerflow.config.extensions_config import ExtensionsConfig
+
+        extensions_config = ExtensionsConfig.from_file()
+    else:
+        extensions_config = getattr(config, "extensions", None)
+    if extensions_config is not None and has_enabled_image_generation_provider(extensions_config):
+        builtin_tools.append(generate_image_tool)
+        logger.info("Including generate_image_tool (image generation enabled)")
 
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:

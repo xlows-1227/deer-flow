@@ -29,6 +29,7 @@ from app.gateway.routers import (
     suggestions,
     thread_runs,
     threads,
+    tools,
     uploads,
 )
 from deerflow.config import app_config as deerflow_app_config
@@ -325,6 +326,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Manage Model Context Protocol (MCP) server configurations",
             },
             {
+                "name": "tools",
+                "description": "Manage built-in tool configurations",
+            },
+            {
                 "name": "memory",
                 "description": "Access and manage global memory data for personalized conversations",
             },
@@ -404,6 +409,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
+
+    # Built-in tool configuration API is mounted at /api/tools
+    app.include_router(tools.router)
 
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)

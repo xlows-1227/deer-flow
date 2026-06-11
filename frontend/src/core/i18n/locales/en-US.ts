@@ -399,7 +399,7 @@ export const enUS: Translations = {
       appearance: "Appearance",
       memory: "Memory",
       connectors: "Connectors",
-      tools: "MCP",
+      tools: "Tools",
       skills: "Skills",
       notification: "Notification",
       about: "About",

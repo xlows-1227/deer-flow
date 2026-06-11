@@ -27,6 +27,7 @@ from deerflow.sandbox.tools import (
     str_replace_tool,
     write_file_tool,
 )
+from deerflow.tools.builtins.generate_image_tool import generate_image_tool
 from deerflow.tools.builtins.present_file_tool import present_file_tool
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 from deerflow.tools.builtins.task_tool import task_tool
@@ -57,6 +58,7 @@ _TOOL_CASES = [
     (str_replace_tool, {"description": "replace", "path": "/tmp/x", "old_str": "a", "new_str": "b"}),
     (present_file_tool, {"filepaths": ["/tmp/x"], "tool_call_id": "call-1"}),
     (view_image_tool, {"image_path": "/tmp/img.png", "tool_call_id": "call-1"}),
+    (generate_image_tool, {"prompt": "a red kite", "tool_call_id": "call-1"}),
     (task_tool, {"description": "do", "prompt": "go", "subagent_type": "general-purpose", "tool_call_id": "call-1"}),
     (skill_manage_tool, {"action": "list", "name": "demo"}),
     (setup_agent, {"soul": "s", "description": "d"}),
