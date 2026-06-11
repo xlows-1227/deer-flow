@@ -386,7 +386,7 @@ export const zhCN: Translations = {
       appearance: "外观",
       memory: "记忆",
       connectors: "连接器",
-      tools: "MCP",
+      tools: "工具",
       skills: "技能",
       notification: "通知",
       about: "关于",

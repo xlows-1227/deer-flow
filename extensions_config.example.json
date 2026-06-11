@@ -29,5 +29,67 @@
       "description": "PostgreSQL database access"
     }
   },
+  "imageGeneration": {
+    "enabled": false,
+    "defaultProvider": "openai",
+    "outputSubdir": "generated-images",
+    "providers": {
+      "openai": {
+        "enabled": false,
+        "provider": "openai",
+        "display_name": "OpenAI",
+        "api_key": "$OPENAI_API_KEY",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-image-1",
+        "timeout_seconds": 120,
+        "trust_env": false,
+        "params": {}
+      },
+      "stability": {
+        "enabled": false,
+        "provider": "stability",
+        "display_name": "Stability AI",
+        "api_key": "$STABILITY_API_KEY",
+        "base_url": "https://api.stability.ai/v2beta",
+        "model": "sd3.5-large",
+        "timeout_seconds": 120,
+        "trust_env": false,
+        "params": {}
+      },
+      "volcengine": {
+        "enabled": false,
+        "provider": "volcengine",
+        "display_name": "Volcengine Ark",
+        "api_key": "$VOLCENGINE_API_KEY",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "doubao-seedream-3-0-t2i-250415",
+        "timeout_seconds": 120,
+        "trust_env": false,
+        "params": {}
+      },
+      "aihubmix": {
+        "enabled": false,
+        "provider": "aihubmix",
+        "display_name": "Aihubmix",
+        "api_key": "$AIHUBMIX_API_KEY",
+        "base_url": "https://aihubmix.com/v1",
+        "model": "openai/gpt-image-2-free",
+        "timeout_seconds": 120,
+        "trust_env": false,
+        "params": {}
+      },
+      "custom_openai_compatible": {
+        "enabled": false,
+        "provider": "custom_openai_compatible",
+        "display_name": "OpenAI-compatible",
+        "api_key": "",
+        "base_url": "",
+        "model": "",
+        "timeout_seconds": 120,
+        "trust_env": false,
+        "params": {}
+      }
+    }
+  },
   "skills": {}
 }

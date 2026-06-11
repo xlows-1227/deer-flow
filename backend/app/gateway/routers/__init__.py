@@ -1,4 +1,4 @@
-from . import artifacts, assistants_compat, files, mcp, models, scheduler, skills, suggestions, thread_runs, threads, uploads
+from . import artifacts, assistants_compat, files, mcp, models, scheduler, skills, suggestions, thread_runs, threads, tools, uploads
 
 __all__ = [
     "artifacts",
@@ -11,5 +11,6 @@ __all__ = [
     "suggestions",
     "threads",
     "thread_runs",
+    "tools",
     "uploads",
 ]

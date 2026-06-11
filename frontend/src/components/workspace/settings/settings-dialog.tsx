@@ -46,6 +46,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const { t } = useI18n();
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
+  const settingsOpen = dialogProps.open;
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
@@ -140,7 +141,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
-              {activeSection === "connectors" && <ConnectorSettingsPage />}
+              {activeSection === "connectors" && (
+                <ConnectorSettingsPage settingsOpen={settingsOpen} />
+              )}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (
                 <SkillSettingsPage

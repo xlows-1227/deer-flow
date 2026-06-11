@@ -276,7 +276,13 @@ function Field({
   );
 }
 
-export function ConnectorSettingsPage() {
+type ConnectorSettingsPageProps = {
+  settingsOpen?: boolean;
+};
+
+export function ConnectorSettingsPage({
+  settingsOpen,
+}: ConnectorSettingsPageProps) {
   const { t } = useI18n();
   const copy = t.settings.connectors;
   const [types, setTypes] = useState<ConnectorTypeDefinition[]>([]);
@@ -329,6 +335,12 @@ export function ConnectorSettingsPage() {
     // The initial load intentionally runs once; form changes should not refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (settingsOpen === false) {
+      setFormOpen(false);
+    }
+  }, [settingsOpen]);
 
   function openCreate() {
     const firstType = types[0];
@@ -696,7 +708,10 @@ export function ConnectorSettingsPage() {
       </div>
 
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogContent
+          className="z-[60] max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+          showOverlay={false}
+        >
           <DialogHeader>
             <DialogTitle>
               {form.id ? copy.editTitle : copy.createTitle}
