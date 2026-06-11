@@ -14,16 +14,15 @@ from __future__ import annotations
 
 import logging
 import mimetypes
-import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from langgraph.checkpoint.base import empty_checkpoint
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
+from app.gateway.thread_service import create_empty_thread
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.memory.capture import capture_rollup_input
 from deerflow.agents.memory.consolidation import ProfileConsolidator
@@ -345,14 +344,13 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    thread_id = body.thread_id or str(uuid.uuid4())
-    now = now_iso()
+    thread_id = body.thread_id
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
-    existing_record = await thread_store.get(thread_id)
-    if existing_record is not None:
+    existing_record = await thread_store.get(thread_id) if thread_id else None
+    if thread_id and existing_record is not None:
         return ThreadResponse(
             thread_id=thread_id,
             status=existing_record.get("status", "idle"),
@@ -361,39 +359,24 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             metadata=existing_record.get("metadata", {}),
         )
 
-    # Write thread_meta so the thread appears in /threads/search immediately
     try:
-        await thread_store.create(
-            thread_id,
+        record = await create_empty_thread(
+            thread_store=thread_store,
+            checkpointer=checkpointer,
             assistant_id=getattr(body, "assistant_id", None),
             metadata=body.metadata,
+            thread_id=thread_id,
         )
     except Exception:
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
-
-    # Write an empty checkpoint so state endpoints work immediately
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    try:
-        ckpt_metadata = {
-            "step": -1,
-            "source": "input",
-            "writes": None,
-            "parents": {},
-            **body.metadata,
-            "created_at": now,
-        }
-        await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
-    except Exception:
-        logger.exception("Failed to create checkpoint for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create thread")
-
+    thread_id = record["thread_id"]
     logger.info("Thread created: %s", sanitize_log_param(thread_id))
     return ThreadResponse(
         thread_id=thread_id,
         status="idle",
-        created_at=now,
-        updated_at=now,
+        created_at=coerce_iso(record.get("created_at", "")),
+        updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=body.metadata,
     )
 

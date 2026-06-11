@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.api_key import APIKeyRepository
+    from deerflow.persistence.external_audit import ExternalAuditRepository
+    from deerflow.persistence.external_conversation import ExternalConversationRepository
+    from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -138,6 +142,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
+            from deerflow.persistence.api_key import APIKeyRepository
+            from deerflow.persistence.external_audit import ExternalAuditRepository
+            from deerflow.persistence.external_conversation import ExternalConversationRepository
+            from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
@@ -148,6 +156,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.scheduled_task_run import ScheduledTaskRunRepository
 
             app.state.scheduler_run_store = ScheduledTaskRunRepository(sf)
+            app.state.api_key_repo = APIKeyRepository(sf)
+            app.state.external_conversation_repo = ExternalConversationRepository(sf)
+            app.state.external_idempotency_repo = ExternalIdempotencyRepository(sf)
+            app.state.external_audit_repo = ExternalAuditRepository(sf)
         else:
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
             from deerflow.persistence.scheduled_task_run import MemoryScheduledTaskRunStore
@@ -157,6 +169,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.feedback_repo = None
             app.state.scheduler_store = make_scheduled_task_store(None)
             app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
+            app.state.api_key_repo = None
+            app.state.external_conversation_repo = None
+            app.state.external_idempotency_repo = None
+            app.state.external_audit_repo = None
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -214,6 +230,10 @@ get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_st
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 get_scheduler_store: Callable[[Request], object] = _require("scheduler_store", "Scheduler store")
+get_api_key_repo: Callable[[Request], APIKeyRepository] = _require("api_key_repo", "External API persistence")
+get_external_conversation_repo: Callable[[Request], ExternalConversationRepository] = _require("external_conversation_repo", "External API persistence")
+get_external_idempotency_repo: Callable[[Request], ExternalIdempotencyRepository] = _require("external_idempotency_repo", "External API persistence")
+get_external_audit_repo: Callable[[Request], ExternalAuditRepository] = _require("external_audit_repo", "External API persistence")
 
 
 def get_store(request: Request):

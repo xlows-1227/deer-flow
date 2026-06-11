@@ -1404,14 +1404,14 @@ export function InputBox({
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">
                   <div className="text-xs font-normal">
                     {t.inputBox.reasoningEffort}:
-                    {context.reasoning_effort === "minimal" &&
-                      " " + t.inputBox.reasoningEffortMinimal}
-                    {context.reasoning_effort === "low" &&
-                      " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
-                      " " + t.inputBox.reasoningEffortMedium}
-                    {context.reasoning_effort === "high" &&
-                      " " + t.inputBox.reasoningEffortHigh}
+                    {" " +
+                      (context.reasoning_effort === "minimal"
+                        ? t.inputBox.reasoningEffortMinimal
+                        : context.reasoning_effort === "low"
+                          ? t.inputBox.reasoningEffortLow
+                          : context.reasoning_effort === "high"
+                            ? t.inputBox.reasoningEffortHigh
+                            : t.inputBox.reasoningEffortMedium)}
                   </div>
                 </PromptInputActionMenuTrigger>
                 <PromptInputActionMenuContent className="w-48">
@@ -1522,7 +1522,7 @@ export function InputBox({
               >
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">
                   <DatabaseIcon className="size-3" />
-                  <div className="text-xs font-normal">
+                  <div className="max-w-[100px] truncate text-xs font-normal">
                     {selectedConnector
                       ? (selectedConnector.display_name ??
                         selectedConnector.name)
@@ -1609,7 +1609,7 @@ export function InputBox({
               >
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">
                   <WrenchIcon className="size-3" />
-                  <div className="text-xs font-normal">
+                  <div className="max-w-[100px] truncate text-xs font-normal">
                     {context.skill_name
                       ? ((
                           skills.find((s) => s.name === context.skill_name) as
@@ -1688,13 +1688,13 @@ export function InputBox({
               </PromptInputActionMenu>
             )}
           </PromptInputTools>
-          <PromptInputTools>
+          <PromptInputTools className="gap-2">
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
               <ModelSelectorTrigger asChild>
-                <PromptInputButton>
+                <PromptInputButton className="max-w-[120px]">
                   <div className="flex min-w-0 flex-col items-start text-left">
                     <ModelSelectorName className="text-xs font-normal">
                       {selectedModel?.display_name}

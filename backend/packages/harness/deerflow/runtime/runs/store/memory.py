@@ -105,6 +105,9 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"])
         return results
 
+    async def count_inflight_by_user(self, user_id: str) -> int:
+        return sum(1 for run in self._runs.values() if run.get("user_id") == user_id and run.get("status") in ("pending", "running"))
+
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]

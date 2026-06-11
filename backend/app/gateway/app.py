@@ -3,20 +3,27 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
+from app.gateway.api_key_auth import ExternalAPIAuthMiddleware
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
+from app.gateway.external.audit import ExternalAuditMiddleware
 from app.gateway.routers import (
     agents,
+    api_keys,
     artifacts,
     assistants_compat,
     auth,
     channels,
     connectors,
+    external,
     feedback,
     files,
     mcp,
@@ -401,11 +408,56 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ],
     )
 
+    @app.exception_handler(HTTPException)
+    async def external_http_exception_handler(request: Request, exc: HTTPException):
+        if not request.url.path.startswith("/api/v1/external/"):
+            return await http_exception_handler(request, exc)
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        raw_error = detail["error"] if isinstance(detail.get("error"), dict) else detail
+        code = str(raw_error.get("code") or "external_api_error")
+        error = {
+            "code": code,
+            "message": str(raw_error.get("message") or code.replace("_", " ")),
+        }
+        safe_details = {key: raw_error[key] for key in ("conversation_id", "run_id") if key in raw_error}
+        if safe_details:
+            error["details"] = safe_details
+        error["request_id"] = getattr(request.state, "request_id", None)
+        return JSONResponse(status_code=exc.status_code, content={"error": error}, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def external_validation_exception_handler(request: Request, exc: RequestValidationError):
+        if not request.url.path.startswith("/api/v1/external/"):
+            return await request_validation_exception_handler(request, exc)
+        details = [
+            {
+                "location": list(error.get("loc") or []),
+                "type": error.get("type"),
+                "message": error.get("msg"),
+            }
+            for error in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "invalid_request",
+                    "message": "Request validation failed.",
+                    "request_id": getattr(request.state, "request_id", None),
+                    "details": details,
+                }
+            },
+        )
+
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
 
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
+
+    # External API Key auth must execute before CSRF and browser-session auth.
+    app.add_middleware(ExternalAPIAuthMiddleware)
+    app.add_middleware(ExternalAuditMiddleware)
 
     # CORS: the unified nginx endpoint is same-origin by default. Split-origin
     # browser clients must opt in with this explicit Gateway allowlist so CORS
@@ -468,6 +520,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
+
+    # Browser-session management API for External API Keys.
+    app.include_router(api_keys.router)
+    app.include_router(external.router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)

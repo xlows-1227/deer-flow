@@ -77,6 +77,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(request.url.path):
             return await call_next(request)
 
+        if request.url.path.startswith("/api/v1/external/") and getattr(request.state, "auth_method", None) == "api_key":
+            return await call_next(request)
+
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             internal_user = get_internal_user()
@@ -120,6 +123,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+        request.state.auth_method = "internal" if internal_user is not None else "session"
         token = set_current_user(user)
         try:
             return await call_next(request)

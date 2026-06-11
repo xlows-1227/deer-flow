@@ -364,6 +364,7 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
             "agent_name": "my-agent",
             "is_bootstrap": True,
             "connector_ids": ["conn_1"],
+            "external_allowed_skills": ["sales-report"],
             "thread_id": "should-not-override",
         },
     )
@@ -371,9 +372,11 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     assert config["configurable"]["agent_name"] == "my-agent"
     assert config["configurable"]["is_bootstrap"] is True
     assert config["configurable"]["connector_ids"] == ["conn_1"]
+    assert config["configurable"]["external_allowed_skills"] == ["sales-report"]
     assert config["context"]["agent_name"] == "my-agent"
     assert config["context"]["is_bootstrap"] is True
     assert config["context"]["connector_ids"] == ["conn_1"]
+    assert config["context"]["external_allowed_skills"] == ["sales-report"]
     # Runtime context must use the server-side thread id from build_run_config,
     # not a client-supplied body.context override.
     assert config["context"]["thread_id"] == "thread-1"
