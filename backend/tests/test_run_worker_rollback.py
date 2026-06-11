@@ -1,15 +1,15 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.worker import RunContext, _agent_factory_supports_app_config, _build_runtime_context, _install_runtime_context, _rollback_to_pre_run_checkpoint, run_agent
+from deerflow.runtime.runs.worker import RunContext, _agent_factory_supports_app_config, _build_runtime_context, _install_runtime_context, _queue_flash_memory_capture, _rollback_to_pre_run_checkpoint, run_agent
 
 
 class FakeCheckpointer:
@@ -53,6 +53,25 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["thread_id"] == "caller-thread"
     assert config["context"]["run_id"] == "run-1"
     assert config["context"]["app_config"] is app_config
+
+
+def test_flash_direct_path_queues_memory_capture():
+    queue = SimpleNamespace(add=MagicMock())
+    app_config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_queue", return_value=queue),
+        patch("deerflow.runtime.runs.worker.get_effective_user_id", return_value="user-a"),
+    ):
+        _queue_flash_memory_capture(
+            thread_id="thread-a",
+            messages=[HumanMessage(content="我偏好中文"), AIMessage(content="收到")],
+            app_config=app_config,
+        )
+
+    queue.add.assert_called_once()
+    assert queue.add.call_args.kwargs["thread_id"] == "thread-a"
+    assert queue.add.call_args.kwargs["user_id"] == "user-a"
 
 
 @pytest.mark.anyio

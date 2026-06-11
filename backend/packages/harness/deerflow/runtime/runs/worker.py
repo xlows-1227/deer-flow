@@ -154,6 +154,8 @@ def _should_use_flash_direct_path(
     cfg = _get_runtime_config(config)
     if cfg.get("is_bootstrap"):
         return False
+    if cfg.get("skill_name"):
+        return False
     if interrupt_before or interrupt_after:
         return False
     if cfg.get("mode") != "flash":
@@ -165,6 +167,33 @@ def _should_use_flash_direct_path(
     if _thread_has_historical_uploads(thread_id):
         return False
     return True
+
+
+def _queue_flash_memory_capture(
+    *,
+    thread_id: str,
+    messages: list[Any],
+    app_config: AppConfig,
+) -> None:
+    """Queue a completed flash-direct conversation for the shared memory pipeline."""
+    memory_config = getattr(app_config, "memory", None)
+    if memory_config is None or not memory_config.enabled:
+        return
+
+    from deerflow.agents.memory.message_processing import filter_messages_for_memory
+    from deerflow.agents.memory.queue import get_memory_queue
+
+    filtered_messages = filter_messages_for_memory(messages)
+    has_user = any(getattr(message, "type", None) == "human" for message in filtered_messages)
+    has_assistant = any(getattr(message, "type", None) == "ai" for message in filtered_messages)
+    if not has_user or not has_assistant:
+        return
+
+    get_memory_queue().add(
+        thread_id=thread_id,
+        messages=filtered_messages,
+        user_id=get_effective_user_id(),
+    )
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
@@ -264,11 +293,7 @@ def _extract_fallback_title(messages: list[Any]) -> str | None:
         content = getattr(msg, "content", "") or ""
         if isinstance(content, list):
             # Extract text from multimodal content blocks
-            texts = [
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            ]
+            texts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
             content = " ".join(texts)
         elif not isinstance(content, str):
             content = str(content)
@@ -359,7 +384,7 @@ async def _run_flash_direct_model(
 ) -> bool:
     from langchain_core.messages import AIMessage, SystemMessage, message_chunk_to_message
 
-    from deerflow.agents.lead_agent.agent import _available_skill_names, _resolve_model_name
+    from deerflow.agents.lead_agent.agent import _resolve_available_skill_names, _resolve_model_name
     from deerflow.agents.lead_agent.prompt import apply_prompt_template
     from deerflow.config.agents_config import load_agent_config, validate_agent_name
     from deerflow.config.app_config import get_app_config
@@ -388,7 +413,13 @@ async def _run_flash_direct_model(
         subagent_enabled=False,
         max_concurrent_subagents=cfg.get("max_concurrent_subagents", 3),
         agent_name=agent_name,
-        available_skills=_available_skill_names(agent_config, False),
+        available_skills=_resolve_available_skill_names(
+            agent_config,
+            False,
+            cfg.get("skill_name"),
+            app_config=app_config,
+            external_allowed_skills=cfg.get("external_allowed_skills"),
+        ),
         app_config=app_config,
     )
     model_messages = [SystemMessage(content=system_prompt), *conversation_messages]
@@ -430,6 +461,11 @@ async def _run_flash_direct_model(
             ckpt_tuple=pre_run_checkpoint_tuple,
             channel_values=channel_values,
             changed_channels={"messages", "artifacts"},
+        )
+        _queue_flash_memory_capture(
+            thread_id=record.thread_id,
+            messages=final_messages,
+            app_config=app_config,
         )
 
     if stream_subgraphs:

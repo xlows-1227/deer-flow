@@ -133,6 +133,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "agent_name",
         "is_bootstrap",
         "skill_name",
+        "external_allowed_skills",
         "connector_ids",
         "thread_id",
     }

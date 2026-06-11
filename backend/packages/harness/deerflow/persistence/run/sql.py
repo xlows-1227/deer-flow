@@ -218,6 +218,18 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def count_inflight_by_user(self, user_id: str) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(RunRow)
+            .where(
+                RunRow.user_id == user_id,
+                RunRow.status.in_(("pending", "running")),
+            )
+        )
+        async with self._sf() as session:
+            return await session.scalar(stmt) or 0
+
     async def update_run_completion(
         self,
         run_id: str,

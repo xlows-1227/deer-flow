@@ -37,8 +37,10 @@ class MemoryUpdateQueue:
         """Initialize the memory update queue."""
         self._queue: list[ConversationContext] = []
         self._lock = threading.Lock()
+        self._capture_lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._processing = False
+        self._discard_before_by_user: dict[str, datetime] = {}
 
     @staticmethod
     def _queue_key(
@@ -47,7 +49,9 @@ class MemoryUpdateQueue:
         agent_name: str | None,
     ) -> tuple[str, str | None, str | None]:
         """Return the debounce identity for a memory update target."""
-        return (thread_id, user_id, agent_name)
+        # V2 memory is user-level only; agent_name no longer separates memory
+        # targets. Keep the tuple shape for compatibility with older tests/callers.
+        return (thread_id, user_id, None)
 
     def add(
         self,
@@ -165,9 +169,6 @@ class MemoryUpdateQueue:
 
     def _process_queue(self) -> None:
         """Process all queued conversation contexts."""
-        # Import here to avoid circular dependency
-        from deerflow.agents.memory.updater import MemoryUpdater
-
         with self._lock:
             if self._processing:
                 # Preserve immediate flush semantics even if another worker is active.
@@ -185,33 +186,39 @@ class MemoryUpdateQueue:
         logger.info("Processing %d queued memory updates", len(contexts_to_process))
 
         try:
-            updater = MemoryUpdater()
-
-            for context in contexts_to_process:
-                try:
-                    logger.info("Updating memory for thread %s", context.thread_id)
-                    success = updater.update_memory(
-                        messages=context.messages,
-                        thread_id=context.thread_id,
-                        agent_name=context.agent_name,
-                        correction_detected=context.correction_detected,
-                        reinforcement_detected=context.reinforcement_detected,
-                        user_id=context.user_id,
-                    )
-                    if success:
-                        logger.info("Memory updated successfully for thread %s", context.thread_id)
-                    else:
-                        logger.warning("Memory update skipped/failed for thread %s", context.thread_id)
-                except Exception as e:
-                    logger.error("Error updating memory for thread %s: %s", context.thread_id, e)
-
-                # Small delay between updates to avoid rate limiting
-                if len(contexts_to_process) > 1:
-                    time.sleep(0.5)
+            self._process_contexts(contexts_to_process)
 
         finally:
             with self._lock:
                 self._processing = False
+
+    def _process_contexts(self, contexts: list[ConversationContext]) -> None:
+        """Persist a selected set of queued contexts."""
+        from deerflow.agents.memory.capture import capture_rollup_input
+
+        for context in contexts:
+            try:
+                user_id = context.user_id or "default"
+                with self._capture_lock:
+                    discard_before = self._discard_before_by_user.get(user_id)
+                    if discard_before is not None and context.timestamp <= discard_before:
+                        logger.info("Skipping cleared memory update for thread %s", context.thread_id)
+                        continue
+                    logger.info("Capturing memory rollup input for thread %s", context.thread_id)
+                    captured = capture_rollup_input(
+                        user_id=user_id,
+                        thread_id=context.thread_id,
+                        messages=context.messages,
+                    )
+                if captured is not None:
+                    logger.info("Memory rollup input captured for thread %s", context.thread_id)
+                else:
+                    logger.warning("Memory rollup input skipped for thread %s", context.thread_id)
+            except Exception as e:
+                logger.error("Error capturing memory rollup input for thread %s: %s", context.thread_id, e)
+
+            if len(contexts) > 1:
+                time.sleep(0.5)
 
     def flush(self) -> None:
         """Force immediate processing of the queue.
@@ -232,6 +239,16 @@ class MemoryUpdateQueue:
             # before _process_queue completes. Acceptable for best-effort memory updates.
             self._schedule_timer(0)
 
+    def flush_user(self, user_id: str) -> None:
+        """Immediately persist pending memory captures for one user."""
+        with self._lock:
+            contexts = [context for context in self._queue if (context.user_id or "default") == user_id]
+            self._queue = [context for context in self._queue if (context.user_id or "default") != user_id]
+            if not self._queue and self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        self._process_contexts(contexts)
+
     def clear(self) -> None:
         """Clear the queue without processing.
 
@@ -243,6 +260,17 @@ class MemoryUpdateQueue:
                 self._timer = None
             self._queue.clear()
             self._processing = False
+            self._discard_before_by_user.clear()
+
+    def clear_user(self, user_id: str) -> None:
+        """Remove pending memory captures for one user without affecting others."""
+        with self._capture_lock:
+            with self._lock:
+                self._discard_before_by_user[user_id] = datetime.now(UTC)
+                self._queue = [context for context in self._queue if (context.user_id or "default") != user_id]
+                if not self._queue and self._timer is not None:
+                    self._timer.cancel()
+                    self._timer = None
 
     @property
     def pending_count(self) -> int:

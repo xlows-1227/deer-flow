@@ -2,8 +2,10 @@ import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 
 import type {
+  DailyPersonSummary,
   MemoryFactInput,
   MemoryFactPatchInput,
+  MemoryProfile,
   UserMemory,
 } from "./types";
 
@@ -83,6 +85,82 @@ async function readMemoryResponse(
 export async function loadMemory(): Promise<UserMemory> {
   const response = await fetch(`${getBackendBaseURL()}/api/memory`);
   return readMemoryResponse(response, "Failed to fetch memory");
+}
+
+export async function loadMemoryProfile(): Promise<MemoryProfile> {
+  const response = await fetch(`${getBackendBaseURL()}/api/memory/profile`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch memory profile: ${response.statusText}`);
+  }
+  return response.json() as Promise<MemoryProfile>;
+}
+
+export async function loadDailyMemory(
+  limit = 30,
+): Promise<DailyPersonSummary[]> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/memory/daily?limit=${encodeURIComponent(String(limit))}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch daily memory: ${response.statusText}`);
+  }
+  const data = (await response.json()) as
+    | DailyPersonSummary[]
+    | DailyPersonSummary
+    | null;
+  if (!data) return [];
+  return Array.isArray(data) ? data : [data];
+}
+
+export async function rollupDailyMemory(
+  input: {
+    date?: string;
+    threadId?: string;
+    force?: boolean;
+  } = {},
+): Promise<DailyPersonSummary | null> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/memory/daily/rollup`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to roll up daily memory: ${response.statusText}`);
+  }
+  return response.json() as Promise<DailyPersonSummary | null>;
+}
+
+export async function rollupThreadMemory(
+  threadId: string,
+): Promise<DailyPersonSummary | null> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/memory/rollup`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to summarize conversation: ${response.statusText}`);
+  }
+  return response.json() as Promise<DailyPersonSummary | null>;
+}
+
+export async function deleteDailyMemory(
+  date: string,
+): Promise<DailyPersonSummary | null> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/memory/daily/${encodeURIComponent(date)}`,
+    {
+      method: "DELETE",
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to delete daily memory: ${response.statusText}`);
+  }
+  return response.json() as Promise<DailyPersonSummary | null>;
 }
 
 export async function clearMemory(): Promise<UserMemory> {

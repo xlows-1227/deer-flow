@@ -14,6 +14,7 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
+- External API V1 使用 `/api/v1/external/*` 对业务系统提供稳定接口，通过用户级 Bearer API Key 认证，并将公开 Conversation 映射到内部 Thread 后复用现有 RunManager。API Key 管理接口位于 `/api/v1/api-keys/current*`，仅接受浏览器 Cookie 会话和 CSRF。
 
 **Project Structure**:
 ```

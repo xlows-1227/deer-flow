@@ -744,7 +744,7 @@ uv run pytest tests/test_skills_parser.py tests/test_lead_agent_prompt.py -q
 
 **Files:**
 
-- Modify: `docs/CONNECTOR_PLATFORM_DESIGN.md`
+- Modify: `docs/design/CONNECTOR_PLATFORM_DESIGN.md`
 - Create: `backend/docs/CONNECTORS.md`
 - Modify: `backend/docs/CONFIGURATION.md`
 - Modify: `README_zh.md`
@@ -926,4 +926,3 @@ pnpm test
 6. `feat(api): add connector management endpoints`
 7. `feat(agent): expose connector runtime tools`
 8. `docs(connectors): document MySQL and StarRocks connector MVP`
-

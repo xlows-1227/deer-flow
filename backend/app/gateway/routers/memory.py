@@ -3,6 +3,18 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from deerflow.agents.memory.compat import (
+    add_manual_profile_item,
+    delete_profile_item,
+    profile_to_legacy_memory,
+    update_profile_item,
+)
+from deerflow.agents.memory.consolidation import ProfileConsolidator
+from deerflow.agents.memory.migration import legacy_memory_to_profile, migrate_legacy_memory
+from deerflow.agents.memory.models import DailyPersonSummary, MemoryProfile
+from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.memory.rollup import DailyRollupService
+from deerflow.agents.memory.storage_v2 import get_memory_storage_v2
 from deerflow.agents.memory.updater import (
     clear_memory_data,
     create_memory_fact,
@@ -98,6 +110,13 @@ class MemoryConfigResponse(BaseModel):
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
+    v2_enabled: bool = Field(default=True, description="Whether v2 daily-person memory is enabled")
+    daily_rollup_enabled: bool = Field(default=True, description="Whether daily rollup is enabled")
+    daily_rollup_time: str = Field(default="23:55", description="Daily rollup time")
+    retention_days: int | None = Field(default=None, description="Daily summary retention in days")
+    relevance_strategy: str = Field(default="rules", description="Memory relevance strategy")
+    max_daily_snippets: int = Field(default=3, description="Maximum daily snippets injected")
+    max_daily_snippet_tokens: int = Field(default=600, description="Daily snippet token budget")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -105,6 +124,29 @@ class MemoryStatusResponse(BaseModel):
 
     config: MemoryConfigResponse
     data: MemoryResponse
+
+
+class DailyRollupRequest(BaseModel):
+    """Request model for manual daily rollup."""
+
+    date: str | None = Field(default=None, description="Optional YYYY-MM-DD date")
+    threadId: str | None = Field(default=None, description="Optional thread id for per-conversation rollup")
+    force: bool = Field(default=False, description="Reserved for future forced regeneration")
+
+
+def _get_v2_profile_for_response(user_id: str) -> MemoryProfile:
+    config = get_memory_config()
+    if getattr(config, "v2_enabled", False) and getattr(config, "migrate_legacy_on_startup", True):
+        return migrate_legacy_memory(user_id)
+    return get_memory_storage_v2().load_profile(user_id)
+
+
+def _get_memory_response_data(user_id: str) -> dict:
+    config = get_memory_config()
+    if getattr(config, "v2_enabled", False):
+        profile = _get_v2_profile_for_response(user_id)
+        return profile_to_legacy_memory(profile)
+    return get_memory_data(user_id=user_id)
 
 
 @router.get(
@@ -148,7 +190,7 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = _get_memory_response_data(get_effective_user_id())
     return MemoryResponse(**memory_data)
 
 
@@ -168,7 +210,11 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    memory_data = reload_memory_data(user_id=get_effective_user_id())
+    user_id = get_effective_user_id()
+    if getattr(get_memory_config(), "v2_enabled", False):
+        memory_data = profile_to_legacy_memory(get_memory_storage_v2().load_profile(user_id))
+    else:
+        memory_data = reload_memory_data(user_id=user_id)
     return MemoryResponse(**memory_data)
 
 
@@ -182,7 +228,13 @@ async def reload_memory() -> MemoryResponse:
 async def clear_memory() -> MemoryResponse:
     """Clear all persisted memory data."""
     try:
-        memory_data = clear_memory_data(user_id=get_effective_user_id())
+        user_id = get_effective_user_id()
+        if getattr(get_memory_config(), "v2_enabled", False):
+            get_memory_queue().clear_user(user_id)
+            get_memory_storage_v2().clear_user_memory(user_id)
+            memory_data = profile_to_legacy_memory(get_memory_storage_v2().load_profile(user_id))
+        else:
+            memory_data = clear_memory_data(user_id=user_id)
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -199,12 +251,17 @@ async def clear_memory() -> MemoryResponse:
 async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
     """Create a single fact manually."""
     try:
-        memory_data = create_memory_fact(
-            content=request.content,
-            category=request.category,
-            confidence=request.confidence,
-            user_id=get_effective_user_id(),
-        )
+        user_id = get_effective_user_id()
+        if getattr(get_memory_config(), "v2_enabled", False):
+            profile = add_manual_profile_item(request.content, request.category, request.confidence, user_id=user_id)
+            memory_data = profile_to_legacy_memory(profile)
+        else:
+            memory_data = create_memory_fact(
+                content=request.content,
+                category=request.category,
+                confidence=request.confidence,
+                user_id=user_id,
+            )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
     except OSError as exc:
@@ -223,7 +280,12 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
 async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     try:
-        memory_data = delete_memory_fact(fact_id, user_id=get_effective_user_id())
+        user_id = get_effective_user_id()
+        if getattr(get_memory_config(), "v2_enabled", False):
+            profile = delete_profile_item(fact_id, user_id=user_id)
+            memory_data = profile_to_legacy_memory(profile)
+        else:
+            memory_data = delete_memory_fact(fact_id, user_id=user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
@@ -242,13 +304,24 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
     """Partially update a single fact manually."""
     try:
-        memory_data = update_memory_fact(
-            fact_id=fact_id,
-            content=request.content,
-            category=request.category,
-            confidence=request.confidence,
-            user_id=get_effective_user_id(),
-        )
+        user_id = get_effective_user_id()
+        if getattr(get_memory_config(), "v2_enabled", False):
+            profile = update_profile_item(
+                fact_id,
+                content=request.content,
+                category=request.category,
+                confidence=request.confidence,
+                user_id=user_id,
+            )
+            memory_data = profile_to_legacy_memory(profile)
+        else:
+            memory_data = update_memory_fact(
+                fact_id=fact_id,
+                content=request.content,
+                category=request.category,
+                confidence=request.confidence,
+                user_id=user_id,
+            )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
     except KeyError as exc:
@@ -268,7 +341,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
 )
 async def export_memory() -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = _get_memory_response_data(get_effective_user_id())
     return MemoryResponse(**memory_data)
 
 
@@ -282,11 +355,123 @@ async def export_memory() -> MemoryResponse:
 async def import_memory(request: MemoryResponse) -> MemoryResponse:
     """Import and persist memory data."""
     try:
-        memory_data = import_memory_data(request.model_dump(), user_id=get_effective_user_id())
+        user_id = get_effective_user_id()
+        if getattr(get_memory_config(), "v2_enabled", False):
+            profile = legacy_memory_to_profile(user_id, request.model_dump())
+            profile = get_memory_storage_v2().save_profile(user_id, profile)
+            memory_data = profile_to_legacy_memory(profile)
+        else:
+            memory_data = import_memory_data(request.model_dump(), user_id=user_id)
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
     return MemoryResponse(**memory_data)
+
+
+@router.get(
+    "/memory/profile",
+    response_model=MemoryProfile,
+    summary="Get Memory Profile",
+    description="Retrieve the v2 long-term memory profile for the current user.",
+)
+async def get_memory_profile() -> MemoryProfile:
+    """Get the v2 memory profile."""
+    return _get_v2_profile_for_response(get_effective_user_id())
+
+
+@router.get(
+    "/memory/daily",
+    response_model=list[DailyPersonSummary] | DailyPersonSummary | None,
+    summary="Get Daily Memory Summaries",
+    description="Retrieve one daily summary by date, or recent daily summaries by limit.",
+)
+async def get_daily_memory(date: str | None = None, limit: int = 30):
+    """Get daily summaries."""
+    storage = get_memory_storage_v2()
+    user_id = get_effective_user_id()
+    if date:
+        return storage.load_daily(user_id, date)
+    return storage.list_daily(user_id, limit=limit)
+
+
+@router.post(
+    "/memory/daily/rollup",
+    response_model=DailyPersonSummary | None,
+    summary="Roll Up Daily Memory",
+    description="Manually roll up memory for a date or a specific thread.",
+)
+async def rollup_daily_memory(request: DailyRollupRequest) -> DailyPersonSummary | None:
+    """Manually roll up daily memory."""
+    user_id = get_effective_user_id()
+    get_memory_queue().flush_user(user_id)
+    service = DailyRollupService()
+    if request.threadId:
+        summary = service.rollup_thread(user_id, request.threadId, request.date)
+    else:
+        summary = service.rollup_date(user_id, request.date, source_kind="manual")
+    if summary is not None:
+        ProfileConsolidator().rebuild_profile(user_id)
+    return summary
+
+
+@router.delete(
+    "/memory/daily/{date}",
+    response_model=DailyPersonSummary | None,
+    summary="Delete Daily Memory",
+    description="Soft-delete a daily summary and rebuild the profile.",
+)
+async def delete_daily_memory(date: str) -> DailyPersonSummary | None:
+    """Soft-delete a daily memory summary."""
+    user_id = get_effective_user_id()
+    summary = get_memory_storage_v2().soft_delete_daily(user_id, date)
+    ProfileConsolidator().rebuild_profile(user_id)
+    return summary
+
+
+@router.post(
+    "/memory/daily/{date}/restore",
+    response_model=DailyPersonSummary | None,
+    summary="Restore Daily Memory",
+)
+async def restore_daily_memory(date: str) -> DailyPersonSummary | None:
+    """Restore a soft-deleted daily memory summary."""
+    user_id = get_effective_user_id()
+    summary = get_memory_storage_v2().restore_daily(user_id, date)
+    ProfileConsolidator().rebuild_profile(user_id)
+    return summary
+
+
+@router.delete(
+    "/memory/daily/{date}/purge",
+    response_model=dict,
+    summary="Purge Daily Memory",
+)
+async def purge_daily_memory(date: str) -> dict:
+    """Permanently delete a daily memory summary."""
+    user_id = get_effective_user_id()
+    deleted = get_memory_storage_v2().purge_daily(user_id, date)
+    ProfileConsolidator().rebuild_profile(user_id)
+    return {"deleted": deleted}
+
+
+@router.post(
+    "/memory/consolidate",
+    response_model=MemoryProfile,
+    summary="Consolidate Memory Profile",
+)
+async def consolidate_memory_profile() -> MemoryProfile:
+    """Rebuild the v2 profile from active daily summaries."""
+    return ProfileConsolidator().rebuild_profile(get_effective_user_id())
+
+
+@router.post(
+    "/memory/migrate-legacy",
+    response_model=MemoryProfile,
+    summary="Migrate Legacy Memory",
+)
+async def migrate_legacy_memory_endpoint() -> MemoryProfile:
+    """Back up and migrate legacy memory.json into v2 profile.json."""
+    return migrate_legacy_memory(get_effective_user_id(), force=True)
 
 
 @router.get(
@@ -323,6 +508,13 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         fact_confidence_threshold=config.fact_confidence_threshold,
         injection_enabled=config.injection_enabled,
         max_injection_tokens=config.max_injection_tokens,
+        v2_enabled=config.v2_enabled,
+        daily_rollup_enabled=config.daily_rollup_enabled,
+        daily_rollup_time=config.daily_rollup_time,
+        retention_days=config.retention_days,
+        relevance_strategy=config.relevance_strategy,
+        max_daily_snippets=config.max_daily_snippets,
+        max_daily_snippet_tokens=config.max_daily_snippet_tokens,
     )
 
 
@@ -340,7 +532,7 @@ async def get_memory_status() -> MemoryStatusResponse:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = _get_memory_response_data(get_effective_user_id())
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(
@@ -351,6 +543,13 @@ async def get_memory_status() -> MemoryStatusResponse:
             fact_confidence_threshold=config.fact_confidence_threshold,
             injection_enabled=config.injection_enabled,
             max_injection_tokens=config.max_injection_tokens,
+            v2_enabled=config.v2_enabled,
+            daily_rollup_enabled=config.daily_rollup_enabled,
+            daily_rollup_time=config.daily_rollup_time,
+            retention_days=config.retention_days,
+            relevance_strategy=config.relevance_strategy,
+            max_daily_snippets=config.max_daily_snippets,
+            max_daily_snippet_tokens=config.max_daily_snippet_tokens,
         ),
         data=MemoryResponse(**memory_data),
     )

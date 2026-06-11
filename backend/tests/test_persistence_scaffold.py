@@ -157,6 +157,14 @@ class TestMemoryRunStore:
         pending = await store.list_pending()
         assert pending[0]["run_id"] == "r1"
 
+    @pytest.mark.anyio
+    async def test_count_inflight_by_user(self, store):
+        await store.put("a1", thread_id="t1", user_id="alice", status="pending")
+        await store.put("a2", thread_id="t2", user_id="alice", status="running")
+        await store.put("a3", thread_id="t3", user_id="alice", status="success")
+        await store.put("b1", thread_id="t4", user_id="bob", status="running")
+        assert await store.count_inflight_by_user("alice") == 2
+
 
 # -- Base.to_dict mixin --
 
