@@ -150,6 +150,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 {"thinking": {"type": "disabled"}},
             )
             model_settings_from_config["reasoning_effort"] = "minimal"
+            kwargs.pop("reasoning_effort", None)
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
