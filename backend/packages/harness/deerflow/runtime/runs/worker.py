@@ -41,6 +41,22 @@ from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 
+
+def _log_cleanup_exception(
+    task: asyncio.Task, run_id: str, logger: logging.Logger
+) -> None:
+    """Log an exception raised by the bridge cleanup task."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "Bridge cleanup failed for run %s",
+            run_id,
+            exc_info=exc,
+        )
+
+
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 
@@ -844,7 +860,11 @@ async def run_agent(
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
         await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+
+        cleanup_task = asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        cleanup_task.add_done_callback(
+            lambda task: _log_cleanup_exception(task, run_id, logger)
+        )
 
 
 # ---------------------------------------------------------------------------

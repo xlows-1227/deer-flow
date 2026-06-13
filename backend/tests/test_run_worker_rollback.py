@@ -196,6 +196,7 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
     )
 
     class MockModelConfig:
+        use = "tests.fake:ChatModel"
         supports_thinking = False
         supports_vision = False
 
@@ -215,7 +216,10 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
 
     monkeypatch.setattr("deerflow.agents.lead_agent.agent._resolve_model_name", lambda requested=None, *, app_config=None: requested or "flash-model")
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", lambda **_kwargs: "system prompt")
-    monkeypatch.setattr("deerflow.models.create_chat_model", lambda **_kwargs: FakeModel())
+    monkeypatch.setattr(
+        "deerflow.models.factory.create_chat_model",
+        lambda **_kwargs: FakeModel(),
+    )
 
     await run_agent(
         bridge,
@@ -253,6 +257,7 @@ async def test_flash_direct_path_persists_checkpoint_history(monkeypatch):
     captured_model_messages: list[list[str]] = []
 
     class MockModelConfig:
+        use = "tests.fake:ChatModel"
         supports_thinking = False
         supports_vision = False
 
@@ -271,7 +276,10 @@ async def test_flash_direct_path_persists_checkpoint_history(monkeypatch):
 
     monkeypatch.setattr("deerflow.agents.lead_agent.agent._resolve_model_name", lambda requested=None, *, app_config=None: requested or "flash-model")
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", lambda **_kwargs: "system prompt")
-    monkeypatch.setattr("deerflow.models.create_chat_model", lambda **_kwargs: FakeModel())
+    monkeypatch.setattr(
+        "deerflow.models.factory.create_chat_model",
+        lambda **_kwargs: FakeModel(),
+    )
 
     for text in ("first", "second"):
         record = await run_manager.create("thread-1", assistant_id="lead_agent")
@@ -626,3 +634,45 @@ def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_f
     monkeypatch.setattr("deerflow.runtime.runs.worker.inspect.signature", lambda _obj: (_ for _ in ()).throw(ValueError("boom")))
 
     assert _agent_factory_supports_app_config(BrokenCallable()) is False
+
+
+@pytest.mark.anyio
+async def test_log_cleanup_exception_records_real_traceback():
+    """_log_cleanup_exception must log the real exception via exc_info."""
+    from deerflow.runtime.runs.worker import _log_cleanup_exception
+
+    async def fail():
+        raise RuntimeError("cleanup boom")
+
+    task = asyncio.create_task(fail())
+    with pytest.raises(RuntimeError, match="cleanup boom"):
+        await task
+
+    mock_logger = MagicMock()
+    _log_cleanup_exception(task, "run-123", mock_logger)
+
+    assert mock_logger.error.call_count == 1
+    args, kwargs = mock_logger.error.call_args
+    assert "Bridge cleanup failed" in args[0]
+    assert kwargs.get("exc_info") is task.exception()
+    assert isinstance(kwargs.get("exc_info"), RuntimeError)
+    assert str(kwargs.get("exc_info")) == "cleanup boom"
+
+
+@pytest.mark.anyio
+async def test_log_cleanup_exception_ignores_cancelled_task():
+    """Cancelled cleanup tasks should not produce an error log."""
+    from deerflow.runtime.runs.worker import _log_cleanup_exception
+
+    async def never():
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(never())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    mock_logger = MagicMock()
+    _log_cleanup_exception(task, "run-123", mock_logger)
+
+    mock_logger.error.assert_not_called()

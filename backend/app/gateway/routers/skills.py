@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_admin
+from app.gateway.authz import require_admin, require_permission
 from app.gateway.deps import get_config
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
@@ -420,7 +420,7 @@ async def upload_skill_archive(
     summary="Get Public Skill Content (Admin)",
     description="Read SKILL.md for a public skill. Restricted to admin users.",
 )
-@require_admin
+@require_permission("system", "admin")
 async def get_public_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")

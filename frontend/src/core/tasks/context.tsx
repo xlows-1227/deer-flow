@@ -4,7 +4,11 @@ import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
   tasks: Record<string, Subtask>;
-  setTasks: (tasks: Record<string, Subtask>) => void;
+  setTasks: (
+    tasks:
+      | Record<string, Subtask>
+      | ((prev: Record<string, Subtask>) => Record<string, Subtask>),
+  ) => void;
 }
 
 export const SubtaskContext = createContext<SubtaskContextValue>({
@@ -42,12 +46,12 @@ export function useUpdateSubtask() {
   const { tasks, setTasks } = useSubtaskContext();
   const updateSubtask = useCallback(
     (task: Partial<Subtask> & { id: string }) => {
-      tasks[task.id] = { ...tasks[task.id], ...task } as Subtask;
-      if (task.latestMessage) {
-        setTasks({ ...tasks });
-      }
+      setTasks((prev) => ({
+        ...prev,
+        [task.id]: { ...prev[task.id], ...task } as Subtask,
+      }));
     },
-    [tasks, setTasks],
+    [setTasks],
   );
   return updateSubtask;
 }

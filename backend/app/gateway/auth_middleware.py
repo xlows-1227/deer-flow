@@ -17,7 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
+from app.gateway.authz import AuthContext, permissions_for_user
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -122,7 +122,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # None" branch short-circuits instead of running the entire
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
-        request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+        request.state.auth = AuthContext(user=user, permissions=permissions_for_user(user))
         request.state.auth_method = "internal" if internal_user is not None else "session"
         token = set_current_user(user)
         try:

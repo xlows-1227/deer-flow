@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import TokenError
@@ -51,5 +51,7 @@ def decode_token(token: str) -> TokenPayload | TokenError:
         return TokenError.EXPIRED
     except jwt.InvalidSignatureError:
         return TokenError.INVALID_SIGNATURE
+    except ValidationError:
+        return TokenError.MALFORMED
     except jwt.PyJWTError:
         return TokenError.MALFORMED

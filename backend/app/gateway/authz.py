@@ -25,6 +25,7 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- system:admin  - Admin-only operations (e.g. user management)
 """
 
 from __future__ import annotations
@@ -57,6 +58,9 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+
+    # System / admin-only
+    SYSTEM_ADMIN = "system:admin"
 
 
 class AuthContext:
@@ -116,7 +120,33 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.SYSTEM_ADMIN,
 ]
+
+# Permissions granted to regular (non-admin) authenticated users.
+# Admin users receive _ALL_PERMISSIONS so that admin-only permissions are not
+# accidentally leaked to every logged-in user.
+_USER_PERMISSIONS: list[str] = [
+    Permissions.THREADS_READ,
+    Permissions.THREADS_WRITE,
+    Permissions.THREADS_DELETE,
+    Permissions.RUNS_CREATE,
+    Permissions.RUNS_READ,
+    Permissions.RUNS_CANCEL,
+]
+
+
+def permissions_for_user(user: User | None) -> list[str]:
+    """Return the permission list appropriate for ``user``.
+
+    ``None`` (anonymous) gets an empty list.  Admin users receive all
+    permissions; regular users receive the standard user permission set.
+    """
+    if user is None:
+        return []
+    if getattr(user, "system_role", None) == "admin":
+        return list(_ALL_PERMISSIONS)
+    return list(_USER_PERMISSIONS)
 
 
 def _make_test_request_stub() -> Any:
@@ -140,8 +170,7 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    # In future, permissions could be stored in user record
-    return AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+    return AuthContext(user=user, permissions=permissions_for_user(user))
 
 
 def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:

@@ -742,9 +742,11 @@ export function useThreadStream({
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
   // and to allow access to the full message list in onUpdateEvent without causing re-renders.
-  if (thread.messages.length >= messagesRef.current.length) {
-    messagesRef.current = thread.messages;
-  }
+  useEffect(() => {
+    if (thread.messages.length >= messagesRef.current.length) {
+      messagesRef.current = thread.messages;
+    }
+  }, [thread.messages]);
 
   const visibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticMessages,
@@ -791,6 +793,8 @@ export function useThreadHistory(threadId: string) {
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const generationRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
@@ -810,8 +814,11 @@ export function useThreadHistory(threadId: string) {
       return;
     }
 
+    const requestGeneration = ++generationRef.current;
     loadingRef.current = true;
     setLoading(true);
+
+    let controller: AbortController | null = null;
 
     try {
       do {
@@ -831,6 +838,8 @@ export function useThreadHistory(threadId: string) {
 
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
+        controller = new AbortController();
+        abortControllerRef.current = controller;
         const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
           `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
           {
@@ -839,6 +848,7 @@ export function useThreadHistory(threadId: string) {
               "Content-Type": "application/json",
             },
             credentials: "include",
+            signal: controller.signal,
           },
         ).then((res) => {
           return res.json();
@@ -846,7 +856,10 @@ export function useThreadHistory(threadId: string) {
         const _messages = result.data
           .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
           .map((m) => withMessageTimestamp(m.content, m.created_at));
-        if (threadIdRef.current !== requestThreadId) {
+        if (
+          threadIdRef.current !== requestThreadId ||
+          generationRef.current !== requestGeneration
+        ) {
           return;
         }
         setMessages((prev) =>
@@ -859,39 +872,66 @@ export function useThreadHistory(threadId: string) {
         );
       } while (pendingLoadRef.current);
     } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        return;
+      }
       console.error(err);
     } finally {
-      loadingRef.current = false;
-      loadingRunIdRef.current = null;
-      setLoading(false);
+      // Only clear shared loading state if no newer request has taken over.
+      if (generationRef.current === requestGeneration) {
+        loadingRef.current = false;
+        loadingRunIdRef.current = null;
+        setLoading(false);
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+        }
+      }
     }
   }, []);
+
+
+
+  // Reset all thread-local state when the active thread changes. This also
+  // aborts any in-flight fetch for the previous thread and bumps the request
+  // generation so stale finally blocks cannot overwrite the new thread's state.
   useEffect(() => {
-    const threadChanged = threadIdRef.current !== threadId;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    generationRef.current += 1;
+    runsRef.current = [];
+    indexRef.current = -1;
+    pendingLoadRef.current = false;
+    loadingRunIdRef.current = null;
+    loadedRunIdsRef.current = new Set();
+    loadingRef.current = false;
+    setLoading(false);
+    setMessages([]);
     threadIdRef.current = threadId;
 
-    if (threadChanged) {
-      runsRef.current = [];
-      indexRef.current = -1;
-      pendingLoadRef.current = false;
-      loadingRunIdRef.current = null;
-      loadedRunIdsRef.current = new Set();
-      loadingRef.current = false;
-      setLoading(false);
-      setMessages([]);
-    }
+    return () => {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      generationRef.current += 1;
+    };
+  }, [threadId]);
 
-    if (runs.data && runs.data.length > 0) {
-      runsRef.current = runs.data ?? [];
-      indexRef.current = findLatestUnloadedRunIndex(
-        runs.data,
-        loadedRunIdsRef.current,
-      );
+  // Load history when the runs list changes (e.g. new runs during streaming).
+  // We replace the runs snapshot without aborting an in-flight load so that
+  // messages for already-fetched runs are not discarded.
+  useEffect(() => {
+    const currentRuns = runs.data ?? [];
+    if (currentRuns.length === 0) {
+      return;
     }
+    runsRef.current = currentRuns;
+    indexRef.current = findLatestUnloadedRunIndex(
+      runsRef.current,
+      loadedRunIdsRef.current,
+    );
     loadMessages().catch(() => {
       toast.error("Failed to load thread history.");
     });
-  }, [threadId, runs.data, loadMessages]);
+  }, [runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
     setMessages((prev) => {

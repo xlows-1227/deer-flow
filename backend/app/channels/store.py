@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,9 @@ class ChannelStore:
     The store is intentionally simple — a single JSON file that is atomically
     rewritten on every mutation. For production workloads with high concurrency,
     this can be swapped for a proper database backend.
+
+    All public methods are async so that file I/O can be run in a thread pool
+    without blocking the asyncio event loop.
     """
 
     def __init__(self, path: str | Path | None = None) -> None:
@@ -40,34 +43,42 @@ class ChannelStore:
             path = Path(get_paths().base_dir) / "channels" / "store.json"
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._data: dict[str, dict[str, Any]] = self._load()
-        self._lock = threading.Lock()
+        self._data: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
 
-    # -- persistence -------------------------------------------------------
+    async def _load(self) -> dict[str, dict[str, Any]]:
+        def _read() -> dict[str, dict[str, Any]]:
+            if self._path.exists():
+                try:
+                    return json.loads(self._path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    logger.warning("Corrupt channel store at %s, starting fresh", self._path)
+            return {}
 
-    def _load(self) -> dict[str, dict[str, Any]]:
-        if self._path.exists():
+        return await asyncio.to_thread(_read)
+
+    async def _ensure_loaded(self) -> None:
+        if not self._data:
+            self._data = await self._load()
+
+    async def _save(self) -> None:
+        def _write() -> None:
+            fd = tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self._path.parent,
+                suffix=".tmp",
+                delete=False,
+            )
             try:
-                return json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                logger.warning("Corrupt channel store at %s, starting fresh", self._path)
-        return {}
+                json.dump(self._data, fd, indent=2)
+                fd.close()
+                Path(fd.name).replace(self._path)
+            except BaseException:
+                fd.close()
+                Path(fd.name).unlink(missing_ok=True)
+                raise
 
-    def _save(self) -> None:
-        fd = tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self._path.parent,
-            suffix=".tmp",
-            delete=False,
-        )
-        try:
-            json.dump(self._data, fd, indent=2)
-            fd.close()
-            Path(fd.name).replace(self._path)
-        except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
-            raise
+        await asyncio.to_thread(_write)
 
     # -- key helpers -------------------------------------------------------
 
@@ -79,12 +90,14 @@ class ChannelStore:
 
     # -- public API --------------------------------------------------------
 
-    def get_thread_id(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> str | None:
+    async def get_thread_id(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> str | None:
         """Look up the DeerFlow thread_id for a given IM conversation/topic."""
-        entry = self._data.get(self._key(channel_name, chat_id, topic_id))
-        return entry["thread_id"] if entry else None
+        async with self._lock:
+            await self._ensure_loaded()
+            entry = self._data.get(self._key(channel_name, chat_id, topic_id))
+            return entry["thread_id"] if entry else None
 
-    def set_thread_id(
+    async def set_thread_id(
         self,
         channel_name: str,
         chat_id: str,
@@ -94,7 +107,8 @@ class ChannelStore:
         user_id: str = "",
     ) -> None:
         """Create or update the mapping for an IM conversation/topic."""
-        with self._lock:
+        async with self._lock:
+            await self._ensure_loaded()
             key = self._key(channel_name, chat_id, topic_id)
             now = time.time()
             existing = self._data.get(key)
@@ -104,9 +118,9 @@ class ChannelStore:
                 "created_at": existing["created_at"] if existing else now,
                 "updated_at": now,
             }
-            self._save()
+            await self._save()
 
-    def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
+    async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         """Remove a mapping.
 
         If ``topic_id`` is provided, only that specific conversation/topic mapping is removed.
@@ -115,13 +129,14 @@ class ChannelStore:
 
         Returns True if at least one mapping was removed.
         """
-        with self._lock:
+        async with self._lock:
+            await self._ensure_loaded()
             # Remove a specific conversation/topic mapping.
             if topic_id is not None:
                 key = self._key(channel_name, chat_id, topic_id)
                 if key in self._data:
                     del self._data[key]
-                    self._save()
+                    await self._save()
                     return True
                 return False
 
@@ -133,21 +148,23 @@ class ChannelStore:
 
             for k in keys_to_delete:
                 del self._data[k]
-            self._save()
+            await self._save()
             return True
 
-    def list_entries(self, channel_name: str | None = None) -> list[dict[str, Any]]:
+    async def list_entries(self, channel_name: str | None = None) -> list[dict[str, Any]]:
         """List all stored mappings, optionally filtered by channel."""
-        results = []
-        for key, entry in self._data.items():
-            parts = key.split(":", 2)
-            ch = parts[0]
-            chat = parts[1] if len(parts) > 1 else ""
-            topic = parts[2] if len(parts) > 2 else None
-            if channel_name and ch != channel_name:
-                continue
-            item: dict[str, Any] = {"channel_name": ch, "chat_id": chat, **entry}
-            if topic is not None:
-                item["topic_id"] = topic
-            results.append(item)
-        return results
+        async with self._lock:
+            await self._ensure_loaded()
+            results = []
+            for key, entry in self._data.items():
+                parts = key.split(":", 2)
+                ch = parts[0]
+                chat = parts[1] if len(parts) > 1 else ""
+                topic = parts[2] if len(parts) > 2 else None
+                if channel_name and ch != channel_name:
+                    continue
+                item: dict[str, Any] = {"channel_name": ch, "chat_id": chat, **entry}
+                if topic is not None:
+                    item["topic_id"] = topic
+                results.append(item)
+            return results

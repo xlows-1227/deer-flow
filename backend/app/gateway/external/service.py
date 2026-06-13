@@ -138,8 +138,20 @@ class ExternalConversationService:
                     "default_skill_name": default_skill_name,
                 }
             )
-        except Exception:
-            await self._thread_store.delete(thread_id)
-            if hasattr(self._checkpointer, "adelete_thread"):
-                await self._checkpointer.adelete_thread(thread_id)
-            raise
+        except Exception as exc:
+            try:
+                await self._thread_store.delete(thread_id)
+            except Exception:
+                logger.exception(
+                    "Failed to clean up thread_store after external conversation create failed (thread_id=%s)",
+                    thread_id,
+                )
+            try:
+                if hasattr(self._checkpointer, "adelete_thread"):
+                    await self._checkpointer.adelete_thread(thread_id)
+            except Exception:
+                logger.exception(
+                    "Failed to clean up checkpointer after external conversation create failed (thread_id=%s)",
+                    thread_id,
+                )
+            raise exc
