@@ -13,7 +13,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -442,6 +442,43 @@ function ToolCall({
       fallback
     );
 
+  const path: string | undefined = (args as { path: string })?.path;
+
+  // Hooks must be called unconditionally; the body short-circuits for tools that
+  // should not auto-open an artifact editor.
+  useEffect(() => {
+    if (name !== "write_file" && name !== "str_replace") {
+      return;
+    }
+    if (!(isLoading && isLast && autoOpen && autoSelect && path && !result)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      const url = new URL(
+        `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+      ).toString();
+      if (selectedArtifact === url) {
+        return;
+      }
+      select(url, true);
+      setOpen(true);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [
+    name,
+    isLoading,
+    isLast,
+    autoOpen,
+    autoSelect,
+    path,
+    result,
+    id,
+    messageId,
+    selectedArtifact,
+    select,
+    setOpen,
+  ]);
+
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
@@ -588,19 +625,6 @@ function ToolCall({
       ?.description;
     if (!description) {
       description = t.toolCalls.writeFile;
-    }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
     }
 
     return (

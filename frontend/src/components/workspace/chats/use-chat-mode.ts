@@ -27,7 +27,7 @@ export function useSpecificChatMode() {
       inputInitialValue !== lastInitialValueRef.current
     ) {
       lastInitialValueRef.current = inputInitialValue;
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         setInputRef.current(inputInitialValue);
         const textarea = document.querySelector("textarea");
         if (textarea) {
@@ -36,6 +36,8 @@ export function useSpecificChatMode() {
           textarea.selectionEnd = textarea.value.length;
         }
       }, 100);
+      return () => clearTimeout(timer);
     }
+    return undefined;
   }, [inputInitialValue]);
 }

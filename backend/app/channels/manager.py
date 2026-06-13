@@ -8,6 +8,7 @@ import mimetypes
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,10 @@ def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in meta.items() if k not in _METADATA_DROP_KEYS}
 
 
+# Maximum inbound attachment size (bytes).  Prevents a malicious or
+# accidentally large attachment URL from exhausting gateway memory/disk.
+_INBOUND_FILE_MAX_BYTES = 50 * 1024 * 1024
+
 INBOUND_FILE_READERS: dict[str, InboundFileReader] = {}
 
 
@@ -69,9 +74,38 @@ async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.Async
     if not isinstance(url, str) or not url:
         return None
 
-    resp = await client.get(url)
-    resp.raise_for_status()
-    return resp.content
+    async with client.stream("GET", url) as resp:
+        resp.raise_for_status()
+
+        content_length = resp.headers.get("content-length")
+        if content_length is not None:
+            try:
+                total = int(content_length)
+            except ValueError:
+                total = None
+            if total is not None and total > _INBOUND_FILE_MAX_BYTES:
+                logger.warning(
+                    "[Manager] inbound file exceeds size limit: url=%s size=%s limit=%s",
+                    url,
+                    total,
+                    _INBOUND_FILE_MAX_BYTES,
+                )
+                return None
+
+        chunks: list[bytes] = []
+        total_read = 0
+        async for chunk in resp.aiter_bytes():
+            total_read += len(chunk)
+            if total_read > _INBOUND_FILE_MAX_BYTES:
+                logger.warning(
+                    "[Manager] inbound file exceeded size limit while streaming: url=%s limit=%s",
+                    url,
+                    _INBOUND_FILE_MAX_BYTES,
+                )
+                return None
+            chunks.append(chunk)
+
+        return b"".join(chunks)
 
 
 async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
@@ -556,6 +590,11 @@ class ChannelManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        # Per-key locks prevent concurrent get-or-create races for the same
+        # IM conversation/topic when store operations became async. The ref
+        # count lets us remove a lock once no waiter still needs it.
+        self._create_thread_locks: dict[str, asyncio.Lock] = {}
+        self._create_thread_lock_refs: dict[str, int] = {}
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -716,7 +755,7 @@ class ChannelManager:
         """Create a new thread through Gateway and store the mapping."""
         thread = await client.threads.create()
         thread_id = thread["thread_id"]
-        self.store.set_thread_id(
+        await self.store.set_thread_id(
             msg.channel_name,
             msg.chat_id,
             thread_id,
@@ -726,19 +765,45 @@ class ChannelManager:
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
+    def _create_thread_lock_key(self, msg: InboundMessage) -> str:
+        topic = msg.topic_id or ""
+        return f"{msg.channel_name}:{msg.chat_id}:{topic}"
+
+    @asynccontextmanager
+    async def _create_thread_lock(self, key: str):
+        """Acquire the per-key get-or-create lock and clean it up when idle."""
+        lock = self._create_thread_locks.setdefault(key, asyncio.Lock())
+        self._create_thread_lock_refs[key] = self._create_thread_lock_refs.get(key, 0) + 1
+        try:
+            await lock.acquire()
+            try:
+                yield
+            finally:
+                lock.release()
+        finally:
+            self._create_thread_lock_refs[key] -= 1
+            if self._create_thread_lock_refs[key] == 0:
+                self._create_thread_lock_refs.pop(key, None)
+                self._create_thread_locks.pop(key, None)
+
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()
 
-        # Look up existing DeerFlow thread.
-        # topic_id may be None (e.g. Telegram private chats) — the store
-        # handles this by using the "channel:chat_id" key without a topic suffix.
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
-        if thread_id:
-            logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
+        # Serialize get-or-create for the same conversation/topic so that
+        # async store operations do not allow two concurrent messages to both
+        # decide that no thread exists and create duplicates.
+        lock_key = self._create_thread_lock_key(msg)
+        async with self._create_thread_lock(lock_key):
+            # Look up existing DeerFlow thread.
+            # topic_id may be None (e.g. Telegram private chats) — the store
+            # handles this by using the "channel:chat_id" key without a topic suffix.
+            thread_id = await self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+            if thread_id:
+                logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
 
-        # No existing thread found — create a new one
-        if thread_id is None:
-            thread_id = await self._create_thread(client, msg)
+            # No existing thread found — create a new one
+            if thread_id is None:
+                thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
 
@@ -946,7 +1011,7 @@ class ChannelManager:
             client = self._get_client()
             thread = await client.threads.create()
             new_thread_id = thread["thread_id"]
-            self.store.set_thread_id(
+            await self.store.set_thread_id(
                 msg.channel_name,
                 msg.chat_id,
                 new_thread_id,
@@ -955,7 +1020,7 @@ class ChannelManager:
             )
             reply = "New conversation started."
         elif command == "status":
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+            thread_id = await self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
@@ -978,7 +1043,7 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            thread_id=await self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=reply,
             thread_ts=msg.thread_ts,
             metadata=_slim_metadata(msg.metadata),
@@ -1016,7 +1081,7 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            thread_id=await self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
             metadata=_slim_metadata(msg.metadata),

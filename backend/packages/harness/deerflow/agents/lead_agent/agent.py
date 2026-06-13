@@ -652,7 +652,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         return _get_cached_agent_graph(
             cache_key,
             lambda: create_agent(
-                model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
+                model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
                 tools=filtered_tools,
                 middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
                 system_prompt=apply_prompt_template(

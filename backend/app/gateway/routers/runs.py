@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import serialize_channel_values
@@ -24,15 +24,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 
-def _resolve_thread_id(body: RunCreateRequest) -> str:
-    """Return the thread_id from the request body, or generate a new one."""
+def _resolve_thread_id(body: RunCreateRequest) -> tuple[str, bool]:
+    """Return the thread_id from the request body and whether it was user-supplied.
+
+    If the caller supplied ``config.configurable.thread_id`` we must verify
+    ownership before reusing the thread.  Otherwise we generate a new temporary
+    thread id.
+    """
     thread_id = (body.config or {}).get("configurable", {}).get("thread_id")
     if thread_id:
-        return str(thread_id)
-    return str(uuid.uuid4())
+        return str(thread_id), True
+    return str(uuid.uuid4()), False
+
+
+async def _ensure_thread_access(request: Request, thread_id: str) -> None:
+    """Raise 404 if the authenticated user cannot access ``thread_id``."""
+    auth = request.state.auth
+    user_id = str(auth.user.id)
+    thread_store = get_thread_store(request)
+    allowed = await thread_store.check_access(thread_id, user_id, require_existing=True)
+    if not allowed:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
 
 @router.post("/stream")
+@require_permission("runs", "create")
 async def stateless_stream(body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
@@ -40,7 +56,10 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
     on the given thread so that conversation history is preserved.
     Otherwise a new temporary thread is created.
     """
-    thread_id = _resolve_thread_id(body)
+    thread_id, supplied_by_user = _resolve_thread_id(body)
+    if supplied_by_user:
+        await _ensure_thread_access(request, thread_id)
+
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
@@ -58,6 +77,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
 
 
 @router.post("/wait", response_model=dict)
+@require_permission("runs", "create")
 async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until completion.
 
@@ -65,7 +85,10 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     on the given thread so that conversation history is preserved.
     Otherwise a new temporary thread is created.
     """
-    thread_id = _resolve_thread_id(body)
+    thread_id, supplied_by_user = _resolve_thread_id(body)
+    if supplied_by_user:
+        await _ensure_thread_access(request, thread_id)
+
     record = await start_run(body, thread_id, request)
 
     if record.task is not None:

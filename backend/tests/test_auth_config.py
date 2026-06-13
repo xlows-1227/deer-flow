@@ -1,11 +1,23 @@
 """Tests for AuthConfig typed configuration."""
 
+import multiprocessing
 import os
 from unittest.mock import patch
 
 import pytest
 
 import app.gateway.auth.config as cfg
+
+
+def _load_secret_in_process(base_dir: str, start_event, result_queue) -> None:
+    """Load a secret in a spawned process and report it to the parent."""
+    os.environ["DEER_FLOW_HOME"] = base_dir
+    os.environ.pop("AUTH_JWT_SECRET", None)
+    start_event.wait(timeout=10)
+    try:
+        result_queue.put(("ok", cfg._load_or_create_secret()))
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
 
 
 def test_auth_config_defaults():
@@ -88,3 +100,30 @@ def test_auth_config_empty_secret_file_generates_new(tmp_path):
             assert (tmp_path / ".jwt_secret").read_text().strip() == config.jwt_secret
     finally:
         cfg._auth_config = old
+
+
+def test_auth_config_concurrent_processes_share_generated_secret(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    start_event = ctx.Event()
+    result_queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_load_secret_in_process,
+            args=(str(tmp_path), start_event, result_queue),
+        )
+        for _ in range(4)
+    ]
+
+    for process in processes:
+        process.start()
+    start_event.set()
+
+    results = [result_queue.get(timeout=20) for _ in processes]
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+
+    assert all(status == "ok" for status, _ in results), results
+    secrets = {secret for _, secret in results}
+    assert len(secrets) == 1
+    assert (tmp_path / ".jwt_secret").read_text(encoding="utf-8").strip() in secrets

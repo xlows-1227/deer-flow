@@ -318,26 +318,34 @@ export function InputBox({
   const slashTotalRows = slashActive ? slashCandidates.length : 0;
   const slashHasNone = slashActive && slashCandidates.length === 0;
 
+  const contextRef = useRef(context);
+  contextRef.current = context;
+  const onContextChangeRef = useRef(onContextChange);
+  onContextChangeRef.current = onContextChange;
+
   useEffect(() => {
     if (models.length === 0) {
       return;
     }
-    const currentModel = models.find((m) => m.name === context.model_name);
+    const currentModel = models.find((m) => m.name === contextRef.current.model_name);
     const fallbackModel = currentModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(context.mode, supportsThinking);
+    const nextMode = getResolvedMode(contextRef.current.mode, supportsThinking);
 
-    if (context.model_name === nextModelName && context.mode === nextMode) {
+    if (
+      contextRef.current.model_name === nextModelName &&
+      contextRef.current.mode === nextMode
+    ) {
       return;
     }
 
-    onContextChange?.({
-      ...context,
+    onContextChangeRef.current?.({
+      ...contextRef.current,
       model_name: nextModelName,
       mode: nextMode,
     });
-  }, [context, models, onContextChange]);
+  }, [context.model_name, context.mode, models]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {

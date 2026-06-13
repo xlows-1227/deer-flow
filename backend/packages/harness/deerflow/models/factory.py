@@ -199,7 +199,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    # Merge config defaults with explicit kwargs.  Explicit kwargs take precedence
+    # so that callers can override configuration values, and the merge avoids
+    # TypeError when both dicts contain the same key.
+    final_kwargs = {**model_settings_from_config, **kwargs}
+    model_instance = model_class(**final_kwargs)
 
     if attach_tracing:
         callbacks = build_tracing_callbacks()

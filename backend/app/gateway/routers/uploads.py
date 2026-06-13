@@ -220,6 +220,7 @@ async def upload_files(
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
+    sandbox_id: str | None = None
     if sync_to_sandbox:
         sandbox_id = sandbox_provider.acquire(thread_id)
         sandbox = sandbox_provider.get(sandbox_id)
@@ -227,88 +228,101 @@ async def upload_files(
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
     auto_convert_documents = _auto_convert_documents_enabled(config)
 
-    for file in files:
-        if not file.filename:
-            continue
+    def _release_sandbox() -> None:
+        if sandbox_id is not None:
+            try:
+                sandbox_provider.release(sandbox_id)
+            except Exception:
+                logger.exception("Failed to release sandbox %s", sandbox_id)
 
-        try:
-            original_filename = normalize_filename(file.filename)
-            safe_filename = claim_unique_filename(original_filename, seen_filenames)
-        except ValueError:
-            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
-            continue
+    try:
+        for file in files:
+            if not file.filename:
+                continue
 
-        try:
-            file_path, file_size, total_size = await _write_upload_file_with_limits(
-                file,
-                uploads_dir=uploads_dir,
-                display_filename=safe_filename,
-                max_single_file_size=limits.max_file_size,
-                max_total_size=limits.max_total_size,
-                total_size=total_size,
-            )
-            written_paths.append(file_path)
+            try:
+                original_filename = normalize_filename(file.filename)
+                safe_filename = claim_unique_filename(original_filename, seen_filenames)
+            except ValueError:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                continue
 
-            virtual_path = upload_virtual_path(safe_filename)
+            try:
+                file_path, file_size, total_size = await _write_upload_file_with_limits(
+                    file,
+                    uploads_dir=uploads_dir,
+                    display_filename=safe_filename,
+                    max_single_file_size=limits.max_file_size,
+                    max_total_size=limits.max_total_size,
+                    total_size=total_size,
+                )
+                written_paths.append(file_path)
 
-            if sync_to_sandbox:
-                sandbox_sync_targets.append((file_path, virtual_path))
+                virtual_path = upload_virtual_path(safe_filename)
 
-            file_info = {
-                "filename": safe_filename,
-                "size": str(file_size),
-                "path": str(sandbox_uploads / safe_filename),
-                "virtual_path": virtual_path,
-                "artifact_url": upload_artifact_url(thread_id, safe_filename),
-            }
-            if safe_filename != original_filename:
-                file_info["original_filename"] = original_filename
+                if sync_to_sandbox:
+                    sandbox_sync_targets.append((file_path, virtual_path))
 
-            logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
+                file_info = {
+                    "filename": safe_filename,
+                    "size": str(file_size),
+                    "path": str(sandbox_uploads / safe_filename),
+                    "virtual_path": virtual_path,
+                    "artifact_url": upload_artifact_url(thread_id, safe_filename),
+                }
+                if safe_filename != original_filename:
+                    file_info["original_filename"] = original_filename
 
-            file_ext = file_path.suffix.lower()
-            if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                md_path = await convert_file_to_markdown(file_path)
-                if md_path:
-                    written_paths.append(md_path)
-                    md_virtual_path = upload_virtual_path(md_path.name)
+                logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
-                    if sync_to_sandbox:
-                        sandbox_sync_targets.append((md_path, md_virtual_path))
+                file_ext = file_path.suffix.lower()
+                if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
+                    md_path = await convert_file_to_markdown(file_path)
+                    if md_path:
+                        written_paths.append(md_path)
+                        md_virtual_path = upload_virtual_path(md_path.name)
 
-                    file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
-                    file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                        if sync_to_sandbox:
+                            sandbox_sync_targets.append((md_path, md_virtual_path))
 
-            uploaded_files.append(file_info)
+                        file_info["markdown_file"] = md_path.name
+                        file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                        file_info["markdown_virtual_path"] = md_virtual_path
+                        file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
 
-        except HTTPException as e:
-            _cleanup_uploaded_paths(written_paths)
-            raise e
-        except UnsafeUploadPathError as e:
-            logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
-            skipped_files.append(safe_filename)
-            continue
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            _cleanup_uploaded_paths(written_paths)
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+                uploaded_files.append(file_info)
 
-    # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    for file_path in written_paths:
-        _make_file_sandbox_readable(file_path)
+            except HTTPException as e:
+                _cleanup_uploaded_paths(written_paths)
+                raise e
+            except UnsafeUploadPathError as e:
+                logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
+                skipped_files.append(safe_filename)
+                continue
+            except Exception as e:
+                logger.error(f"Failed to upload {file.filename}: {e}")
+                _cleanup_uploaded_paths(written_paths)
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
-    if sync_to_sandbox:
-        for file_path, virtual_path in sandbox_sync_targets:
-            _make_file_sandbox_writable(file_path)
-            sandbox.update_file(virtual_path, file_path.read_bytes())
+        # Uploaded files are created with 0o600 permissions (owner read/write only).
+        # In Docker sandbox deployments the gateway writes as root but the sandbox
+        # process runs as a non-root user (typically UID 1000).  Without group/other
+        # read bits the sandbox cannot access the files — whether the uploads
+        # directory is bind-mounted into the container or synced via
+        # sandbox.update_file.  Always add group/other read bits so every sandbox
+        # configuration can read the uploaded content.
+        for file_path in written_paths:
+            _make_file_sandbox_readable(file_path)
+
+        if sync_to_sandbox:
+            for file_path, virtual_path in sandbox_sync_targets:
+                _make_file_sandbox_writable(file_path)
+                # Copy the uploaded file into the sandbox without loading the
+                # entire file into memory. Local sandboxes override this with a
+                # filesystem copy; other backends fall back to a chunked read.
+                sandbox.update_file_from_path(virtual_path, str(file_path))
+    finally:
+        _release_sandbox()
 
     message = f"Successfully uploaded {len(uploaded_files)} file(s)"
     if skipped_files:
