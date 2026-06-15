@@ -15,7 +15,7 @@ import {
   RefreshCwIcon,
   PanelRightCloseIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   buildSandboxFileTree,
@@ -302,7 +302,16 @@ export function ConversationWorkspacePanel({
       ),
     [data?.files, thread.values.artifacts],
   );
+
+
   const filePaths = useMemo(() => files.map((file) => file.path), [files]);
+  const hasAutoSelectedRef = useRef(false);
+
+  // Reset the auto-select guard when the thread changes so that the auto-select
+  // effect below runs after the guard is cleared.
+  useEffect(() => {
+    hasAutoSelectedRef.current = false;
+  }, [threadId]);
 
   useEffect(() => {
     setArtifacts(filePaths);
@@ -311,10 +320,12 @@ export function ConversationWorkspacePanel({
   useEffect(() => {
     if (
       filePaths.length > 0 &&
+      !hasAutoSelectedRef.current &&
       (!selectedArtifact ||
         (!selectedArtifact.startsWith("write-file:") &&
           !filePaths.includes(selectedArtifact)))
     ) {
+      hasAutoSelectedRef.current = true;
       selectArtifact(filePaths[0]!, true);
     }
   }, [filePaths, selectArtifact, selectedArtifact]);

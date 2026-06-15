@@ -101,6 +101,10 @@ services:
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      # Trust the Docker Compose subnet by default so that the bundled nginx
+      # reverse proxy is allowed to forward protocol/origin headers. Override via
+      # GATEWAY_TRUSTED_PROXIES in .env when running behind an external proxy.
+      - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.210.0/24}
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
@@ -147,3 +151,6 @@ services:
 networks:
   deer-flow:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.210.0/24

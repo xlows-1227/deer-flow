@@ -276,6 +276,7 @@ def get_run_context(request: Request) -> RunContext:
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
+_cached_session_factory_id: int | None = None
 
 
 def get_local_provider() -> LocalAuthProvider:
@@ -283,16 +284,27 @@ def get_local_provider() -> LocalAuthProvider:
 
     Must be called after ``init_engine_from_config()`` — the shared
     session factory is required to construct the user repository.
-    """
-    global _cached_local_provider, _cached_repo
-    if _cached_repo is None:
-        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-        from deerflow.persistence.engine import get_session_factory
 
-        sf = get_session_factory()
-        if sf is None:
-            raise RuntimeError("get_local_provider() called before init_engine_from_config(); cannot access users table")
+    The cache is keyed on the session factory identity so that engine
+    rebuilds (tests, hot reload, programmatic restarts) do not leave us
+    holding a repository bound to a disposed engine.
+    """
+    global _cached_local_provider, _cached_repo, _cached_session_factory_id
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    sf = get_session_factory()
+    if sf is None:
+        raise RuntimeError("get_local_provider() called before init_engine_from_config(); cannot access users table")
+
+    current_sf_id = id(sf)
+    if _cached_repo is None or _cached_session_factory_id != current_sf_id:
         _cached_repo = SQLiteUserRepository(sf)
+        _cached_session_factory_id = current_sf_id
+        # The provider holds the repo, so recreate it when the repo changes.
+        _cached_local_provider = None
+
     if _cached_local_provider is None:
         from app.gateway.auth.local_provider import LocalAuthProvider
 

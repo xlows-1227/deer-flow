@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -48,11 +48,11 @@ export default function ChatPage() {
     { enabled: tokenUsageEnabled && !isMock },
   );
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
-  const mountedRef = useRef(false);
+  const [mounted, setMounted] = useState(false);
   useSpecificChatMode();
 
   useEffect(() => {
-    mountedRef.current = true;
+    setMounted(true);
   }, []);
 
   // Keep welcome layout in sync when navigating between threads (sidebar
@@ -234,7 +234,7 @@ export default function ChatPage() {
                     </div>
                   </div>
                 )}
-                {mountedRef.current ? (
+                {mounted ? (
                   <InputBox
                     className={cn(
                       "bg-background/5 w-full",

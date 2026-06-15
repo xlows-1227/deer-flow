@@ -110,3 +110,17 @@ class Sandbox(ABC):
             content: The binary content to write to the file.
         """
         pass
+
+    def update_file_from_path(self, path: str, source_path: str) -> None:
+        """Update a file by copying from a local source path.
+
+        Subclasses may override this with a streaming copy to avoid loading the
+        entire source file into memory. The default implementation reads the
+        source into memory and delegates to :meth:`update_file`.
+
+        Args:
+            path: The absolute path of the file to update.
+            source_path: The local filesystem path to copy from.
+        """
+        with open(source_path, "rb") as f:
+            self.update_file(path, f.read())
