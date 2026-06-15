@@ -24,7 +24,9 @@ import {
   formatMessageTime,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
+  getMessageGroupRenderKey,
   getMessageGroups,
+  getMessageRenderKey,
   getMessageTimestamp,
   getStreamingMessageLookup,
   hasContent,
@@ -418,20 +420,26 @@ export function MessageList({
         />
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
+          const groupKey = getMessageGroupRenderKey(group, groupIndex);
 
           if (group.type === "human" || group.type === "assistant") {
             return (
               <div
-                key={group.id}
+                key={groupKey}
                 className={cn(
                   "w-full",
                   group.type === "assistant" && "group/assistant-turn",
                 )}
               >
-                {group.messages.map((msg) => {
+                {group.messages.map((msg, messageIndex) => {
                   return (
                     <MessageListItem
-                      key={`${group.id}/${msg.id}`}
+                      key={getMessageRenderKey(
+                        group,
+                        groupIndex,
+                        msg,
+                        messageIndex,
+                      )}
                       message={msg}
                       isLoading={thread.isLoading}
                       threadId={threadId}
@@ -461,7 +469,7 @@ export function MessageList({
                 ? parsedChoicesByGroupId.get(group.id)
                 : undefined;
               return (
-                <div key={group.id} className="w-full">
+                <div key={groupKey} className="w-full">
                   <MarkdownContent
                     content={
                       parsedChoices?.prompt ??
@@ -494,7 +502,7 @@ export function MessageList({
               }
             }
             return (
-              <div className="w-full" key={group.id}>
+              <div className="w-full" key={groupKey}>
                 {group.messages[0] && hasContent(group.messages[0]) && (
                   <MarkdownContent
                     content={extractContentFromMessage(group.messages[0])}
@@ -585,7 +593,7 @@ export function MessageList({
             }
             return (
               <div
-                key={"subtask-group-" + group.id}
+                key={`subtask-group-${groupKey}`}
                 className="relative z-1 flex flex-col gap-2"
               >
                 {results}
@@ -599,7 +607,7 @@ export function MessageList({
             );
           }
           return (
-            <div key={"group-" + group.id} className="w-full">
+            <div key={`group-${groupKey}`} className="w-full">
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}

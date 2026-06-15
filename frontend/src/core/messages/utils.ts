@@ -175,6 +175,28 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   return groups;
 }
 
+export function getMessageGroupRenderKey(
+  group: MessageGroup,
+  groupIndex: number,
+): string {
+  const id =
+    typeof group.id === "string" && group.id.length > 0 ? group.id : "no-id";
+  return `${group.type}:${groupIndex}:${id}`;
+}
+
+export function getMessageRenderKey(
+  group: MessageGroup,
+  groupIndex: number,
+  message: Message,
+  messageIndex: number,
+): string {
+  const messageId =
+    typeof message.id === "string" && message.id.length > 0
+      ? message.id
+      : `idx-${messageIndex}`;
+  return `${getMessageGroupRenderKey(group, groupIndex)}/${messageId}`;
+}
+
 export function groupMessages<T>(
   messages: Message[],
   mapper: (group: MessageGroup) => T,

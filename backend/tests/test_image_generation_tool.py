@@ -234,6 +234,97 @@ def test_generate_images_calls_aihubmix_predictions_endpoint(monkeypatch: pytest
     ]
 
 
+def test_generate_images_calls_aihubmix_gemini_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeResponse:
+        headers = {"content-type": "application/json"}
+        content = b""
+        text = ""
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, list[dict[str, dict[str, list[dict[str, dict[str, str]]]]]]]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "multi_mod_content": [
+                                {"text": "A generated tree"},
+                                {
+                                    "inline_data": {
+                                        "mime_type": "image/png",
+                                        "data": base64.b64encode(PNG_BYTES).decode(),
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def post(self, url, *, headers=None, json=None, files=None):
+            calls.append({"url": url, "headers": headers, "json": json, "files": files})
+            return _FakeResponse()
+
+        def get(self, url):
+            raise AssertionError(f"Unexpected download request: {url}")
+
+    monkeypatch.setattr(image_generation_module.httpx, "Client", _FakeClient)
+    config = ExtensionsConfig.model_validate(
+        {
+            "imageGeneration": {
+                "enabled": True,
+                "defaultProvider": "aihubmix",
+                "providers": {
+                    "aihubmix": {
+                        "enabled": True,
+                        "api_key": "sk-test-aihubmix",
+                        "model": "gemini-3.1-flash-image-preview-free",
+                    }
+                },
+            }
+        }
+    )
+
+    provider_name, metadata, images = generate_images(
+        prompt="draw a tree",
+        size="1:1",
+        quality="high",
+        config=config,
+    )
+
+    assert provider_name == "aihubmix"
+    assert images[0].data == PNG_BYTES
+    assert images[0].revised_prompt == "A generated tree"
+    assert calls == [
+        {
+            "url": "https://aihubmix.com/gemini/v1beta/models/gemini-3.1-flash-image-preview-free:generateContent",
+            "headers": {"x-goog-api-key": "sk-test-aihubmix", "Content-Type": "application/json"},
+            "json": {
+                "contents": [{"role": "user", "parts": [{"text": "draw a tree"}]}],
+                "generationConfig": {
+                    "responseModalities": ["TEXT", "IMAGE"],
+                    "imageConfig": {"aspectRatio": "1:1", "imageSize": "2k"},
+                },
+            },
+            "files": None,
+        }
+    ]
+
+
 def test_generate_images_logs_aihubmix_remote_protocol_error(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     class _DisconnectingClient:
         def __init__(self, *args, **kwargs) -> None:

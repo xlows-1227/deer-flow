@@ -48,7 +48,7 @@ export function createEmptyLocalDraft(): SkillLocalDraft {
 export function loadLocalDraft(threadId: string): SkillLocalDraft | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = sessionStorage.getItem(`${DRAFT_STORAGE_PREFIX}${threadId}`);
+    const raw = sessionStorage.getItem(getDraftStorageKey(threadId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as SkillLocalDraft;
     return {
@@ -63,17 +63,73 @@ export function loadLocalDraft(threadId: string): SkillLocalDraft | null {
   }
 }
 
-export function saveLocalDraft(threadId: string, draft: SkillLocalDraft) {
-  if (typeof window === "undefined") return;
-  sessionStorage.setItem(
-    `${DRAFT_STORAGE_PREFIX}${threadId}`,
-    JSON.stringify(draft),
+function getDraftStorageKey(threadId: string) {
+  return `${DRAFT_STORAGE_PREFIX}${threadId}`;
+}
+
+function removeDraftStorageKey(key: string) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    // Storage can be unavailable in locked-down browser contexts.
+  }
+}
+
+function removeOtherLocalDrafts(currentKey: string) {
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index);
+      if (key && key !== currentKey && key.startsWith(DRAFT_STORAGE_PREFIX)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach(removeDraftStorageKey);
+  } catch {
+    // Best-effort quota recovery only.
+  }
+}
+
+function isQuotaExceededError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const name = error.name.toLowerCase();
+  const message = error.message.toLowerCase();
+  return (
+    name === "quotaexceedederror" ||
+    name === "ns_error_dom_quota_reached" ||
+    message.includes("quota")
   );
+}
+
+export function saveLocalDraft(
+  threadId: string,
+  draft: SkillLocalDraft,
+): boolean {
+  if (typeof window === "undefined") return false;
+  const key = getDraftStorageKey(threadId);
+  const serialized = JSON.stringify(draft);
+  try {
+    sessionStorage.setItem(key, serialized);
+    return true;
+  } catch (error) {
+    if (isQuotaExceededError(error)) {
+      removeOtherLocalDrafts(key);
+      try {
+        sessionStorage.setItem(key, serialized);
+        return true;
+      } catch {
+        removeDraftStorageKey(key);
+        return false;
+      }
+    }
+    removeDraftStorageKey(key);
+    return false;
+  }
 }
 
 export function deleteLocalDraft(threadId: string) {
   if (typeof window === "undefined") return;
-  sessionStorage.removeItem(`${DRAFT_STORAGE_PREFIX}${threadId}`);
+  removeDraftStorageKey(getDraftStorageKey(threadId));
 }
 
 export function isLocalDraftEmpty(draft: SkillLocalDraft) {

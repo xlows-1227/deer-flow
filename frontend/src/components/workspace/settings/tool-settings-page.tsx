@@ -21,6 +21,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -74,35 +81,56 @@ function providerNames(config: ImageGenerationConfig | null) {
 }
 
 function ProviderModelInput({
-  name,
   provider,
   disabled,
   onChange,
 }: {
-  name: string;
   provider: ImageGenerationProviderConfig;
   disabled: boolean;
   onChange: (model: string) => void;
 }) {
-  const options = provider.metadata?.models ?? [];
-  const listId = `image-generation-models-${name}`;
-  return (
-    <>
+  const modelOptions = useMemo(() => {
+    const options = new Set(provider.metadata?.models ?? []);
+    const current = provider.model.trim();
+    if (current) {
+      options.add(current);
+    }
+    return Array.from(options);
+  }, [provider.metadata?.models, provider.model]);
+
+  const placeholder = fallbackText(
+    provider.metadata?.default_model,
+    "选择模型",
+  );
+
+  if (modelOptions.length === 0) {
+    return (
       <Input
-        list={options.length ? listId : undefined}
         value={provider.model}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        placeholder={fallbackText(provider.metadata?.default_model, "model")}
+        placeholder={placeholder}
       />
-      {options.length > 0 && (
-        <datalist id={listId}>
-          {options.map((model) => (
-            <option key={model} value={model} />
-          ))}
-        </datalist>
-      )}
-    </>
+    );
+  }
+
+  return (
+    <Select
+      value={provider.model ?? provider.metadata?.default_model ?? undefined}
+      disabled={disabled}
+      onValueChange={onChange}
+    >
+      <SelectTrigger className="w-full">
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent>
+        {modelOptions.map((model) => (
+          <SelectItem key={model} value={model}>
+            {model}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -162,7 +190,6 @@ function ProviderCard({
           <label className="grid gap-1.5 text-sm">
             <span className="font-medium">默认模型</span>
             <ProviderModelInput
-              name={name}
               provider={provider}
               disabled={disabled}
               onChange={(model) => onProviderChange({ model })}
