@@ -1,4 +1,5 @@
 import zipfile
+from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -146,6 +147,29 @@ def test_upload_skill_archive_accepts_zip(tmp_path, monkeypatch):
     assert body["success"] is True
     assert body["skill_name"] == "uploaded-zip-skill"
     assert storage.get_custom_skill_file("uploaded-zip-skill").exists()
+
+
+def test_upload_skill_archive_rejects_over_limit_and_removes_temp_file(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch)
+    temp_path = tmp_path / "oversize-upload.skill"
+
+    def fake_named_temporary_file(*, delete: bool, suffix: str):
+        assert delete is False
+        assert suffix == ".skill"
+        return temp_path.open("w+b")
+
+    monkeypatch.setattr(skills_router, "MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 8)
+    monkeypatch.setattr(skills_router.tempfile, "NamedTemporaryFile", fake_named_temporary_file)
+
+    response = client.post(
+        "/api/skills/upload",
+        files={"file": ("oversize.skill", BytesIO(b"x" * 9), "application/zip")},
+    )
+
+    assert response.status_code == 413
+    assert "Skill archive too large" in response.json()["detail"]
+    assert not temp_path.exists()
+    assert not any((storage.get_skills_root_path() / "custom").iterdir())
 
 
 def test_admin_can_read_public_skill_content(tmp_path, monkeypatch):

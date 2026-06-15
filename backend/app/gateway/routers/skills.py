@@ -25,6 +25,36 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["skills"])
 
+SKILL_ARCHIVE_UPLOAD_CHUNK_SIZE = 1024 * 1024
+MAX_SKILL_ARCHIVE_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def _format_upload_limit(size: int) -> str:
+    if size % (1024 * 1024) == 0:
+        return f"{size // (1024 * 1024)} MiB"
+    return f"{size} bytes"
+
+
+async def _write_skill_archive_upload_to_temp_file(file: UploadFile, suffix: str) -> Path:
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            total_size = 0
+            while chunk := await file.read(SKILL_ARCHIVE_UPLOAD_CHUNK_SIZE):
+                total_size += len(chunk)
+                if total_size > MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Skill archive too large: maximum is {_format_upload_limit(MAX_SKILL_ARCHIVE_UPLOAD_BYTES)}",
+                    )
+                tmp_file.write(chunk)
+        return tmp_path
+    except Exception:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
 
 class SkillResponse(BaseModel):
     """Response model for skill information."""
@@ -372,10 +402,7 @@ async def upload_skill_archive(
     if suffix not in {".skill", ".zip"}:
         raise HTTPException(status_code=400, detail="File must have .skill or .zip extension")
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            tmp_path = Path(tmp_file.name)
-            while chunk := await file.read(1024 * 1024):
-                tmp_file.write(chunk)
+        tmp_path = await _write_skill_archive_upload_to_temp_file(file, suffix)
         try:
             storage = get_or_new_skill_storage(app_config=config)
             result = await storage.ainstall_skill_from_archive(tmp_path, skip_security_scan=force)
@@ -405,6 +432,8 @@ async def upload_skill_archive(
             can_force=e.can_force,
         )
         raise HTTPException(status_code=400, detail=detail.model_dump())
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

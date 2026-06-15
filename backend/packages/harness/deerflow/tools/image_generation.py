@@ -115,9 +115,22 @@ PROVIDER_METADATA: dict[str, ImageGenerationProviderMetadata] = {
         display_name="Aihubmix",
         default_base_url="https://aihubmix.com/v1",
         default_model="openai/gpt-image-2-free",
-        models=("openai/gpt-image-2-free",),
+        models=("openai/gpt-image-2-free", "gemini-3.1-flash-image-preview-free"),
         supported_parameters=("prompt", "model", "size", "n", "quality", "moderation", "background"),
-        size_options=("1024x1024", "1024x1536", "1536x1024", "1792x1024", "1024x1792"),
+        size_options=(
+            "1024x1024",
+            "1024x1536",
+            "1536x1024",
+            "1792x1024",
+            "1024x1792",
+            "1:1",
+            "16:9",
+            "9:16",
+            "4:3",
+            "3:4",
+            "3:2",
+            "2:3",
+        ),
         quality_options=("auto", "low", "medium", "high"),
         moderation_options=("auto", "low"),
         background_options=("auto", "transparent", "opaque"),
@@ -415,6 +428,114 @@ def _aihubmix_payload(params: dict[str, Any], metadata: ImageGenerationProviderM
     return {"input": input_payload}
 
 
+AIHUBMIX_GEMINI_BASE_URL = "https://aihubmix.com/gemini/v1beta"
+
+_PIXEL_SIZE_TO_ASPECT_RATIO = {
+    "1024x1024": "1:1",
+    "1024x1536": "2:3",
+    "1536x1024": "3:2",
+    "1792x1024": "16:9",
+    "1024x1792": "9:16",
+}
+
+
+def _is_aihubmix_gemini_model(model: str) -> bool:
+    normalized = model.strip().lower()
+    return normalized.startswith("gemini-") or "/gemini-" in normalized
+
+
+def _aihubmix_gemini_aspect_ratio(size: str | None) -> str:
+    if not size:
+        return "1:1"
+    if ":" in size:
+        return size
+    return _PIXEL_SIZE_TO_ASPECT_RATIO.get(size, "1:1")
+
+
+def _aihubmix_gemini_image_size(quality: str | None, provider_defaults: dict[str, Any]) -> str:
+    if isinstance(provider_defaults.get("imageSize"), str) and provider_defaults["imageSize"].strip():
+        return provider_defaults["imageSize"].strip()
+    if isinstance(provider_defaults.get("image_size"), str) and provider_defaults["image_size"].strip():
+        return provider_defaults["image_size"].strip()
+    quality_map = {"low": "1k", "medium": "1k", "high": "2k", "auto": "1k"}
+    if quality and quality in quality_map:
+        return quality_map[quality]
+    return "1k"
+
+
+def _aihubmix_gemini_payload(params: dict[str, Any], provider_defaults: dict[str, Any]) -> dict[str, Any]:
+    image_config: dict[str, Any] = {
+        "aspectRatio": _aihubmix_gemini_aspect_ratio(params.get("size")),
+        "imageSize": _aihubmix_gemini_image_size(params.get("quality"), provider_defaults),
+    }
+    generation_config = dict(provider_defaults.get("generationConfig") or provider_defaults.get("generation_config") or {})
+    generation_config.setdefault("responseModalities", ["TEXT", "IMAGE"])
+    generation_config["imageConfig"] = {**(generation_config.get("imageConfig") or {}), **image_config}
+    return {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": params["prompt"]}],
+            }
+        ],
+        "generationConfig": generation_config,
+    }
+
+
+def _images_from_aihubmix_gemini_body(body: dict[str, Any]) -> list[GeneratedImage]:
+    images: list[GeneratedImage] = []
+    revised_prompt: str | None = None
+
+    def _append_inline_part(inline: dict[str, Any]) -> None:
+        nonlocal revised_prompt
+        data_value = inline.get("data")
+        if not isinstance(data_value, str) or not data_value:
+            return
+        data = _decode_base64_image(data_value)
+        mime_type = inline.get("mime_type") or inline.get("mimeType")
+        images.append(
+            GeneratedImage(
+                data=data,
+                mime_type=str(mime_type) if isinstance(mime_type, str) and mime_type else _detect_mime_type(data),
+                revised_prompt=revised_prompt,
+            )
+        )
+
+    def _consume_parts(parts: list[Any]) -> None:
+        nonlocal revised_prompt
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                revised_prompt = text.strip()
+            inline = part.get("inline_data") or part.get("inlineData")
+            if isinstance(inline, dict):
+                _append_inline_part(inline)
+
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            multi_mod_content = message.get("multi_mod_content")
+            if isinstance(multi_mod_content, list):
+                _consume_parts(multi_mod_content)
+                if images:
+                    return images
+
+    candidates = body.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+        if isinstance(content, dict):
+            parts = content.get("parts")
+            if isinstance(parts, list):
+                _consume_parts(parts)
+                if images:
+                    return images
+
+    return images
+
+
 def _request_log_context(provider_name: str, metadata: ImageGenerationProviderMetadata, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     return {
         "provider": provider_name,
@@ -510,6 +631,44 @@ def _generate_openai_compatible(
     return _images_from_openai_response(client, response, provider_name)
 
 
+def _generate_aihubmix_gemini(
+    *,
+    client: httpx.Client,
+    provider_name: str,
+    metadata: ImageGenerationProviderMetadata,
+    provider_config: ImageGenerationProviderConfig,
+    params: dict[str, Any],
+) -> list[GeneratedImage]:
+    api_key = _clean_string(provider_config.api_key)
+    if not api_key:
+        raise ImageGenerationConfigError("Aihubmix API key is not configured. Ask the user to add it in Settings > Tools > Image generation.")
+    model = params["model"]
+    count = int(params.get("n") or 1)
+    payload = _aihubmix_gemini_payload(params, provider_config.params)
+    endpoint = f"{AIHUBMIX_GEMINI_BASE_URL.rstrip('/')}/models/{model}:generateContent"
+    images: list[GeneratedImage] = []
+    for _ in range(count):
+        response = _post_provider_request(
+            client,
+            provider_name=provider_name,
+            metadata=metadata,
+            endpoint=endpoint,
+            params=params,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json_payload=payload,
+        )
+        _raise_http_error(response, provider_name)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ImageGenerationProviderError("Aihubmix Gemini returned a non-JSON image response") from exc
+        batch = _images_from_aihubmix_gemini_body(body)
+        if not batch:
+            raise ImageGenerationProviderError("Aihubmix Gemini response did not include image data")
+        images.extend(batch)
+    return images
+
+
 def _generate_aihubmix(
     *,
     client: httpx.Client,
@@ -518,6 +677,15 @@ def _generate_aihubmix(
     provider_config: ImageGenerationProviderConfig,
     params: dict[str, Any],
 ) -> list[GeneratedImage]:
+    if _is_aihubmix_gemini_model(params["model"]):
+        return _generate_aihubmix_gemini(
+            client=client,
+            provider_name=provider_name,
+            metadata=metadata,
+            provider_config=provider_config,
+            params=params,
+        )
+
     api_key = _clean_string(provider_config.api_key)
     if not api_key:
         raise ImageGenerationConfigError("Aihubmix API key is not configured. Ask the user to add it in Settings > Tools > Image generation.")

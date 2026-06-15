@@ -5,7 +5,9 @@ import { extractMessageChoiceOptions } from "@/core/messages/choice-options";
 import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
+  getMessageGroupRenderKey,
   getMessageGroups,
+  getMessageRenderKey,
   getStreamingMessageLookup,
   isAssistantMessageGroupStreaming,
   stripInternalMarkers,
@@ -574,6 +576,29 @@ test("routes late tool results to the group that owns the tool call", () => {
       .filter((message) => message.type === "tool")
       .map((message) => message.id),
   ).toEqual(["tool-1-result"]);
+});
+
+test("message group render keys stay unique when message ids are missing", () => {
+  const messages = [
+    {
+      type: "human",
+      content: "Hello",
+    },
+    {
+      type: "ai",
+      content: "Hi there",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+  const keys = groups.map((group, index) =>
+    getMessageGroupRenderKey(group, index),
+  );
+
+  expect(new Set(keys).size).toBe(keys.length);
+  expect(
+    getMessageRenderKey(groups[1]!, 1, groups[1]!.messages[0]!, 0),
+  ).toContain("assistant:1:");
 });
 
 test("ignores incomplete streaming tool placeholders", () => {
