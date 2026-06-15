@@ -12,7 +12,12 @@ function getInternalServiceURL(envKey, fallbackURL) {
 }
 import nextra from "nextra";
 
-const withNextra = nextra({});
+const withNextra = nextra({
+  // Shiki's full language bundle makes the first Nextra route compile
+  // disproportionately slow in development. Keep production highlighting
+  // while letting the dev server compile docs and blog routes quickly.
+  codeHighlight: process.env.NODE_ENV !== "development",
+});
 
 /** @type {import("next").NextConfig} */
 const config = {
