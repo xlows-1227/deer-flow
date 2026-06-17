@@ -58,7 +58,11 @@ import {
   useThreads,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
-import { pathOfThread, titleOfThread } from "@/core/threads/utils";
+import {
+  isVisibleInChatList,
+  pathOfThread,
+  titleOfThread,
+} from "@/core/threads/utils";
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
@@ -74,9 +78,7 @@ export function RecentChatList() {
       agent_name?: string;
     }>();
   const { data: threads = [] } = useThreads();
-  const nonScheduledThreads = threads.filter(
-    (t) => t.metadata?.source !== "scheduled_task",
-  );
+  const visibleThreads = threads.filter(isVisibleInChatList);
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
   const { mutateAsync: rollupThreadMemory, isPending: isRollingUpMemory } =
@@ -195,11 +197,11 @@ export function RecentChatList() {
     [rollupThreadMemory, t],
   );
 
-  if (nonScheduledThreads.length === 0) {
+  if (visibleThreads.length === 0) {
     return null;
   }
 
-  const recentThreads = nonScheduledThreads.slice(0, RECENT_CHAT_LIMIT);
+  const recentThreads = visibleThreads.slice(0, RECENT_CHAT_LIMIT);
 
   return (
     <>

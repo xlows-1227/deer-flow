@@ -1,6 +1,11 @@
 import { expect, test } from "vitest";
 
-import { pathOfThread } from "@/core/threads/utils";
+import {
+  isVisibleInChatList,
+  pathOfThread,
+  THREAD_SOURCE_SCHEDULED_TASK,
+  THREAD_SOURCE_SKILL_SESSION,
+} from "@/core/threads/utils";
 
 test("uses standard chat route when thread has no agent context", () => {
   expect(pathOfThread("thread-123")).toBe("/workspace/chats/thread-123");
@@ -43,4 +48,31 @@ test("prefers context.agent_name over metadata.agent_name", () => {
       metadata: { agent_name: "from-metadata" },
     }),
   ).toBe("/workspace/agents/from-context/chats/thread-789");
+});
+
+test("shows normal threads in chat list", () => {
+  expect(
+    isVisibleInChatList({
+      thread_id: "thread-1",
+      metadata: {},
+    }),
+  ).toBe(true);
+});
+
+test("hides scheduled task threads from chat list", () => {
+  expect(
+    isVisibleInChatList({
+      thread_id: "thread-2",
+      metadata: { source: THREAD_SOURCE_SCHEDULED_TASK },
+    }),
+  ).toBe(false);
+});
+
+test("hides skill session threads from chat list", () => {
+  expect(
+    isVisibleInChatList({
+      thread_id: "thread-3",
+      metadata: { source: THREAD_SOURCE_SKILL_SESSION },
+    }),
+  ).toBe(false);
 });

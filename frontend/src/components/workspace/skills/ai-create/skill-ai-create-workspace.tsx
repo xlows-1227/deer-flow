@@ -1,6 +1,7 @@
 "use client";
 
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftIcon, Loader2Icon, SparklesIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -45,8 +46,10 @@ import {
   useEnableSkill,
   useUpdateCustomSkill,
 } from "@/core/skills/hooks";
+import { ensureSkillSessionThreadMetadata } from "@/core/threads/api";
 import { useThreadStream } from "@/core/threads/hooks";
 import type { AgentThreadState } from "@/core/threads/types";
+import { THREAD_SOURCE_SKILL_SESSION } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 
 import { SkillAiCreateSessionHistory } from "./skill-ai-create-session-history";
@@ -135,6 +138,7 @@ export function SkillAiCreateWorkspace({
 } = {}) {
   const { t } = useI18n();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [threadId, setThreadId] = useState(() => initialThreadId ?? uuid());
   const [isNewThread, setIsNewThread] = useState(initialIsNewThread);
   const [isWelcomeMode, setIsWelcomeMode] = useState(initialIsNewThread);
@@ -337,6 +341,13 @@ export function SkillAiCreateWorkspace({
     threadId,
   ]);
 
+  useEffect(() => {
+    if (isNewThread) return;
+    void ensureSkillSessionThreadMetadata(threadId).then(() => {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    });
+  }, [isNewThread, queryClient, threadId]);
+
   const {
     thread,
     sendMessage,
@@ -347,6 +358,7 @@ export function SkillAiCreateWorkspace({
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: skillContext,
+    threadMetadata: { source: THREAD_SOURCE_SKILL_SESSION },
     onSend: () => setIsWelcomeMode(false),
     onStart: (createdThreadId) => {
       setLocalDraft((current) => {
