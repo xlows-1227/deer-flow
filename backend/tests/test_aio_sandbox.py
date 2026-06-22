@@ -318,3 +318,61 @@ class TestDownloadFile:
         result = sandbox.download_file("/mnt/user-data/outputs/single.bin")
 
         assert result == b"single-chunk"
+
+
+class TestUploadFileFromPath:
+    """Tests for AioSandbox.update_file_from_path streaming upload."""
+
+    def test_uploads_local_file_with_path(self, sandbox, tmp_path):
+        """Should pass the target path and a readable file handle to the client."""
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"hello sandbox")
+        sandbox._client.file.upload_file = MagicMock(return_value=None)
+
+        sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
+
+        sandbox._client.file.upload_file.assert_called_once()
+        kwargs = sandbox._client.file.upload_file.call_args.kwargs
+        assert kwargs["path"] == "/mnt/user-data/outputs/file.bin"
+        assert kwargs["file"].closed is True
+
+    def test_propagates_client_error(self, sandbox, tmp_path):
+        """Exceptions from the client upload should propagate unchanged."""
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"x")
+        sandbox._client.file.upload_file = MagicMock(
+            side_effect=RuntimeError("upload failed")
+        )
+
+        with pytest.raises(RuntimeError, match="upload failed"):
+            sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
+
+    def test_holds_lock_during_upload(self, sandbox, tmp_path):
+        """update_file_from_path should hold the instance lock while uploading."""
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"x")
+        lock_was_held = []
+
+        def tracking_upload(**kwargs):
+            lock_was_held.append(sandbox._lock.locked())
+
+        sandbox._client.file.upload_file = tracking_upload
+
+        sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
+
+        assert lock_was_held == [True], "update_file_from_path must hold the lock during upload"
+
+    def test_closes_file_handle_on_client_error(self, sandbox, tmp_path):
+        """The local file handle must be closed even if upload fails."""
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"x")
+        sandbox._client.file.upload_file = MagicMock(
+            side_effect=RuntimeError("upload failed")
+        )
+
+        with pytest.raises(RuntimeError):
+            sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
+
+        sandbox._client.file.upload_file.assert_called_once()
+        kwargs = sandbox._client.file.upload_file.call_args.kwargs
+        assert kwargs["file"].closed is True

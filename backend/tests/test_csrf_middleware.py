@@ -1,9 +1,23 @@
 """Tests for CSRF middleware."""
 
+import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
+from app.gateway import csrf_middleware as csrf_mod
 from app.gateway.csrf_middleware import CSRFMiddleware
+
+
+@pytest.fixture
+def trust_testclient(monkeypatch):
+    """Temporarily treat Starlette's TestClient peer as a trusted proxy."""
+    original = csrf_mod._is_trusted_proxy
+
+    def _patched(host: str | None) -> bool:
+        return host == "testclient" or original(host)
+
+    monkeypatch.setattr(csrf_mod, "_is_trusted_proxy", _patched)
+    yield
 
 
 def _make_app() -> FastAPI:
@@ -102,6 +116,7 @@ def test_auth_post_allows_same_origin_default_port_equivalence():
     assert response.cookies.get("csrf_token")
 
 
+@pytest.mark.usefixtures("trust_testclient")
 def test_auth_post_allows_forwarded_same_origin():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
@@ -118,6 +133,7 @@ def test_auth_post_allows_forwarded_same_origin():
     assert response.cookies.get("csrf_token")
 
 
+@pytest.mark.usefixtures("trust_testclient")
 def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
@@ -134,6 +150,7 @@ def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
     assert response.cookies.get("csrf_token")
 
 
+@pytest.mark.usefixtures("trust_testclient")
 def test_auth_post_allows_rfc_forwarded_same_origin():
     client = TestClient(_make_app(), base_url="http://internal:8000")
 
@@ -148,6 +165,23 @@ def test_auth_post_allows_rfc_forwarded_same_origin():
     assert response.status_code == 200
     assert response.cookies.get("csrf_token")
     assert "secure" in response.headers["set-cookie"].lower()
+
+
+def test_auth_post_rejects_forwarded_header_from_untrusted_proxy():
+    """A private-network client must not be able to forge forwarded headers."""
+    client = TestClient(_make_app(), base_url="http://internal:8000")
+
+    response = client.post(
+        "/api/v1/auth/login/local",
+        headers={
+            "Origin": "https://deerflow.example",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "deerflow.example",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Cross-site auth request denied."
 
 
 def test_auth_post_allows_explicit_configured_origin(monkeypatch):
@@ -309,3 +343,22 @@ def test_read_endpoint_rejects_csrf_header_without_cookie():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF token missing. Include X-CSRF-Token header."
+
+
+def test_invalid_trusted_proxy_config_is_skipped_with_warning(monkeypatch, caplog):
+    """Garbage entries in GATEWAY_TRUSTED_PROXIES are skipped and logged."""
+    import logging
+
+    monkeypatch.setenv("GATEWAY_TRUSTED_PROXIES", "not-an-ip,127.0.0.1,::1")
+    # Force re-parsing with the new env value.
+    monkeypatch.setattr(
+        csrf_mod,
+        "_TRUSTED_PROXY_NETWORKS",
+        csrf_mod._load_trusted_proxy_networks(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        networks = csrf_mod._TRUSTED_PROXY_NETWORKS
+
+    assert any("not-an-ip" in msg for msg in caplog.messages)
+    assert len(networks) == 2

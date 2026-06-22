@@ -151,58 +151,67 @@ class TestChannelStore:
     def store(self, tmp_path):
         return ChannelStore(path=tmp_path / "store.json")
 
-    def test_set_and_get_thread_id(self, store):
-        store.set_thread_id("slack", "ch1", "thread-abc", user_id="u1")
-        assert store.get_thread_id("slack", "ch1") == "thread-abc"
+    @pytest.mark.asyncio
+    async def test_set_and_get_thread_id(self, store):
+        await store.set_thread_id("slack", "ch1", "thread-abc", user_id="u1")
+        assert await store.get_thread_id("slack", "ch1") == "thread-abc"
 
-    def test_get_nonexistent_returns_none(self, store):
-        assert store.get_thread_id("slack", "nonexistent") is None
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_returns_none(self, store):
+        assert await store.get_thread_id("slack", "nonexistent") is None
 
-    def test_remove(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        assert store.remove("slack", "ch1") is True
-        assert store.get_thread_id("slack", "ch1") is None
+    @pytest.mark.asyncio
+    async def test_remove(self, store):
+        await store.set_thread_id("slack", "ch1", "t1")
+        assert await store.remove("slack", "ch1") is True
+        assert await store.get_thread_id("slack", "ch1") is None
 
-    def test_remove_nonexistent_returns_false(self, store):
-        assert store.remove("slack", "nope") is False
+    @pytest.mark.asyncio
+    async def test_remove_nonexistent_returns_false(self, store):
+        assert await store.remove("slack", "nope") is False
 
-    def test_list_entries_all(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        store.set_thread_id("feishu", "ch2", "t2")
-        entries = store.list_entries()
+    @pytest.mark.asyncio
+    async def test_list_entries_all(self, store):
+        await store.set_thread_id("slack", "ch1", "t1")
+        await store.set_thread_id("feishu", "ch2", "t2")
+        entries = await store.list_entries()
         assert len(entries) == 2
 
-    def test_list_entries_filtered(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        store.set_thread_id("feishu", "ch2", "t2")
-        entries = store.list_entries(channel_name="slack")
+    @pytest.mark.asyncio
+    async def test_list_entries_filtered(self, store):
+        await store.set_thread_id("slack", "ch1", "t1")
+        await store.set_thread_id("feishu", "ch2", "t2")
+        entries = await store.list_entries(channel_name="slack")
         assert len(entries) == 1
         assert entries[0]["channel_name"] == "slack"
 
-    def test_persistence(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_persistence(self, tmp_path):
         path = tmp_path / "store.json"
         store1 = ChannelStore(path=path)
-        store1.set_thread_id("slack", "ch1", "t1")
+        await store1.set_thread_id("slack", "ch1", "t1")
 
         store2 = ChannelStore(path=path)
-        assert store2.get_thread_id("slack", "ch1") == "t1"
+        assert await store2.get_thread_id("slack", "ch1") == "t1"
 
-    def test_update_preserves_created_at(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        entries = store.list_entries()
+    @pytest.mark.asyncio
+    async def test_update_preserves_created_at(self, store):
+        await store.set_thread_id("slack", "ch1", "t1")
+        entries = await store.list_entries()
         created_at = entries[0]["created_at"]
 
-        store.set_thread_id("slack", "ch1", "t2")
-        entries = store.list_entries()
+        await store.set_thread_id("slack", "ch1", "t2")
+        entries = await store.list_entries()
         assert entries[0]["created_at"] == created_at
         assert entries[0]["thread_id"] == "t2"
         assert entries[0]["updated_at"] >= created_at
 
-    def test_corrupt_file_handled(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_corrupt_file_handled(self, tmp_path):
         path = tmp_path / "store.json"
         path.write_text("not json", encoding="utf-8")
         store = ChannelStore(path=path)
-        assert store.get_thread_id("x", "y") is None
+        assert await store.get_thread_id("x", "y") is None
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +571,7 @@ class TestChannelManager:
             mock_client.threads.create.assert_called_once()
 
             # Thread ID should be stored
-            thread_id = store.get_thread_id("test", "chat1")
+            thread_id = await store.get_thread_id("test", "chat1")
             assert thread_id == "test-thread-123"
 
             # runs.wait should be called with the thread_id
@@ -1146,7 +1155,7 @@ class TestChannelManager:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            store.set_thread_id("test", "chat1", "old-thread")
+            await store.set_thread_id("test", "chat1", "old-thread")
 
             mock_client = _make_mock_langgraph_client(thread_id="new-thread-456")
             manager._client = mock_client
@@ -1170,7 +1179,7 @@ class TestChannelManager:
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
-            new_thread = store.get_thread_id("test", "chat1")
+            new_thread = await store.get_thread_id("test", "chat1")
             assert new_thread == "new-thread-456"
             assert new_thread != "old-thread"
             assert "New conversation started" in outbound_received[0].text
@@ -1554,7 +1563,7 @@ class TestChannelManager:
 
             # A thread should be created
             mock_client.threads.create.assert_called_once()
-            assert store.get_thread_id("test", "chat1") == "bootstrap-thread"
+            assert await store.get_thread_id("test", "chat1") == "bootstrap-thread"
 
         _run(go())
 

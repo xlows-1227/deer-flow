@@ -70,6 +70,7 @@ import {
   getDefaultExpandedPaths,
 } from "@/components/workspace/skills/ai-create/utils";
 import { parseSkillMarkdown } from "@/components/workspace/skills/skill-create-utils";
+import { useHighlightTimeout } from "@/components/workspace/skills/use-highlight-timeout";
 import { useThreadSettings } from "@/core/settings";
 import {
   createCustomSkillDirectory,
@@ -391,6 +392,11 @@ function applyImportedPathsToTree(
   setHighlightedPaths: (
     value: Set<string> | ((current: Set<string>) => Set<string>),
   ) => void,
+  highlightPaths: (
+    setter: (value: Set<string>) => void,
+    paths: Set<string>,
+    delay?: number,
+  ) => void,
 ) {
   if (paths.length === 0) return;
   setExpandedPaths((current) => {
@@ -398,8 +404,10 @@ function applyImportedPathsToTree(
     expandPathAncestors(paths).forEach((item) => next.add(item));
     return next;
   });
-  setHighlightedPaths(new Set(paths));
-  window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
+  highlightPaths(
+    setHighlightedPaths as (value: Set<string>) => void,
+    new Set(paths),
+  );
 }
 
 export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
@@ -424,6 +432,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(
     () => new Set(),
   );
+  const highlightPaths = useHighlightTimeout();
   const [selectedChangePath, setSelectedChangePath] = useState<string | null>(
     null,
   );
@@ -517,7 +526,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
       ? (effectiveDraft.files[skillMdPath] ?? "")
       : "";
     return parseSkillMarkdown(content);
-  }, [effectiveDraft.files]);
+  }, [effectiveDraft]);
   const hasDirtyTabs = openTabs.some((tab) => tab.dirty);
   const displaySkillName =
     parsedSkill.displayName || parsedSkill.name || skillName;
@@ -793,6 +802,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
           organizedPaths,
           setExpandedPaths,
           setHighlightedPaths,
+          highlightPaths,
         );
         const highlightPath = options.highlightServerPath
           ? remapPathToSkillFolder(
@@ -802,15 +812,14 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
             )
           : null;
         if (highlightPath) {
-          setHighlightedPaths(new Set([highlightPath]));
-          window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
+          highlightPaths(setHighlightedPaths, new Set([highlightPath]));
         }
         return organizedPaths;
       } catch {
         return [];
       }
     },
-    [skillName],
+    [highlightPaths, skillName],
   );
 
   importServerSkillFilesRef.current = importServerSkillFiles;
@@ -853,6 +862,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
           organizedPaths,
           setExpandedPaths,
           setHighlightedPaths,
+          highlightPaths,
         );
         setOpenTabs((current) =>
           current.map((tab) => {
@@ -872,7 +882,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
         return [];
       }
     },
-    [skillName, threadId],
+    [highlightPaths, skillName, threadId],
   );
 
   runThreadFileImportRef.current = runThreadFileImport;

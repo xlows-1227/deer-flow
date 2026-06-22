@@ -10,7 +10,6 @@ import {
   type HTMLAttributes,
   useContext,
   useEffect,
-  useRef,
   useState,
 } from "react";
 import { type BundledLanguage, codeToHtml, type ShikiTransformer } from "shiki";
@@ -83,19 +82,18 @@ export const CodeBlock = ({
 }: CodeBlockProps) => {
   const [html, setHtml] = useState<string>("");
   const [darkHtml, setDarkHtml] = useState<string>("");
-  const mounted = useRef(false);
 
   useEffect(() => {
+    let cancelled = false;
     highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
-      if (!mounted.current) {
+      if (!cancelled) {
         setHtml(light);
         setDarkHtml(dark);
-        mounted.current = true;
       }
     });
 
     return () => {
-      mounted.current = false;
+      cancelled = true;
     };
   }, [code, language, showLineNumbers]);
 
@@ -147,6 +145,12 @@ export const CodeBlockCopyButton = ({
   const [isCopied, setIsCopied] = useState(false);
   const { code } = useContext(CodeBlockContext);
 
+  useEffect(() => {
+    if (!isCopied) return;
+    const timer = setTimeout(() => setIsCopied(false), timeout);
+    return () => clearTimeout(timer);
+  }, [isCopied, timeout]);
+
   const copyToClipboard = async () => {
     if (typeof window === "undefined") {
       onError?.(new Error("Clipboard API not available"));
@@ -161,7 +165,6 @@ export const CodeBlockCopyButton = ({
       }
       setIsCopied(true);
       onCopy?.();
-      setTimeout(() => setIsCopied(false), timeout);
     } catch (error) {
       onError?.(error as Error);
     }

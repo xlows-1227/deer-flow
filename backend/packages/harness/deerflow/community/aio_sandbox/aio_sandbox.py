@@ -283,3 +283,21 @@ class AioSandbox(Sandbox):
             except Exception as e:
                 logger.error(f"Failed to update file in sandbox: {e}")
                 raise
+
+    def update_file_from_path(self, path: str, source_path: str) -> None:
+        """Upload a local file into the sandbox using the streaming upload API.
+
+        This avoids loading the entire file into memory, which is important for
+        large file uploads to remote AIO sandbox backends.
+
+        Args:
+            path: The absolute virtual path to write in the sandbox.
+            source_path: The local filesystem path to stream from.
+        """
+        with self._lock:
+            try:
+                with open(source_path, "rb") as fh:
+                    self._client.file.upload_file(file=fh, path=path)
+            except Exception as e:
+                logger.error(f"Failed to upload file to sandbox: {e}")
+                raise

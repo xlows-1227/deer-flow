@@ -171,6 +171,9 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Trust the fixed Docker Compose subnet so the bundled nginx can forward
+      # protocol/origin headers. Override via GATEWAY_TRUSTED_PROXIES in .env.
+      - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.200.0/24}
     env_file:
       - ../.env
     extra_hosts:

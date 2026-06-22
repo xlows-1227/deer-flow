@@ -475,3 +475,18 @@ class LocalSandbox(Sandbox):
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
+
+    def update_file_from_path(self, path: str, source_path: str) -> None:
+        """Copy a local file into the sandbox without loading it into memory."""
+        resolved = self._resolve_path_with_mapping(path)
+        resolved_path = resolved.path
+        if self._is_resolved_path_read_only(resolved):
+            raise OSError(errno.EROFS, "Read-only file system", path)
+        try:
+            dir_path = os.path.dirname(resolved_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            shutil.copyfile(source_path, resolved_path)
+        except OSError as e:
+            # Re-raise with the original path for clearer error messages, hiding internal resolved paths
+            raise type(e)(e.errno, e.strerror, path) from None

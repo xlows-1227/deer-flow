@@ -30,6 +30,7 @@ import {
   resolveSkillDisplayName,
   syncSkillDisplayFrontmatter,
 } from "@/components/workspace/skills/skill-create-utils";
+import { useHighlightTimeout } from "@/components/workspace/skills/use-highlight-timeout";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadSettings } from "@/core/settings";
 import {
@@ -151,6 +152,7 @@ export function SkillAiCreateWorkspace({
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(
     () => new Set(),
   );
+  const highlightPaths = useHighlightTimeout();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
   const [isRefreshingFiles, setIsRefreshingFiles] = useState(false);
@@ -414,8 +416,7 @@ export function SkillAiCreateWorkspace({
               files: snapshot.contents,
             });
         if (highlightPath) {
-          setHighlightedPaths(new Set([highlightPath]));
-          window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
+          highlightPaths(setHighlightedPaths, new Set([highlightPath]));
         }
         void runThreadFileImportRef.current({ replaceExisting: true });
       })();
@@ -481,8 +482,7 @@ export function SkillAiCreateWorkspace({
           );
           return next;
         });
-        setHighlightedPaths(new Set(result.importedPaths));
-        window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
+        highlightPaths(setHighlightedPaths, new Set(result.importedPaths));
         return result.importedPaths;
       } catch {
         return [];
@@ -938,26 +938,27 @@ export function SkillAiCreateWorkspace({
         expandPathAncestors([path]).forEach((item) => next.add(item));
         return next;
       });
-      setHighlightedPaths(new Set([path]));
-      window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
+      highlightPaths(setHighlightedPaths, new Set([path]));
       openFile(path);
     },
     [openFile],
   );
 
-  const handleCreateDirectory = useCallback(async (path: string) => {
-    setLocalDraft((current) => addLocalDirectory(current, path));
-    setExpandedPaths((current) => {
-      const next = new Set(current);
-      expandPathAncestors([path]).forEach((item) => next.add(item));
-      next.add(path);
-      return next;
-    });
-    setSelectedTreePath(path);
-    setSelectedTreeType("directory");
-    setHighlightedPaths(new Set([path]));
-    window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
-  }, []);
+  const handleCreateDirectory = useCallback(
+    async (path: string) => {
+      setLocalDraft((current) => addLocalDirectory(current, path));
+      setExpandedPaths((current) => {
+        const next = new Set(current);
+        expandPathAncestors([path]).forEach((item) => next.add(item));
+        next.add(path);
+        return next;
+      });
+      setSelectedTreePath(path);
+      setSelectedTreeType("directory");
+      highlightPaths(setHighlightedPaths, new Set([path]));
+    },
+    [highlightPaths],
+  );
 
   const getDirectoryEntryCount = useCallback(
     (path: string) =>
@@ -1164,8 +1165,7 @@ export function SkillAiCreateWorkspace({
         expandPathAncestors(uploadedPaths).forEach((item) => next.add(item));
         return next;
       });
-      setHighlightedPaths(new Set(uploadedPaths));
-      window.setTimeout(() => setHighlightedPaths(new Set()), 4000);
+      highlightPaths(setHighlightedPaths, new Set(uploadedPaths));
 
       const firstTextPath = textEntries[0]?.path;
       if (firstTextPath) {

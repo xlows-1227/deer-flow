@@ -1,7 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { ChevronUpIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Conversation,
@@ -270,7 +270,65 @@ export function MessageList({
     [],
   );
 
-  const timestampMapRef = useRef<Map<string, string>>(new Map());
+  const [timestampMap, setTimestampMap] = useState<Map<string, string>>(
+    new Map(),
+  );
+
+  // Populate frontend-render timestamps for groups that do not have a backend
+  // timestamp.  This is done in an effect to avoid mutating refs during render.
+  useEffect(() => {
+    setTimestampMap((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const group of groupedMessages) {
+        if (group.type !== "assistant") continue;
+        const aiMessage = group.messages.find((m) => m.type === "ai");
+        const backendTimestamp = formatMessageTime(
+          getMessageTimestamp(aiMessage ?? group.messages[0]!),
+        );
+        if (!backendTimestamp && group.id && !next.has(group.id)) {
+          next.set(group.id, formatMessageTime(new Date().toISOString()));
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [groupedMessages]);
+
+  // Sync subagent task states from the rendered message groups.  Keeping this
+  // in an effect avoids calling setState while rendering.
+  useEffect(() => {
+    const tasksToUpdate: Subtask[] = [];
+    for (const group of groupedMessages) {
+      if (group.type !== "assistant:subagent") continue;
+      for (const message of group.messages) {
+        if (message.type === "ai") {
+          for (const toolCall of message.tool_calls ?? []) {
+            if (toolCall.name === "task") {
+              tasksToUpdate.push({
+                id: toolCall.id!,
+                subagent_type: toolCall.args.subagent_type,
+                description: toolCall.args.description,
+                prompt: toolCall.args.prompt,
+                status: "in_progress",
+              });
+            }
+          }
+        } else if (message.type === "tool") {
+          const taskId = message.tool_call_id;
+          if (taskId) {
+            const parsed = parseSubtaskResult(
+              extractTextFromMessage(message),
+            );
+            tasksToUpdate.push({ id: taskId, ...parsed } as Subtask);
+          }
+        }
+      }
+    }
+    for (const task of tasksToUpdate) {
+      updateSubtask(task);
+    }
+  }, [groupedMessages, updateSubtask]);
 
   const renderTokenUsage = useCallback(
     ({
@@ -291,15 +349,9 @@ export function MessageList({
         getMessageTimestamp(aiMessage ?? messages[0]!),
       );
 
-      // Fallback: record frontend render time if no backend timestamp
+      // Fallback: use frontend render time if no backend timestamp
       if (!aiTimestamp && groupId) {
-        if (!timestampMapRef.current.has(groupId)) {
-          timestampMapRef.current.set(
-            groupId,
-            formatMessageTime(new Date().toISOString()),
-          );
-        }
-        aiTimestamp = timestampMapRef.current.get(groupId)!;
+        aiTimestamp = timestampMap.get(groupId)!;
       }
 
       if (tokenUsageInlineMode === "per_turn") {
@@ -349,7 +401,7 @@ export function MessageList({
 
       return null;
     },
-    [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
+    [thread.isLoading, timestampMap, tokenDebugSteps, tokenUsageInlineMode],
   );
 
   if (thread.isThreadLoading && messages.length === 0) {
@@ -480,7 +532,6 @@ export function MessageList({
                       prompt: toolCall.args.prompt,
                       status: "in_progress",
                     };
-                    updateSubtask(task);
                     tasks.add(task);
                   }
                 }
@@ -490,7 +541,7 @@ export function MessageList({
                   const parsed = parseSubtaskResult(
                     extractTextFromMessage(message),
                   );
-                  updateSubtask({ id: taskId, ...parsed });
+                  tasks.add({ id: taskId, ...parsed } as Subtask);
                 }
               }
             }

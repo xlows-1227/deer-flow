@@ -49,6 +49,16 @@ function ensureStorageListenerRegistered() {
   storageListenerRegistered = true;
 }
 
+function maybeUnregisterStorageListener() {
+  if (!storageListenerRegistered || listeners.size > 0) {
+    return;
+  }
+  if (typeof window !== "undefined") {
+    window.removeEventListener("storage", handleStorage);
+  }
+  storageListenerRegistered = false;
+}
+
 function mergeSettingsSection<K extends keyof LocalSettings>(
   settings: LocalSettings,
   key: K,
@@ -104,6 +114,7 @@ export function subscribe(listener: Listener): () => void {
 
   return () => {
     listeners.delete(listener);
+    maybeUnregisterStorageListener();
   };
 }
 

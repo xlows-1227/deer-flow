@@ -4,6 +4,8 @@ Per RFC-001:
 State-changing operations require CSRF protection.
 """
 
+import ipaddress
+import logging
 import os
 import secrets
 from collections.abc import Awaitable, Callable
@@ -14,9 +16,52 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
+logger = logging.getLogger(__name__)
+
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_TOKEN_LENGTH = 64  # bytes
+
+
+def _load_trusted_proxy_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse GATEWAY_TRUSTED_PROXIES into a list of networks.
+
+    Examples:
+        GATEWAY_TRUSTED_PROXIES=127.0.0.1,10.0.0.0/8,::1
+
+    If unset, only loopback addresses are trusted. In containerized deployments
+    behind a reverse proxy, explicitly set ``GATEWAY_TRUSTED_PROXIES`` to the
+    exact proxy CIDRs (e.g. the Docker network containing nginx).
+    """
+    raw = os.environ.get("GATEWAY_TRUSTED_PROXIES", "127.0.0.1,::1")
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning(
+                "Invalid GATEWAY_TRUSTED_PROXIES entry %r; skipping. Expected an IP address or CIDR.",
+                item,
+            )
+            continue
+    return networks
+
+
+_TRUSTED_PROXY_NETWORKS = _load_trusted_proxy_networks()
+
+
+def _is_trusted_proxy(client_host: str | None) -> bool:
+    """Return True if ``client_host`` is a trusted proxy."""
+    if not client_host:
+        return False
+    try:
+        addr = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    return any(addr in network for network in _TRUSTED_PROXY_NETWORKS)
 
 
 def is_secure_request(request: Request) -> bool:
@@ -136,18 +181,30 @@ def _forwarded_param(request: Request, name: str) -> str | None:
 
 def _request_scheme(request: Request) -> str:
     """Resolve the original request scheme from trusted proxy headers."""
-    scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
-    return scheme.lower()
+    if _is_trusted_proxy(request.client.host if request.client else None):
+        scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto"))
+        if scheme:
+            return scheme.lower()
+    return request.url.scheme.lower()
 
 
 def _request_origin(request: Request) -> str | None:
-    """Build the origin for the URL the browser is targeting."""
-    scheme = _request_scheme(request)
-    host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or request.headers.get("host") or request.url.netloc
+    """Build the origin for the URL the browser is targeting.
 
-    forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))
-    if forwarded_port and ":" not in host.rsplit("]", 1)[-1]:
-        host = f"{host}:{forwarded_port}"
+    Forwarded headers are only honored when the immediate peer is a trusted
+    proxy.  In direct-gateway / dev mode a client can otherwise forge both
+    Origin and forwarded headers to bypass the login-CSRF guard.
+    """
+    if _is_trusted_proxy(request.client.host if request.client else None):
+        scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
+        host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or request.headers.get("host") or request.url.netloc
+
+        forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))
+        if forwarded_port and ":" not in host.rsplit("]", 1)[-1]:
+            host = f"{host}:{forwarded_port}"
+    else:
+        scheme = request.url.scheme
+        host = request.headers.get("host") or request.url.netloc
 
     return _normalize_origin(f"{scheme}://{host}")
 

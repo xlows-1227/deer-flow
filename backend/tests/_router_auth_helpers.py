@@ -37,18 +37,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
-from app.gateway.authz import AuthContext, Permissions
-
-# Default permission set granted to the stub user. Mirrors `_ALL_PERMISSIONS`
-# in authz.py — kept inline so the tests don't import a private symbol.
-_STUB_PERMISSIONS: list[str] = [
-    Permissions.THREADS_READ,
-    Permissions.THREADS_WRITE,
-    Permissions.THREADS_DELETE,
-    Permissions.RUNS_CREATE,
-    Permissions.RUNS_READ,
-    Permissions.RUNS_CANCEL,
-]
+from app.gateway.authz import AuthContext, permissions_for_user
 
 
 def _make_stub_user() -> User:
@@ -76,7 +65,7 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
         request.state.user = user
-        request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
+        request.state.auth = AuthContext(user=user, permissions=permissions_for_user(user))
         return await call_next(request)
 
 

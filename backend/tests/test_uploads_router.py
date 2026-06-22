@@ -178,8 +178,12 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
     assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
     assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
 
-    sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
-    sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
+    sandbox.update_file_from_path.assert_any_call(
+        "/mnt/user-data/uploads/report.pdf", str(thread_uploads_dir / "report.pdf")
+    )
+    sandbox.update_file_from_path.assert_any_call(
+        "/mnt/user-data/uploads/report.md", str(thread_uploads_dir / "report.md")
+    )
 
 
 def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
@@ -266,7 +270,9 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
 
     assert result.success is True
     provider.acquire.assert_called_once_with("thread-aio")
-    sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
+    sandbox.update_file_from_path.assert_called_once_with(
+        "/mnt/user-data/uploads/notes.txt", str(thread_uploads_dir / "notes.txt")
+    )
 
 
 def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tmp_path):
