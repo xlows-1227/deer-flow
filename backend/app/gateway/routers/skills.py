@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_admin, require_permission
+from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
@@ -778,6 +778,8 @@ async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(
         return CustomSkillHistoryResponse(history=storage.read_history(skill_name))
     except HTTPException:
         raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error("Failed to read history for %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read history: {str(e)}")
@@ -793,6 +795,8 @@ async def list_custom_skill_versions(skill_name: str, config: AppConfig = Depend
         return CustomSkillVersionsResponse(versions=storage.list_skill_versions(skill_name))
     except HTTPException:
         raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error("Failed to list versions for %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list versions: {str(e)}")

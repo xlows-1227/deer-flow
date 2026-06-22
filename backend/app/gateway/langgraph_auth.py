@@ -10,7 +10,8 @@ rules as Gateway so both modes validate sessions consistently.
 
 Two layers:
   1. @auth.authenticate — validates JWT cookie, extracts user_id,
-     and enforces CSRF on state-changing methods (POST/PUT/DELETE/PATCH)
+     enforces CSRF on state-changing methods (POST/PUT/DELETE/PATCH), and
+     validates any CSRF header supplied on read requests
   2. @auth.on — returns metadata filter so each user only sees own threads
 """
 
@@ -29,17 +30,17 @@ _CSRF_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 
 
 def _check_csrf(request) -> None:
-    """Enforce Double Submit Cookie CSRF check for state-changing requests.
+    """Enforce the same Double Submit Cookie rules as Gateway.
 
     Mirrors Gateway's CSRFMiddleware logic so that LangGraph routes
     proxied directly by nginx have the same CSRF protection.
     """
     method = getattr(request, "method", "") or ""
-    if method.upper() not in _CSRF_METHODS:
+    header_token = request.headers.get("x-csrf-token")
+    if method.upper() not in _CSRF_METHODS and header_token is None:
         return
 
     cookie_token = request.cookies.get("csrf_token")
-    header_token = request.headers.get("x-csrf-token")
 
     if not cookie_token or not header_token:
         raise Auth.exceptions.HTTPException(

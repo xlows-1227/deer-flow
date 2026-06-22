@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const fetchWithAuth = vi.fn();
+const getCsrfHeaders = vi.fn(() => ({ "X-CSRF-Token": "known-token" }));
 
 vi.mock("@/core/api/fetcher", () => ({
   fetch: fetchWithAuth,
+  getCsrfHeaders,
 }));
 
 vi.mock("@/core/config", () => ({
@@ -15,6 +17,23 @@ beforeEach(() => {
 });
 
 describe("skill version api", () => {
+  test("loadSkills sends a valid CSRF credential for validation", async () => {
+    fetchWithAuth.mockResolvedValue({
+      ok: true,
+      json: async () => ({ skills: [] }),
+    });
+
+    const { loadSkills } = await import("@/core/skills/api");
+
+    await expect(loadSkills()).resolves.toEqual([]);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      "http://localhost:8001/api/skills",
+      {
+        headers: { "X-CSRF-Token": "known-token" },
+      },
+    );
+  });
+
   test("listCustomSkillVersions returns version list", async () => {
     fetchWithAuth.mockResolvedValue({
       ok: true,

@@ -50,6 +50,8 @@ import {
   threadUploadDownloadUrl,
   uploadUserFiles,
   useAllUserFiles,
+  useUserFileUploadConfig,
+  useUserFolders,
   userFileUrl,
 } from "@/core/files";
 import type { UserFileItem, UserFileTypeFilter } from "@/core/files";
@@ -178,7 +180,9 @@ function FolderBreadcrumb({
             <ChevronRightIcon className="size-3.5" />
             <button
               type="button"
-              className={cn(index === parts.length - 1 && "font-medium text-gray-950")}
+              className={cn(
+                index === parts.length - 1 && "font-medium text-gray-950",
+              )}
               onClick={() => onOpen(path)}
             >
               {part}
@@ -201,14 +205,23 @@ export default function WorkspaceFilesPage() {
   const [folderName, setFolderName] = useState("");
   const [savingFolder, setSavingFolder] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
+  const [uploadFolderPath, setUploadFolderPath] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const { folders, refetch: refetchFolders } = useUserFolders();
+  const { config: uploadConfig } = useUserFileUploadConfig();
 
   // Library filters (folder/source/q) drive the backend request for
   // the library half. The `type` switch is library-only and we apply
   // it client-side on the merged list below; thread uploads are filtered
   // client-side too because they live across many threads and we'd
   // rather avoid per-thread re-requests when the user toggles a filter.
-  const { files: rawItems, isLoading, refetch } = useAllUserFiles({
+  const {
+    files: rawItems,
+    isLoading,
+    refetch,
+  } = useAllUserFiles({
     folder_path: folderPath,
     source: source === "all" ? "all" : source,
     q: query,
@@ -233,12 +246,15 @@ export default function WorkspaceFilesPage() {
       if (q && !item.name.toLowerCase().includes(q)) {
         return false;
       }
+      if (item.kind === "file" && source !== "all" && item.source !== source) {
+        return false;
+      }
       if (type !== "all" && fileType(item) !== type) {
         return false;
       }
       return true;
     });
-  }, [rawItems, query, sourceKind, type]);
+  }, [rawItems, query, source, sourceKind, type]);
 
   const stats = useMemo(() => {
     const files = items.filter((item) => item.kind === "file").length;
@@ -247,19 +263,43 @@ export default function WorkspaceFilesPage() {
     return { files, folders, fromThreads };
   }, [items, rawItems]);
 
-  const handleUpload = async (fileList: FileList | null) => {
+  const handleFileSelection = (fileList: FileList | null) => {
     const files = Array.from(fileList ?? []);
     if (files.length === 0) return;
+    if (fileInputRef.current) fileInputRef.current.value = "";
+
+    const oversized = uploadConfig
+      ? files.find((file) => file.size > uploadConfig.max_upload_bytes)
+      : null;
+    if (oversized && uploadConfig) {
+      toast.error(
+        `「${oversized.name}」超过单文件 ${uploadConfig.max_upload_label} 的上传限制`,
+      );
+      return;
+    }
+
+    setPendingUploadFiles(files);
+    setUploadDialogOpen(true);
+  };
+
+  const handleUpload = async () => {
+    if (pendingUploadFiles.length === 0) return;
     setUploading(true);
     try {
-      await uploadUserFiles(files, folderPath);
-      toast.success(`已上传 ${files.length} 个文件`);
-      refetch();
+      await uploadUserFiles(pendingUploadFiles, uploadFolderPath);
+      toast.success(`已上传 ${pendingUploadFiles.length} 个文件`);
+      setUploadDialogOpen(false);
+      setPendingUploadFiles([]);
+      setFolderPath(uploadFolderPath);
+      setSourceKind("library");
+      setSource("uploaded");
+      setType("all");
+      setQuery("");
+      void refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "上传文件失败");
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
@@ -271,7 +311,8 @@ export default function WorkspaceFilesPage() {
       toast.success("文件夹已创建");
       setFolderDialogOpen(false);
       setFolderName("");
-      refetch();
+      void refetch();
+      void refetchFolders();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "新建文件夹失败");
     } finally {
@@ -300,6 +341,7 @@ export default function WorkspaceFilesPage() {
   const openItem = (item: UserFileItem) => {
     if (item.kind === "folder") {
       setFolderPath(item.path);
+      setSourceKind("library");
       return;
     }
     // For thread uploads, jump to the source chat so the file is seen
@@ -307,7 +349,11 @@ export default function WorkspaceFilesPage() {
     // browseable for non-SDK clients). For library files, open the
     // managed-file URL straight in a new tab.
     if (item.source_thread_id) {
-      window.open(`/workspace/chats/${item.source_thread_id}`, "_blank", "noopener,noreferrer");
+      window.open(
+        `/workspace/chats/${item.source_thread_id}`,
+        "_blank",
+        "noopener,noreferrer",
+      );
       return;
     }
     window.open(userFileUrl(item.path), "_blank", "noopener,noreferrer");
@@ -362,7 +408,8 @@ export default function WorkspaceFilesPage() {
 
   const renderSourceLabel = (item: UserFileItem) => {
     if (item.source_thread_id) {
-      const title = item.source_thread_title ?? item.source_thread_id.slice(0, 8);
+      const title =
+        item.source_thread_title ?? item.source_thread_id.slice(0, 8);
       return (
         <span
           className="text-muted-foreground inline-flex max-w-40 items-center gap-1 truncate text-xs"
@@ -373,7 +420,8 @@ export default function WorkspaceFilesPage() {
         </span>
       );
     }
-    if (item.source === "generated") return <span className="text-gray-500">已生成</span>;
+    if (item.source === "generated")
+      return <span className="text-gray-500">已生成</span>;
     return <span className="text-gray-500">已上传</span>;
   };
 
@@ -388,19 +436,28 @@ export default function WorkspaceFilesPage() {
             <div className="mt-5 flex flex-wrap items-center gap-2">
               <Select
                 value={sourceKind}
-                onValueChange={(value) => setSourceKind(value as SourceKindFilter)}
+                onValueChange={(value) => {
+                  const next = value as SourceKindFilter;
+                  setSourceKind(next);
+                  if (next === "thread") {
+                    setFolderPath("");
+                  }
+                }}
               >
                 <SelectTrigger className="h-8 w-36 rounded-lg border-gray-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {(Object.entries(sourceKindLabels) as [SourceKindFilter, string][]).map(
-                    ([value, label]) => (
-                      <SelectItem key={value} value={value}>
-                        {label}
-                      </SelectItem>
-                    ),
-                  )}
+                  {(
+                    Object.entries(sourceKindLabels) as [
+                      SourceKindFilter,
+                      string,
+                    ][]
+                  ).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <Select
@@ -411,13 +468,13 @@ export default function WorkspaceFilesPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {(Object.entries(sourceLabels) as [SourceFilter, string][]).map(
-                    ([value, label]) => (
-                      <SelectItem key={value} value={value}>
-                        {label}
-                      </SelectItem>
-                    ),
-                  )}
+                  {(
+                    Object.entries(sourceLabels) as [SourceFilter, string][]
+                  ).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <Select
@@ -461,7 +518,10 @@ export default function WorkspaceFilesPage() {
                 type="button"
                 className="h-9 rounded-lg bg-black px-4 text-white hover:bg-black/90"
                 disabled={uploading}
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => {
+                  setUploadFolderPath(folderPath);
+                  fileInputRef.current?.click();
+                }}
               >
                 {uploading ? (
                   <LoaderCircleIcon className="size-4 animate-spin" />
@@ -475,7 +535,7 @@ export default function WorkspaceFilesPage() {
                 type="file"
                 multiple
                 className="hidden"
-                onChange={(event) => void handleUpload(event.target.files)}
+                onChange={(event) => handleFileSelection(event.target.files)}
               />
             </div>
             <div className="flex rounded-lg border border-gray-200 bg-white p-1">
@@ -483,7 +543,10 @@ export default function WorkspaceFilesPage() {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className={cn("size-7 rounded-md", viewMode === "list" && "bg-gray-100")}
+                className={cn(
+                  "size-7 rounded-md",
+                  viewMode === "list" && "bg-gray-100",
+                )}
                 onClick={() => setViewMode("list")}
               >
                 <ListIcon className="size-4" />
@@ -492,7 +555,10 @@ export default function WorkspaceFilesPage() {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className={cn("size-7 rounded-md", viewMode === "grid" && "bg-gray-100")}
+                className={cn(
+                  "size-7 rounded-md",
+                  viewMode === "grid" && "bg-gray-100",
+                )}
                 onClick={() => setViewMode("grid")}
               >
                 <Grid2X2Icon className="size-4" />
@@ -501,7 +567,13 @@ export default function WorkspaceFilesPage() {
           </div>
         </div>
         <div className="mt-4">
-          <FolderBreadcrumb folderPath={folderPath} onOpen={setFolderPath} />
+          <FolderBreadcrumb
+            folderPath={folderPath}
+            onOpen={(path) => {
+              setFolderPath(path);
+              if (path) setSourceKind("library");
+            }}
+          />
         </div>
       </header>
 
@@ -541,13 +613,20 @@ export default function WorkspaceFilesPage() {
               >
                 <button
                   type="button"
-                  className="flex min-w-0 items-center gap-3 text-left"
+                  className="flex min-w-0 items-center gap-3 py-1 text-left"
                   onClick={() => openItem(item)}
                 >
                   <FileGlyph item={item} />
-                  <span className="truncate font-medium text-black">{item.name}</span>
+                  <span
+                    className="min-w-0 font-medium break-all whitespace-normal text-black"
+                    title={item.name}
+                  >
+                    {item.name}
+                  </span>
                 </button>
-                <div className="text-gray-500">{formatDate(item.modified_at)}</div>
+                <div className="text-gray-500">
+                  {formatDate(item.modified_at)}
+                </div>
                 <div className="text-gray-500">{formatSize(item.size)}</div>
                 <div>{renderSourceLabel(item)}</div>
                 <div>{renderActions(item)}</div>
@@ -564,11 +643,14 @@ export default function WorkspaceFilesPage() {
                 <div className="flex items-start justify-between">
                   <button
                     type="button"
-                    className="flex min-w-0 items-center gap-3 text-left"
+                    className="flex min-w-0 flex-1 items-start gap-3 text-left"
                     onClick={() => openItem(item)}
                   >
                     <FileGlyph item={item} />
-                    <span className="line-clamp-2 text-sm font-medium text-black">
+                    <span
+                      className="min-w-0 text-sm font-medium break-all whitespace-normal text-black"
+                      title={item.name}
+                    >
                       {item.name}
                     </span>
                   </button>
@@ -586,11 +668,113 @@ export default function WorkspaceFilesPage() {
           <div className="mt-4 text-xs text-gray-400">
             {stats.folders} 个文件夹，{stats.files} 个文件
             {stats.fromThreads > 0 && (
-              <span className="ml-1">（其中 {stats.fromThreads} 个来自对话）</span>
+              <span className="ml-1">
+                （其中 {stats.fromThreads} 个来自对话）
+              </span>
             )}
           </div>
         )}
       </main>
+
+      <Dialog
+        open={uploadDialogOpen}
+        onOpenChange={(open) => {
+          if (uploading) return;
+          setUploadDialogOpen(open);
+          if (!open) setPendingUploadFiles([]);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>上传文件</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-5">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-gray-900">上传到</div>
+              <Select
+                value={uploadFolderPath || "__root__"}
+                onValueChange={(value) =>
+                  setUploadFolderPath(value === "__root__" ? "" : value)
+                }
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__root__">全部文件（根目录）</SelectItem>
+                  {folders.map((path) => (
+                    <SelectItem key={path} value={path}>
+                      {path}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-gray-500">
+                也可以先进入某个文件夹，再点击上传；默认会选中当前文件夹。
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-medium text-gray-900">
+                  已选择 {pendingUploadFiles.length} 个文件
+                </span>
+                <span className="text-gray-500">
+                  {formatSize(
+                    pendingUploadFiles.reduce(
+                      (total, file) => total + file.size,
+                      0,
+                    ),
+                  )}
+                </span>
+              </div>
+              <div className="max-h-40 overflow-y-auto rounded-lg border border-gray-200">
+                {pendingUploadFiles.map((file) => (
+                  <div
+                    key={`${file.name}-${file.size}-${file.lastModified}`}
+                    className="flex items-center justify-between gap-4 border-b border-gray-100 px-3 py-2 text-sm last:border-b-0"
+                  >
+                    <span className="min-w-0 break-all text-gray-900">
+                      {file.name}
+                    </span>
+                    <span className="shrink-0 text-xs text-gray-500">
+                      {formatSize(file.size)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-500">
+                {uploadConfig
+                  ? `单个文件最大 ${uploadConfig.max_upload_label}`
+                  : "正在读取上传大小限制…"}
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={uploading}
+              onClick={() => {
+                setUploadDialogOpen(false);
+                setPendingUploadFiles([]);
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={uploading || pendingUploadFiles.length === 0}
+              onClick={() => void handleUpload()}
+            >
+              {uploading && (
+                <LoaderCircleIcon className="size-4 animate-spin" />
+              )}
+              确认上传
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={folderDialogOpen} onOpenChange={setFolderDialogOpen}>
         <DialogContent className="sm:max-w-md">
@@ -618,7 +802,9 @@ export default function WorkspaceFilesPage() {
               disabled={savingFolder || !folderName.trim()}
               onClick={() => void handleCreateFolder()}
             >
-              {savingFolder && <LoaderCircleIcon className="size-4 animate-spin" />}
+              {savingFolder && (
+                <LoaderCircleIcon className="size-4 animate-spin" />
+              )}
               创建
             </Button>
           </DialogFooter>

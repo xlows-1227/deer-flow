@@ -94,7 +94,8 @@ export async function fetch(
  * **Prefer :func:`fetchWithAuth`** for new code — it injects the header
  * automatically on state-changing methods. This helper exists for legacy
  * call sites that need to compose headers manually (e.g. inside
- * `next/server` route handlers that build their own ``Headers`` object).
+ * `next/server` route handlers that build their own ``Headers`` object) and
+ * reads that intentionally submit a CSRF credential for validation.
  *
  * Per RFC-001: Double Submit Cookie pattern.
  */

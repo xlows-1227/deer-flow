@@ -35,6 +35,7 @@ export type ToolEndEvent = {
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   context: LocalSettings["context"];
+  threadMetadata?: Record<string, unknown>;
   isMock?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
@@ -230,6 +231,7 @@ function getStreamErrorMessage(error: unknown): string {
 export function useThreadStream({
   threadId,
   context,
+  threadMetadata,
   isMock,
   onSend,
   onStart,
@@ -296,11 +298,13 @@ export function useThreadStream({
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
-      if (context.agent_name && !isMock) {
+      const metadata: Record<string, unknown> = {
+        ...threadMetadata,
+        ...(context.agent_name ? { agent_name: context.agent_name } : {}),
+      };
+      if (Object.keys(metadata).length > 0 && !isMock) {
         void getAPIClient()
-          .threads.update(meta.thread_id, {
-            metadata: { agent_name: context.agent_name },
-          })
+          .threads.update(meta.thread_id, { metadata })
           .catch(() => ({}));
       }
     },
@@ -888,8 +892,6 @@ export function useThreadHistory(threadId: string) {
       }
     }
   }, []);
-
-
 
   // Reset all thread-local state when the active thread changes. This also
   // aborts any in-flight fetch for the previous thread and bumps the request

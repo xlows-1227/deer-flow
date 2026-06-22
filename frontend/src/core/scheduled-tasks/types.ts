@@ -12,6 +12,7 @@ export interface ScheduledTask {
   prompt: string;
   repeat_type: ScheduledTaskRepeatType;
   execution_time: string;
+  timezone: string;
   day_of_week: number | null;
   is_enabled: boolean;
   model_name: string | null;
@@ -32,6 +33,7 @@ export type ScheduledTaskPayload = Pick<
   | "prompt"
   | "repeat_type"
   | "execution_time"
+  | "timezone"
   | "day_of_week"
   | "is_enabled"
   | "model_name"

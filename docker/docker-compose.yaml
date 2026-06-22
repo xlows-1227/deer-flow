@@ -74,8 +74,10 @@ services:
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
-      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
-      - ../skills:/app/skills:ro
+      # Writable: skill enable/disable and MCP updates persist here.
+      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json
+      # Map host skills (public + custom) into the container; custom publish/install needs write access.
+      - ../skills:/app/skills
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
       # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock

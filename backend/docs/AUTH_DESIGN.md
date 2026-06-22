@@ -170,6 +170,7 @@ DeerFlow 使用 Double Submit Cookie：
 - 服务端设置 `csrf_token` cookie。
 - 前端 state-changing 请求发送同值 `X-CSRF-Token` header。
 - 服务端用 `secrets.compare_digest` 比较 cookie/header。
+- 只读请求不强制携带 token；但只要请求显式发送了 `X-CSRF-Token`，服务端同样校验其与 cookie 是否匹配，避免任何接口静默接受伪造的 CSRF 凭据。
 
 需要 CSRF 的方法：
 

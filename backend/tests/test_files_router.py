@@ -75,9 +75,66 @@ def test_user_files_reject_path_traversal(tmp_path, monkeypatch):
     assert response.status_code == 400
 
 
+def test_user_files_list_folders_and_keep_them_in_uploaded_filter(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/api/files/folders",
+                json={"name": "Reports", "parent_path": ""},
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post(
+                "/api/files/folders",
+                json={"name": "2026", "parent_path": "Reports"},
+            ).status_code
+            == 201
+        )
+
+        filtered = client.get("/api/files?source=uploaded&type=folder&q=report")
+        assert filtered.status_code == 200
+        assert [item["path"] for item in filtered.json()["items"]] == ["Reports"]
+
+        folders = client.get("/api/files/folders")
+        assert folders.status_code == 200
+        assert folders.json()["folders"] == ["Reports", "Reports/2026"]
+
+
+def test_user_files_upload_limit_is_described_and_partial_file_removed(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "MAX_UPLOAD_BYTES", 4)
+    app = _make_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        config = client.get("/api/files/upload-config")
+        assert config.status_code == 200
+        assert config.json() == {
+            "max_upload_bytes": 4,
+            "max_upload_label": "4 bytes",
+        }
+
+        uploaded = client.post(
+            "/api/files/upload",
+            files=[
+                ("files", ("small.txt", b"1234", "text/plain")),
+                ("files", ("too-large.txt", b"12345", "text/plain")),
+            ],
+        )
+        assert uploaded.status_code == 413
+        assert "Maximum size per file is 4 bytes" in uploaded.json()["detail"]
+
+        listed = client.get("/api/files")
+        assert listed.status_code == 200
+        assert listed.json()["items"] == []
+
+
 def test_gateway_app_mounts_files_router():
     app = create_app()
     paths = {getattr(route, "path", "") for route in app.routes}
 
     assert "/api/files" in paths
     assert "/api/files/upload" in paths
+    assert "/api/files/folders" in paths
+    assert "/api/files/upload-config" in paths

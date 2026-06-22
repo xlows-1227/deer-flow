@@ -1,4 +1,3 @@
-
 """Tests for CSRF middleware."""
 
 import pytest
@@ -36,6 +35,14 @@ def _make_app() -> FastAPI:
     @app.post("/api/threads/abc/runs/stream")
     async def protected_mutation():
         return {"ok": True}
+
+    @app.get("/api/skills")
+    async def list_skills():
+        return {"skills": []}
+
+    @app.get("/api/models")
+    async def list_models():
+        return {"models": []}
 
     return app
 
@@ -268,6 +275,74 @@ def test_non_auth_mutation_rejects_mismatched_double_submit_token():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF token mismatch."
+
+
+def test_skills_list_allows_request_without_csrf_header():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.get("/api/skills")
+
+    assert response.status_code == 200
+    assert response.json() == {"skills": []}
+
+
+def test_skills_list_rejects_invalid_csrf_header():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+    client.cookies.set("csrf_token", "known-token")
+
+    response = client.get(
+        "/api/skills",
+        headers={"X-CSRF-Token": "1"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF token mismatch."
+
+
+def test_skills_list_allows_valid_double_submit_token():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+    client.cookies.set("csrf_token", "known-token")
+
+    response = client.get(
+        "/api/skills",
+        headers={"X-CSRF-Token": "known-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"skills": []}
+
+
+def test_other_read_endpoints_allow_request_without_csrf_header():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.get("/api/models")
+
+    assert response.status_code == 200
+
+
+def test_other_read_endpoints_reject_invalid_csrf_header():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+    client.cookies.set("csrf_token", "known-token")
+
+    response = client.get(
+        "/api/models",
+        headers={"X-CSRF-Token": "forged-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF token mismatch."
+
+
+def test_read_endpoint_rejects_csrf_header_without_cookie():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.get(
+        "/api/models",
+        headers={"X-CSRF-Token": "orphan-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF token missing. Include X-CSRF-Token header."
 
 
 def test_invalid_trusted_proxy_config_is_skipped_with_warning(monkeypatch, caplog):

@@ -20,6 +20,7 @@ class ScheduledTaskRow(Base):
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     repeat_type: Mapped[str] = mapped_column(String(20), nullable=False)
     execution_time: Mapped[str] = mapped_column(String(5), nullable=False)
+    timezone: Mapped[str | None] = mapped_column(String(64))
     day_of_week: Mapped[int | None] = mapped_column(Integer)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 

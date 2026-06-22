@@ -225,6 +225,48 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     }
 
 
+def test_enabled_skills_config_cache_is_scoped_by_user(monkeypatch, tmp_path):
+    current_user = {"id": "user-a"}
+    load_calls: list[str] = []
+    explicit_config = SimpleNamespace()
+
+    def fake_load_skills(*, enabled_only: bool):
+        assert enabled_only is True
+        user_id = current_user["id"]
+        load_calls.append(user_id)
+        skill_dir = tmp_path / user_id
+        return [
+            Skill(
+                name=f"{user_id}-skill",
+                description=f"Skill for {user_id}",
+                license=None,
+                skill_dir=skill_dir,
+                skill_file=skill_dir / "SKILL.md",
+                relative_path=skill_dir.relative_to(tmp_path),
+                category=SkillCategory.CUSTOM,
+                enabled=True,
+            )
+        ]
+
+    monkeypatch.setattr(
+        prompt_module,
+        "get_or_new_skill_storage",
+        lambda **kwargs: SimpleNamespace(load_skills=fake_load_skills),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.user_context.get_effective_user_id",
+        lambda: current_user["id"],
+    )
+    _set_skills_cache_state()
+
+    assert [skill.name for skill in prompt_module.get_enabled_skills_for_config(explicit_config)] == ["user-a-skill"]
+    current_user["id"] = "user-b"
+    assert [skill.name for skill in prompt_module.get_enabled_skills_for_config(explicit_config)] == ["user-b-skill"]
+    current_user["id"] = "user-a"
+    assert [skill.name for skill in prompt_module.get_enabled_skills_for_config(explicit_config)] == ["user-a-skill"]
+    assert load_calls == ["user-a", "user-b"]
+
+
 def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatch, tmp_path):
     def make_skill(name: str) -> Skill:
         skill_dir = tmp_path / name

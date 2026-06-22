@@ -8,7 +8,11 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
-import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import {
+  ChatBox,
+  useEnsureThreadAccessible,
+  useThreadChat,
+} from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -27,7 +31,7 @@ import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import { textOfMessage } from "@/core/threads/utils";
+import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -43,6 +47,7 @@ export default function AgentChatPage() {
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  useEnsureThreadAccessible(pathOfThread("new", { agent_name: agent_name }));
   // `isNewThread` gates history/token-usage fetches until the backend creates
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.

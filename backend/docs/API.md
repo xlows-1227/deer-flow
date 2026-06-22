@@ -541,7 +541,7 @@ The authenticated auth endpoints are:
 - `GET /api/v1/auth/me` returns the current user.
 - `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
 
-Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
+Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Read-only requests do not require the header, but the gateway validates it against the cookie whenever it is supplied. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 
 User isolation is enforced from the authenticated user context:
 

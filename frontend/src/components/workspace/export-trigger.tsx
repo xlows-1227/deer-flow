@@ -32,6 +32,7 @@ import {
   exportThreadAsMarkdown,
 } from "@/core/threads/export";
 import type { AgentThread } from "@/core/threads/types";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 import { useThread } from "./messages/context";
 import { Tooltip } from "./tooltip";
@@ -78,16 +79,22 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
         toast.success("分享链接已生成");
       },
       onError: (error) => {
-        toast.error(error instanceof Error ? error.message : "生成分享链接失败");
+        toast.error(
+          error instanceof Error ? error.message : "生成分享链接失败",
+        );
       },
     });
   }, [createShare, messages.length, threadId, t]);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     if (!shareUrl) return;
-    void navigator.clipboard.writeText(shareUrl);
-    toast.success("链接已复制到剪贴板");
-  }, [shareUrl]);
+    const success = await copyTextToClipboard(shareUrl);
+    if (success) {
+      toast.success("链接已复制到剪贴板");
+    } else {
+      toast.error(t.clipboard.failedToCopyToClipboard);
+    }
+  }, [shareUrl, t]);
 
   if (messages.length === 0) {
     return null;
@@ -134,7 +141,10 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
         </DropdownMenu>
       </div>
 
-      <Dialog open={!!shareUrl} onOpenChange={(open) => !open && setShareUrl(null)}>
+      <Dialog
+        open={!!shareUrl}
+        onOpenChange={(open) => !open && setShareUrl(null)}
+      >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>分享对话</DialogTitle>
@@ -150,7 +160,7 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
               onClick={(e) => e.currentTarget.select()}
             />
             <Button onClick={handleCopy} size="sm">
-              <LinkIcon className="h-4 w-4 mr-1" />
+              <LinkIcon className="mr-1 h-4 w-4" />
               复制
             </Button>
           </div>

@@ -52,6 +52,15 @@ class FileListResponse(BaseModel):
     total: int
 
 
+class FolderListResponse(BaseModel):
+    folders: list[str]
+
+
+class FileUploadConfigResponse(BaseModel):
+    max_upload_bytes: int
+    max_upload_label: str
+
+
 class FolderCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     parent_path: str = ""
@@ -133,6 +142,12 @@ def _file_type(extension: str, mime_type: str | None) -> str:
     return "other"
 
 
+def _format_upload_limit(size: int) -> str:
+    if size % (1024 * 1024) == 0:
+        return f"{size // (1024 * 1024)} MiB"
+    return f"{size} bytes"
+
+
 def _item_from_path(root: Path, path: Path, metadata: dict[str, dict[str, str]]) -> FileItem:
     stat_result = path.stat()
     relative = _relative_path(root, path)
@@ -190,7 +205,7 @@ async def list_files(
         item = _item_from_path(root, entry, metadata)
         if query and query not in item.name.lower():
             continue
-        if source != "all" and item.source != source:
+        if item.kind == "file" and source != "all" and item.source != source:
             continue
         if type != "all":
             if type == "folder" and item.kind != "folder":
@@ -204,6 +219,27 @@ async def list_files(
     items.sort(key=lambda item: (item.kind != "folder", item.name.lower()))
     normalized_folder = _normalize_library_path(folder_path)
     return FileListResponse(folder_path=normalized_folder, items=items, total=len(items))
+
+
+@router.get("/folders", response_model=FolderListResponse)
+async def list_folders(request: Request) -> FolderListResponse:
+    root = _library_dir(await _require_user_id(request))
+    folders: list[str] = []
+    for current_root, dir_names, _file_names in os.walk(root, followlinks=False):
+        current_path = Path(current_root)
+        dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not (current_path / name).is_symlink())
+        for name in dir_names:
+            folders.append(_relative_path(root, current_path / name))
+    folders.sort(key=lambda path: (path.count("/"), path.lower()))
+    return FolderListResponse(folders=folders)
+
+
+@router.get("/upload-config", response_model=FileUploadConfigResponse)
+async def get_upload_config() -> FileUploadConfigResponse:
+    return FileUploadConfigResponse(
+        max_upload_bytes=MAX_UPLOAD_BYTES,
+        max_upload_label=_format_upload_limit(MAX_UPLOAD_BYTES),
+    )
 
 
 @router.post("/folders", response_model=FileItem, status_code=status.HTTP_201_CREATED)
@@ -242,26 +278,41 @@ async def upload_files(
     metadata = _load_metadata(root)
     seen = {entry.name for entry in folder.iterdir() if not entry.is_symlink()}
     uploaded: list[FileItem] = []
-    for upload in files:
-        if not upload.filename:
-            continue
-        safe_name = claim_unique_filename(normalize_filename(upload.filename), seen)
-        dest, fh = open_upload_file_no_symlink(folder, safe_name)
-        size = 0
-        try:
-            while chunk := await upload.read(8192):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail=f"File too large: {safe_name}")
-                fh.write(chunk)
-        finally:
-            fh.close()
-        os.chmod(dest, stat.S_IMODE(os.stat(dest).st_mode) | stat.S_IRGRP | stat.S_IROTH)
-        metadata[_relative_path(root, dest)] = {
-            "source": "uploaded",
-            "uploaded_at": datetime.now(UTC).isoformat(),
-        }
-        uploaded.append(_item_from_path(root, dest, metadata))
+    created_paths: list[Path] = []
+    try:
+        for upload in files:
+            if not upload.filename:
+                continue
+            safe_name = claim_unique_filename(normalize_filename(upload.filename), seen)
+            dest, fh = open_upload_file_no_symlink(folder, safe_name)
+            size = 0
+            try:
+                while chunk := await upload.read(8192):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(f"File too large: {safe_name}. Maximum size per file is {_format_upload_limit(MAX_UPLOAD_BYTES)}."),
+                        )
+                    fh.write(chunk)
+            except Exception:
+                fh.close()
+                dest.unlink(missing_ok=True)
+                raise
+            finally:
+                if not fh.closed:
+                    fh.close()
+            created_paths.append(dest)
+            os.chmod(dest, stat.S_IMODE(os.stat(dest).st_mode) | stat.S_IRGRP | stat.S_IROTH)
+            metadata[_relative_path(root, dest)] = {
+                "source": "uploaded",
+                "uploaded_at": datetime.now(UTC).isoformat(),
+            }
+            uploaded.append(_item_from_path(root, dest, metadata))
+    except Exception:
+        for created_path in created_paths:
+            created_path.unlink(missing_ok=True)
+        raise
 
     _save_metadata(root, metadata)
     return FileListResponse(folder_path=_normalize_library_path(folder_path), items=uploaded, total=len(uploaded))

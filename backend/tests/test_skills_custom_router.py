@@ -760,3 +760,53 @@ def test_custom_skill_versions_api_lifecycle(monkeypatch, tmp_path):
         assert get_response.status_code == 200
         assert get_response.json()["description"] == "Demo skill"
         assert (skill_dir / "references" / "notes.md").read_text(encoding="utf-8") == "notes"
+
+
+def test_other_users_cannot_probe_custom_skill_history_or_versions(monkeypatch, tmp_path):
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    skills_root = tmp_path / "skills"
+    current_user = {"id": "user-a"}
+    storage = LocalSkillStorage(
+        host_path=str(skills_root),
+        enforce_owner_isolation=True,
+    )
+    monkeypatch.setattr(
+        storage,
+        "_current_user_id",
+        lambda: current_user["id"],
+    )
+    storage.write_custom_skill(
+        "private-skill",
+        "SKILL.md",
+        _skill_content("private-skill"),
+    )
+    storage.append_history(
+        "private-skill",
+        {"action": "create", "author": "human"},
+    )
+    storage.create_skill_version(
+        "private-skill",
+        action="create",
+        author="human",
+    )
+    current_user["id"] = "user-b"
+
+    config = SimpleNamespace()
+    monkeypatch.setattr(
+        skills_router,
+        "get_or_new_skill_storage",
+        lambda **kwargs: storage,
+    )
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        history_response = client.get(
+            "/api/skills/custom/private-skill/history",
+        )
+        versions_response = client.get(
+            "/api/skills/custom/private-skill/versions",
+        )
+
+    assert history_response.status_code == 404
+    assert versions_response.status_code == 404

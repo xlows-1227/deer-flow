@@ -87,6 +87,7 @@ import type { SkillVersion } from "@/core/skills/type";
 import { useThreadStream } from "@/core/threads/hooks";
 import type { ToolEndEvent } from "@/core/threads/hooks";
 import type { AgentThreadState } from "@/core/threads/types";
+import { THREAD_SOURCE_SKILL_SESSION } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
 
@@ -403,7 +404,10 @@ function applyImportedPathsToTree(
     expandPathAncestors(paths).forEach((item) => next.add(item));
     return next;
   });
-  highlightPaths(setHighlightedPaths as (value: Set<string>) => void, new Set(paths));
+  highlightPaths(
+    setHighlightedPaths as (value: Set<string>) => void,
+    new Set(paths),
+  );
 }
 
 export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
@@ -735,6 +739,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: skillContext,
+    threadMetadata: { source: THREAD_SOURCE_SKILL_SESSION },
     onSend: () => setIsWelcomeMode(false),
     onStart: (createdThreadId) => {
       saveLocalDraft(createdThreadId, effectiveDraft);

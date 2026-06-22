@@ -16,7 +16,11 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import { useRollupThreadMemory } from "@/core/memory/hooks";
 import { useThreads } from "@/core/threads/hooks";
-import { pathOfThread, titleOfThread } from "@/core/threads/utils";
+import {
+  isVisibleInChatList,
+  pathOfThread,
+  titleOfThread,
+} from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 export default function ChatsPage() {
@@ -32,13 +36,9 @@ export default function ChatsPage() {
   }, [t.pages.chats, t.pages.appName]);
 
   const filteredThreads = useMemo(() => {
-    return threads
-      ?.filter((thread) => thread.metadata?.source !== "scheduled_task")
-      .filter((thread) => {
-        return titleOfThread(thread)
-          .toLowerCase()
-          .includes(search.toLowerCase());
-      });
+    return threads?.filter(isVisibleInChatList).filter((thread) => {
+      return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
+    });
   }, [threads, search]);
 
   const handleRollupMemory = async (threadId: string) => {

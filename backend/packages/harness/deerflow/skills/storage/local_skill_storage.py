@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 MAX_SKILL_VERSION_SNAPSHOTS = 5
+CUSTOM_SKILL_OWNER_FILE = ".owner.json"
 
 
 class LocalSkillStorage(SkillStorage):
@@ -41,8 +42,10 @@ class LocalSkillStorage(SkillStorage):
         host_path: str | None = None,
         container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
         app_config=None,
+        enforce_owner_isolation: bool = False,
     ) -> None:
         super().__init__(container_path=container_path)
+        self._enforce_owner_isolation = enforce_owner_isolation
         if host_path is None:
             from deerflow.config import get_app_config
 
@@ -58,8 +61,101 @@ class LocalSkillStorage(SkillStorage):
     def get_skills_root_path(self) -> Path:
         return self._host_root
 
+    @staticmethod
+    def _current_user_id() -> str:
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        return get_effective_user_id()
+
+    @staticmethod
+    def _legacy_owner_file(skill_dir: Path) -> Path:
+        return skill_dir / CUSTOM_SKILL_OWNER_FILE
+
+    def _owner_file(self, skill_dir: Path) -> Path:
+        return self._host_root / SkillCategory.CUSTOM.value / ".owners" / f"{skill_dir.name}.json"
+
+    def _read_custom_skill_owner(self, skill_dir: Path) -> str | None:
+        owner_file = self._owner_file(skill_dir)
+        if not owner_file.exists():
+            owner_file = self._legacy_owner_file(skill_dir)
+        if not owner_file.exists():
+            return None
+        try:
+            payload = json.loads(owner_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Invalid custom skill owner metadata: %s", owner_file, exc_info=True)
+            return ""
+        owner_id = payload.get("owner_id") if isinstance(payload, dict) else None
+        return str(owner_id).strip() if owner_id else ""
+
+    def _can_access_custom_skill_dir(self, skill_dir: Path) -> bool:
+        if not self._enforce_owner_isolation:
+            return True
+
+        from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+        owner_id = self._read_custom_skill_owner(skill_dir)
+        current_user_id = self._current_user_id()
+        if owner_id is None:
+            # Preserve CLI and pre-auth compatibility for legacy skills while
+            # failing closed for authenticated users.
+            return current_user_id == DEFAULT_USER_ID
+        return bool(owner_id) and owner_id == current_user_id
+
+    def _write_custom_skill_owner(self, skill_dir: Path) -> None:
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        owner_file = self._owner_file(skill_dir)
+        owner_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"owner_id": self._current_user_id()}
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=str(owner_file.parent),
+        ) as tmp_file:
+            json.dump(payload, tmp_file, ensure_ascii=False)
+            tmp_file.write("\n")
+            tmp_path = Path(tmp_file.name)
+        tmp_path.replace(owner_file)
+
+    def _ensure_custom_skill_owner_access(self, name: str) -> None:
+        if not self._enforce_owner_isolation:
+            return
+
+        from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+        skill_dir = self.get_custom_skill_dir(name)
+        owner_id = self._read_custom_skill_owner(skill_dir)
+        current_user_id = self._current_user_id()
+        if owner_id and owner_id == current_user_id:
+            return
+        if owner_id is None and current_user_id == DEFAULT_USER_ID:
+            return
+        raise FileNotFoundError(f"Custom skill '{name}' not found.")
+
+    def _ensure_or_claim_custom_skill_owner(self, name: str) -> None:
+        if not self._enforce_owner_isolation:
+            return
+
+        from deerflow.runtime.user_context import DEFAULT_USER_ID
+
+        skill_dir = self.get_custom_skill_dir(name)
+        owner_id = self._read_custom_skill_owner(skill_dir)
+        current_user_id = self._current_user_id()
+        if owner_id is not None:
+            if owner_id and owner_id == current_user_id:
+                return
+            raise FileNotFoundError(f"Custom skill '{name}' not found.")
+
+        # Legacy custom skills predate ownership metadata. They remain
+        # available only to the default migration/CLI account.
+        if (skill_dir / SKILL_MD_FILE).exists() and current_user_id != DEFAULT_USER_ID:
+            raise FileNotFoundError(f"Custom skill '{name}' not found.")
+        self._write_custom_skill_owner(skill_dir)
+
     def custom_skill_exists(self, name: str) -> bool:
-        return self.get_custom_skill_file(name).exists()
+        skill_file = self.get_custom_skill_file(name)
+        return skill_file.exists() and self._can_access_custom_skill_dir(skill_file.parent)
 
     def public_skill_exists(self, name: str) -> bool:
         normalized_name = self.validate_skill_name(name)
@@ -76,7 +172,29 @@ class LocalSkillStorage(SkillStorage):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
-                yield category, category_path, Path(current_root) / SKILL_MD_FILE
+                skill_dir = Path(current_root)
+                if category == SkillCategory.CUSTOM and not self._can_access_custom_skill_dir(skill_dir):
+                    continue
+                yield category, category_path, skill_dir / SKILL_MD_FILE
+
+    def ensure_custom_skill_is_editable(self, name: str) -> None:
+        normalized_name = self.validate_skill_name(name)
+        if self.custom_skill_exists(normalized_name):
+            return
+
+        skill_dir = self.get_custom_skill_dir(normalized_name)
+        if skill_dir.exists():
+            if self._can_access_custom_skill_dir(skill_dir):
+                return
+            raise FileNotFoundError(f"Custom skill '{name}' not found.")
+
+        if self.public_skill_exists(normalized_name):
+            if self._enforce_owner_isolation:
+                self._write_custom_skill_owner(skill_dir)
+            else:
+                skill_dir.mkdir(parents=True, exist_ok=True)
+            return
+        raise FileNotFoundError(f"Custom skill '{name}' not found.")
 
     def read_custom_skill(self, name: str) -> str:
         if not self.custom_skill_exists(name):
@@ -90,6 +208,7 @@ class LocalSkillStorage(SkillStorage):
         return (self._host_root / SkillCategory.PUBLIC.value / normalized_name / SKILL_MD_FILE).read_text(encoding="utf-8")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+        self._ensure_or_claim_custom_skill_owner(name)
         target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -157,6 +276,8 @@ class LocalSkillStorage(SkillStorage):
                 staging_target = Path(staging_root) / skill_name
                 shutil.copytree(skill_dir, staging_target)
                 _move_staged_skill_into_reserved_target(staging_target, target)
+            if self._enforce_owner_isolation:
+                self._write_custom_skill_owner(target)
             logger.info("Skill %r installed to %s", skill_name, target)
 
         return {
@@ -186,6 +307,7 @@ class LocalSkillStorage(SkillStorage):
 
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
+        self.ensure_custom_skill_is_editable(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,6 +317,7 @@ class LocalSkillStorage(SkillStorage):
 
     def read_history(self, name: str) -> list[dict]:
         self.validate_skill_name(name)
+        self._ensure_custom_skill_owner_access(name)
         history_path = self.get_skill_history_file(name)
         if not history_path.exists():
             return []
@@ -454,6 +577,8 @@ class LocalSkillStorage(SkillStorage):
 
         # Restore current working directory from snapshot.
         shutil.copytree(source_dir, skill_dir)
+        if self._enforce_owner_isolation:
+            self._write_custom_skill_owner(skill_dir)
 
         # Record the restored state as a new version snapshot (immutable).
         return self._create_skill_version_snapshot(

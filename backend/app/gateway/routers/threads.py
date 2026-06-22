@@ -286,6 +286,19 @@ def _derive_thread_status(checkpoint_tuple) -> str:
     return "idle"
 
 
+async def _require_thread_meta(thread_id: str, thread_store) -> dict:
+    """Return the thread_meta row or 404.
+
+    Deleted threads drop their ``threads_meta`` row first; without this
+    guard, leftover checkpoints would still be served via the legacy
+    checkpointer-only fallback and the UI could load a removed conversation.
+    """
+    record = await thread_store.get(thread_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -305,30 +318,36 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     # Clean local filesystem
     response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
 
-    # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
         try:
             if hasattr(checkpointer, "adelete_thread"):
                 await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+            elif hasattr(checkpointer, "delete_thread"):
+                checkpointer.delete_thread(thread_id)
+        except Exception as exc:
+            logger.exception("Failed to delete checkpoints for thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints.") from exc
 
-    # Remove thread_meta row (best-effort) — required for sqlite backend
-    # so the deleted thread no longer appears in /threads/search.
+    # Remove thread_meta so the deleted thread no longer appears in /threads/search
+    # and read endpoints reject direct access.
     try:
         thread_store = get_thread_store(request)
         await thread_store.delete(thread_id)
-    except Exception:
-        logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+    except Exception as exc:
+        logger.exception("Failed to delete thread_meta for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread metadata.") from exc
 
     return response
 
 
 @router.get("/{thread_id}/sandbox/files", response_model=SandboxFilesResponse)
-@require_permission("threads", "read", owner_check=True)
+@require_permission("threads", "read", owner_check=True, require_existing=True)
 async def list_thread_sandbox_files(thread_id: str, request: Request) -> SandboxFilesResponse:
     """List files in the thread sandbox's user-data directory."""
+    from app.gateway.deps import get_thread_store
+
+    await _require_thread_meta(thread_id, get_thread_store(request))
     return _list_sandbox_files(thread_id, user_id=get_effective_user_id())
 
 
@@ -453,15 +472,14 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     """Get thread info.
 
     Reads metadata from the ThreadMetaStore and derives the accurate
-    execution status from the checkpointer.  Falls back to the checkpointer
-    alone for threads that pre-date ThreadMetaStore adoption (backward compat).
+    execution status from the checkpointer.
     """
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
 
-    record: dict | None = await thread_store.get(thread_id)
+    record = await _require_thread_meta(thread_id, thread_store)
 
     # Derive accurate status from the checkpointer
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -470,25 +488,6 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     except Exception:
         logger.exception("Failed to get checkpoint for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to get thread")
-
-    if record is None and checkpoint_tuple is None:
-        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
-
-    # If the thread exists in the checkpointer but not in thread_meta (e.g.
-    # legacy data created before thread_meta adoption), synthesize a minimal
-    # record from the checkpoint metadata.
-    if record is None and checkpoint_tuple is not None:
-        ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
-        record = {
-            "thread_id": thread_id,
-            "status": "idle",
-            "created_at": coerce_iso(ckpt_meta.get("created_at", "")),
-            "updated_at": coerce_iso(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
-            "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
-        }
-
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     status = _derive_thread_status(checkpoint_tuple) if checkpoint_tuple is not None else record.get("status", "idle")
     checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {} if checkpoint_tuple is not None else {}
@@ -513,6 +512,9 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
     Channel values are serialized to ensure LangChain message objects
     are converted to JSON-safe dicts.
     """
+    from app.gateway.deps import get_thread_store
+
+    await _require_thread_meta(thread_id, get_thread_store(request))
     checkpointer = get_checkpointer(request)
 
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -686,6 +688,9 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating them across every entry.
     """
+    from app.gateway.deps import get_thread_store
+
+    await _require_thread_meta(thread_id, get_thread_store(request))
     checkpointer = get_checkpointer(request)
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}

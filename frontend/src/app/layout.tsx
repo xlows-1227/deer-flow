@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 
 import { type Metadata } from "next";
 
+import { ClipboardBootstrap } from "@/components/clipboard-bootstrap";
 import { SlashCommandBootstrap } from "@/components/slash-command-bootstrap";
 import { ThemeProvider } from "@/components/theme-provider";
 import { I18nProvider } from "@/core/i18n/context";
@@ -22,6 +23,7 @@ export default async function RootLayout({
       <body>
         <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
           <I18nProvider initialLocale={locale}>
+            <ClipboardBootstrap />
             <SlashCommandBootstrap />
             {children}
           </I18nProvider>

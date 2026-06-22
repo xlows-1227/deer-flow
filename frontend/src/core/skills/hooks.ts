@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useAuth } from "@/core/auth/AuthProvider";
+
 import {
   createCustomSkillVersionSnapshot,
   deleteCustomSkill,
@@ -19,17 +21,24 @@ import type { Skill, SkillFileEntry, SkillVersion } from "./type";
 
 import { loadSkills } from ".";
 
+function useSkillQueryRoot() {
+  const { user } = useAuth();
+  return ["skills", user?.id ?? "anonymous"] as const;
+}
+
 export function useSkills() {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error } = useQuery<Skill[]>({
-    queryKey: ["skills"],
+    queryKey: queryRoot,
     queryFn: () => loadSkills(),
   });
   return { skills: data ?? [], isLoading, error };
 }
 
 export function useCustomSkill(skillName: string | null) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["skills", "custom", skillName],
+    queryKey: [...queryRoot, "custom", skillName],
     queryFn: () => loadCustomSkill(skillName!),
     enabled: !!skillName,
   });
@@ -37,8 +46,9 @@ export function useCustomSkill(skillName: string | null) {
 }
 
 export function usePublicSkill(skillName: string | null) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error } = useQuery({
-    queryKey: ["skills", "public", skillName],
+    queryKey: [...queryRoot, "public", skillName],
     queryFn: () => loadPublicSkill(skillName!),
     enabled: !!skillName,
   });
@@ -47,6 +57,7 @@ export function usePublicSkill(skillName: string | null) {
 
 export function useEnableSkill() {
   const queryClient = useQueryClient();
+  const queryRoot = useSkillQueryRoot();
   return useMutation({
     mutationFn: async ({
       skillName,
@@ -58,20 +69,23 @@ export function useEnableSkill() {
       await enableSkill(skillName, enabled);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      void queryClient.invalidateQueries({ queryKey: queryRoot });
     },
   });
 }
 
 export function useDeleteCustomSkill() {
   const queryClient = useQueryClient();
+  const queryRoot = useSkillQueryRoot();
   return useMutation({
     mutationFn: (skillName: string) => deleteCustomSkill(skillName),
     onSuccess: (_data, skillName) => {
-      void queryClient.invalidateQueries({ queryKey: ["skills"] });
-      void queryClient.invalidateQueries({ queryKey: ["skills", "custom"] });
+      void queryClient.invalidateQueries({ queryKey: queryRoot });
+      void queryClient.invalidateQueries({
+        queryKey: [...queryRoot, "custom"],
+      });
       void queryClient.removeQueries({
-        queryKey: ["skills", "custom", skillName],
+        queryKey: [...queryRoot, "custom", skillName],
       });
     },
   });
@@ -80,8 +94,9 @@ export function useDeleteCustomSkill() {
 export function useCustomSkills(options?: {
   refetchInterval?: number | false;
 }) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch } = useQuery<Skill[]>({
-    queryKey: ["skills", "custom"],
+    queryKey: [...queryRoot, "custom"],
     queryFn: () => loadCustomSkills(),
     refetchInterval: options?.refetchInterval,
   });
@@ -92,10 +107,11 @@ export function useCustomSkillFiles(
   skillName: string | null,
   options?: { refetchInterval?: number | false },
 ) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch, isFetching } = useQuery<
     SkillFileEntry[]
   >({
-    queryKey: ["skills", "custom", skillName, "files"],
+    queryKey: [...queryRoot, "custom", skillName, "files"],
     queryFn: () => listCustomSkillFiles(skillName!),
     enabled: !!skillName,
     refetchInterval: options?.refetchInterval,
@@ -114,8 +130,9 @@ export function useCustomSkillFile(
   skillName: string | null,
   path: string | null,
 ) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["skills", "custom", skillName, "file", path],
+    queryKey: [...queryRoot, "custom", skillName, "file", path],
     queryFn: () => readCustomSkillFile(skillName!, path!),
     enabled: !!skillName && !!path,
   });
@@ -124,6 +141,7 @@ export function useCustomSkillFile(
 
 export function useUpdateCustomSkill() {
   const queryClient = useQueryClient();
+  const queryRoot = useSkillQueryRoot();
   return useMutation({
     mutationFn: async ({
       skillName,
@@ -133,20 +151,21 @@ export function useUpdateCustomSkill() {
       content: string;
     }) => updateCustomSkill(skillName, content),
     onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      void queryClient.invalidateQueries({ queryKey: queryRoot });
       void queryClient.invalidateQueries({
-        queryKey: ["skills", "custom", variables.skillName],
+        queryKey: [...queryRoot, "custom", variables.skillName],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["skills", "custom", variables.skillName, "files"],
+        queryKey: [...queryRoot, "custom", variables.skillName, "files"],
       });
     },
   });
 }
 
 export function useCustomSkillVersions(skillName: string | null) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch } = useQuery<SkillVersion[]>({
-    queryKey: ["skills", "custom", skillName, "versions"],
+    queryKey: [...queryRoot, "custom", skillName, "versions"],
     queryFn: () => listCustomSkillVersions(skillName!),
     enabled: !!skillName,
   });
@@ -155,6 +174,7 @@ export function useCustomSkillVersions(skillName: string | null) {
 
 export function useCreateCustomSkillVersionSnapshot() {
   const queryClient = useQueryClient();
+  const queryRoot = useSkillQueryRoot();
   return useMutation({
     mutationFn: async ({
       skillName,
@@ -174,7 +194,7 @@ export function useCreateCustomSkillVersionSnapshot() {
       }),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({
-        queryKey: ["skills", "custom", variables.skillName, "versions"],
+        queryKey: [...queryRoot, "custom", variables.skillName, "versions"],
       });
     },
   });
@@ -184,8 +204,9 @@ export function useCustomSkillVersionFiles(
   skillName: string | null,
   seq: number | null,
 ) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch } = useQuery<SkillFileEntry[]>({
-    queryKey: ["skills", "custom", skillName, "versions", seq, "files"],
+    queryKey: [...queryRoot, "custom", skillName, "versions", seq, "files"],
     queryFn: () => listCustomSkillVersionFiles(skillName!, seq!),
     enabled: !!skillName && typeof seq === "number",
   });
@@ -197,8 +218,17 @@ export function useCustomSkillVersionFile(
   seq: number | null,
   path: string | null,
 ) {
+  const queryRoot = useSkillQueryRoot();
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["skills", "custom", skillName, "versions", seq, "file", path],
+    queryKey: [
+      ...queryRoot,
+      "custom",
+      skillName,
+      "versions",
+      seq,
+      "file",
+      path,
+    ],
     queryFn: () => readCustomSkillVersionFile(skillName!, seq!, path!),
     enabled: !!skillName && typeof seq === "number" && !!path,
   });
@@ -207,6 +237,7 @@ export function useCustomSkillVersionFile(
 
 export function useRestoreCustomSkillVersion() {
   const queryClient = useQueryClient();
+  const queryRoot = useSkillQueryRoot();
   return useMutation({
     mutationFn: async ({
       skillName,
@@ -216,15 +247,15 @@ export function useRestoreCustomSkillVersion() {
       seq: number;
     }) => restoreCustomSkillVersion(skillName, seq),
     onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      void queryClient.invalidateQueries({ queryKey: queryRoot });
       void queryClient.invalidateQueries({
-        queryKey: ["skills", "custom", variables.skillName],
+        queryKey: [...queryRoot, "custom", variables.skillName],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["skills", "custom", variables.skillName, "files"],
+        queryKey: [...queryRoot, "custom", variables.skillName, "files"],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["skills", "custom", variables.skillName, "versions"],
+        queryKey: [...queryRoot, "custom", variables.skillName, "versions"],
       });
     },
   });

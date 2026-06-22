@@ -38,13 +38,14 @@ const repeatLabels: Record<string, string> = {
 
 const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
-function formatDateTime(value: string | null) {
+function formatDateTime(value: string | null, timezone?: string) {
   if (!value) return "暂无";
   return new Date(value).toLocaleString("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    ...(timezone ? { timeZone: timezone } : {}),
   });
 }
 
@@ -234,18 +235,22 @@ export function ScheduledTaskCard({
         <div className="mt-auto grid gap-2 text-xs text-slate-500">
           <div className="flex items-center justify-between gap-3">
             <span>计划</span>
-            <span className="font-medium text-slate-800">{scheduleLabel(task)}</span>
+            <span className="font-medium text-slate-800">
+              {scheduleLabel(task)}
+            </span>
           </div>
           <div className="flex items-center justify-between gap-3">
             <span>下次运行</span>
             <span className="font-medium text-slate-800">
-              {task.is_enabled ? formatDateTime(task.next_run_at) : "已暂停"}
+              {task.is_enabled
+                ? formatDateTime(task.next_run_at, task.timezone)
+                : "已暂停"}
             </span>
           </div>
           <div className="flex items-center justify-between gap-3">
             <span>上次运行</span>
             <span className="font-medium text-slate-800">
-              {formatDateTime(task.last_run_at)}
+              {formatDateTime(task.last_run_at, task.timezone)}
             </span>
           </div>
         </div>
@@ -310,7 +315,10 @@ export function ScheduledTaskCard({
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    onOpen({ ...task, last_run_thread_id: run.thread_id })
+                                    onOpen({
+                                      ...task,
+                                      last_run_thread_id: run.thread_id,
+                                    })
                                   }
                                   className="inline-flex items-center gap-0.5 text-[10px] text-indigo-600 hover:text-indigo-700 hover:underline"
                                 >
@@ -326,7 +334,7 @@ export function ScheduledTaskCard({
                             )}
                           </div>
                           <span className="shrink-0 text-[10px] text-slate-400">
-                            {formatDateTime(run.created_at)}
+                            {formatDateTime(run.created_at, task.timezone)}
                           </span>
                         </li>
                       );

@@ -190,6 +190,7 @@ export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}
 export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-$(openssl rand -hex 32)}"
 
 mkdir -p "$DEER_FLOW_HOME"
+mkdir -p "$DEER_FLOW_REPO_ROOT/skills/custom"
 ```
 
 缺少 `DEER_FLOW_CONFIG_PATH` 等变量时，compose 会解析出无效挂载 `:/app/backend/config.yaml:ro` 并报错。
@@ -356,6 +357,7 @@ export DEER_FLOW_IMAGE_TAG=v1.0.0
 | 前端注册失败 | gateway 未就绪 | 先查 `docker compose logs gateway` |
 | `UNAUTHORIZED` pull | GHCR 包为 Private | 改 Public 或 `docker login ghcr.io` |
 | `ghcr.io` 很慢 | 网络限制 | registry mirror，或同步到阿里云 ACR 再 pull |
+| Skill 发布失败 `Read-only file system: '/app/skills/custom'` | `skills` 目录被 `:ro` 只读挂载 | 确保 `docker-compose.yaml` 中 `../skills:/app/skills` **无** `:ro`；`mkdir -p skills/custom` 后重启 gateway |
 
 ### 诊断命令
 

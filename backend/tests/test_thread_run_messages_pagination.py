@@ -58,11 +58,6 @@ def _make_store_only_run_manager() -> RunManager:
     return RunManager(store=store)
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 def test_returns_paginated_envelope():
     """GET /api/threads/{tid}/runs/{rid}/messages returns {data: [...], has_more: bool}."""
     rows = [_make_message(i) for i in range(1, 4)]
@@ -193,3 +188,30 @@ def test_stream_store_only_run_returns_409():
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
+
+
+def test_list_runs_unauthenticated_returns_401():
+    """Unauthenticated callers must not receive an empty run list."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(thread_runs.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/0000/runs?limit=10&offset=0")
+
+    assert response.status_code == 401
+
+
+def test_list_runs_missing_thread_returns_404():
+    """Unknown threads must 404 instead of returning []."""
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    app = make_authed_test_app()
+    app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    app.include_router(thread_runs.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/0000/runs?limit=10&offset=0")
+
+    assert response.status_code == 404

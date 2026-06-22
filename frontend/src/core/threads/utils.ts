@@ -2,6 +2,19 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import type { AgentThread, AgentThreadContext } from "./types";
 
+export const THREAD_SOURCE_SCHEDULED_TASK = "scheduled_task";
+export const THREAD_SOURCE_SKILL_SESSION = "skill_session";
+
+export function isVisibleInChatList(
+  thread: Pick<AgentThread, "thread_id" | "metadata">,
+) {
+  const source = thread.metadata?.source;
+  return (
+    source !== THREAD_SOURCE_SCHEDULED_TASK &&
+    source !== THREAD_SOURCE_SKILL_SESSION
+  );
+}
+
 type ThreadRouteTarget =
   | string
   | {

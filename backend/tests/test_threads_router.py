@@ -135,23 +135,48 @@ def test_list_sandbox_files_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
+    import asyncio
+
+    from langgraph.checkpoint.base import empty_checkpoint
+
     from deerflow.runtime.user_context import get_effective_user_id
 
     paths = Paths(tmp_path)
     user_id = get_effective_user_id()
-    thread_dir = paths.thread_dir("thread-route", user_id=user_id)
-    paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
-    (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
+    thread_id = "thread-route"
+    thread_dir = paths.thread_dir(thread_id, user_id=user_id)
+    paths.sandbox_work_dir(thread_id, user_id=user_id).mkdir(parents=True, exist_ok=True)
+    (paths.sandbox_work_dir(thread_id, user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
-    app.include_router(threads.router)
+    app, store, checkpointer = _build_thread_app()
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}},
+            {},
+        )
+
+    asyncio.run(_seed())
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
         with TestClient(app) as client:
-            response = client.delete("/api/threads/thread-route")
+            response = client.delete(f"/api/threads/{thread_id}")
 
     assert response.status_code == 200
-    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
+    assert response.json() == {"success": True, "message": f"Deleted local thread data for {thread_id}"}
     assert not thread_dir.exists()
 
 
@@ -406,12 +431,23 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     ``new Date(...)`` parser does not break — same root cause as the
     thread-record bug fixed in #2594, but on the checkpoint side.
     """
-    app, _store, checkpointer = _build_thread_app()
+    app, store, checkpointer = _build_thread_app()
     thread_id = "legacy-state"
 
     async def _seed() -> None:
         from langgraph.checkpoint.base import empty_checkpoint
 
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
         await checkpointer.aput(
             {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
             empty_checkpoint(),
@@ -481,12 +517,23 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     checkpoint. Each entry's ``created_at`` must come out as ISO even if
     older checkpoints stored a unix-second float in their metadata.
     """
-    app, _store, checkpointer = _build_thread_app()
+    app, store, checkpointer = _build_thread_app()
     thread_id = "legacy-history"
 
     async def _seed() -> None:
         from langgraph.checkpoint.base import empty_checkpoint
 
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
         await checkpointer.aput(
             {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
             empty_checkpoint(),
@@ -559,3 +606,70 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
         response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
 
     assert response.status_code == 200
+
+
+def test_deleted_thread_with_remaining_checkpoints_is_not_readable() -> None:
+    """After deletion removes thread_meta, leftover checkpoints must not reopen the chat."""
+    import asyncio
+
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "deleted-thread"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}},
+            {},
+        )
+        await store.adelete(THREADS_NS, thread_id)
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        get_response = client.get(f"/api/threads/{thread_id}")
+        state_response = client.get(f"/api/threads/{thread_id}/state")
+        history_response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+        sandbox_response = client.get(f"/api/threads/{thread_id}/sandbox/files")
+
+    assert get_response.status_code == 404
+    assert state_response.status_code == 404
+    assert history_response.status_code == 404
+    assert sandbox_response.status_code == 404
+
+
+def test_sandbox_files_unauthenticated_returns_401() -> None:
+    """Unauthenticated callers must not receive an empty file list."""
+    app = FastAPI()
+    app.include_router(threads.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/000000/sandbox/files")
+
+    assert response.status_code == 401
+
+
+def test_sandbox_files_missing_thread_returns_404() -> None:
+    """Unknown threads must 404 instead of returning an empty listing."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/000000/sandbox/files")
+
+    assert response.status_code == 404

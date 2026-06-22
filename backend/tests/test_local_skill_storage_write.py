@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
 
 @pytest.fixture()
@@ -20,6 +24,19 @@ def skill_dir(tmp_path, storage):
     d = tmp_path / "custom" / "demo-skill"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+@contextmanager
+def _as_user(user_id: str):
+    token = set_current_user(SimpleNamespace(id=user_id))
+    try:
+        yield
+    finally:
+        reset_current_user(token)
+
+
+def _skill_markdown(name: str) -> str:
+    return f"---\nname: {name}\ndescription: Test skill\n---\n\n# {name}\n"
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +58,40 @@ def test_write_is_atomic_overwrite(tmp_path, storage):
     storage.write_custom_skill("demo-skill", "SKILL.md", "first")
     storage.write_custom_skill("demo-skill", "SKILL.md", "second")
     assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_text() == "second"
+
+
+def test_custom_skills_are_visible_only_to_their_owner(tmp_path, storage):
+    storage = LocalSkillStorage(host_path=str(tmp_path), enforce_owner_isolation=True)
+    public_dir = tmp_path / "public" / "public-skill"
+    public_dir.mkdir(parents=True)
+    (public_dir / "SKILL.md").write_text(_skill_markdown("public-skill"), encoding="utf-8")
+
+    with _as_user("user-a"):
+        storage.write_custom_skill("personal-skill", "SKILL.md", _skill_markdown("personal-skill"))
+        assert {skill.name for skill in storage.load_skills()} == {"personal-skill", "public-skill"}
+
+    with _as_user("user-b"):
+        assert {skill.name for skill in storage.load_skills()} == {"public-skill"}
+        with pytest.raises(FileNotFoundError, match="not found"):
+            storage.read_custom_skill("personal-skill")
+
+    with _as_user("user-a"):
+        assert storage.read_custom_skill("personal-skill") == _skill_markdown("personal-skill")
+
+
+def test_authenticated_users_cannot_see_unowned_legacy_custom_skills(tmp_path, storage):
+    storage = LocalSkillStorage(host_path=str(tmp_path), enforce_owner_isolation=True)
+    legacy_dir = tmp_path / "custom" / "legacy-skill"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "SKILL.md").write_text(_skill_markdown("legacy-skill"), encoding="utf-8")
+
+    with _as_user("user-a"):
+        assert storage.load_skills() == []
+        with pytest.raises(FileNotFoundError, match="not found"):
+            storage.read_custom_skill("legacy-skill")
+
+    with _as_user("default"):
+        assert [skill.name for skill in storage.load_skills()] == ["legacy-skill"]
 
 
 # ---------------------------------------------------------------------------

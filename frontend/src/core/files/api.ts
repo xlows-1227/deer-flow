@@ -32,7 +32,11 @@ export interface ListFilesParams {
 export async function listFiles(
   params: ListFilesParams = {},
 ): Promise<FileItem[]> {
-  const { items } = await listUserFiles(params);
+  const { items } = await listUserFiles({
+    folderPath: params.folder_path,
+    source: params.source,
+    q: params.q,
+  });
   return items;
 }
 
@@ -98,20 +102,57 @@ export async function createUserFolder(
     const detail = await response
       .json()
       .catch(() => ({ detail: response.statusText }));
-    throw new Error(detail.detail ?? `Failed to create folder: ${response.statusText}`);
+    throw new Error(
+      detail.detail ?? `Failed to create folder: ${response.statusText}`,
+    );
   }
   return (await response.json()) as UserFileItem;
 }
 
+export interface UserFileUploadConfig {
+  max_upload_bytes: number;
+  max_upload_label: string;
+}
+
+export async function listUserFolders(): Promise<string[]> {
+  const response = await fetch(`${getBackendBaseURL()}/api/files/folders`, {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Failed to list folders: ${response.status} ${response.statusText}`,
+    );
+  }
+  const data = (await response.json()) as { folders: string[] };
+  return data.folders;
+}
+
+export async function getUserFileUploadConfig(): Promise<UserFileUploadConfig> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/files/upload-config`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Failed to load upload configuration: ${response.status} ${response.statusText}`,
+    );
+  }
+  return (await response.json()) as UserFileUploadConfig;
+}
+
 export async function deleteUserFile(path: string): Promise<void> {
-  const url = `${getBackendBaseURL()}/api/files/${encodeURI(path)
-    .replace(/%2F/g, "/")}`;
+  const url = `${getBackendBaseURL()}/api/files/${encodeURI(path).replace(
+    /%2F/g,
+    "/",
+  )}`;
   const response = await fetch(url, { method: "DELETE" });
   if (!response.ok) {
     const detail = await response
       .json()
       .catch(() => ({ detail: response.statusText }));
-    throw new Error(detail.detail ?? `Failed to delete file: ${response.statusText}`);
+    throw new Error(
+      detail.detail ?? `Failed to delete file: ${response.statusText}`,
+    );
   }
 }
 
@@ -136,7 +177,9 @@ export async function uploadUserFiles(
     const detail = await response
       .json()
       .catch(() => ({ detail: response.statusText }));
-    throw new Error(detail.detail ?? `Failed to upload files: ${response.statusText}`);
+    throw new Error(
+      detail.detail ?? `Failed to upload files: ${response.statusText}`,
+    );
   }
   const data = (await response.json()) as FileListResponse;
   return data.items;
@@ -187,7 +230,8 @@ export function threadUploadToFileItem(
   threadId: string,
   threadTitle?: string,
 ): FileItem {
-  const sizeNum = typeof file.size === "string" ? parseInt(file.size, 10) : file.size;
+  const sizeNum =
+    typeof file.size === "string" ? parseInt(file.size, 10) : file.size;
   const modifiedIso =
     typeof file.modified === "number"
       ? new Date(file.modified * 1000).toISOString()

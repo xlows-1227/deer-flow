@@ -118,6 +118,11 @@ def test_csrf_skips_get_requests():
     assert should_check_csrf(req) is False
 
 
+def test_csrf_does_not_require_token_for_skills_list_get():
+    req = _FakeRequest("/api/skills", method="GET")
+    assert should_check_csrf(req) is False
+
+
 def test_csrf_checks_post_to_protected():
     req = _FakeRequest("/api/v1/some/endpoint", method="POST")
     assert should_check_csrf(req) is True
@@ -514,9 +519,9 @@ def _make_auth_app():
     return create_app()
 
 
-def _get_auth_client():
+def _get_auth_client(*, base_url: str = "http://testserver"):
     """Get TestClient for auth API contract tests."""
-    return TestClient(_make_auth_app())
+    return TestClient(_make_auth_app(), base_url=base_url)
 
 
 def test_api_auth_me_no_cookie_returns_structured_401():
@@ -635,13 +640,12 @@ def test_register_http_cookie_httponly_true_secure_false():
 
 
 def test_register_https_cookie_httponly_true_secure_true():
-    """HTTPS register (x-forwarded-proto) → access_token cookie is httponly=True, secure=True, has max_age."""
+    """HTTPS register → access_token cookie is httponly=True, secure=True, has max_age."""
     _setup_config()
-    client = _get_auth_client()
+    client = _get_auth_client(base_url="https://testserver")
     resp = client.post(
         "/api/v1/auth/register",
         json={"email": _unique_email("https-cookie"), "password": "Tr0ub4dor3a"},
-        headers={"x-forwarded-proto": "https"},
     )
     assert resp.status_code == 201
     cookie_header = resp.headers.get("set-cookie", "")
@@ -654,13 +658,12 @@ def test_register_https_cookie_httponly_true_secure_true():
 def test_login_https_sets_secure_cookie():
     """HTTPS login → access_token cookie has secure flag."""
     _setup_config()
-    client = _get_auth_client()
+    client = _get_auth_client(base_url="https://testserver")
     email = _unique_email("https-login")
     client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
     resp = client.post(
         "/api/v1/auth/login/local",
         data={"username": email, "password": "Tr0ub4dor3a"},
-        headers={"x-forwarded-proto": "https"},
     )
     assert resp.status_code == 200
     cookie_header = resp.headers.get("set-cookie", "")
@@ -672,11 +675,10 @@ def test_login_https_sets_secure_cookie():
 def test_csrf_cookie_secure_on_https():
     """HTTPS register → csrf_token cookie has secure flag but NOT httponly."""
     _setup_config()
-    client = _get_auth_client()
+    client = _get_auth_client(base_url="https://testserver")
     resp = client.post(
         "/api/v1/auth/register",
         json={"email": _unique_email("csrf-https"), "password": "Tr0ub4dor3a"},
-        headers={"x-forwarded-proto": "https"},
     )
     assert resp.status_code == 201
     csrf_cookies = [h for h in _get_set_cookie_headers(resp) if "csrf_token=" in h]

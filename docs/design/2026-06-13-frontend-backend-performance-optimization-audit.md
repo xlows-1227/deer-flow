@@ -1,7 +1,7 @@
 # 前后端性能优化审计报告
 
-**日期**：2026-06-13  
-**范围**：backend（Python/FastAPI/LangGraph）+ frontend（Next.js/React/TypeScript）  
+**日期**：2026-06-13
+**范围**：backend（Python/FastAPI/LangGraph）+ frontend（Next.js/React/TypeScript）
 **目标**：识别高影响的性能瓶颈、重复计算、同步阻塞、渲染浪费与缓存失效问题，并给出优化建议。
 
 ---

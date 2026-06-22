@@ -1,10 +1,6 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 import { createElement } from "react";
-import {
-  act,
-  create,
-  type ReactTestRenderer,
-} from "react-test-renderer";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const { fetchMock, runsByThread, toastErrorMock } = vi.hoisted(() => ({
@@ -104,8 +100,9 @@ beforeEach(() => {
   runsByThread.clear();
   fetchMock.mockReset();
   toastErrorMock.mockReset();
-  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
-    .IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 afterEach(() => {
@@ -196,7 +193,9 @@ test("aborts and invalidates an in-flight request on unmount", async () => {
 test("loads a new run discovered while another history request is pending", async () => {
   const first = deferredResponse();
   const second = deferredResponse();
-  fetchMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  fetchMock
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(second.promise);
   runsByThread.set("thread-a", [run("run-1")]);
 
   let latest!: HistoryResult;

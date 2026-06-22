@@ -6,6 +6,7 @@ import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   ChatBox,
+  useEnsureThreadAccessible,
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
@@ -50,6 +51,7 @@ export default function ChatPage() {
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const [mounted, setMounted] = useState(false);
   useSpecificChatMode();
+  useEnsureThreadAccessible("/workspace/chats/new");
 
   useEffect(() => {
     setMounted(true);

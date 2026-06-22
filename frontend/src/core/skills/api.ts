@@ -1,4 +1,4 @@
-import { fetch } from "@/core/api/fetcher";
+import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type {
@@ -48,7 +48,9 @@ async function readErrorMessage(response: Response, fallback: string) {
 }
 
 export async function loadSkills() {
-  const skills = await fetch(`${getBackendBaseURL()}/api/skills`);
+  const skills = await fetch(`${getBackendBaseURL()}/api/skills`, {
+    headers: getCsrfHeaders(),
+  });
   const json = await skills.json();
   return json.skills as Skill[];
 }
