@@ -64,6 +64,7 @@ import {
   titleOfThread,
 } from "@/core/threads/utils";
 import { env } from "@/env";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { isIMEComposing } from "@/lib/ime";
 
 const RECENT_CHAT_LIMIT = 4;
@@ -140,8 +141,12 @@ export function RecentChatList() {
       const baseUrl = isLocalhost ? VERCEL_URL : window.location.origin;
       const shareUrl = `${baseUrl}${pathOfThread(thread)}`;
       try {
-        await navigator.clipboard.writeText(shareUrl);
-        toast.success(t.clipboard.linkCopied);
+        const success = await copyTextToClipboard(shareUrl);
+        if (success) {
+          toast.success(t.clipboard.linkCopied);
+        } else {
+          toast.error(t.clipboard.failedToCopyToClipboard);
+        }
       } catch {
         toast.error(t.clipboard.failedToCopyToClipboard);
       }

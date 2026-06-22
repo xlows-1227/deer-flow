@@ -144,6 +144,7 @@ class ScheduledTaskRepository:
         *,
         status: str,
         disable: bool = False,
+        run_id: str | None = None,
     ) -> None:
         values: dict[str, Any] = {
             "last_run_status": status,
@@ -152,8 +153,11 @@ class ScheduledTaskRepository:
         if disable:
             values["is_enabled"] = False
             values["next_run_at"] = None
+        stmt = update(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id)
+        if run_id is not None:
+            stmt = stmt.where(ScheduledTaskRow.last_run_id == run_id)
         async with self._sf() as session:
-            await session.execute(update(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id).values(**values))
+            await session.execute(stmt.values(**values))
             await session.commit()
 
 
@@ -181,11 +185,7 @@ class MemoryScheduledTaskStore:
 
     async def list(self, *, user_id: str | None) -> list[TaskDict]:
         async with self._lock:
-            rows = [
-                _copy_task(task)
-                for task in self._tasks.values()
-                if user_id is None or task.get("user_id") == user_id
-            ]
+            rows = [_copy_task(task) for task in self._tasks.values() if user_id is None or task.get("user_id") == user_id]
         return sorted(rows, key=lambda task: task["created_at"], reverse=True)
 
     async def update(self, task_id: str, values: Mapping[str, Any], *, user_id: str | None) -> TaskDict | None:
@@ -211,14 +211,7 @@ class MemoryScheduledTaskStore:
 
     async def list_due(self, *, now: datetime, limit: int = 20) -> list[TaskDict]:
         async with self._lock:
-            rows = [
-                _copy_task(task)
-                for task in self._tasks.values()
-                if task.get("is_enabled")
-                and task.get("next_run_at") is not None
-                and task["next_run_at"] <= now
-                and task.get("last_run_status") != "running"
-            ]
+            rows = [_copy_task(task) for task in self._tasks.values() if task.get("is_enabled") and task.get("next_run_at") is not None and task["next_run_at"] <= now and task.get("last_run_status") != "running"]
         return sorted(rows, key=lambda task: (task["next_run_at"], task["created_at"]))[:limit]
 
     async def mark_running(
@@ -252,10 +245,13 @@ class MemoryScheduledTaskStore:
         *,
         status: str,
         disable: bool = False,
+        run_id: str | None = None,
     ) -> None:
         async with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
+                return
+            if run_id is not None and task.get("last_run_id") != run_id:
                 return
             task["last_run_status"] = status
             if disable:

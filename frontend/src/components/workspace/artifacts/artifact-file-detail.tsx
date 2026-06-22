@@ -53,6 +53,7 @@ import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
 import { env } from "@/env";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 import { ArtifactLink } from "../citations/artifact-link";
@@ -138,7 +139,9 @@ export function ArtifactFileDetail({
   );
   const [isInstalling, setIsInstalling] = useState(false);
   const [zoomDialogOpen, setZoomDialogOpen] = useState(false);
-  const [zoomViewMode, setZoomViewMode] = useState<"code" | "preview">("preview");
+  const [zoomViewMode, setZoomViewMode] = useState<"code" | "preview">(
+    "preview",
+  );
   // Keep zoom dialog view mode in sync when the underlying file changes
   useEffect(() => {
     setZoomViewMode("preview");
@@ -203,7 +206,7 @@ export function ArtifactFileDetail({
                   "inline-flex h-8 items-center justify-center rounded-l-md px-3 transition-colors",
                   viewMode === "code"
                     ? "bg-accent text-accent-foreground"
-                    : "bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground",
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground bg-transparent",
                 )}
                 title="代码"
               >
@@ -216,7 +219,7 @@ export function ArtifactFileDetail({
                   "inline-flex h-8 items-center justify-center rounded-r-md border-l px-3 transition-colors",
                   viewMode === "preview"
                     ? "bg-accent text-accent-foreground"
-                    : "bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground",
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground bg-transparent",
                 )}
                 title="预览"
               >
@@ -268,12 +271,13 @@ export function ArtifactFileDetail({
                 label={t.clipboard.copyToClipboard}
                 disabled={!content}
                 onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(visibleContent ?? "");
+                  const success = await copyTextToClipboard(
+                    visibleContent ?? "",
+                  );
+                  if (success) {
                     toast.success(t.clipboard.copiedToClipboard);
-                  } catch (error) {
-                    toast.error("Failed to copy to clipboard");
-                    console.error(error);
+                  } else {
+                    toast.error(t.clipboard.failedToCopyToClipboard);
                   }
                 }}
                 tooltip={t.clipboard.copyToClipboard}
@@ -342,7 +346,9 @@ export function ArtifactFileDetail({
           showCloseButton={false}
         >
           <DialogHeader className="flex-row items-center justify-between border-b px-4 py-3">
-            <DialogTitle className="text-base">{getFileName(filepath)}</DialogTitle>
+            <DialogTitle className="text-base">
+              {getFileName(filepath)}
+            </DialogTitle>
             {language === "markdown" && (
               <ToggleGroup
                 type="single"
@@ -364,7 +370,10 @@ export function ArtifactFileDetail({
           </DialogHeader>
           <div className="max-h-[calc(95vh-60px)] overflow-auto p-4">
             {language === "markdown" && zoomViewMode === "preview" && (
-              <Streamdown {...streamdownPlugins} components={{ a: ArtifactLink }}>
+              <Streamdown
+                {...streamdownPlugins}
+                components={{ a: ArtifactLink }}
+              >
                 {visibleContent ?? ""}
               </Streamdown>
             )}
@@ -376,10 +385,7 @@ export function ArtifactFileDetail({
               />
             )}
             {language === "html" && (
-              <ZoomHtmlPreview
-                content={visibleContent ?? ""}
-                url={url}
-              />
+              <ZoomHtmlPreview content={visibleContent ?? ""} url={url} />
             )}
             {isCodeFile && language !== "markdown" && language !== "html" && (
               <CodeEditor
@@ -526,7 +532,9 @@ function ZoomHtmlPreview({ content, url }: { content: string; url?: string }) {
       appendHtmlPreviewBaseHref(content, url),
       "zoom",
     );
-    const blob = new Blob([previewContent], { type: "text/html;charset=utf-8" });
+    const blob = new Blob([previewContent], {
+      type: "text/html;charset=utf-8",
+    });
     return URL.createObjectURL(blob);
   }, [content, url]);
 

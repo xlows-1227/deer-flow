@@ -326,6 +326,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
             prompt: "Mock scheduled task",
             repeat_type: "daily",
             execution_time: "09:00",
+            timezone: "UTC",
             day_of_week: null,
             is_enabled: true,
             model_name: null,

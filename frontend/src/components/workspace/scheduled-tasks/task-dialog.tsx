@@ -71,11 +71,17 @@ const effortOptions: Array<{
   { value: "high", label: "High" },
 ];
 
-function defaultEffort(mode: ScheduledTaskMode): ScheduledTaskReasoningEffort | null {
+function defaultEffort(
+  mode: ScheduledTaskMode,
+): ScheduledTaskReasoningEffort | null {
   if (mode === "ultra") return "high";
   if (mode === "pro") return "medium";
   if (mode === "thinking") return "low";
   return null;
+}
+
+function browserTimezone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 function taskToInitial(task: ScheduledTask | null): ScheduledTaskPayload {
@@ -84,6 +90,7 @@ function taskToInitial(task: ScheduledTask | null): ScheduledTaskPayload {
     prompt: task?.prompt ?? "",
     repeat_type: task?.repeat_type ?? "daily",
     execution_time: task?.execution_time ?? "09:00",
+    timezone: task?.timezone ?? browserTimezone(),
     day_of_week: task?.day_of_week ?? 0,
     is_enabled: task?.is_enabled ?? true,
     model_name: task?.model_name ?? null,
@@ -110,15 +117,19 @@ export function ScheduledTaskDialog({
   const [form, setForm] = useState<ScheduledTaskPayload>(() =>
     taskToInitial(task),
   );
+  const [submitAttempted, setSubmitAttempted] = useState(false);
   const { models } = useModels({ enabled: open });
 
   useEffect(() => {
     if (open) {
       setForm(taskToInitial(task));
+      setSubmitAttempted(false);
     }
   }, [open, task]);
 
-  const missingRequired = !form.name.trim() || !form.prompt.trim();
+  const missingName = !form.name.trim();
+  const missingPrompt = !form.prompt.trim();
+  const missingRequired = missingName || missingPrompt;
   const selectedModelLabel = useMemo(() => {
     if (!form.model_name) return "使用默认模型";
     return (
@@ -141,6 +152,7 @@ export function ScheduledTaskDialog({
   };
 
   const submit = () => {
+    setSubmitAttempted(true);
     if (missingRequired) return;
     onSubmit({
       ...form,
@@ -148,7 +160,9 @@ export function ScheduledTaskDialog({
       prompt: form.prompt.trim(),
       day_of_week: form.repeat_type === "weekly" ? form.day_of_week : null,
       reasoning_effort:
-        form.mode === "flash" ? null : form.reasoning_effort ?? defaultEffort(form.mode),
+        form.mode === "flash"
+          ? null
+          : (form.reasoning_effort ?? defaultEffort(form.mode)),
     });
   };
 
@@ -174,7 +188,9 @@ export function ScheduledTaskDialog({
             )}
 
             <label className="grid gap-1.5">
-              <span className="text-sm font-medium text-slate-800">任务名称</span>
+              <span className="text-sm font-medium text-slate-800">
+                任务名称
+              </span>
               <Input
                 value={form.name}
                 maxLength={120}
@@ -185,7 +201,9 @@ export function ScheduledTaskDialog({
 
             <div className="grid gap-3 sm:grid-cols-[1fr_160px]">
               <div className="grid gap-1.5">
-                <span className="text-sm font-medium text-slate-800">重复频率</span>
+                <span className="text-sm font-medium text-slate-800">
+                  重复频率
+                </span>
                 <div className="grid grid-cols-3 gap-2">
                   {repeatOptions.map((option) => (
                     <button
@@ -196,7 +214,9 @@ export function ScheduledTaskDialog({
                           ...prev,
                           repeat_type: option.value,
                           day_of_week:
-                            option.value === "weekly" ? prev.day_of_week ?? 0 : null,
+                            option.value === "weekly"
+                              ? (prev.day_of_week ?? 0)
+                              : null,
                         }))
                       }
                       className={cn(
@@ -225,7 +245,9 @@ export function ScheduledTaskDialog({
               </div>
 
               <label className="grid gap-1.5">
-                <span className="text-sm font-medium text-slate-800">执行时间</span>
+                <span className="text-sm font-medium text-slate-800">
+                  执行时间
+                </span>
                 <div className="relative">
                   <ClockIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-slate-400" />
                   <Input
@@ -242,7 +264,9 @@ export function ScheduledTaskDialog({
 
             {form.repeat_type === "weekly" && (
               <div className="grid gap-1.5">
-                <span className="text-sm font-medium text-slate-800">每周几执行</span>
+                <span className="text-sm font-medium text-slate-800">
+                  每周几执行
+                </span>
                 <div className="grid grid-cols-7 gap-2">
                   {weekdays.map((label, index) => (
                     <button
@@ -264,14 +288,36 @@ export function ScheduledTaskDialog({
             )}
 
             <label className="grid gap-1.5">
-              <span className="text-sm font-medium text-slate-800">执行提示词</span>
+              <span className="text-sm font-medium text-slate-800">
+                执行提示词 <span className="text-red-500">*</span>
+              </span>
               <Textarea
                 value={form.prompt}
                 rows={7}
                 onChange={(event) => update("prompt", event.target.value)}
                 placeholder="描述 Agent 到点后要完成的任务、输入来源和输出格式。"
-                className="resize-y"
+                required
+                aria-invalid={submitAttempted && missingPrompt}
+                aria-describedby={
+                  submitAttempted && missingPrompt
+                    ? "scheduled-task-prompt-error"
+                    : undefined
+                }
+                className={cn(
+                  "resize-y",
+                  submitAttempted &&
+                    missingPrompt &&
+                    "border-red-400 focus-visible:ring-red-200",
+                )}
               />
+              {submitAttempted && missingPrompt && (
+                <span
+                  id="scheduled-task-prompt-error"
+                  className="text-xs text-red-600"
+                >
+                  请输入执行提示词
+                </span>
+              )}
             </label>
 
             <div className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
@@ -282,11 +328,16 @@ export function ScheduledTaskDialog({
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-1.5">
-                  <span className="text-sm font-medium text-slate-800">模型</span>
+                  <span className="text-sm font-medium text-slate-800">
+                    模型
+                  </span>
                   <Select
                     value={form.model_name ?? "__default__"}
                     onValueChange={(value) =>
-                      update("model_name", value === "__default__" ? null : value)
+                      update(
+                        "model_name",
+                        value === "__default__" ? null : value,
+                      )
                     }
                   >
                     <SelectTrigger className="w-full bg-white">
@@ -304,7 +355,9 @@ export function ScheduledTaskDialog({
                 </div>
 
                 <div className="grid gap-1.5">
-                  <span className="text-sm font-medium text-slate-800">推理强度</span>
+                  <span className="text-sm font-medium text-slate-800">
+                    推理强度
+                  </span>
                   <Select
                     value={form.reasoning_effort ?? "low"}
                     disabled={form.mode === "flash"}
@@ -343,7 +396,9 @@ export function ScheduledTaskDialog({
                     )}
                   >
                     <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
-                      {form.mode === mode.value && <CheckIcon className="size-3.5" />}
+                      {form.mode === mode.value && (
+                        <CheckIcon className="size-3.5" />
+                      )}
                       {mode.label}
                     </span>
                     <span className="mt-1 block text-xs text-slate-500">
@@ -356,7 +411,9 @@ export function ScheduledTaskDialog({
 
             <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3">
               <div>
-                <div className="text-sm font-medium text-slate-900">立即启用</div>
+                <div className="text-sm font-medium text-slate-900">
+                  立即启用
+                </div>
                 <div className="mt-0.5 text-xs text-slate-500">
                   关闭后任务会保留，但不会被后台调度触发。
                 </div>
@@ -378,7 +435,11 @@ export function ScheduledTaskDialog({
           >
             取消
           </Button>
-          <Button type="button" disabled={saving || missingRequired} onClick={submit}>
+          <Button
+            type="button"
+            disabled={saving || missingName}
+            onClick={submit}
+          >
             {saving && <LoaderCircleIcon className="size-4 animate-spin" />}
             {task ? "保存修改" : "创建任务"}
           </Button>

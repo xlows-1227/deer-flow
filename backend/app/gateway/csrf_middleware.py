@@ -33,7 +33,9 @@ def should_check_csrf(request: Request) -> bool:
     """Determine if a request needs CSRF validation.
 
     CSRF is checked for state-changing methods (POST, PUT, DELETE, PATCH).
-    GET, HEAD, OPTIONS, and TRACE are exempt per RFC 7231.
+    GET, HEAD, OPTIONS, and TRACE do not require a token per RFC 7231. When
+    clients voluntarily send a CSRF header on those methods, the middleware
+    still validates it in ``dispatch`` instead of silently accepting garbage.
     """
     if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
         return False
@@ -180,16 +182,22 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         _is_auth = is_auth_endpoint(request)
         api_key_authenticated = getattr(request.state, "auth_method", None) == "api_key"
+        csrf_required = should_check_csrf(request)
+        header_token = request.headers.get(CSRF_HEADER_NAME)
+        csrf_supplied = header_token is not None
 
-        if should_check_csrf(request) and _is_auth and not is_allowed_auth_origin(request):
+        if csrf_required and _is_auth and not is_allowed_auth_origin(request):
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Cross-site auth request denied."},
             )
 
-        if should_check_csrf(request) and not _is_auth and not api_key_authenticated:
+        # Unsafe methods require a double-submit token. Safe methods do not
+        # require one, but a supplied X-CSRF-Token must still be valid. This
+        # prevents any API endpoint from silently accepting forged CSRF
+        # credentials while preserving normal header-free GET requests.
+        if (csrf_required or csrf_supplied) and not _is_auth and not api_key_authenticated:
             cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
-            header_token = request.headers.get(CSRF_HEADER_NAME)
 
             if not cookie_token or not header_token:
                 return JSONResponse(

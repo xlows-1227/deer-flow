@@ -118,6 +118,11 @@ def test_csrf_skips_get_requests():
     assert should_check_csrf(req) is False
 
 
+def test_csrf_does_not_require_token_for_skills_list_get():
+    req = _FakeRequest("/api/skills", method="GET")
+    assert should_check_csrf(req) is False
+
+
 def test_csrf_checks_post_to_protected():
     req = _FakeRequest("/api/v1/some/endpoint", method="POST")
     assert should_check_csrf(req) is True

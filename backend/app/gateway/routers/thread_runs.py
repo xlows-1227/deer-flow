@@ -198,9 +198,13 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
-@require_permission("runs", "read", owner_check=True)
+@require_permission("runs", "read", owner_check=True, require_existing=True)
 async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
+    from app.gateway.deps import get_thread_store
+    from app.gateway.routers.threads import _require_thread_meta
+
+    await _require_thread_meta(thread_id, get_thread_store(request))
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)

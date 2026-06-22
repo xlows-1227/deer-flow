@@ -19,10 +19,15 @@ async function parseError(response: Response): Promise<string> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const timezone =
+    typeof Intl === "undefined"
+      ? null
+      : Intl.DateTimeFormat().resolvedOptions().timeZone;
   const response = await fetch(`${getBackendBaseURL()}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(timezone ? { "X-Time-Zone": timezone } : {}),
       ...init?.headers,
     },
   });

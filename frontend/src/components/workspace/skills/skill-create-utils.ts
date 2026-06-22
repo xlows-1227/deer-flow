@@ -56,6 +56,16 @@ Use this skill when the user asks for ${description || "this custom workflow"}.
 `;
 }
 
+/** Remove YAML frontmatter block from skill markdown for preview rendering. */
+export function stripSkillFrontmatter(content: string) {
+  const trimmed = content.trimStart();
+  const match = /^---\n[\s\S]*?\n---/.exec(trimmed);
+  if (!match) {
+    return content;
+  }
+  return trimmed.slice(match[0].length).trimStart();
+}
+
 export function parseSkillMarkdown(content: string) {
   const frontmatter = /^---\n([\s\S]*?)\n---/.exec(content.trimStart())?.[1];
   if (!frontmatter) {

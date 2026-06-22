@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { parseSkillMarkdown } from "@/components/workspace/skills/skill-create-utils";
 import { streamdownPlugins } from "@/core/streamdown";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 import { isMarkdownPath } from "./utils";
@@ -96,10 +97,10 @@ export function SkillFileViewer({
   }, [activeTab?.path]);
 
   async function handleCopy(content: string) {
-    try {
-      await navigator.clipboard.writeText(content);
+    const success = await copyTextToClipboard(content);
+    if (success) {
       toast.success("已复制到剪贴板");
-    } catch {
+    } else {
       toast.error("复制失败");
     }
   }

@@ -182,9 +182,10 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
         if getattr(request, "_deerflow_test_bypass_auth", False):
             return await func(*args, **kwargs)
 
-        # Authenticate and set context
-        auth_context = await _authenticate(request)
-        request.state.auth = auth_context
+        auth_context = getattr(request.state, "auth", None)
+        if auth_context is None or not auth_context.is_authenticated:
+            auth_context = await _authenticate(request)
+            request.state.auth = auth_context
 
         if not auth_context.is_authenticated:
             raise HTTPException(status_code=401, detail="Authentication required")

@@ -40,6 +40,7 @@ def test_public_paths(path: str):
         "/api/channels",
         "/api/runs/stream",
         "/api/threads/123/runs",
+        "/api/scheduler/tasks",
         "/api/v1/auth/me",
         "/api/v1/auth/change-password",
     ],

@@ -249,12 +249,43 @@ def test_auth_handler_has_both_layers():
 
 
 def test_csrf_get_no_check():
-    """GET requests skip CSRF — should proceed to JWT validation."""
+    """GET requests without a CSRF header proceed to JWT validation."""
     with pytest.raises(Auth.exceptions.HTTPException) as exc:
         asyncio.run(authenticate(_req(method="GET")))
     # Rejected by missing cookie, NOT by CSRF
     assert exc.value.status_code == 401
     assert "Not authenticated" in str(exc.value.detail)
+
+
+def test_csrf_get_rejects_mismatched_supplied_token():
+    """GET does not require CSRF, but a supplied token must be valid."""
+    with pytest.raises(Auth.exceptions.HTTPException) as exc:
+        asyncio.run(
+            authenticate(
+                _req(
+                    method="GET",
+                    cookies={"access_token": "some-jwt", "csrf_token": "real-token"},
+                    headers={"x-csrf-token": "forged-token"},
+                )
+            )
+        )
+    assert exc.value.status_code == 403
+    assert "mismatch" in str(exc.value.detail)
+
+
+def test_csrf_get_rejects_header_without_cookie():
+    with pytest.raises(Auth.exceptions.HTTPException) as exc:
+        asyncio.run(
+            authenticate(
+                _req(
+                    method="GET",
+                    cookies={"access_token": "some-jwt"},
+                    headers={"x-csrf-token": "orphan-token"},
+                )
+            )
+        )
+    assert exc.value.status_code == 403
+    assert "CSRF token missing" in str(exc.value.detail)
 
 
 def test_csrf_post_missing_token():

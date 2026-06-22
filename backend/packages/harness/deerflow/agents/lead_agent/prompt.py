@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
-_enabled_skills_by_config_cache: dict[int, tuple[object, list[Skill]]] = {}
+_enabled_skills_by_config_cache: dict[tuple[int, str], tuple[object, list[Skill]]] = {}
 _enabled_skills_refresh_active = False
 _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
@@ -138,7 +138,9 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[S
     if app_config is None:
         return _get_enabled_skills()
 
-    cache_key = id(app_config)
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    cache_key = (id(app_config), get_effective_user_id())
     with _enabled_skills_lock:
         cached = _enabled_skills_by_config_cache.get(cache_key)
         if cached is not None:
@@ -611,17 +613,18 @@ def _get_cached_skills_prompt_section(
     filtered = [(name, description, category, location, connector_requirements) for name, description, category, location, connector_requirements in skill_signature if available_skills_key is None or name in available_skills_key]
     skills_list = ""
     if filtered:
+
         def _connector_requirements_xml(requirements: tuple[tuple[str, str | None], ...]) -> str:
             if not requirements:
                 return ""
-            items = "\n".join(
-                f"            <connector><capability>{capability}</capability><purpose>{purpose or ''}</purpose></connector>"
-                for capability, purpose in requirements
-            )
+            items = "\n".join(f"            <connector><capability>{capability}</capability><purpose>{purpose or ''}</purpose></connector>" for capability, purpose in requirements)
             return f"\n        <connector_requirements>\n{items}\n        </connector_requirements>"
 
         skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>{_connector_requirements_xml(connector_requirements)}\n    </skill>"
+            f"    <skill>\n        <name>{name}</name>\n"
+            f"        <description>{description} {_skill_mutability_label(category)}</description>\n"
+            f"        <location>{location}</location>{_connector_requirements_xml(connector_requirements)}\n"
+            "    </skill>"
             for name, description, category, location, connector_requirements in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"

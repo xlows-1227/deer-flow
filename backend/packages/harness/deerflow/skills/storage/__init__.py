@@ -30,10 +30,18 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     from deerflow.config import get_app_config
     from deerflow.config.skills_config import SkillsConfig
 
-    def _make_storage(skills_config: SkillsConfig, *, host_path: str | None = None, **kwargs) -> SkillStorage:
+    def _make_storage(
+        skills_config: SkillsConfig,
+        *,
+        host_path: str | None = None,
+        enforce_owner_isolation: bool = False,
+        **kwargs,
+    ) -> SkillStorage:
         from deerflow.reflection import resolve_class
 
         cls = resolve_class(skills_config.use, SkillStorage)
+        if issubclass(cls, LocalSkillStorage):
+            kwargs.setdefault("enforce_owner_isolation", enforce_owner_isolation)
         return cls(
             host_path=host_path if host_path is not None else str(skills_config.get_skills_path()),
             container_path=skills_config.container_path,
@@ -53,7 +61,13 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
         return _make_storage(SkillsConfig(), host_path=str(skills_path), **kwargs)
 
     if app_config is not None:
-        return _make_storage(app_config.skills, **kwargs)
+        from deerflow.config.app_config import AppConfig
+
+        return _make_storage(
+            app_config.skills,
+            enforce_owner_isolation=isinstance(app_config, AppConfig),
+            **kwargs,
+        )
 
     # If the singleton was manually injected (e.g. in tests) without a config
     # identity (_default_skill_storage_config is None), skip get_app_config()
@@ -63,7 +77,11 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
 
     app_config_now = get_app_config()
     if _default_skill_storage is None or _default_skill_storage_config is not app_config_now:
-        _default_skill_storage = _make_storage(app_config_now.skills, **kwargs)
+        _default_skill_storage = _make_storage(
+            app_config_now.skills,
+            enforce_owner_isolation=True,
+            **kwargs,
+        )
         _default_skill_storage_config = app_config_now
     return _default_skill_storage
 

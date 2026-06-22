@@ -3,6 +3,7 @@ import { useCallback, useState, type ComponentProps } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 import { Tooltip } from "./tooltip";
 
@@ -14,8 +15,11 @@ export function CopyButton({
 }) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
-  const handleCopy = useCallback(() => {
-    void navigator.clipboard.writeText(clipboardData);
+  const handleCopy = useCallback(async () => {
+    const success = await copyTextToClipboard(clipboardData);
+    if (!success) {
+      return;
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [clipboardData]);

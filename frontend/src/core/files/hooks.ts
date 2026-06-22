@@ -7,7 +7,9 @@ import { useThreads } from "@/core/threads/hooks";
 import { listUploadedFiles } from "@/core/uploads/api";
 
 import {
+  getUserFileUploadConfig,
   listFiles,
+  listUserFolders,
   threadUploadToFileItem,
   type ListFilesParams,
 } from "./api";
@@ -49,6 +51,30 @@ export function useFiles(params: ListFilesParams = {}) {
   };
 }
 
+export function useUserFolders() {
+  const query = useQuery<string[]>({
+    queryKey: ["files", "folders"],
+    queryFn: listUserFolders,
+  });
+  return {
+    folders: query.data ?? [],
+    isLoading: query.isLoading,
+    refetch: query.refetch,
+  };
+}
+
+export function useUserFileUploadConfig() {
+  const query = useQuery({
+    queryKey: ["files", "upload-config"],
+    queryFn: getUserFileUploadConfig,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  return {
+    config: query.data ?? null,
+    isLoading: query.isLoading,
+  };
+}
+
 /**
  * How many recent threads to scan for chat-uploaded files when the
  * file-management page stitches a unified view together. Tuned for the
@@ -83,6 +109,7 @@ const MAX_THREADS_TO_SCAN = 50;
  */
 export function useAllUserFiles(params: ListFilesParams = {}) {
   const library = useFiles(params);
+  const inLibraryFolder = !!params.folder_path;
   const threads = useThreads({
     limit: MAX_THREADS_TO_SCAN,
     sortBy: "updated_at",
@@ -96,7 +123,7 @@ export function useAllUserFiles(params: ListFilesParams = {}) {
       // Only fire after the thread list arrives. Errors are non-fatal —
       // a single thread's uploads failing shouldn't break the whole
       // page; we filter them out of the merged result.
-      enabled: !!threads.data,
+      enabled: !!threads.data && !inLibraryFolder,
       retry: false,
     })),
   });
@@ -107,6 +134,10 @@ export function useAllUserFiles(params: ListFilesParams = {}) {
       // Thread titles live in `values.title` (set by TitleMiddleware).
       const title = (thread.values as { title?: string } | undefined)?.title;
       threadTitleById.set(thread.thread_id, title);
+    }
+
+    if (inLibraryFolder) {
+      return library.files;
     }
 
     const threadItems: FileItem[] = [];
@@ -122,12 +153,12 @@ export function useAllUserFiles(params: ListFilesParams = {}) {
     });
 
     return [...library.files, ...threadItems];
-  }, [library.files, threads.data, threadUploads]);
+  }, [inLibraryFolder, library.files, threads.data, threadUploads]);
 
   return {
     files,
-    isLoading: library.isLoading || threads.isLoading,
-    isFetching: library.isFetching || threads.isFetching,
+    isLoading: library.isLoading || (!inLibraryFolder && threads.isLoading),
+    isFetching: library.isFetching || (!inLibraryFolder && threads.isFetching),
     error: library.error,
     /**
      * Manual refetch — useful for the page's "refresh" affordance. We
