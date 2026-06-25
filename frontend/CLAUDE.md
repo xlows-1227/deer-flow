@@ -12,7 +12,8 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 | Command          | Purpose                                           |
 | ---------------- | ------------------------------------------------- |
-| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
+| `pnpm dev`       | Dev server with Webpack (http://localhost:3000, lower memory) |
+| `pnpm dev:turbo` | Dev server with Turbopack (faster HMR, high memory on macOS) |
 | `pnpm build`     | Production build                                  |
 | `pnpm check`     | Lint + type check (run before committing)         |
 | `pnpm lint`      | ESLint only                                       |

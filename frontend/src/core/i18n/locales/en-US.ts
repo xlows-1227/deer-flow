@@ -590,6 +590,8 @@ export const enUS: Translations = {
       testTitle: "DeerFlow",
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
+      secureContextRequired:
+        "This address cannot use browser notifications. Use HTTPS, or access the Docker service through localhost / 127.0.0.1.",
       disableNotification: "Disable notification",
     },
     account: {

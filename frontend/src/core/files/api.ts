@@ -200,16 +200,15 @@ export function userFileUrl(path: string, download = false): string {
 
 /**
  * Build a download URL for a thread-uploaded file. Thread uploads live
- * under the per-thread sandbox uploads dir; the gateway doesn't expose
- * a public download route for them, so we point the file-management
- * page at the langgraph artifact URL (which is what the chat input
- * itself uses for inline previews).
+ * under the per-thread sandbox uploads dir, which is exposed through the
+ * artifacts route. The uploads route itself only supports POST/list/DELETE,
+ * so using it for GET downloads returns 405 Method Not Allowed.
  */
 export function threadUploadDownloadUrl(
   threadId: string,
   filename: string,
 ): string {
-  return `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${encodeURIComponent(
+  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts/mnt/user-data/uploads/${encodeURIComponent(
     filename,
   )}?download=true`;
 }

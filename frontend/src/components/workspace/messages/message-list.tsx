@@ -317,9 +317,7 @@ export function MessageList({
         } else if (message.type === "tool") {
           const taskId = message.tool_call_id;
           if (taskId) {
-            const parsed = parseSubtaskResult(
-              extractTextFromMessage(message),
-            );
+            const parsed = parseSubtaskResult(extractTextFromMessage(message));
             tasksToUpdate.push({ id: taskId, ...parsed } as Subtask);
           }
         }

@@ -12,8 +12,13 @@ import { SettingsSection } from "./settings-section";
 
 export function NotificationSettingsPage() {
   const { t } = useI18n();
-  const { permission, isSupported, requestPermission, showNotification } =
-    useNotification();
+  const {
+    permission,
+    isSupported,
+    isSecureContext,
+    requestPermission,
+    showNotification,
+  } = useNotification();
 
   const [settings, setSettings] = useLocalSettings();
 
@@ -33,14 +38,16 @@ export function NotificationSettingsPage() {
     });
   };
 
-  if (!isSupported) {
+  if (!isSupported || !isSecureContext) {
     return (
       <SettingsSection
         title={t.settings.notification.title}
         description={t.settings.notification.description}
       >
         <p className="text-muted-foreground text-sm">
-          {t.settings.notification.notSupported}
+          {isSupported
+            ? t.settings.notification.secureContextRequired
+            : t.settings.notification.notSupported}
         </p>
       </SettingsSection>
     );

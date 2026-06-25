@@ -197,6 +197,8 @@ class TestInstallSkillFromArchive:
         assert result["success"] is True
         assert result["skill_name"] == "test-skill"
         assert (skills_root / "custom" / "test-skill" / "SKILL.md").exists()
+        assert stat.S_IMODE((skills_root / "custom" / "test-skill").stat().st_mode) == 0o755
+        assert stat.S_IMODE((skills_root / "custom" / "test-skill" / "SKILL.md").stat().st_mode) == 0o644
 
     def test_scans_skill_markdown_before_install(self, tmp_path, monkeypatch):
         zip_path = self._make_skill_zip(tmp_path)

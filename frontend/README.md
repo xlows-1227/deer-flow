@@ -128,7 +128,8 @@ src/
 
 | Command             | Description                             |
 | ------------------- | --------------------------------------- |
-| `pnpm dev`          | Start development server with Turbopack |
+| `pnpm dev`          | Start development server with Webpack (lower memory) |
+| `pnpm dev:turbo`    | Start development server with Turbopack (faster HMR) |
 | `pnpm build`        | Build for production                    |
 | `pnpm start`        | Start production server                 |
 | `pnpm test`         | Run unit tests with Vitest              |
@@ -143,7 +144,7 @@ src/
 ## Development Notes
 
 - Uses pnpm workspaces (see `packageManager` in package.json)
-- Turbopack enabled by default in development for faster builds
+- Webpack is the default dev bundler; use `pnpm dev:turbo` when you need faster HMR
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 

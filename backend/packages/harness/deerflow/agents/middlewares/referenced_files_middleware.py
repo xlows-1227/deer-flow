@@ -1,8 +1,9 @@
 """Middleware to inject `@`-referenced file contents into agent context.
 
 The chat input's `@`-mention picker lets the user point at files that already
-live in their per-user document library (see ``/api/files``). When the user
-submits a message, the frontend forwards those picks as
+live in their per-user document library (see ``/api/files``) or in a recent
+thread's upload directory. When the user submits a message, the frontend
+forwards those picks as
 ``additional_kwargs.referenced_files`` on the human message. This middleware
 reads them back, loads the actual file content from the host filesystem, and
 prepends a ``<referenced_files>`` block to the message so the model can
@@ -129,6 +130,22 @@ _CONVERTIBLE_EXTENSIONS = frozenset(
     }
 )
 
+_IMAGE_EXTENSIONS = frozenset(
+    {
+        ".avif",
+        ".bmp",
+        ".gif",
+        ".heic",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".svg",
+        ".tiff",
+        ".webp",
+    }
+)
+
 
 def _format_size(size_bytes: int) -> str:
     """Render a byte count as a human-friendly string."""
@@ -144,10 +161,7 @@ def _is_probably_text(file_path: Path, mime_type: str | None) -> bool:
     ext = file_path.suffix.lower()
     if ext in _TEXT_EXTENSIONS:
         return True
-    if mime_type and (
-        mime_type.startswith("text/")
-        or mime_type in {"application/json", "application/xml", "application/x-yaml"}
-    ):
+    if mime_type and (mime_type.startswith("text/") or mime_type in {"application/json", "application/xml", "application/x-yaml"}):
         return True
     return False
 
@@ -231,10 +245,10 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
         """Extract and validate ``additional_kwargs.referenced_files``.
 
         Each entry must be a dict with at least ``id`` and ``path`` keys.
-        ``path`` is the library-relative POSIX path. We deliberately
-        *don't* check existence here — that's the job of
-        :meth:`_resolve_library_path` so we can return a clear error per
-        file in the rendered block.
+        ``path`` is the library-relative POSIX path, or the upload filename
+        when ``source_thread_id`` is present. We deliberately *don't* check
+        existence here — that's the job of the resolver so we can return a
+        clear error per file in the rendered block.
         """
         kwargs_files = (message.additional_kwargs or {}).get("referenced_files")
         if not isinstance(kwargs_files, list) or not kwargs_files:
@@ -251,6 +265,8 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
                 continue
             if not isinstance(library_path, str) or not library_path:
                 continue
+            source_thread_id = entry.get("source_thread_id")
+            source_thread_title = entry.get("source_thread_title")
             files.append(
                 {
                     "id": file_id,
@@ -259,6 +275,8 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
                     "mime_type": entry.get("mime_type"),
                     "extension": entry.get("extension") or Path(library_path).suffix.lower(),
                     "size": int(entry.get("size") or 0),
+                    "source_thread_id": source_thread_id if isinstance(source_thread_id, str) else None,
+                    "source_thread_title": source_thread_title if isinstance(source_thread_title, str) else None,
                 }
             )
         return files if files else None
@@ -282,6 +300,33 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
             raise ValueError(f"Library path escapes root: {library_path!r}") from exc
         return target
 
+    def _resolve_thread_upload_path(self, thread_id: str, upload_path: str) -> Path:
+        """Map a thread-upload filename to its absolute host location.
+
+        Thread uploads are stored flat in the thread's ``uploads`` directory.
+        The frontend sends only the filename for these records; reject any
+        path-shaped value so a forged reference cannot escape that directory.
+        """
+        if "/" in upload_path or "\\" in upload_path or upload_path in {"", ".", ".."}:
+            raise ValueError(f"Invalid thread upload path: {upload_path!r}")
+
+        upload_root = self._paths.sandbox_uploads_dir(
+            thread_id,
+            user_id=get_effective_user_id(),
+        ).resolve()
+        target = (upload_root / upload_path).resolve()
+        try:
+            target.relative_to(upload_root)
+        except ValueError as exc:
+            raise ValueError(f"Thread upload path escapes root: {upload_path!r}") from exc
+        return target
+
+    def _resolve_referenced_path(self, file: dict) -> Path:
+        source_thread_id = file.get("source_thread_id")
+        if isinstance(source_thread_id, str) and source_thread_id:
+            return self._resolve_thread_upload_path(source_thread_id, file["path"])
+        return self._resolve_library_path(file["path"])
+
     # ------------------------------------------------------------------
     # Content loading
     # ------------------------------------------------------------------
@@ -301,7 +346,7 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
             "note": None,
         }
         try:
-            abs_path = self._resolve_library_path(file["path"])
+            abs_path = self._resolve_referenced_path(file)
         except ValueError as exc:
             result["status"] = "unreadable"
             result["note"] = str(exc)
@@ -327,12 +372,10 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
         # Image files: emit a short marker so the model knows the file
         # is referenced; the model can't see it without Vision support
         # anyway, and inlining the bytes would blow the context.
-        if mime_type and mime_type.startswith("image/"):
+        is_image = (mime_type and mime_type.startswith("image/")) or abs_path.suffix.lower() in _IMAGE_EXTENSIONS
+        if is_image:
             result["status"] = "binary"
-            result["note"] = (
-                "Image file — content not inlined. If your model has vision, "
-                "download from the file library and attach it to the chat as an image."
-            )
+            result["note"] = "Image file — content not inlined. If your model has vision, download from the file library and attach it to the chat as an image."
             return result
 
         # Try to extract a textual representation.
@@ -357,10 +400,7 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
             converted = _try_convert_to_text(abs_path)
             if converted is None:
                 result["status"] = "binary"
-                result["note"] = (
-                    "Document conversion is not available on this server. "
-                    "Open the file in the file library to convert it to Markdown first."
-                )
+                result["note"] = "Document conversion is not available on this server. Open the file in the file library to convert it to Markdown first."
                 return result
             content = converted
         else:
@@ -439,9 +479,7 @@ class ReferencedFilesMiddleware(AgentMiddleware[ReferencedFilesMiddlewareState])
                 budget = self._format_file_entry(file, lines, budget)
                 if budget <= 0:
                     lines.append("")
-                    lines.append(
-                        f"_(remaining {len(files) - files.index(file) - 1} file(s) omitted — aggregate size cap of {_MAX_TOTAL_CHARS:,} chars reached)_"
-                    )
+                    lines.append(f"_(remaining {len(files) - files.index(file) - 1} file(s) omitted — aggregate size cap of {_MAX_TOTAL_CHARS:,} chars reached)_")
                     break
         lines.append("</referenced_files>")
         return "\n".join(lines)

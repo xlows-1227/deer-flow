@@ -138,3 +138,8 @@ def test_gateway_app_mounts_files_router():
     assert "/api/files/upload" in paths
     assert "/api/files/folders" in paths
     assert "/api/files/upload-config" in paths
+
+
+def test_file_type_recognizes_image_extensions_without_mime():
+    assert files._file_type(".png", None) == "image"
+    assert files._file_type(".webp", None) == "image"

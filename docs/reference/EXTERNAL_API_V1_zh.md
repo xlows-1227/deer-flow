@@ -1,9 +1,10 @@
 # DeerFlow External API V1 接口文档与接入手册
 
-> 适用对象：需要将业务系统接入 DeerFlow Agent 能力的开发、测试和运维人员  
-> API 版本：V1  
-> 基础路径：`/api/v1/external`  
+> 适用对象：需要将业务系统接入 DeerFlow Agent 能力的开发、测试和运维人员
+> API 版本：V1
+> 基础路径：`/api/v1/external`
 > 机器可读规范：[external-api-v1.openapi.yaml](./external-api-v1.openapi.yaml)
+> 测试手册：[EXTERNAL_API_V1_TEST_MANUAL_zh.md](./EXTERNAL_API_V1_TEST_MANUAL_zh.md)
 
 ## 1. 能力概览
 

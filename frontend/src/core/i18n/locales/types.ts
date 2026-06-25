@@ -494,6 +494,7 @@ export interface Translations {
       testTitle: string;
       testBody: string;
       notSupported: string;
+      secureContextRequired: string;
       disableNotification: string;
     };
     account: {

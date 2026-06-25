@@ -564,6 +564,8 @@ export const zhCN: Translations = {
       testTitle: "DeerFlow",
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
+      secureContextRequired:
+        "当前访问地址不支持浏览器通知。请使用 HTTPS，或通过 localhost / 127.0.0.1 访问 Docker 服务。",
       disableNotification: "关闭通知",
     },
     account: {

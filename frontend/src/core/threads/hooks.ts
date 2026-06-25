@@ -958,6 +958,7 @@ export function useThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
@@ -1014,6 +1015,7 @@ export function useThreads(
 
       return threads;
     },
+    enabled,
     refetchOnWindowFocus: false,
   });
 }

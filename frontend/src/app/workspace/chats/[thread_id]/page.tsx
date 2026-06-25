@@ -157,7 +157,10 @@ export default function ChatPage() {
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
-      <ChatBox threadId={threadId}>
+      <ChatBox
+        threadId={threadId}
+        sandboxFilesEnabled={!isNewThread && !isMock}
+      >
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(

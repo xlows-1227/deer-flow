@@ -16,6 +16,7 @@ interface NotificationOptions {
 interface UseNotificationReturn {
   permission: NotificationPermission;
   isSupported: boolean;
+  isSecureContext: boolean;
   requestPermission: () => Promise<NotificationPermission>;
   showNotification: (title: string, options?: NotificationOptions) => void;
 }
@@ -24,10 +25,13 @@ export function useNotification(): UseNotificationReturn {
   const [permission, setPermission] =
     useState<NotificationPermission>("default");
   const [isSupported, setIsSupported] = useState(false);
+  const [isSecureContext, setIsSecureContext] = useState(true);
 
   const lastNotificationTime = useRef<Date | null>(null);
 
   useEffect(() => {
+    const secureContext = window.isSecureContext;
+    setIsSecureContext(secureContext);
     if ("Notification" in window) {
       setIsSupported(true);
       setPermission(Notification.permission);
@@ -41,6 +45,13 @@ export function useNotification(): UseNotificationReturn {
         toast.error("当前浏览器不支持通知功能");
         return "denied";
       }
+      if (!isSecureContext) {
+        console.warn("Notification API requires a secure context");
+        toast.error(
+          "当前访问地址不支持通知功能，请使用 HTTPS 或 localhost 访问",
+        );
+        return "denied";
+      }
 
       const result = await Notification.requestPermission();
       setPermission(result);
@@ -50,7 +61,7 @@ export function useNotification(): UseNotificationReturn {
         toast.error("通知权限被拒绝，请在浏览器设置中手动开启");
       }
       return result;
-    }, [isSupported]);
+    }, [isSecureContext, isSupported]);
 
   const [settings] = useLocalSettings();
 
@@ -59,6 +70,10 @@ export function useNotification(): UseNotificationReturn {
       if (!isSupported) {
         console.warn("Notification API is not supported");
         toast.error("当前浏览器不支持通知功能");
+        return;
+      }
+      if (!isSecureContext) {
+        console.warn("Notification API requires a secure context");
         return;
       }
 
@@ -102,12 +117,13 @@ export function useNotification(): UseNotificationReturn {
         toast.error("通知发送失败，请检查浏览器通知设置");
       }
     },
-    [isSupported, settings.notification.enabled, permission],
+    [isSecureContext, isSupported, settings.notification.enabled, permission],
   );
 
   return {
     permission,
     isSupported,
+    isSecureContext,
     requestPermission,
     showNotification,
   };

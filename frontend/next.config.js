@@ -24,6 +24,10 @@ const config = {
   // Pin the workspace root so Next.js doesn't pick up stray lockfiles
   // outside the repo (e.g. ~/pnpm-lock.yaml), which bloats file tracing.
   outputFileTracingRoot: import.meta.dirname,
+  // Keep Turbopack (dev:turbo) from watching parent directories on macOS.
+  turbopack: {
+    root: import.meta.dirname,
+  },
   output:
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"
       ? "standalone"
