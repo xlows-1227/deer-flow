@@ -1,8 +1,10 @@
-import type { Message } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  getVisibleOptimisticMessagesForServerMessages,
   getVisibleOptimisticMessages,
+  mergeLoadedRunMessages,
   mergeMessages,
 } from "@/core/threads/hooks";
 
@@ -89,6 +91,42 @@ test("mergeMessages keeps live timestamps when they already exist", () => {
   expect(mergeMessages([historyAi], [liveAi], [])).toEqual([liveAi]);
 });
 
+test("mergeLoadedRunMessages keeps newer runs after older history", () => {
+  const olderRun = {
+    run_id: "run-old",
+    created_at: "2026-06-26T08:34:04.000Z",
+  } as Run;
+  const newerRun = {
+    run_id: "run-new",
+    created_at: "2026-06-26T08:34:44.000Z",
+  } as Run;
+  const olderHuman = {
+    id: "human-old",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const olderAi = {
+    id: "ai-old",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  const newerHuman = {
+    id: "human-new",
+    type: "human",
+    content: "你能做什么",
+  } as Message;
+
+  expect(
+    mergeLoadedRunMessages(
+      [newerRun, olderRun],
+      new Map([
+        [olderRun.run_id, [olderHuman, olderAi]],
+        [newerRun.run_id, [newerHuman]],
+      ]),
+    ),
+  ).toEqual([olderHuman, olderAi, newerHuman]);
+});
+
 test("mergeMessages deduplicates tool messages by tool_call_id", () => {
   const oldTool = {
     id: "tool-message-old",
@@ -138,6 +176,64 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
   ]);
 });
 
+test("mergeMessages places optimistic user input before streaming assistant output", () => {
+  const previousHuman = {
+    id: "human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const previousAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  const streamingAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "周报需要这些信息",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-2",
+    type: "human",
+    content: "帮我写一份周报需要什么信息",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [previousHuman, previousAi],
+      [streamingAi],
+      [optimisticHuman],
+    ),
+  ).toEqual([previousHuman, previousAi, optimisticHuman, streamingAi]);
+});
+
+test("mergeMessages keeps replaced history before optimistic user input", () => {
+  const historyHuman = {
+    id: "human-1",
+    type: "human",
+    content: "old",
+  } as Message;
+  const liveHuman = {
+    id: "human-1",
+    type: "human",
+    content: "live",
+  } as Message;
+  const streamingAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "streaming",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-2",
+    type: "human",
+    content: "follow up",
+  } as Message;
+
+  expect(
+    mergeMessages([historyHuman], [liveHuman, streamingAi], [optimisticHuman]),
+  ).toEqual([liveHuman, optimisticHuman, streamingAi]);
+});
+
 test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
   const optimisticHuman = {
     id: "opt-human-1",
@@ -148,6 +244,53 @@ test("getVisibleOptimisticMessages keeps optimistic user input until server huma
   expect(getVisibleOptimisticMessages([optimisticHuman], 0, 0)).toEqual([
     optimisticHuman,
   ]);
+});
+
+test("keeps optimistic user input when only old server history arrives", () => {
+  const oldServerHuman = {
+    id: "human-old",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-new",
+    type: "human",
+    content: "帮我写一份周报需要什么信息",
+  } as Message;
+
+  expect(
+    getVisibleOptimisticMessagesForServerMessages(
+      [optimisticHuman],
+      new Set(),
+      [oldServerHuman],
+    ),
+  ).toEqual([optimisticHuman]);
+});
+
+test("hides optimistic user input only after matching server human arrives", () => {
+  const oldServerHuman = {
+    id: "human-old",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const serverHuman = {
+    id: "human-new",
+    type: "human",
+    content: "帮我写一份周报需要什么信息",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-new",
+    type: "human",
+    content: "帮我写一份周报需要什么信息",
+  } as Message;
+
+  expect(
+    getVisibleOptimisticMessagesForServerMessages(
+      [optimisticHuman],
+      new Set(["message:human-old"]),
+      [oldServerHuman, serverHuman],
+    ),
+  ).toEqual([]);
 });
 
 test("getVisibleOptimisticMessages keeps non-human optimistic status messages", () => {

@@ -29,6 +29,8 @@ import {
   parseSkillMarkdown,
   resolveSkillDisplayName,
   syncSkillDisplayFrontmatter,
+  formatSkillValidationError,
+  validateSkillMarkdownContent,
 } from "@/components/workspace/skills/skill-create-utils";
 import { useHighlightTimeout } from "@/components/workspace/skills/use-highlight-timeout";
 import { useI18n } from "@/core/i18n/hooks";
@@ -202,7 +204,7 @@ export function SkillAiCreateWorkspace({
   const skillContext = useMemo(
     () => ({
       ...settings.context,
-      mode: settings.context.mode ?? "pro",
+      mode: settings.context.mode ?? "flash",
       skill_name: "skill-creator",
     }),
     [settings.context],
@@ -807,6 +809,15 @@ export function SkillAiCreateWorkspace({
         return;
       }
 
+      const validation = validateSkillMarkdownContent(
+        skillMdForServer,
+        skillName,
+      );
+      if (!validation.valid) {
+        toast.error(validation.message);
+        return;
+      }
+
       await createCustomSkill({
         name: skillName,
         description:
@@ -842,7 +853,11 @@ export function SkillAiCreateWorkspace({
       toast.success("Skill 已发布并启用");
       router.push("/workspace/skills");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "发布失败");
+      toast.error(
+        error instanceof Error
+          ? formatSkillValidationError(error.message)
+          : "发布失败",
+      );
     } finally {
       setIsCompleting(false);
     }

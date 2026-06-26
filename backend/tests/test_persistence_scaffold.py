@@ -108,6 +108,14 @@ class TestMemoryRunStore:
         assert all(r["thread_id"] == "t1" for r in rows)
 
     @pytest.mark.anyio
+    async def test_list_by_thread_offset(self, store):
+        await store.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
+        await store.put("r2", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        await store.put("r3", thread_id="t1", created_at="2024-01-03T00:00:00+00:00")
+        rows = await store.list_by_thread("t1", limit=1, offset=1)
+        assert [r["run_id"] for r in rows] == ["r2"]
+
+    @pytest.mark.anyio
     async def test_list_by_thread_owner_filter(self, store):
         await store.put("r1", thread_id="t1", user_id="alice")
         await store.put("r2", thread_id="t1", user_id="bob")

@@ -31,6 +31,8 @@ export const zhCN: Translations = {
     search: "搜索",
     loadMore: "加载更多",
     download: "下载",
+    downloadSuccess: "下载成功",
+    downloadFailed: "下载失败",
     thinking: "思考",
     artifacts: "文件",
     public: "公共",
@@ -201,6 +203,12 @@ export const zhCN: Translations = {
     viewAllChats: "查看全部",
     demoChats: "演示对话",
     agents: "智能体",
+    skills: "Skill 管理",
+    files: "文件",
+    memory: "记忆",
+    scheduledTasks: "定时任务",
+    collapseSidebar: "收起侧边栏",
+    expandSidebar: "展开侧边栏",
     taskRecords: "任务记录",
     taskRecordsEmpty: "暂无任务运行记录",
     taskRecordsLoadFailed: "任务记录加载失败。",
@@ -286,7 +294,7 @@ export const zhCN: Translations = {
 
   // Chats
   chats: {
-    searchChats: "搜索对话",
+    searchChats: "对话搜索",
   },
 
   // Page titles (document title)
@@ -491,8 +499,7 @@ export const zhCN: Translations = {
         loadFailed: "图片生成配置加载失败",
         noConfig: "暂无图片生成配置",
         enableTool: "启用图片生成工具",
-        enableToolDescription:
-          "启用后，已启用的厂商会暴露给 Agent 生成图片。",
+        enableToolDescription: "启用后，已启用的厂商会暴露给 Agent 生成图片。",
         defaultProvider: "默认厂商",
         outputDir: "输出目录",
         selectModel: "选择模型",

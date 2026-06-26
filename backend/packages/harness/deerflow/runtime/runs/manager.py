@@ -391,38 +391,42 @@ class RunManager:
         """
         return await self.get(run_id, user_id=user_id)
 
-    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
+    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100, offset: int = 0) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
-        In-memory runs take precedence only when the same ``run_id`` exists in both
-        memory and the backing store. The merged result is then sorted newest-first
-        by ``created_at`` and trimmed to ``limit`` (default 100).
+        In-memory runs take precedence when the same ``run_id`` exists in both
+        memory and the backing store, so active worker state stays current while
+        historical pages are served from the persistent store.
 
         Args:
             thread_id: The thread ID to filter by.
             user_id: Optional user ID for permission filtering when hydrating from store.
             limit: Maximum number of runs to return.
+            offset: Number of newest runs to skip.
         """
+        offset = max(0, offset)
         async with self._lock:
             # Dict insertion order gives deterministic results when timestamps tie.
             memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
         if self._store is None:
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[offset : offset + limit]
         records_by_id = {record.run_id: record for record in memory_records}
-        store_limit = max(0, limit - len(memory_records))
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=limit, offset=offset)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[offset : offset + limit]
+        records: list[RunRecord] = []
         for row in rows:
             run_id = row.get("run_id")
-            if run_id and run_id not in records_by_id:
-                try:
-                    records_by_id[run_id] = self._record_from_store(row)
-                except Exception:
-                    logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
-        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
+            if run_id and run_id in records_by_id:
+                records.append(records_by_id[run_id])
+                continue
+            try:
+                records.append(self._record_from_store(row))
+            except Exception:
+                logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        return records
 
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""

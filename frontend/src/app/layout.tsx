@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 
 import { type Metadata } from "next";
 
+import { ChunkLoadRecovery } from "@/components/chunk-load-recovery";
 import { ClipboardBootstrap } from "@/components/clipboard-bootstrap";
 import { SlashCommandBootstrap } from "@/components/slash-command-bootstrap";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -23,6 +24,7 @@ export default async function RootLayout({
       <body>
         <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
           <I18nProvider initialLocale={locale}>
+            <ChunkLoadRecovery />
             <ClipboardBootstrap />
             <SlashCommandBootstrap />
             {children}

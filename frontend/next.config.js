@@ -37,6 +37,17 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
+  // API rewrites proxy multipart uploads to Gateway; default proxy buffer is too small.
+  proxyClientMaxBodySize: "100mb",
+  webpack: (config, { dev }) => {
+    if (dev) {
+      // Docker dev compiles routes on demand and can exceed the default
+      // webpack chunk load timeout before the first chunk is ready.
+      config.output ??= {};
+      config.output.chunkLoadTimeout = 600_000;
+    }
+    return config;
+  },
   async rewrites() {
     const rewrites = [];
     const gatewayURL = getInternalServiceURL(

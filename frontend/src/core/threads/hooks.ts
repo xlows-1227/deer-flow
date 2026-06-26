@@ -3,6 +3,7 @@ import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -11,7 +12,12 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import { getMessageTimestamp, type FileInMessage } from "../messages/utils";
+import {
+  extractTextFromMessage,
+  getMessageTimestamp,
+  stripUploadedFilesTag,
+  type FileInMessage,
+} from "../messages/utils";
 import { sandboxFilesQueryKey } from "../sandbox";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
@@ -45,7 +51,39 @@ export type ThreadStreamOptions = {
 
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
+  multitaskStrategy?: "reject" | "interrupt" | "rollback" | "enqueue";
 };
+
+const THREAD_RUNS_PAGE_SIZE = 100;
+const RUN_MESSAGES_PAGE_SIZE = 200;
+
+type RunMessagesResponse = {
+  data?: RunMessage[];
+  has_more?: boolean;
+  hasMore?: boolean;
+};
+
+function waitForNextPaint(): Promise<void> {
+  if (typeof window === "undefined" || !window.requestAnimationFrame) {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      resolve();
+    };
+    const timeout = window.setTimeout(finish, 50);
+    window.requestAnimationFrame(() => {
+      window.clearTimeout(timeout);
+      finish();
+    });
+  });
+}
 
 function uploadedFileSizeToNumber(size: UploadedFileInfo["size"]): number {
   const normalized =
@@ -144,6 +182,136 @@ function findLatestUnloadedRunIndex(
   return -1;
 }
 
+function getRunCreatedAtMs(run: Run): number {
+  const createdAt = (run as { created_at?: string | null }).created_at;
+  if (!createdAt) {
+    return 0;
+  }
+  const timestamp = Date.parse(createdAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortRunsChronologically(runs: Run[]): Run[] {
+  return [...runs].sort((a, b) => getRunCreatedAtMs(a) - getRunCreatedAtMs(b));
+}
+
+export function mergeLoadedRunMessages(
+  runs: Run[],
+  messagesByRunId: ReadonlyMap<string, Message[]>,
+  appendedMessages: Message[] = [],
+): Message[] {
+  return dedupeMessagesByIdentity([
+    ...sortRunsChronologically(runs).flatMap(
+      (run) => messagesByRunId.get(run.run_id) ?? [],
+    ),
+    ...appendedMessages,
+  ]);
+}
+
+function mergeThreadAndOptimisticMessages(
+  historyMessages: Message[],
+  threadMessages: Message[],
+  optimisticMessages: Message[],
+): Message[] {
+  if (!optimisticMessages.some((message) => message.type === "human")) {
+    return [...threadMessages, ...optimisticMessages];
+  }
+
+  const historyMessageIds = new Set(
+    historyMessages.map(messageIdentity).filter(isNonEmptyString),
+  );
+  const firstNewThreadMessageIndex = threadMessages.findIndex((message) => {
+    const identity = messageIdentity(message);
+    return !identity || !historyMessageIds.has(identity);
+  });
+
+  if (firstNewThreadMessageIndex === -1) {
+    return [...threadMessages, ...optimisticMessages];
+  }
+
+  return [
+    ...threadMessages.slice(0, firstNewThreadMessageIndex),
+    ...optimisticMessages,
+    ...threadMessages.slice(firstNewThreadMessageIndex),
+  ];
+}
+
+function humanMessageVisibilityKey(message: Message): string | null {
+  if (message.type !== "human") {
+    return null;
+  }
+  const identity = messageIdentity(message);
+  if (identity) {
+    return identity;
+  }
+  const text = normalizeHumanMessageText(message);
+  return text ? `human-content:${text}` : null;
+}
+
+function getHumanMessageVisibilityKeys(messages: Message[]): Set<string> {
+  const keys = new Set<string>();
+  for (const message of messages) {
+    const key = humanMessageVisibilityKey(message);
+    if (key) {
+      keys.add(key);
+    }
+  }
+  return keys;
+}
+
+function normalizeHumanMessageText(message: Message): string {
+  if (message.type !== "human") {
+    return "";
+  }
+  return stripUploadedFilesTag(extractTextFromMessage(message)).trim();
+}
+
+function hasServerReplacementForOptimisticHuman(
+  optimisticMessages: Message[],
+  baselineHumanMessageKeys: ReadonlySet<string>,
+  serverMessages: Message[],
+): boolean {
+  const optimisticHumanTexts = new Set(
+    optimisticMessages
+      .filter((message) => message.type === "human")
+      .map(normalizeHumanMessageText)
+      .filter((text) => text.length > 0),
+  );
+
+  if (optimisticHumanTexts.size === 0) {
+    return false;
+  }
+
+  return serverMessages.some((message) => {
+    if (message.type !== "human") {
+      return false;
+    }
+    const key = humanMessageVisibilityKey(message);
+    if (key && baselineHumanMessageKeys.has(key)) {
+      return false;
+    }
+    return optimisticHumanTexts.has(normalizeHumanMessageText(message));
+  });
+}
+
+export function getVisibleOptimisticMessagesForServerMessages(
+  optimisticMessages: Message[],
+  baselineHumanMessageKeys: ReadonlySet<string>,
+  serverMessages: Message[],
+): Message[] {
+  if (
+    optimisticMessages.some((message) => message.type === "human") &&
+    hasServerReplacementForOptimisticHuman(
+      optimisticMessages,
+      baselineHumanMessageKeys,
+      serverMessages,
+    )
+  ) {
+    return [];
+  }
+  return optimisticMessages;
+}
+
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -176,8 +344,11 @@ export function mergeMessages(
 
   return dedupeMessagesByIdentity([
     ...historyMessages.slice(0, cutoff),
-    ...timestampedThreadMessages,
-    ...optimisticMessages,
+    ...mergeThreadAndOptimisticMessages(
+      historyMessages,
+      timestampedThreadMessages,
+      optimisticMessages,
+    ),
   ]);
 }
 
@@ -226,6 +397,57 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
+}
+
+async function fetchRunMessages(
+  threadId: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<RunMessage[]> {
+  const pages: RunMessage[][] = [];
+  let beforeSeq: number | null = null;
+
+  for (let page = 0; page < 1000; page += 1) {
+    const params = new URLSearchParams({
+      limit: String(RUN_MESSAGES_PAGE_SIZE),
+    });
+    if (beforeSeq !== null) {
+      params.set("before_seq", String(beforeSeq));
+    }
+
+    const response = await fetch(
+      `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages?${params.toString()}`,
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        signal,
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to load run messages.");
+    }
+
+    const result = (await response.json()) as RunMessagesResponse;
+    const data = Array.isArray(result.data) ? result.data : [];
+    if (data.length === 0) {
+      break;
+    }
+
+    pages.unshift(data);
+
+    const hasMore = result.has_more ?? result.hasMore ?? false;
+    const firstSeq = data[0]?.seq;
+    if (!hasMore || typeof firstSeq !== "number" || firstSeq === beforeSeq) {
+      break;
+    }
+    beforeSeq = firstSeq;
+  }
+
+  return pages.flat();
 }
 
 export function useThreadStream({
@@ -481,34 +703,30 @@ export function useThreadStream({
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const humanMessageCount = thread.messages.filter(
-    (m) => m.type === "human",
-  ).length;
-  const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
   const summarizedRef = useRef<Set<string>>(null);
-  // Track human message count before sending to prevent clearing optimistic
-  // messages before the server's human message arrives (e.g. when AI messages
-  // from "messages-tuple" events arrive before the input human message from
-  // "values" events).
-  const prevHumanMsgCountRef = useRef(humanMessageCount);
+  const optimisticBaselineHumanKeysRef = useRef<Set<string>>(new Set());
 
-  latestMessageCountsRef.current = { humanMessageCount };
   summarizedRef.current ??= new Set<string>();
+
+  const serverMessagesWithoutOptimistic = mergeMessages(
+    history,
+    thread.messages,
+    [],
+  );
 
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    optimisticBaselineHumanKeysRef.current = new Set();
     pendingUsageBaselineMessageIdsRef.current = new Set(
       messagesRef.current
         .map(messageIdentity)
         .filter((id): id is string => Boolean(id)),
     );
-    prevHumanMsgCountRef.current =
-      latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
 
   // When streaming starts without a baseline (e.g. reconnection, run started
@@ -534,15 +752,23 @@ export function useThreadStream({
   // after individual "messages-tuple" events for AI messages).
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
+  const hasServerReplacementForOptimistic =
+    hasServerReplacementForOptimisticHuman(
+      optimisticMessages,
+      optimisticBaselineHumanKeysRef.current,
+      serverMessagesWithoutOptimistic,
+    );
   useEffect(() => {
     if (optimisticMessageCount === 0) return;
 
-    const newHumanMsgArrived = humanMessageCount > prevHumanMsgCountRef.current;
-
-    if (!hasHumanOptimistic || newHumanMsgArrived) {
+    if (!hasHumanOptimistic || hasServerReplacementForOptimistic) {
       setOptimisticMessages([]);
     }
-  }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
+  }, [
+    hasHumanOptimistic,
+    hasServerReplacementForOptimistic,
+    optimisticMessageCount,
+  ]);
 
   const sendMessage = useCallback(
     async (
@@ -558,9 +784,13 @@ export function useThreadStream({
 
       const text = message.text.trim();
 
-      // Capture the current human message count before showing optimistic
-      // messages so we can wait for the server's copy of the user input.
-      prevHumanMsgCountRef.current = humanMessageCount;
+      // Capture the currently visible server-backed human messages before
+      // showing optimistic UI. During streaming, old history can arrive before
+      // the server echoes this submission; only the matching new human should
+      // replace the optimistic bubble.
+      optimisticBaselineHumanKeysRef.current = getHumanMessageVisibilityKeys(
+        serverMessagesWithoutOptimistic,
+      );
       pendingUsageBaselineMessageIdsRef.current = new Set(
         thread.messages
           .map(messageIdentity)
@@ -601,9 +831,16 @@ export function useThreadStream({
           additional_kwargs: { element: "task" },
         });
       }
-      setOptimisticMessages(newOptimistic);
-
-      listeners.current.onSend?.(threadId);
+      if (newOptimistic.length > 0) {
+        flushSync(() => {
+          setOptimisticMessages(newOptimistic);
+          listeners.current.onSend?.(threadId);
+        });
+        await waitForNextPaint();
+      } else {
+        setOptimisticMessages(newOptimistic);
+        listeners.current.onSend?.(threadId);
+      }
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -709,6 +946,7 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
+            multitaskStrategy: options?.multitaskStrategy,
             config: {
               recursion_limit: 1000,
             },
@@ -741,7 +979,13 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [thread, t.uploads.uploadingFiles, context, queryClient, humanMessageCount],
+    [
+      thread,
+      t.uploads.uploadingFiles,
+      context,
+      queryClient,
+      serverMessagesWithoutOptimistic,
+    ],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
@@ -752,11 +996,12 @@ export function useThreadStream({
     }
   }, [thread.messages]);
 
-  const visibleOptimisticMessages = getVisibleOptimisticMessages(
-    optimisticMessages,
-    prevHumanMsgCountRef.current,
-    humanMessageCount,
-  );
+  const visibleOptimisticMessages =
+    getVisibleOptimisticMessagesForServerMessages(
+      optimisticMessages,
+      optimisticBaselineHumanKeysRef.current,
+      serverMessagesWithoutOptimistic,
+    );
 
   const mergedMessages = mergeMessages(
     history,
@@ -797,10 +1042,20 @@ export function useThreadHistory(threadId: string) {
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const messagesByRunIdRef = useRef<Map<string, Message[]>>(new Map());
+  const appendedMessagesRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+
+  const getComposedMessages = useCallback(() => {
+    return mergeLoadedRunMessages(
+      runsRef.current,
+      messagesByRunIdRef.current,
+      appendedMessagesRef.current,
+    );
+  }, []);
 
   const loadMessages = useCallback(async () => {
     if (loadingRef.current) {
@@ -844,21 +1099,13 @@ export function useThreadHistory(threadId: string) {
         loadingRunIdRef.current = run.run_id;
         controller = new AbortController();
         abortControllerRef.current = controller;
-        const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-          {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
-            signal: controller.signal,
-          },
-        ).then((res) => {
-          return res.json();
-        });
-        const _messages = result.data
-          .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
+        const runMessages = await fetchRunMessages(
+          requestThreadId,
+          run.run_id,
+          controller.signal,
+        );
+        const _messages = runMessages
+          .filter((m) => !m.metadata?.caller?.startsWith("middleware:"))
           .map((m) => withMessageTimestamp(m.content, m.created_at));
         if (
           threadIdRef.current !== requestThreadId ||
@@ -866,10 +1113,9 @@ export function useThreadHistory(threadId: string) {
         ) {
           return;
         }
-        setMessages((prev) =>
-          dedupeMessagesByIdentity([..._messages, ...prev]),
-        );
+        messagesByRunIdRef.current.set(run.run_id, _messages);
         loadedRunIdsRef.current.add(run.run_id);
+        setMessages(getComposedMessages());
         indexRef.current = findLatestUnloadedRunIndex(
           runsRef.current,
           loadedRunIdsRef.current,
@@ -891,7 +1137,7 @@ export function useThreadHistory(threadId: string) {
         }
       }
     }
-  }, []);
+  }, [getComposedMessages]);
 
   // Reset all thread-local state when the active thread changes. This also
   // aborts any in-flight fetch for the previous thread and bumps the request
@@ -905,6 +1151,8 @@ export function useThreadHistory(threadId: string) {
     pendingLoadRef.current = false;
     loadingRunIdRef.current = null;
     loadedRunIdsRef.current = new Set();
+    messagesByRunIdRef.current = new Map();
+    appendedMessagesRef.current = [];
     loadingRef.current = false;
     setLoading(false);
     setMessages([]);
@@ -925,21 +1173,27 @@ export function useThreadHistory(threadId: string) {
     if (currentRuns.length === 0) {
       return;
     }
-    runsRef.current = currentRuns;
+    runsRef.current = sortRunsChronologically(currentRuns);
     indexRef.current = findLatestUnloadedRunIndex(
       runsRef.current,
       loadedRunIdsRef.current,
     );
+    setMessages(getComposedMessages());
     loadMessages().catch(() => {
       toast.error("Failed to load thread history.");
     });
-  }, [runs.data, loadMessages]);
+  }, [runs.data, getComposedMessages, loadMessages]);
 
-  const appendMessages = useCallback((_messages: Message[]) => {
-    setMessages((prev) => {
-      return dedupeMessagesByIdentity([...prev, ..._messages]);
-    });
-  }, []);
+  const appendMessages = useCallback(
+    (_messages: Message[]) => {
+      appendedMessagesRef.current = dedupeMessagesByIdentity([
+        ...appendedMessagesRef.current,
+        ..._messages,
+      ]);
+      setMessages(getComposedMessages());
+    },
+    [getComposedMessages],
+  );
   const hasMore = indexRef.current >= 0 || !runs.data;
   return {
     runs: runs.data,
@@ -1021,15 +1275,45 @@ export function useThreads(
 }
 
 export function useThreadRuns(threadId?: string) {
-  const apiClient = getAPIClient();
   return useQuery<Run[]>({
     queryKey: ["thread", threadId],
     queryFn: async () => {
       if (!threadId) {
         return [];
       }
-      const response = await apiClient.runs.list(threadId);
-      return response;
+      const runs: Run[] = [];
+      let offset = 0;
+
+      while (true) {
+        const params = new URLSearchParams({
+          limit: String(THREAD_RUNS_PAGE_SIZE),
+          offset: String(offset),
+        });
+        const response = await fetch(
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs?${params.toString()}`,
+          {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error("Failed to load thread runs.");
+        }
+
+        const page = (await response.json()) as Run[];
+        runs.push(...page);
+
+        if (page.length < THREAD_RUNS_PAGE_SIZE) {
+          break;
+        }
+        offset += page.length;
+      }
+
+      return runs;
     },
     refetchOnWindowFocus: false,
   });

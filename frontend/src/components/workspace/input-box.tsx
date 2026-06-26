@@ -143,7 +143,7 @@ function getResolvedMode(
   if (mode) {
     return mode;
   }
-  return supportsThinking ? "pro" : "flash";
+  return "flash";
 }
 
 export function InputBox({
@@ -160,6 +160,7 @@ export function InputBox({
   onFollowupsVisibilityChange,
   onSubmit,
   onStop,
+  submitWhileStreaming = false,
   lockedSkillName,
   showWelcomeSuggestions = true,
   footerExtensionClassName,
@@ -198,6 +199,7 @@ export function InputBox({
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
+  submitWhileStreaming?: boolean;
   /** When set, skill is fixed and cannot be changed or cleared. */
   lockedSkillName?: string;
   /** Whether to show welcome quick suggestion chips under the input. */
@@ -602,10 +604,6 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      if (status === "streaming") {
-        onStop?.();
-        return;
-      }
       // Merge in the @-picked files. The form-level `message` only knows
       // about the textarea text and the *uploaded* attachments; the
       // mention-picker state lives here, so we tack it on at submit time.
@@ -619,9 +617,6 @@ export function InputBox({
       // delayed clear here causes a 1-frame "chip above input + chip in
       // bubble" duplicate that the eye picks up on a new chat.
       const submittedReferencedFiles = referencedFiles;
-      if (submittedReferencedFiles.length > 0) {
-        setReferencedFiles([]);
-      }
       const enrichedMessage: PromptInputMessage = {
         ...message,
         referencedFiles:
@@ -629,12 +624,22 @@ export function InputBox({
             ? submittedReferencedFiles
             : undefined,
       };
-      if (
-        !enrichedMessage.text.trim() &&
-        enrichedMessage.files.length === 0 &&
-        (enrichedMessage.referencedFiles?.length ?? 0) === 0
-      ) {
+      const hasContent =
+        enrichedMessage.text.trim().length > 0 ||
+        enrichedMessage.files.length > 0 ||
+        (enrichedMessage.referencedFiles?.length ?? 0) > 0;
+
+      if (status === "streaming" && (!submitWhileStreaming || !hasContent)) {
+        onStop?.();
         return;
+      }
+
+      if (!hasContent) {
+        return;
+      }
+
+      if (submittedReferencedFiles.length > 0) {
+        setReferencedFiles([]);
       }
       setFollowups([]);
       setFollowupsHidden(false);
@@ -691,6 +696,7 @@ export function InputBox({
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
+      submitWhileStreaming,
     ],
   );
 

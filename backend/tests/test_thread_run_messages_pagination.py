@@ -9,7 +9,7 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
-from deerflow.runtime import RunManager
+from deerflow.runtime import DisconnectMode, RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -188,6 +188,34 @@ def test_stream_store_only_run_returns_409():
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
+
+
+def test_list_runs_forwards_limit_and_offset():
+    """GET /api/threads/{tid}/runs forwards pagination to RunManager."""
+    record = RunRecord(
+        run_id="run-page",
+        thread_id="thread-page",
+        assistant_id="lead_agent",
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.cancel,
+        created_at="2026-01-02T00:00:00+00:00",
+        updated_at="2026-01-02T00:00:01+00:00",
+    )
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[record])
+    app = _make_app(run_manager=run_manager)
+    app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-page"})
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-page/runs?limit=2&offset=3")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [run["run_id"] for run in body] == ["run-page"]
+    run_manager.list_by_thread.assert_awaited_once()
+    _, kwargs = run_manager.list_by_thread.await_args
+    assert kwargs["limit"] == 2
+    assert kwargs["offset"] == 3
 
 
 def test_list_runs_unauthenticated_returns_401():

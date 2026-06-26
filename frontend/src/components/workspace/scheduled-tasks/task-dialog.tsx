@@ -94,7 +94,7 @@ function taskToInitial(task: ScheduledTask | null): ScheduledTaskPayload {
     day_of_week: task?.day_of_week ?? 0,
     is_enabled: task?.is_enabled ?? true,
     model_name: task?.model_name ?? null,
-    mode: task?.mode ?? "pro",
+    mode: task?.mode ?? "flash",
     reasoning_effort: task?.reasoning_effort ?? "medium",
   };
 }

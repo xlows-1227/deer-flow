@@ -20,9 +20,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
   buildSkillMarkdown,
+  formatSkillValidationError,
   parseSkillMarkdown,
   slugifySkillName,
   syncSkillFrontmatter,
+  validateSkillMarkdownContent,
 } from "@/components/workspace/skills/skill-create-utils";
 import { createCustomSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
@@ -60,22 +62,37 @@ export default function CreateSkillPage() {
 
   async function handleSubmit() {
     if (!canSubmit) return;
+
+    const syncedContent = syncSkillFrontmatter({
+      content,
+      name: normalizedName,
+      displayName,
+      description: description.trim(),
+    });
+    const validation = validateSkillMarkdownContent(
+      syncedContent,
+      normalizedName,
+    );
+    if (!validation.valid) {
+      toast.error(validation.message);
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       await createCustomSkill({
         name: normalizedName,
         description: description.trim(),
-        content: syncSkillFrontmatter({
-          content,
-          name: normalizedName,
-          displayName,
-          description: description.trim(),
-        }),
+        content: syncedContent,
       });
       toast.success("Skill 已创建");
       router.push("/workspace/skills");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "创建 Skill 失败");
+      toast.error(
+        error instanceof Error
+          ? formatSkillValidationError(error.message)
+          : "创建 Skill 失败",
+      );
     } finally {
       setIsSubmitting(false);
     }

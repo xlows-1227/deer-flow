@@ -423,6 +423,16 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_list_by_thread_offset(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
+        await repo.put("r2", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        await repo.put("r3", thread_id="t1", created_at="2024-01-03T00:00:00+00:00")
+        rows = await repo.list_by_thread("t1", limit=1, offset=1)
+        assert [r["run_id"] for r in rows] == ["r2"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_owner_none_returns_all(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", user_id="alice")

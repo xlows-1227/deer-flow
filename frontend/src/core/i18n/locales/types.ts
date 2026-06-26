@@ -20,6 +20,8 @@ export interface Translations {
     search: string;
     loadMore: string;
     download: string;
+    downloadSuccess: string;
+    downloadFailed: string;
     thinking: string;
     artifacts: string;
     public: string;
@@ -150,6 +152,12 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    skills: string;
+    files: string;
+    memory: string;
+    scheduledTasks: string;
+    collapseSidebar: string;
+    expandSidebar: string;
     taskRecords: string;
     taskRecordsEmpty: string;
     taskRecordsLoadFailed: string;

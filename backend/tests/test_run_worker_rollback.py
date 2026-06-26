@@ -9,7 +9,16 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.worker import RunContext, _agent_factory_supports_app_config, _build_runtime_context, _install_runtime_context, _queue_flash_memory_capture, _rollback_to_pre_run_checkpoint, run_agent
+from deerflow.runtime.runs.worker import (
+    RunContext,
+    _agent_factory_supports_app_config,
+    _build_runtime_context,
+    _flash_direct_checkpoint_metadata,
+    _install_runtime_context,
+    _queue_flash_memory_capture,
+    _rollback_to_pre_run_checkpoint,
+    run_agent,
+)
 
 
 class FakeCheckpointer:
@@ -309,6 +318,28 @@ async def test_flash_direct_path_persists_checkpoint_history(monkeypatch):
 
     assert captured_model_messages[0] == ["system prompt", "first"]
     assert captured_model_messages[1] == ["system prompt", "first", "response-1", "second"]
+
+    ckpt = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}})
+    metadata = getattr(ckpt, "metadata", {}) or {}
+    assert metadata["step"] == 1
+    assert metadata["source"] == "flash_direct"
+    assert isinstance(metadata.get("parents"), dict)
+
+
+def test_flash_direct_checkpoint_metadata_advances_step_from_parent():
+    parent = SimpleNamespace(metadata={"step": 4, "parents": {"": "ckpt-1"}, "source": "loop"})
+    metadata = _flash_direct_checkpoint_metadata(parent)
+    assert metadata == {"source": "flash_direct", "step": 5, "parents": {"": "ckpt-1"}}
+
+
+def test_flash_direct_checkpoint_metadata_defaults_step_to_zero():
+    metadata = _flash_direct_checkpoint_metadata(None)
+    assert metadata == {"source": "flash_direct", "step": 0, "parents": {}}
+
+
+def test_flash_direct_checkpoint_metadata_matches_langgraph_resume_contract():
+    metadata = _flash_direct_checkpoint_metadata(SimpleNamespace(metadata={"step": -1, "parents": {}, "source": "input"}))
+    assert metadata["step"] + 1 == 1
 
 
 @pytest.mark.anyio

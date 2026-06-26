@@ -95,16 +95,20 @@ services:
     container_name: deer-flow-frontend
     command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
     volumes:
-      - ../frontend/src:/app/frontend/src
-      - ../frontend/public:/app/frontend/public
+      - ../frontend/src:/app/frontend/src:cached
+      - ../frontend/public:/app/frontend/public:cached
       - ../frontend/next.config.js:/app/frontend/next.config.js:ro
       - ../logs:/app/logs
+      # Persist webpack/next compile cache across container restarts.
+      - frontend-next-cache:/app/frontend/.next
       # Mount pnpm store for caching
       - ${PNPM_STORE_PATH:-~/.local/share/pnpm/store}:/root/.local/share/pnpm/store
     working_dir: /app
     environment:
       - NODE_ENV=development
+      - NODE_OPTIONS=--max-old-space-size=4096
       - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
       - CI=true
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
@@ -188,6 +192,7 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   gateway-uv-cache:
+  frontend-next-cache:
 
 networks:
   deer-flow-dev:

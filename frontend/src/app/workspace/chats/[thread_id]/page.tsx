@@ -116,20 +116,20 @@ export default function ChatPage() {
       // `additional_kwargs.referenced_files` so the agent knows which
       // existing files in the user's library to read.
       const { referencedFiles, ...rest } = message;
-      const sendPromise = sendMessage(
-        threadId,
-        rest,
-        undefined,
-        referencedFiles && referencedFiles.length > 0
+      const sendPromise = sendMessage(threadId, rest, undefined, {
+        ...(referencedFiles && referencedFiles.length > 0
           ? { additionalKwargs: { referenced_files: referencedFiles } }
-          : undefined,
-      );
+          : {}),
+        ...(thread.isLoading
+          ? { multitaskStrategy: "interrupt" as const }
+          : {}),
+      });
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId],
+    [sendMessage, thread.isLoading, threadId],
   );
   const handleChoiceSelect = useCallback(
     (choice: string) => {
@@ -267,6 +267,7 @@ export default function ChatPage() {
                     onContextChange={(context) =>
                       setSettings("context", context)
                     }
+                    submitWhileStreaming
                     onSubmit={handleSubmit}
                     onStop={handleStop}
                   />
