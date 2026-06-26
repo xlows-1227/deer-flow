@@ -300,6 +300,23 @@
     @apply bg-background text-foreground;
   }
 
+  /* Docker environment dropdown fix
+   * Ensures Radix UI dropdown menus render correctly in containerized environments
+   * by preventing clipping and ensuring proper event handling.
+   * Targets actual Radix UI Popper wrapper elements used by DropdownMenu.
+   */
+  [data-radix-popper-content-wrapper] {
+    /* Ensure dropdown wrapper doesn't get clipped by parent overflow */
+    position: fixed !important;
+    /* Ensure dropdown receives pointer events */
+    pointer-events: auto !important;
+  }
+
+  [data-slot="dropdown-menu-content"] {
+    /* DropdownMenuContent - ensure pointer events for interaction */
+    pointer-events: auto !important;
+  }
+
   .container-md {
     width: 100%;
     @media (width >= 40rem) {
