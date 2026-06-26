@@ -147,37 +147,53 @@ function profileItemsToMarkdown(title: string, items: MemoryProfileItem[]) {
   ].join("\n");
 }
 
-function memoryProfileToMarkdown(profile: MemoryProfile | null) {
+function memoryProfileToMarkdown(
+  profile: MemoryProfile | null,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   if (!profile) return "";
+  const exportKeys = t.settings.memory.markdown.export;
   const sections = [
     profile.overview || "",
-    profileItemsToMarkdown("偏好", profile.preferences),
-    profileItemsToMarkdown("沟通风格", profile.communicationStyle),
-    profileItemsToMarkdown("Skill 与工具使用习惯", profile.skillUsagePatterns),
-    profileItemsToMarkdown("兴趣与画像", profile.interests),
-    profileItemsToMarkdown("近期关注", profile.topOfMind),
-    profileItemsToMarkdown("纠正与避免", profile.corrections),
+    profileItemsToMarkdown(exportKeys.preferences, profile.preferences),
+    profileItemsToMarkdown(
+      exportKeys.communicationStyle,
+      profile.communicationStyle,
+    ),
+    profileItemsToMarkdown(
+      exportKeys.skillUsagePatterns,
+      profile.skillUsagePatterns,
+    ),
+    profileItemsToMarkdown(exportKeys.interests, profile.interests),
+    profileItemsToMarkdown(exportKeys.topOfMind, profile.topOfMind),
+    profileItemsToMarkdown(exportKeys.corrections, profile.corrections),
   ].filter((part) => part.trim().length > 0);
   if (sections.length === 0) return "";
-  return ["## 长期画像", ...sections].join("\n");
+  return ["## " + exportKeys.longTermProfile, ...sections].join("\n");
 }
 
-function dailyMemoryToMarkdown(dailyMemory: DailyPersonSummary[]) {
+function dailyMemoryToMarkdown(
+  dailyMemory: DailyPersonSummary[],
+  t: ReturnType<typeof useI18n>["t"],
+) {
   if (dailyMemory.length === 0) return "";
-  const parts = ["## 每日总结"];
+  const exportKeys = t.settings.memory.markdown.export;
+  const parts = ["## " + exportKeys.dailySummary];
   for (const daily of dailyMemory.slice(0, 7)) {
     parts.push(`### ${daily.date}`);
     if (daily.summary.trim()) parts.push(daily.summary);
     const lines = [
-      ...daily.preferences.map((item) => `- 偏好: ${item}`),
-      ...daily.recentFocus.map((item) => `- 近期关注: ${item}`),
-      ...daily.skillUsagePatterns.map((item) => `- 使用习惯: ${item}`),
-      ...daily.interests.map((item) => `- 兴趣/画像: ${item}`),
-      ...daily.corrections.map((item) => `- 纠正: ${item}`),
+      ...daily.preferences.map((item) => `- ${exportKeys.preferences}: ${item}`),
+      ...daily.recentFocus.map((item) => `- ${exportKeys.topOfMind}: ${item}`),
+      ...daily.skillUsagePatterns.map(
+        (item) => `- ${exportKeys.skillUsagePatterns}: ${item}`,
+      ),
+      ...daily.interests.map((item) => `- ${exportKeys.interests}: ${item}`),
+      ...daily.corrections.map((item) => `- ${exportKeys.corrections}: ${item}`),
     ];
     if (lines.length > 0) parts.push(lines.join("\n"));
     if (daily.updatedAt)
-      parts.push(`> 更新于: \`${formatTimeAgo(daily.updatedAt)}\``);
+      parts.push(`> ${exportKeys.updatedAt}: \`${formatTimeAgo(daily.updatedAt)}\``);
   }
   return parts.join("\n\n");
 }
@@ -288,8 +304,8 @@ export function MemorySettingsPage() {
   const manualFacts = memory
     ? memory.facts.filter((fact) => fact.source === "manual")
     : [];
-  const profileMarkdown = memoryProfileToMarkdown(profile);
-  const dailyMarkdown = dailyMemoryToMarkdown(dailyMemory);
+  const profileMarkdown = memoryProfileToMarkdown(profile, t);
+  const dailyMarkdown = dailyMemoryToMarkdown(dailyMemory, t);
   const isMemoryEmpty =
     !profileMarkdown && !dailyMarkdown && manualFacts.length === 0;
 

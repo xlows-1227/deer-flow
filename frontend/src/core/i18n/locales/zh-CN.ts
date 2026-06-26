@@ -50,6 +50,7 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    view: "查看",
   },
 
   // Home
@@ -454,6 +455,17 @@ export const zhCN: Translations = {
           source: "来源",
           createdAt: "创建时间",
         },
+        export: {
+          longTermProfile: "长期画像",
+          dailySummary: "每日总结",
+          preferences: "偏好",
+          communicationStyle: "沟通风格",
+          skillUsagePatterns: "Skill 与工具使用习惯",
+          interests: "兴趣与画像",
+          topOfMind: "近期关注",
+          corrections: "纠正与避免",
+          updatedAt: "更新于",
+        },
       },
     },
     appearance: {
@@ -471,6 +483,34 @@ export const zhCN: Translations = {
     tools: {
       title: "MCP",
       description: "管理 MCP 服务配置、导入导出和启用状态。",
+      imageGeneration: {
+        title: "图片生成",
+        description:
+          "配置默认厂商、默认模型和 API Key。Agent 会按这里的默认值调用 generate_image 工具。",
+        loading: "加载图片生成配置中...",
+        loadFailed: "图片生成配置加载失败",
+        noConfig: "暂无图片生成配置",
+        enableTool: "启用图片生成工具",
+        enableToolDescription:
+          "启用后，已启用的厂商会暴露给 Agent 生成图片。",
+        defaultProvider: "默认厂商",
+        outputDir: "输出目录",
+        selectModel: "选择模型",
+        enabled: "启用",
+        disabled: "停用",
+        keyConfigured: "Key 已配置",
+        defaultModel: "默认模型",
+        apiKey: "API Key",
+        keepExistingKey: "留空保留现有 Key",
+        enterApiKey: "输入 API Key",
+        baseUrl: "Base URL",
+        timeoutSeconds: "超时秒数",
+        saveConfig: "保存配置",
+        saving: "保存中...",
+        saveSuccess: "图片生成配置已保存",
+        retry: "重试",
+        adapter: "Adapter",
+      },
     },
     connectors: {
       title: "连接器",

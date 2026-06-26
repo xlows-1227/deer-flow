@@ -111,7 +111,7 @@ function SkillSettingsList({
                 onClick={() => setSelectedSkill(skill)}
               >
                 <EyeIcon className="h-3.5 w-3.5" />
-                查看
+                {t.common.view}
               </Button>
               <Switch
                 checked={skill.enabled}

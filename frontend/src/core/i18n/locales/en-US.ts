@@ -50,6 +50,7 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    view: "View",
   },
 
   // Home
@@ -473,6 +474,17 @@ export const enUS: Translations = {
           source: "Source",
           createdAt: "CreatedAt",
         },
+        export: {
+          longTermProfile: "Long-term Profile",
+          dailySummary: "Daily Summary",
+          preferences: "Preferences",
+          communicationStyle: "Communication Style",
+          skillUsagePatterns: "Skill Usage Patterns",
+          interests: "Interests",
+          topOfMind: "Recent Focus",
+          corrections: "Corrections",
+          updatedAt: "Updated at",
+        },
       },
     },
     appearance: {
@@ -492,6 +504,34 @@ export const enUS: Translations = {
       title: "MCP",
       description:
         "Manage MCP server configuration, imports, exports, and enabled status.",
+      imageGeneration: {
+        title: "Image Generation",
+        description:
+          "Configure the default provider, model, and API Key. Agents will call the generate_image tool with these defaults.",
+        loading: "Loading image generation configuration...",
+        loadFailed: "Failed to load image generation configuration",
+        noConfig: "No image generation configuration",
+        enableTool: "Enable Image Generation",
+        enableToolDescription:
+          "When enabled, activated providers will be exposed to Agents for image generation.",
+        defaultProvider: "Default Provider",
+        outputDir: "Output Directory",
+        selectModel: "Select model",
+        enabled: "Enabled",
+        disabled: "Disabled",
+        keyConfigured: "Key configured",
+        defaultModel: "Default Model",
+        apiKey: "API Key",
+        keepExistingKey: "Leave empty to keep existing Key",
+        enterApiKey: "Enter API Key",
+        baseUrl: "Base URL",
+        timeoutSeconds: "Timeout (seconds)",
+        saveConfig: "Save Configuration",
+        saving: "Saving...",
+        saveSuccess: "Image generation configuration saved",
+        retry: "Retry",
+        adapter: "Adapter",
+      },
     },
     connectors: {
       title: "Connectors",

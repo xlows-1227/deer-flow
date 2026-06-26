@@ -36,6 +36,7 @@ import {
   type ImageGenerationConfig,
   type ImageGenerationProviderConfig,
 } from "@/core/tools";
+import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
@@ -89,6 +90,7 @@ function ProviderModelInput({
   disabled: boolean;
   onChange: (model: string) => void;
 }) {
+  const { t } = useI18n();
   const modelOptions = useMemo(() => {
     const options = new Set(provider.metadata?.models ?? []);
     const current = provider.model.trim();
@@ -100,7 +102,7 @@ function ProviderModelInput({
 
   const placeholder = fallbackText(
     provider.metadata?.default_model,
-    "选择模型",
+    t.settings.tools.imageGeneration.selectModel,
   );
 
   if (modelOptions.length === 0) {
@@ -149,6 +151,7 @@ function ProviderCard({
   onProviderChange: (patch: Partial<ImageGenerationProviderConfig>) => void;
   onApiKeyChange: (value: string) => void;
 }) {
+  const { t } = useI18n();
   const supportedParameters = provider.metadata?.supported_parameters ?? [];
   return (
     <Card className="rounded-lg">
@@ -165,17 +168,19 @@ function ProviderCard({
                 ) : (
                   <XCircleIcon className="h-3 w-3" />
                 )}
-                {provider.enabled ? "启用" : "停用"}
+                {provider.enabled
+                  ? t.settings.tools.imageGeneration.enabled
+                  : t.settings.tools.imageGeneration.disabled}
               </Badge>
               {provider.has_api_key && (
                 <Badge variant="secondary">
                   <KeyRoundIcon className="h-3 w-3" />
-                  Key 已配置
+                  {t.settings.tools.imageGeneration.keyConfigured}
                 </Badge>
               )}
             </div>
             <CardDescription className="mt-2">
-              Adapter: {provider.provider}
+              {t.settings.tools.imageGeneration.adapter}: {provider.provider}
             </CardDescription>
           </div>
           <Switch
@@ -188,7 +193,9 @@ function ProviderCard({
       <CardContent className="grid gap-4">
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">默认模型</span>
+            <span className="font-medium">
+              {t.settings.tools.imageGeneration.defaultModel}
+            </span>
             <ProviderModelInput
               provider={provider}
               disabled={disabled}
@@ -196,21 +203,27 @@ function ProviderCard({
             />
           </label>
           <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">API Key</span>
+            <span className="font-medium">
+              {t.settings.tools.imageGeneration.apiKey}
+            </span>
             <Input
               type="password"
               value={apiKeyDraft}
               disabled={disabled}
               onChange={(event) => onApiKeyChange(event.target.value)}
               placeholder={
-                provider.has_api_key ? "留空保留现有 Key" : "输入 API Key"
+                provider.has_api_key
+                  ? t.settings.tools.imageGeneration.keepExistingKey
+                  : t.settings.tools.imageGeneration.enterApiKey
               }
             />
           </label>
         </div>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_9rem]">
           <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">Base URL</span>
+            <span className="font-medium">
+              {t.settings.tools.imageGeneration.baseUrl}
+            </span>
             <Input
               value={provider.base_url}
               disabled={disabled}
@@ -224,7 +237,9 @@ function ProviderCard({
             />
           </label>
           <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">超时秒数</span>
+            <span className="font-medium">
+              {t.settings.tools.imageGeneration.timeoutSeconds}
+            </span>
             <Input
               type="number"
               min={1}
@@ -251,6 +266,7 @@ function ProviderCard({
 }
 
 function ImageGenerationSettings() {
+  const { t } = useI18n();
   const [config, setConfig] = useState<ImageGenerationConfig | null>(null);
   const [apiKeys, setApiKeys] = useState<ApiKeyDraft>({});
   const [loading, setLoading] = useState(true);
@@ -305,7 +321,7 @@ function ImageGenerationSettings() {
       });
       setConfig(updated);
       setApiKeys({});
-      toast.success("图片生成配置已保存");
+      toast.success(t.settings.tools.imageGeneration.saveSuccess);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
@@ -313,42 +329,44 @@ function ImageGenerationSettings() {
     }
   }
 
+  const img = t.settings.tools.imageGeneration;
+
   return (
     <SettingsSection
       title={
         <span className="inline-flex items-center gap-2">
           <ImageIcon className="h-5 w-5" />
-          图片生成
+          {img.title}
         </span>
       }
-      description="配置默认厂商、默认模型和 API Key。Agent 会按这里的默认值调用 generate_image 工具。"
+      description={img.description}
     >
       {loading ? (
         <div className="text-muted-foreground flex h-24 items-center text-sm">
-          加载图片生成配置中...
+          {img.loading}
         </div>
       ) : error && !config ? (
         <div className="grid gap-3 rounded-lg border p-4">
-          <div className="font-medium">图片生成配置加载失败</div>
+          <div className="font-medium">{img.loadFailed}</div>
           <div className="text-muted-foreground text-sm">{error}</div>
           <div>
             <Button variant="outline" size="sm" onClick={() => void refresh()}>
-              重试
+              {img.retry}
             </Button>
           </div>
         </div>
       ) : !config ? (
         <div className="text-muted-foreground flex h-24 items-center text-sm">
-          暂无图片生成配置
+          {img.noConfig}
         </div>
       ) : (
         <div className="space-y-5">
           <div className="grid gap-4 rounded-lg border p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="font-medium">启用图片生成工具</div>
+                <div className="font-medium">{img.enableTool}</div>
                 <div className="text-muted-foreground mt-1 text-sm">
-                  启用后，已启用的厂商会暴露给 Agent 生成图片。
+                  {img.enableToolDescription}
                 </div>
               </div>
               <Switch
@@ -363,7 +381,7 @@ function ImageGenerationSettings() {
             </div>
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className="grid gap-1.5 text-sm">
-                <span className="font-medium">默认厂商</span>
+                <span className="font-medium">{img.defaultProvider}</span>
                 <select
                   className="border-input bg-background h-9 rounded-md border px-3 text-sm"
                   value={config.default_provider ?? ""}
@@ -384,7 +402,7 @@ function ImageGenerationSettings() {
                 </select>
               </label>
               <label className="grid gap-1.5 text-sm">
-                <span className="font-medium">输出目录</span>
+                <span className="font-medium">{img.outputDir}</span>
                 <Input
                   value={config.output_subdir}
                   disabled={saving}
@@ -427,7 +445,7 @@ function ImageGenerationSettings() {
           <div className="flex justify-end">
             <Button onClick={() => void handleSave()} disabled={saving}>
               <SaveIcon className="h-4 w-4" />
-              {saving ? "保存中..." : "保存配置"}
+              {saving ? img.saving : img.saveConfig}
             </Button>
           </div>
         </div>
