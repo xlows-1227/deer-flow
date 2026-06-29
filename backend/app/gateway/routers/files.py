@@ -28,6 +28,19 @@ ACTIVE_CONTENT_MIME_TYPES = {
     "application/xhtml+xml",
     "image/svg+xml",
 }
+IMAGE_EXTENSIONS = {
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".tiff",
+    ".webp",
+}
 FileSource = Literal["uploaded", "generated"]
 ItemKind = Literal["file", "folder"]
 
@@ -135,6 +148,8 @@ def _file_type(extension: str, mime_type: str | None) -> str:
     ext = extension.lower()
     if mime_type and mime_type.startswith("image/"):
         return "image"
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
     if mime_type and mime_type.startswith("audio/"):
         return "audio"
     if ext in {".pdf", ".doc", ".docx", ".md", ".txt", ".csv", ".xls", ".xlsx", ".ppt", ".pptx"}:
@@ -163,7 +178,7 @@ def _item_from_path(root: Path, path: Path, metadata: dict[str, dict[str, str]])
 
     mime_type, _ = mimetypes.guess_type(path.name)
     source = metadata.get(relative, {}).get("source") or "uploaded"
-    preview_url = f"/api/files/{quote(relative, safe='/')}" if mime_type and mime_type.startswith("image/") else None
+    preview_url = f"/api/files/{quote(relative, safe='/')}" if _file_type(path.suffix, mime_type) == "image" else None
     return FileItem(
         id=relative,
         name=path.name,

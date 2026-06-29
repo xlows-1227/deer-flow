@@ -71,7 +71,7 @@ export function SkillConversationPanel({
   const context = useMemo(
     () => ({
       ...settings.context,
-      mode: settings.context.mode ?? "pro",
+      mode: settings.context.mode ?? "flash",
       skill_name: SKILL_CREATOR_NAME,
     }),
     [settings.context],

@@ -70,8 +70,10 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           )}
           <SidebarTrigger
             className="mr-1 size-7 shrink-0 opacity-70 group-data-[collapsible=icon]:mr-0 hover:opacity-100"
-            aria-label={open ? "收起侧边栏" : "展开侧边栏"}
-            title={open ? "收起侧边栏" : "展开侧边栏"}
+            aria-label={
+              open ? t.sidebar.collapseSidebar : t.sidebar.expandSidebar
+            }
+            title={open ? t.sidebar.collapseSidebar : t.sidebar.expandSidebar}
           />
         </div>
       </div>
@@ -93,12 +95,12 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           <SidebarMenuButton
             isActive={pathname === "/workspace/chats"}
             asChild
-            tooltip="对话搜索"
+            tooltip={t.chats.searchChats}
             className="h-9 rounded-lg text-gray-600 hover:bg-gray-200 data-[active=true]:bg-gray-200 data-[active=true]:text-gray-900"
           >
             <Link href="/workspace/chats" prefetch={false}>
               <SearchIcon size={16} />
-              <span>对话搜索</span>
+              <span>{t.chats.searchChats}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -31,6 +32,13 @@ interface ArtifactsProviderProps {
   children: ReactNode;
 }
 
+function sameArtifacts(previous: string[], next: string[]): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((item, index) => item === next[index])
+  );
+}
+
 export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
@@ -41,9 +49,18 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const [autoOpen, setAutoOpen] = useState(true);
   const { setOpen: setSidebarOpen } = useSidebar();
 
+  const updateArtifacts = useCallback((nextArtifacts: string[]) => {
+    const next = nextArtifacts ?? [];
+    setArtifacts((previous) =>
+      sameArtifacts(previous, next) ? previous : next,
+    );
+  }, []);
+
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
-      setSelectedArtifact(artifact);
+      setSelectedArtifact((current) =>
+        current === artifact ? current : artifact,
+      );
       if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
         setSidebarOpen(false);
       }
@@ -60,25 +77,43 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     setOpen(false);
   }, []);
 
-  const value: ArtifactsContextType = {
-    artifacts,
-    setArtifacts,
-
-    open,
-    autoOpen,
-    autoSelect,
-    setOpen: (isOpen: boolean) => {
+  const setArtifactsOpen = useCallback(
+    (isOpen: boolean) => {
       if (!isOpen && autoOpen) {
         setAutoOpen(false);
         setAutoSelect(false);
       }
       setOpen(isOpen);
     },
+    [autoOpen],
+  );
 
-    selectedArtifact,
-    select,
-    deselect,
-  };
+  const value = useMemo<ArtifactsContextType>(
+    () => ({
+      artifacts,
+      setArtifacts: updateArtifacts,
+
+      open,
+      autoOpen,
+      autoSelect,
+      setOpen: setArtifactsOpen,
+
+      selectedArtifact,
+      select,
+      deselect,
+    }),
+    [
+      artifacts,
+      autoOpen,
+      autoSelect,
+      deselect,
+      open,
+      select,
+      selectedArtifact,
+      setArtifactsOpen,
+      updateArtifacts,
+    ],
+  );
 
   return (
     <ArtifactsContext.Provider value={value}>

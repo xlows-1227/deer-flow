@@ -1,7 +1,6 @@
 import { PanelRightOpenIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -14,10 +13,11 @@ const MIN_PANEL_WIDTH = 240;
 const MAX_PANEL_WIDTH = 800;
 const DEFAULT_PANEL_WIDTH = 320;
 
-const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
-  children,
-  threadId,
-}) => {
+const ChatBox: React.FC<{
+  children: React.ReactNode;
+  threadId: string;
+  sandboxFilesEnabled?: boolean;
+}> = ({ children, threadId, sandboxFilesEnabled = true }) => {
   const { thread } = useThread();
   const threadIdRef = useRef(threadId);
 
@@ -42,7 +42,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       deselect();
     }
 
-    setArtifacts(thread.values.artifacts);
+    setArtifacts(thread.values.artifacts ?? []);
 
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
@@ -84,9 +84,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
     const handleMouseMove = (e: MouseEvent) => {
       const newWidth = window.innerWidth - e.clientX;
-      setWidth(
-        Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, newWidth)),
-      );
+      setWidth(Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, newWidth)));
     };
 
     const handleMouseUp = () => {
@@ -116,7 +114,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
             "group/resizer z-20 w-1 shrink-0 transition-colors",
             isResizing
               ? "bg-blue-400/60"
-              : "hover:bg-blue-400/40 cursor-col-resize bg-transparent",
+              : "cursor-col-resize bg-transparent hover:bg-blue-400/40",
           )}
           onMouseDown={handleResizeStart}
           title="拖拽调整宽度"
@@ -136,6 +134,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
         <div className="h-full w-full">
           <ConversationWorkspacePanel
             threadId={threadId}
+            sandboxFilesEnabled={artifactPanelOpen && sandboxFilesEnabled}
             onCollapse={() => setArtifactsOpen(false)}
           />
         </div>
@@ -144,7 +143,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       {!artifactPanelOpen && (
         <button
           type="button"
-          className="flex h-full w-6 shrink-0 cursor-pointer items-center justify-center border-l border-slate-200 bg-background hover:bg-slate-50"
+          className="bg-background flex h-full w-6 shrink-0 cursor-pointer items-center justify-center border-l border-slate-200 hover:bg-slate-50"
           onClick={() => setArtifactsOpen(true)}
           title="展开工作空间"
         >

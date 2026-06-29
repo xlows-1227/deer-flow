@@ -17,7 +17,17 @@ import {
   XIcon,
 } from "lucide-react";
 import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
-import { createContext, memo, useContext, useEffect, useState } from "react";
+import {
+  Children,
+  createContext,
+  isValidElement,
+  memo,
+  useContext,
+  useEffect,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { Streamdown } from "streamdown";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
@@ -110,7 +120,7 @@ type MessageBranchContextType = {
   goToPrevious: () => void;
   goToNext: () => void;
   branches: ReactElement[];
-  setBranches: (branches: ReactElement[]) => void;
+  setBranches: Dispatch<SetStateAction<ReactElement[]>>;
 };
 
 const MessageBranchContext = createContext<MessageBranchContextType | null>(
@@ -185,15 +195,27 @@ export const MessageBranchContent = ({
   children,
   ...props
 }: MessageBranchContentProps) => {
-  const { currentBranch, setBranches, branches } = useMessageBranch();
-  const childrenArray = Array.isArray(children) ? children : [children];
+  const { currentBranch, setBranches } = useMessageBranch();
+  const childrenArray = Children.toArray(children).filter(
+    isValidElement,
+  ) as ReactElement[];
 
-  // Use useEffect to update branches when they change
   useEffect(() => {
-    if (branches.length !== childrenArray.length) {
-      setBranches(childrenArray);
-    }
-  }, [childrenArray, branches, setBranches]);
+    setBranches((previous) => {
+      if (
+        previous.length === childrenArray.length &&
+        previous.every((branch, index) => {
+          const nextBranch = childrenArray[index];
+          return (
+            branch.key === nextBranch?.key && branch.type === nextBranch.type
+          );
+        })
+      ) {
+        return previous;
+      }
+      return childrenArray;
+    });
+  }, [childrenArray, setBranches]);
 
   return childrenArray.map((branch, index) => (
     <div

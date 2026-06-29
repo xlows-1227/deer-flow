@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import stat
+
 from deerflow.skills.storage import get_or_new_skill_storage
 
 
@@ -14,6 +16,10 @@ def _setup_skill(storage, name: str, *, description: str = "Demo skill", version
     content = _skill_content(name, description, version)
     storage.write_custom_skill(name, "SKILL.md", content)
     storage.write_custom_skill(name, "references/notes.md", "supporting notes")
+
+
+def _mode(path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
 
 
 def test_create_skill_version_starts_at_seq_one(tmp_path):
@@ -136,3 +142,22 @@ def test_restore_preserves_history_and_versions_dirs(tmp_path):
     assert (tmp_path / "custom" / ".history" / "demo-skill.jsonl").exists()
     assert (tmp_path / "custom" / ".versions" / "demo-skill" / "index.jsonl").exists()
     assert (tmp_path / "custom" / ".versions" / "demo-skill" / "1").exists()
+
+
+def test_restore_normalizes_legacy_restricted_permissions(tmp_path):
+    storage = get_or_new_skill_storage(skills_path=str(tmp_path))
+    _setup_skill(storage, "demo-skill")
+    storage.create_skill_version("demo-skill", action="create", author="human")
+
+    version_dir = tmp_path / "custom" / ".versions" / "demo-skill" / "1"
+    (version_dir / "SKILL.md").chmod(0o600)
+    (version_dir / "references").chmod(0o700)
+    (version_dir / "references" / "notes.md").chmod(0o600)
+
+    storage.restore_skill_version("demo-skill", 1, author="human")
+
+    skill_dir = tmp_path / "custom" / "demo-skill"
+    assert _mode(skill_dir) == 0o755
+    assert _mode(skill_dir / "SKILL.md") == 0o644
+    assert _mode(skill_dir / "references") == 0o755
+    assert _mode(skill_dir / "references" / "notes.md") == 0o644

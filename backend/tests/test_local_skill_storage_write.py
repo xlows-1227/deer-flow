@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -39,6 +40,10 @@ def _skill_markdown(name: str) -> str:
     return f"---\nname: {name}\ndescription: Test skill\n---\n\n# {name}\n"
 
 
+def _mode(path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
@@ -49,9 +54,41 @@ def test_write_creates_file(tmp_path, storage):
     assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_text() == "# hello"
 
 
+def test_write_normalizes_permissions_for_sandbox_mount(tmp_path, storage):
+    storage.write_custom_skill("demo-skill", "SKILL.md", "# hello")
+
+    skill_dir = tmp_path / "custom" / "demo-skill"
+    assert _mode(skill_dir) == 0o755
+    assert _mode(skill_dir / "SKILL.md") == 0o644
+
+
 def test_write_creates_subdirectory(tmp_path, storage):
     storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
     assert (tmp_path / "custom" / "demo-skill" / "references" / "ref.md").exists()
+
+
+def test_write_normalizes_support_file_permissions(tmp_path, storage):
+    storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
+
+    skill_dir = tmp_path / "custom" / "demo-skill"
+    assert _mode(skill_dir / "references") == 0o755
+    assert _mode(skill_dir / "references" / "ref.md") == 0o644
+
+
+def test_write_custom_skill_bytes_normalizes_permissions(tmp_path, storage):
+    storage.write_custom_skill("demo-skill", "SKILL.md", _skill_markdown("demo-skill"))
+    storage.write_custom_skill_bytes("demo-skill", "assets/logo.png", b"png")
+
+    skill_dir = tmp_path / "custom" / "demo-skill"
+    assert _mode(skill_dir / "assets") == 0o755
+    assert _mode(skill_dir / "assets" / "logo.png") == 0o644
+
+
+def test_mkdir_custom_skill_directory_normalizes_permissions(tmp_path, storage):
+    storage.write_custom_skill("demo-skill", "SKILL.md", _skill_markdown("demo-skill"))
+    storage.mkdir_custom_skill_directory("demo-skill", "templates/nested")
+
+    assert _mode(tmp_path / "custom" / "demo-skill" / "templates" / "nested") == 0o755
 
 
 def test_write_is_atomic_overwrite(tmp_path, storage):

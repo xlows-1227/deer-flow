@@ -276,12 +276,19 @@ function Field({
   );
 }
 
+const connectorSelectContentProps = {
+  position: "popper" as const,
+  className: "z-[100]",
+};
+
 type ConnectorSettingsPageProps = {
   settingsOpen?: boolean;
+  onFormOpenChange?: (open: boolean) => void;
 };
 
 export function ConnectorSettingsPage({
   settingsOpen,
+  onFormOpenChange,
 }: ConnectorSettingsPageProps) {
   const { t } = useI18n();
   const copy = t.settings.connectors;
@@ -341,6 +348,10 @@ export function ConnectorSettingsPage({
       setFormOpen(false);
     }
   }, [settingsOpen]);
+
+  useEffect(() => {
+    onFormOpenChange?.(formOpen);
+  }, [formOpen, onFormOpenChange]);
 
   function openCreate() {
     const firstType = types[0];
@@ -707,10 +718,12 @@ export function ConnectorSettingsPage({
         )}
       </div>
 
-      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+      <Dialog open={formOpen} onOpenChange={setFormOpen} modal={false}>
         <DialogContent
           className="z-[60] max-h-[90vh] overflow-y-auto sm:max-w-2xl"
           showOverlay={false}
+          onInteractOutside={(event) => event.preventDefault()}
+          onPointerDownOutside={(event) => event.preventDefault()}
         >
           <DialogHeader>
             <DialogTitle>
@@ -751,7 +764,7 @@ export function ConnectorSettingsPage({
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent {...connectorSelectContentProps}>
                     {types.map((type) => (
                       <SelectItem key={type.type} value={type.type}>
                         {type.display_name || type.type}
@@ -811,7 +824,7 @@ export function ConnectorSettingsPage({
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent {...connectorSelectContentProps}>
                     <SelectItem value="env">{copy.authModeEnv}</SelectItem>
                     <SelectItem value="inline">
                       {copy.authModeInline}

@@ -121,6 +121,38 @@ def test_scheduler_task_crud_and_toggle():
         assert listed_again.json()["total"] == 0
 
 
+def test_scheduler_task_history_serializes_memory_run_datetimes():
+    app = _make_app()
+    app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
+
+    with TestClient(app) as client:
+        created = client.post("/api/scheduler/tasks", json=_daily_payload())
+        assert created.status_code == 201
+        task_id = created.json()["id"]
+        started_at = datetime(2026, 6, 22, 8, 30, tzinfo=UTC)
+        asyncio.run(
+            app.state.scheduler_run_store.create(
+                {
+                    "task_id": task_id,
+                    "run_id": "run-history-1",
+                    "thread_id": None,
+                    "status": "success",
+                    "started_at": started_at,
+                    "is_automatic": False,
+                }
+            )
+        )
+
+        response = client.get(f"/api/scheduler/tasks/{task_id}/history")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runs"][0]["run_id"] == "run-history-1"
+    assert payload["runs"][0]["thread_id"] is None
+    assert payload["runs"][0]["created_at"] == "2026-06-22T08:30:00+00:00"
+    assert payload["runs"][0]["updated_at"] == "2026-06-22T08:30:00+00:00"
+
+
 def test_scheduler_requires_weekly_day():
     app = _make_app()
 

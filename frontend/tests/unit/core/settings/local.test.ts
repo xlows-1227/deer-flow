@@ -12,6 +12,11 @@ test("defaults token usage to header total plus per-turn breakdown", () => {
   });
 });
 
+test("defaults chat mode to flash", () => {
+  expect(DEFAULT_LOCAL_SETTINGS.context.mode).toBe("flash");
+  expect(DEFAULT_LOCAL_SETTINGS.context.reasoning_effort).toBe("minimal");
+});
+
 test("thread settings do not inherit global chat context", () => {
   const settings = applyThreadContextOverride(
     {

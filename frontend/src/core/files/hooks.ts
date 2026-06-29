@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { useThreads } from "@/core/threads/hooks";
@@ -15,6 +15,10 @@ import {
 } from "./api";
 import type { FileItem } from "./type";
 
+interface FilesQueryOptions {
+  enabled?: boolean;
+}
+
 /**
  * TanStack Query wrapper around {@link listFiles}. Used by the @-mention
  * picker in the chat input to populate the file suggestion list.
@@ -23,7 +27,10 @@ import type { FileItem } from "./type";
  * `enabled: true` always and let the picker show a loading skeleton while
  * the request is in flight.
  */
-export function useFiles(params: ListFilesParams = {}) {
+export function useFiles(
+  params: ListFilesParams = {},
+  { enabled = true }: FilesQueryOptions = {},
+) {
   // Stabilize the query key on the actual field values. We deliberately
   // omit `limit` from the key — the same set of files, just trimmed.
   // The leading underscore tells the linter we intentionally read-and-discard.
@@ -35,6 +42,7 @@ export function useFiles(params: ListFilesParams = {}) {
   const query = useQuery<FileItem[]>({
     queryKey: ["files", "list", stableParams],
     queryFn: () => listFiles(params),
+    enabled,
     // Pickers like this one need the latest data fresh; the library is
     // small and changes infrequently. 30s is a good balance between
     // "show me the file I just uploaded" and "don't refetch on every
@@ -83,6 +91,9 @@ export function useUserFileUploadConfig() {
  */
 const MAX_THREADS_TO_SCAN = 50;
 
+const threadUploadsQueryKey = (threadId: string) =>
+  ["uploads", "list", threadId] as const;
+
 /**
  * Unified file list for the file-management page: library files + chat
  * thread uploads, normalized to the same {@link FileItem} shape.
@@ -107,23 +118,30 @@ const MAX_THREADS_TO_SCAN = 50;
  * has hundreds of active threads, swap this for a real backend
  * "list-all-files" endpoint.
  */
-export function useAllUserFiles(params: ListFilesParams = {}) {
-  const library = useFiles(params);
+export function useAllUserFiles(
+  params: ListFilesParams = {},
+  { enabled = true }: FilesQueryOptions = {},
+) {
+  const queryClient = useQueryClient();
+  const library = useFiles(params, { enabled });
   const inLibraryFolder = !!params.folder_path;
-  const threads = useThreads({
-    limit: MAX_THREADS_TO_SCAN,
-    sortBy: "updated_at",
-    sortOrder: "desc",
-  });
+  const threads = useThreads(
+    {
+      limit: MAX_THREADS_TO_SCAN,
+      sortBy: "updated_at",
+      sortOrder: "desc",
+    },
+    { enabled: enabled && !inLibraryFolder },
+  );
 
   const threadUploads = useQueries({
     queries: (threads.data ?? []).map((thread) => ({
-      queryKey: ["uploads", "list", thread.thread_id],
+      queryKey: threadUploadsQueryKey(thread.thread_id),
       queryFn: () => listUploadedFiles(thread.thread_id),
       // Only fire after the thread list arrives. Errors are non-fatal —
       // a single thread's uploads failing shouldn't break the whole
       // page; we filter them out of the merged result.
-      enabled: !!threads.data && !inLibraryFolder,
+      enabled: enabled && !!threads.data && !inLibraryFolder,
       retry: false,
     })),
   });
@@ -157,22 +175,26 @@ export function useAllUserFiles(params: ListFilesParams = {}) {
 
   return {
     files,
-    isLoading: library.isLoading || (!inLibraryFolder && threads.isLoading),
-    isFetching: library.isFetching || (!inLibraryFolder && threads.isFetching),
+    isLoading:
+      enabled && (library.isLoading || (!inLibraryFolder && threads.isLoading)),
+    isFetching:
+      enabled &&
+      (library.isFetching || (!inLibraryFolder && threads.isFetching)),
     error: library.error,
     /**
-     * Manual refetch — useful for the page's "refresh" affordance. We
-     * intentionally rely on the underlying `useFiles` cache key changing
-     * to trigger most refreshes (e.g. after upload via the page).
+     * Manual refetch — useful after explicit user actions (delete, upload, or
+     * refresh). The merged list includes per-thread upload queries, so those
+     * caches must be invalidated too; otherwise deleted chat uploads linger
+     * until a full page reload.
      */
-    refetch: () => {
-      void library.refetch();
-      void threads.refetch();
-      // Cancel-and-restart the per-thread upload queries too; `useQueries`
-      // doesn't expose a single-shot refetch handle, so we re-derive by
-      // bumping a `refetchTick` would be the right move if we needed
-      // strict invalidation. For now, the page just uses the existing
-      // cache and only `refetch()`s after explicit user actions.
+    refetch: async () => {
+      await Promise.all([
+        library.refetch(),
+        threads.refetch(),
+        inLibraryFolder
+          ? Promise.resolve()
+          : queryClient.invalidateQueries({ queryKey: ["uploads", "list"] }),
+      ]);
     },
   };
 }

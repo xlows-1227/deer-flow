@@ -24,6 +24,10 @@ const config = {
   // Pin the workspace root so Next.js doesn't pick up stray lockfiles
   // outside the repo (e.g. ~/pnpm-lock.yaml), which bloats file tracing.
   outputFileTracingRoot: import.meta.dirname,
+  // Keep Turbopack (dev:turbo) from watching parent directories on macOS.
+  turbopack: {
+    root: import.meta.dirname,
+  },
   output:
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"
       ? "standalone"
@@ -33,6 +37,17 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
+  // API rewrites proxy multipart uploads to Gateway; default proxy buffer is too small.
+  proxyClientMaxBodySize: "100mb",
+  webpack: (config, { dev }) => {
+    if (dev) {
+      // Docker dev compiles routes on demand and can exceed the default
+      // webpack chunk load timeout before the first chunk is ready.
+      config.output ??= {};
+      config.output.chunkLoadTimeout = 600_000;
+    }
+    return config;
+  },
   async rewrites() {
     const rewrites = [];
     const gatewayURL = getInternalServiceURL(

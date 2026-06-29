@@ -28,7 +28,9 @@ export function useI18n() {
     const saved = getLocaleFromCookie();
     if (saved) {
       const normalizedSaved = normalizeLocale(saved);
-      setLocale(normalizedSaved);
+      if (locale !== normalizedSaved) {
+        setLocale(normalizedSaved);
+      }
       if (saved !== normalizedSaved) {
         setLocaleInCookie(normalizedSaved);
       }
@@ -36,9 +38,11 @@ export function useI18n() {
     }
 
     const detected = detectLocale();
-    setLocale(detected);
+    if (locale !== detected) {
+      setLocale(detected);
+    }
     setLocaleInCookie(detected);
-  }, [setLocale]);
+  }, [locale, setLocale]);
 
   return {
     locale,

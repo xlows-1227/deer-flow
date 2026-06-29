@@ -45,12 +45,12 @@ export function WorkspaceNavChatList() {
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/skills")}
             asChild
-            tooltip="Skill 管理"
+            tooltip={t.sidebar.skills}
             className={itemClassName}
           >
             <Link href="/workspace/skills" prefetch={false}>
               <SparklesIcon />
-              <span>Skill 管理</span>
+              <span>{t.sidebar.skills}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -61,12 +61,12 @@ export function WorkspaceNavChatList() {
               pathname.startsWith("/workspace/knowledge")
             }
             asChild
-            tooltip="文件"
+            tooltip={t.sidebar.files}
             className={itemClassName}
           >
             <Link href="/workspace/files" prefetch={false}>
               <FolderIcon />
-              <span>文件</span>
+              <span>{t.sidebar.files}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -74,12 +74,12 @@ export function WorkspaceNavChatList() {
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/memory")}
             asChild
-            tooltip="记忆"
+            tooltip={t.sidebar.memory}
             className={itemClassName}
           >
             <Link href="/workspace/memory" prefetch={false}>
               <BrainIcon />
-              <span>记忆</span>
+              <span>{t.sidebar.memory}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -87,12 +87,12 @@ export function WorkspaceNavChatList() {
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/scheduled-tasks")}
             asChild
-            tooltip="定时任务"
+            tooltip={t.sidebar.scheduledTasks}
             className={itemClassName}
           >
             <Link href="/workspace/scheduled-tasks" prefetch={false}>
               <ClockIcon />
-              <span>定时任务</span>
+              <span>{t.sidebar.scheduledTasks}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

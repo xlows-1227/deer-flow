@@ -47,6 +47,12 @@ def _library_dir(tmp_path: Path) -> Path:
     return d
 
 
+def _uploads_dir(tmp_path: Path, thread_id: str = "thread-abc") -> Path:
+    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id, user_id=USER_ID)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _human(content, referenced_files=None, **extra_kwargs):
     additional_kwargs = dict(extra_kwargs)
     if referenced_files is not None:
@@ -124,6 +130,25 @@ class TestFilesFromKwargs:
         result = mw._files_from_kwargs(msg)
         assert result is not None
         assert result[0]["size"] == 0
+
+    def test_preserves_thread_upload_source(self, tmp_path):
+        mw = _middleware(tmp_path)
+        msg = _human(
+            "hi",
+            referenced_files=[
+                {
+                    "id": "thread:thread-abc:pic.png",
+                    "name": "pic.png",
+                    "path": "pic.png",
+                    "source_thread_id": "thread-abc",
+                    "source_thread_title": "Image chat",
+                },
+            ],
+        )
+        result = mw._files_from_kwargs(msg)
+        assert result is not None
+        assert result[0]["source_thread_id"] == "thread-abc"
+        assert result[0]["source_thread_title"] == "Image chat"
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +228,51 @@ class TestLoadFileContent:
             "mime_type": "image/png",
             "extension": ".png",
             "size": 8,
+        }
+        result = mw._load_file_content(file)
+        assert result["status"] == "binary"
+        assert result["content"] == ""
+
+    def test_reads_thread_upload_reference(self, tmp_path):
+        _uploads_dir(tmp_path, "thread-abc")
+        mw = _middleware(tmp_path)
+        upload_path = mw._paths.sandbox_uploads_dir(
+            "thread-abc",
+            user_id=USER_ID,
+        )
+        (upload_path / "notes.txt").write_text(
+            "from upload",
+            encoding="utf-8",
+        )
+        file = {
+            "id": "thread:thread-abc:notes.txt",
+            "name": "notes.txt",
+            "path": "notes.txt",
+            "mime_type": "text/plain",
+            "extension": ".txt",
+            "size": 11,
+            "source_thread_id": "thread-abc",
+        }
+        result = mw._load_file_content(file)
+        assert result["status"] == "ok"
+        assert result["content"] == "from upload"
+
+    def test_reports_binary_for_thread_upload_image_without_mime(self, tmp_path):
+        _uploads_dir(tmp_path, "thread-abc")
+        mw = _middleware(tmp_path)
+        upload_path = mw._paths.sandbox_uploads_dir(
+            "thread-abc",
+            user_id=USER_ID,
+        )
+        (upload_path / "pic.webp").write_bytes(b"webp")
+        file = {
+            "id": "thread:thread-abc:pic.webp",
+            "name": "pic.webp",
+            "path": "pic.webp",
+            "mime_type": None,
+            "extension": ".webp",
+            "size": 4,
+            "source_thread_id": "thread-abc",
         }
         result = mw._load_file_content(file)
         assert result["status"] == "binary"

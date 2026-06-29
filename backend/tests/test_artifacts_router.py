@@ -14,8 +14,9 @@ import app.gateway.routers.artifacts as artifacts_router
 ACTIVE_ARTIFACT_CASES = [
     ("poc.html", "<html><body><script>alert('xss')</script></body></html>"),
     ("page.xhtml", '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body>hello</body></html>'),
-    ("image.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert("xss")</script></svg>'),
 ]
+
+SVG_CONTENT = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert("xss")</script></svg>'
 
 
 def _make_request(query_string: bytes = b"") -> Request:
@@ -54,6 +55,47 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+
+
+def test_get_artifact_serves_svg_inline_with_sandbox_csp(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "diagram.svg"
+    artifact_path.write_text(SVG_CONTENT, encoding="utf-8")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/diagram.svg", _make_request()))
+
+    assert isinstance(response, FileResponse)
+    assert response.media_type == "image/svg+xml"
+    assert response.headers.get("content-disposition", "").startswith("inline;")
+    assert "sandbox" in response.headers.get("content-security-policy", "")
+
+
+def test_get_artifact_svg_download_true_forces_attachment(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "diagram.svg"
+    artifact_path.write_text(SVG_CONTENT, encoding="utf-8")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/diagram.svg", _make_request(b"download=true"), download=True))
+
+    assert isinstance(response, FileResponse)
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+
+
+def test_get_artifact_serves_svg_inline_in_skill_archive(tmp_path, monkeypatch) -> None:
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w") as zip_ref:
+        zip_ref.writestr("diagram.svg", SVG_CONTENT)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: skill_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/sample.skill/diagram.svg", _make_request()))
+
+    assert response.media_type == "image/svg+xml"
+    assert response.headers.get("content-disposition", "").startswith("inline;")
+    assert "sandbox" in response.headers.get("content-security-policy", "")
+    assert bytes(response.body) == SVG_CONTENT.encode("utf-8")
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)

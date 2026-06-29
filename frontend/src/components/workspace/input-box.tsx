@@ -70,7 +70,7 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useConnectors } from "@/core/connectors/hooks";
-import { useFiles } from "@/core/files/hooks";
+import { useAllUserFiles } from "@/core/files/hooks";
 import type { FileItem, ReferencedFile } from "@/core/files/type";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -113,6 +113,26 @@ import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
 
+const IMAGE_FILE_EXTENSIONS = new Set([
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".tiff",
+  ".webp",
+]);
+
+function normalizeFileExtension(extension: string) {
+  const normalized = extension.trim().toLowerCase();
+  if (!normalized) return "";
+  return normalized.startsWith(".") ? normalized : `.${normalized}`;
+}
+
 function getResolvedMode(
   mode: InputMode | undefined,
   supportsThinking: boolean,
@@ -123,7 +143,7 @@ function getResolvedMode(
   if (mode) {
     return mode;
   }
-  return supportsThinking ? "pro" : "flash";
+  return "flash";
 }
 
 export function InputBox({
@@ -140,6 +160,7 @@ export function InputBox({
   onFollowupsVisibilityChange,
   onSubmit,
   onStop,
+  submitWhileStreaming = false,
   lockedSkillName,
   showWelcomeSuggestions = true,
   footerExtensionClassName,
@@ -178,6 +199,7 @@ export function InputBox({
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
+  submitWhileStreaming?: boolean;
   /** When set, skill is fixed and cannot be changed or cleared. */
   lockedSkillName?: string;
   /** Whether to show welcome quick suggestion chips under the input. */
@@ -245,25 +267,25 @@ export function InputBox({
   // flash "no files" while the user is still in the middle of typing.
   const lastMentionQueryRef = useRef("");
 
-  // We cap the picker at 50 to keep the dropdown snappy. The backend
-  // already supports `q=` for server-side filtering, but client-side
-  // filtering is more responsive for typical library sizes.
+  // The picker reads the unified file view so users can reference both
+  // library files and images/documents uploaded in recent conversations.
+  // It stays disabled until the picker opens to avoid scanning recent
+  // thread uploads on every chat page load.
   const {
     files: libraryFiles,
     isLoading: libraryLoading,
     error: libraryError,
-  } = useFiles({ limit: 50 });
+  } = useAllUserFiles({ limit: 50 }, { enabled: mentionActive });
   const mentionCandidates = useMemo<FileItem[]>(() => {
     if (!mentionActive) {
       return [];
     }
+    const files = libraryFiles.filter((file) => file.kind === "file");
     const needle = mentionQuery.trim().toLowerCase();
     if (!needle) {
-      return libraryFiles;
+      return files;
     }
-    return libraryFiles.filter((file) =>
-      file.name.toLowerCase().includes(needle),
-    );
+    return files.filter((file) => file.name.toLowerCase().includes(needle));
   }, [mentionActive, mentionQuery, libraryFiles]);
   const mentionTotalRows = mentionActive ? mentionCandidates.length : 0;
   const mentionHasNone = mentionActive && mentionCandidates.length === 0;
@@ -274,7 +296,7 @@ export function InputBox({
     !mentionQuery &&
     !libraryLoading &&
     !libraryError &&
-    libraryFiles.length === 0;
+    libraryFiles.every((file) => file.kind !== "file");
   // Track which file is currently in flight so we can avoid double-adding on
   // rapid Enter presses. The id is the library `path` — unique per file.
   const mentionPickingRef = useRef(false);
@@ -327,7 +349,9 @@ export function InputBox({
     if (models.length === 0) {
       return;
     }
-    const currentModel = models.find((m) => m.name === contextRef.current.model_name);
+    const currentModel = models.find(
+      (m) => m.name === contextRef.current.model_name,
+    );
     const fallbackModel = currentModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
@@ -580,10 +604,6 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      if (status === "streaming") {
-        onStop?.();
-        return;
-      }
       // Merge in the @-picked files. The form-level `message` only knows
       // about the textarea text and the *uploaded* attachments; the
       // mention-picker state lives here, so we tack it on at submit time.
@@ -597,9 +617,6 @@ export function InputBox({
       // delayed clear here causes a 1-frame "chip above input + chip in
       // bubble" duplicate that the eye picks up on a new chat.
       const submittedReferencedFiles = referencedFiles;
-      if (submittedReferencedFiles.length > 0) {
-        setReferencedFiles([]);
-      }
       const enrichedMessage: PromptInputMessage = {
         ...message,
         referencedFiles:
@@ -607,12 +624,22 @@ export function InputBox({
             ? submittedReferencedFiles
             : undefined,
       };
-      if (
-        !enrichedMessage.text.trim() &&
-        enrichedMessage.files.length === 0 &&
-        (enrichedMessage.referencedFiles?.length ?? 0) === 0
-      ) {
+      const hasContent =
+        enrichedMessage.text.trim().length > 0 ||
+        enrichedMessage.files.length > 0 ||
+        (enrichedMessage.referencedFiles?.length ?? 0) > 0;
+
+      if (status === "streaming" && (!submitWhileStreaming || !hasContent)) {
+        onStop?.();
         return;
+      }
+
+      if (!hasContent) {
+        return;
+      }
+
+      if (submittedReferencedFiles.length > 0) {
+        setReferencedFiles([]);
       }
       setFollowups([]);
       setFollowupsHidden(false);
@@ -669,6 +696,7 @@ export function InputBox({
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
+      submitWhileStreaming,
     ],
   );
 
@@ -856,6 +884,8 @@ export function InputBox({
             mime_type: file.mime_type,
             extension: file.extension,
             size: file.size,
+            source_thread_id: file.source_thread_id,
+            source_thread_title: file.source_thread_title,
           };
           return [...prev, ref];
         });
@@ -2026,7 +2056,10 @@ function slashCommandIcon(kind: SlashCommand["kind"]): ReactNode {
  */
 function mentionFileIcon(file: FileItem): ReactNode {
   const mime = file.mime_type ?? "";
-  if (mime.startsWith("image/")) {
+  if (
+    mime.startsWith("image/") ||
+    IMAGE_FILE_EXTENSIONS.has(normalizeFileExtension(file.extension))
+  ) {
     return <ImageIcon className="size-4 opacity-60" />;
   }
   if (mime.startsWith("audio/")) {

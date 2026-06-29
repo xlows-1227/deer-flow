@@ -128,7 +128,7 @@ export function ScheduledTaskRunList() {
   const records = useMemo(() => data ?? [], [data]);
 
   return (
-    <SidebarGroup className="border-t border-gray-100 px-2 pt-1 pb-2">
+    <SidebarGroup className="border-t border-gray-100 px-2 pt-1 pb-2 group-data-[collapsible=icon]:hidden">
       <SidebarGroupLabel className="h-6">
         {t.sidebar.taskRecords}
       </SidebarGroupLabel>

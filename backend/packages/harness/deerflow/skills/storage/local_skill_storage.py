@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml
 
 from deerflow.config.runtime_paths import resolve_path
+from deerflow.skills.installer import make_skill_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
 from deerflow.skills.types import SkillCategory
 
@@ -220,6 +221,7 @@ class LocalSkillStorage(SkillStorage):
             tmp_file.write(content)
             tmp_path = Path(tmp_file.name)
         tmp_path.replace(target)
+        make_skill_path_sandbox_readable(self.get_custom_skill_dir(name))
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
         import zipfile
@@ -278,6 +280,7 @@ class LocalSkillStorage(SkillStorage):
                 _move_staged_skill_into_reserved_target(staging_target, target)
             if self._enforce_owner_isolation:
                 self._write_custom_skill_owner(target)
+            make_skill_path_sandbox_readable(target)
             logger.info("Skill %r installed to %s", skill_name, target)
 
         return {
@@ -327,6 +330,14 @@ class LocalSkillStorage(SkillStorage):
                 continue
             records.append(json.loads(line))
         return records
+
+    def mkdir_custom_skill_directory(self, name: str, relative_path: str) -> None:
+        super().mkdir_custom_skill_directory(name, relative_path)
+        make_skill_path_sandbox_readable(self.get_custom_skill_dir(name))
+
+    def write_custom_skill_bytes(self, name: str, relative_path: str, data: bytes) -> None:
+        super().write_custom_skill_bytes(name, relative_path, data)
+        make_skill_path_sandbox_readable(self.get_custom_skill_dir(name))
 
     # ------------------------------------------------------------------
     # Versions
@@ -455,6 +466,7 @@ class LocalSkillStorage(SkillStorage):
             return [e for e in entries if e.startswith(".")]
 
         shutil.copytree(skill_dir, version_dir, ignore=_ignore_hidden)
+        make_skill_path_sandbox_readable(version_dir)
 
         # Metadata
         skill_md = self.read_custom_skill(normalized_name)
@@ -577,6 +589,7 @@ class LocalSkillStorage(SkillStorage):
 
         # Restore current working directory from snapshot.
         shutil.copytree(source_dir, skill_dir)
+        make_skill_path_sandbox_readable(skill_dir)
         if self._enforce_owner_isolation:
             self._write_custom_skill_owner(skill_dir)
 

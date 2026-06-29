@@ -541,7 +541,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
   const skillContext = useMemo(
     () => ({
       ...settings.context,
-      mode: settings.context.mode ?? "pro",
+      mode: settings.context.mode ?? "flash",
       skill_name: "skill-creator",
     }),
     [settings.context],

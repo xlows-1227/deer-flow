@@ -44,6 +44,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { getBackendBaseURL } from "@/core/config";
 import {
   createUserFolder,
   deleteUserFile,
@@ -92,6 +93,43 @@ const typeLabels: Record<UserFileTypeFilter, string> = {
   other: "其他",
 };
 
+const IMAGE_EXTENSIONS = new Set([
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".tiff",
+  ".webp",
+]);
+
+const AUDIO_EXTENSIONS = new Set([
+  ".aac",
+  ".aiff",
+  ".ape",
+  ".flac",
+  ".m4a",
+  ".mp3",
+  ".ogg",
+  ".wav",
+  ".wma",
+]);
+
+const DOCUMENT_EXTENSIONS = new Set([
+  ".csv",
+  ".doc",
+  ".docx",
+  ".md",
+  ".pdf",
+  ".txt",
+  ".xls",
+  ".xlsx",
+]);
+
 function formatSize(size: number) {
   if (!size) return "-";
   if (size < 1024) return `${size} B`;
@@ -108,30 +146,49 @@ function formatDate(value: string) {
   });
 }
 
+function normalizeExtension(extension: string) {
+  const normalized = extension.trim().toLowerCase();
+  if (!normalized) return "";
+  return normalized.startsWith(".") ? normalized : `.${normalized}`;
+}
+
 function fileType(item: UserFileItem): UserFileTypeFilter {
   if (item.kind === "folder") return "folder";
+  const extension = normalizeExtension(item.extension);
   if (item.mime_type?.startsWith("image/")) return "image";
+  if (IMAGE_EXTENSIONS.has(extension)) return "image";
   if (item.mime_type?.startsWith("audio/")) return "audio";
-  if (
-    [".pdf", ".doc", ".docx", ".md", ".txt", ".csv", ".xls", ".xlsx"].includes(
-      item.extension,
-    )
-  ) {
-    return "document";
-  }
+  if (AUDIO_EXTENSIONS.has(extension)) return "audio";
+  if (DOCUMENT_EXTENSIONS.has(extension)) return "document";
   return "other";
+}
+
+function isImageFile(item: UserFileItem) {
+  if (item.mime_type?.startsWith("image/")) return true;
+  return IMAGE_EXTENSIONS.has(normalizeExtension(item.extension));
+}
+
+function resolveBackendUrl(url: string) {
+  if (/^(?:[a-z][a-z\d+\-.]*:)?\/\//i.test(url)) return url;
+  const backendBaseUrl = getBackendBaseURL();
+  if (!backendBaseUrl || !url.startsWith("/")) return url;
+  return `${backendBaseUrl}${url}`;
+}
+
+function previewImageSrc(item: UserFileItem) {
+  if (!isImageFile(item)) return null;
+  if (item.preview_url) return resolveBackendUrl(item.preview_url);
+  if (!item.source_thread_id) return userFileUrl(item.path);
+  return null;
 }
 
 function FileGlyph({ item }: { item: UserFileItem }) {
   const type = fileType(item);
   const iconClass = "size-5";
-  if (item.preview_url) {
+  const imageSrc = previewImageSrc(item);
+  if (imageSrc) {
     return (
-      <img
-        src={userFileUrl(item.path)}
-        alt=""
-        className="size-10 rounded-md object-cover"
-      />
+      <img src={imageSrc} alt="" className="size-10 rounded-md object-cover" />
     );
   }
   const Icon =
@@ -332,7 +389,7 @@ export default function WorkspaceFilesPage() {
         await deleteUserFile(item.path);
       }
       toast.success("已删除");
-      refetch();
+      void refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除失败");
     }

@@ -8,6 +8,7 @@ Tests:
 5. Postgres missing-dep error message
 """
 
+import sqlite3
 import sys
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -105,6 +106,14 @@ class TestMemoryRunStore:
         rows = await store.list_by_thread("t1")
         assert len(rows) == 2
         assert all(r["thread_id"] == "t1" for r in rows)
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_offset(self, store):
+        await store.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
+        await store.put("r2", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        await store.put("r3", thread_id="t1", created_at="2024-01-03T00:00:00+00:00")
+        rows = await store.list_by_thread("t1", limit=1, offset=1)
+        assert [r["run_id"] for r in rows] == ["r2"]
 
     @pytest.mark.anyio
     async def test_list_by_thread_owner_filter(self, store):
@@ -225,6 +234,49 @@ class TestEngineLifecycle:
             assert session is not None
         await close_engine()
         assert get_session_factory() is None
+
+    @pytest.mark.anyio
+    async def test_sqlite_init_migrates_legacy_scheduled_tasks_timezone(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, init_engine
+
+        db_path = tmp_path / "legacy.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE scheduled_tasks (
+                    id VARCHAR(64) NOT NULL,
+                    user_id VARCHAR(64),
+                    name VARCHAR(120) NOT NULL,
+                    prompt TEXT NOT NULL,
+                    repeat_type VARCHAR(20) NOT NULL,
+                    execution_time VARCHAR(5) NOT NULL,
+                    day_of_week INTEGER,
+                    is_enabled BOOLEAN NOT NULL,
+                    model_name VARCHAR(128),
+                    mode VARCHAR(20) NOT NULL,
+                    reasoning_effort VARCHAR(20),
+                    last_run_at DATETIME,
+                    last_run_status VARCHAR(20),
+                    last_run_thread_id VARCHAR(64),
+                    last_run_id VARCHAR(64),
+                    next_run_at DATETIME,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    PRIMARY KEY (id)
+                )
+                """
+            )
+
+        url = f"sqlite+aiosqlite:///{db_path}"
+        try:
+            await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        finally:
+            await close_engine()
+
+        with sqlite3.connect(db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(scheduled_tasks)")}
+
+        assert "timezone" in columns
 
     @pytest.mark.anyio
     async def test_postgres_without_asyncpg_gives_actionable_error(self):

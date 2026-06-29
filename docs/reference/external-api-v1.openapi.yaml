@@ -1,0 +1,558 @@
+openapi: 3.1.0
+info:
+  title: DeerFlow External API
+  version: 1.0.0
+  description: |
+    DeerFlow 面向外部业务系统的稳定异步 Agent API。
+    所有请求均使用用户级 Bearer API Key 认证。
+servers:
+  - url: https://deerflow.example.com
+    description: 请替换为实际 DeerFlow 服务地址
+tags:
+  - name: Skills
+  - name: Conversations
+  - name: Runs
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/external/skills:
+    get:
+      tags: [Skills]
+      operationId: listExternalSkills
+      summary: 查询当前 API Key 可用的 Skill
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Skill 列表
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalSkillsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/external/conversations:
+    post:
+      tags: [Conversations]
+      operationId: createExternalConversation
+      summary: 创建持久化 Conversation
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalConversationCreateRequest"
+      responses:
+        "201":
+          description: Conversation 已创建，或返回幂等重放结果
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalConversation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/external/conversations/{conversation_id}:
+    get:
+      tags: [Conversations]
+      operationId: getExternalConversation
+      summary: 查询 Conversation
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Conversation 信息
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalConversation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/external/conversations/{conversation_id}/runs:
+    post:
+      tags: [Runs]
+      operationId: createExternalRun
+      summary: 在 Conversation 中创建异步 Run
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalRunCreateRequest"
+      responses:
+        "202":
+          description: Run 已接受，或返回幂等重放结果
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/external/runs/{run_id}:
+    get:
+      tags: [Runs]
+      operationId: getExternalRun
+      summary: 查询 Run 状态和结果
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Run 信息
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/external/runs/{run_id}/cancel:
+    post:
+      tags: [Runs]
+      operationId: cancelExternalRun
+      summary: 取消尚未结束的 Run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: 取消后的 Run 信息；已处于终态时返回当前状态
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "dfk_<key_id>_<secret>"
+
+  headers:
+    RequestId:
+      description: 请求追踪 ID
+      schema:
+        type: string
+    CacheControl:
+      description: External API 响应不应缓存
+      schema:
+        type: string
+        const: no-store
+
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: 8～64 个字母、数字、下划线或连字符
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 64
+        pattern: "^[A-Za-z0-9_-]{8,64}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: 建议创建请求必传；有效期 24 小时
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: conv_8a726cd00ec54a14ad9a8a065f31d82f
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: run_a7dbbc73d6004e83a9522a61111c61ef
+
+  schemas:
+    ExternalConversationCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        source:
+          type: string
+          default: default
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        external_conversation_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 256
+        agent:
+          type: string
+          default: lead_agent
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        default_skill:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        metadata:
+          type: object
+          default: {}
+          additionalProperties: true
+
+    ExternalRunCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 200000
+        skill:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+        mode:
+          type: string
+          default: standard
+          enum: [standard, thinking, pro, ultra, flash]
+        metadata:
+          type: object
+          default: {}
+          additionalProperties: true
+
+    ExternalConversation:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - conversation_id
+        - status
+        - agent
+        - default_skill
+        - source
+        - external_conversation_id
+        - created_at
+        - updated_at
+      properties:
+        request_id:
+          type: [string, "null"]
+        conversation_id:
+          type: string
+        status:
+          type: string
+          enum: [active, closed]
+        agent:
+          type: string
+        default_skill:
+          type: [string, "null"]
+        source:
+          type: string
+        external_conversation_id:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ExternalRun:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - run_id
+        - conversation_id
+        - skill
+        - status
+        - answer
+        - error
+        - created_at
+        - updated_at
+      properties:
+        request_id:
+          type: [string, "null"]
+        run_id:
+          type: string
+        conversation_id:
+          type: string
+        skill:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        answer:
+          type: [string, "null"]
+        error:
+          type: [string, "null"]
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+
+    ExternalSkill:
+      type: object
+      additionalProperties: false
+      required: [name, description, display_name, description_zh]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        display_name:
+          type: [string, "null"]
+        description_zh:
+          type: [string, "null"]
+
+    ExternalSkillsResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, skills]
+      properties:
+        request_id:
+          type: [string, "null"]
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalSkill"
+
+    ExternalErrorDetail:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        request_id:
+          type: [string, "null"]
+        details:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+
+    ExternalError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ExternalErrorDetail"
+
+  responses:
+    Unauthorized:
+      description: 未提供 API Key，或 Key 无效、过期、已吊销
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    Forbidden:
+      description: API Key 缺少所需 Scope
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    NotFound:
+      description: Agent、Skill、Conversation 或 Run 不存在或不可访问
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    Conflict:
+      description: 幂等、Conversation 映射、状态或并发冲突
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    RequestTooLarge:
+      description: 请求体超过 256 KB
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    ValidationError:
+      description: 请求参数校验失败
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    TooManyRequests:
+      description: 活跃 Run 达到并发上限
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    InternalError:
+      description: 服务端内部错误
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"
+    Unavailable:
+      description: External API 持久化不可用
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalError"

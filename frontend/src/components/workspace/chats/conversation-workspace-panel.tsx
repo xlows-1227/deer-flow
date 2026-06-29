@@ -277,13 +277,18 @@ function WorkspacePreviewEmpty() {
 
 export function ConversationWorkspacePanel({
   threadId,
+  sandboxFilesEnabled = true,
   onCollapse,
 }: {
   threadId: string;
+  sandboxFilesEnabled?: boolean;
   onCollapse: () => void;
 }) {
   const { thread } = useThread();
-  const { data, error, isFetching, refetch } = useSandboxFiles(threadId);
+  const { data, error, isFetching, refetch } = useSandboxFiles(
+    threadId,
+    sandboxFilesEnabled,
+  );
   const {
     selectedArtifact,
     select: selectArtifact,
@@ -302,7 +307,6 @@ export function ConversationWorkspacePanel({
       ),
     [data?.files, thread.values.artifacts],
   );
-
 
   const filePaths = useMemo(() => files.map((file) => file.path), [files]);
   const hasAutoSelectedRef = useRef(false);
@@ -335,8 +339,9 @@ export function ConversationWorkspacePanel({
     : selectedArtifact;
 
   const handleRefreshFiles = useCallback(() => {
+    if (!sandboxFilesEnabled) return;
     void refetch();
-  }, [refetch]);
+  }, [refetch, sandboxFilesEnabled]);
 
   const tabClass = (tab: WorkspaceTab) =>
     cn(
@@ -419,7 +424,8 @@ export function ConversationWorkspacePanel({
                   }}
                   className={cn(
                     "rounded-md p-1 transition-colors hover:bg-slate-200",
-                    isFetching && "cursor-not-allowed opacity-50",
+                    (isFetching || !sandboxFilesEnabled) &&
+                      "cursor-not-allowed opacity-50",
                   )}
                   title="刷新文件"
                   aria-label="刷新文件"
@@ -441,7 +447,7 @@ export function ConversationWorkspacePanel({
                       : "flex min-h-0 flex-1 flex-col overflow-hidden",
                   )}
                 >
-                  {error && !isFetching && (
+                  {sandboxFilesEnabled && error && !isFetching && (
                     <div className="flex items-center gap-2 p-4 text-amber-800">
                       <AlertCircleIcon className="size-4 shrink-0" />
                       <p className="text-sm">
@@ -457,7 +463,9 @@ export function ConversationWorkspacePanel({
                   <WorkspaceFileTree
                     files={files}
                     selectedPath={selectedFilePath}
-                    isLoading={isFetching && files.length === 0}
+                    isLoading={
+                      sandboxFilesEnabled && isFetching && files.length === 0
+                    }
                     onSelect={(path) => selectArtifact(path)}
                   />
                 </div>

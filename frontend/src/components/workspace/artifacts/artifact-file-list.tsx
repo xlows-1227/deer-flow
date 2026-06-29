@@ -10,7 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import { downloadArtifactFile } from "@/core/artifacts/download";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import {
@@ -34,6 +34,7 @@ export function ArtifactFileList({
   const { t } = useI18n();
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [installingFile, setInstallingFile] = useState<string | null>(null);
+  const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
 
   const handleClick = useCallback(
     (filepath: string) => {
@@ -71,6 +72,27 @@ export function ArtifactFileList({
     [threadId, installingFile],
   );
 
+  const handleDownload = useCallback(
+    async (e: React.MouseEvent, filepath: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+
+      if (downloadingFile) return;
+
+      setDownloadingFile(filepath);
+      try {
+        await downloadArtifactFile({ filepath, threadId });
+        toast.success(t.common.downloadSuccess);
+      } catch (error) {
+        console.error("Failed to download artifact:", error);
+        toast.error(t.common.downloadFailed);
+      } finally {
+        setDownloadingFile(null);
+      }
+    },
+    [threadId, downloadingFile, t.common],
+  );
+
   return (
     <ul className={cn("flex w-full flex-col gap-4", className)}>
       {files.map((file) => (
@@ -104,20 +126,17 @@ export function ArtifactFileList({
                   {t.common.install}
                 </Button>
               )}
-              <Button variant="ghost" asChild>
-                <a
-                  href={urlOfArtifact({
-                    filepath: file,
-                    threadId: threadId,
-                    download: true,
-                  })}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
+              <Button
+                variant="ghost"
+                disabled={downloadingFile === file}
+                onClick={(e) => handleDownload(e, file)}
+              >
+                {downloadingFile === file ? (
+                  <LoaderIcon className="size-4 animate-spin" />
+                ) : (
                   <DownloadIcon className="size-4" />
-                  {t.common.download}
-                </a>
+                )}
+                {t.common.download}
               </Button>
             </CardAction>
           </CardHeader>

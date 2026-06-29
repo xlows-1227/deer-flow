@@ -28,6 +28,7 @@ from app.gateway.services import (
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import DisconnectMode, RunContext, RunRecord, RunStatus, run_agent
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +313,7 @@ class ScheduledTaskCancelResponse(BaseModel):
 
 class ScheduledRunSummary(BaseModel):
     run_id: str
-    thread_id: str
+    thread_id: str | None = None
     status: str
     created_at: str = ""
     updated_at: str = ""
@@ -760,8 +761,8 @@ class SchedulerService:
                             run_id=row["run_id"],
                             thread_id=row["thread_id"],
                             status=row["status"],
-                            created_at=row["started_at"] or "",
-                            updated_at=row["finished_at"] or row["started_at"] or "",
+                            created_at=coerce_iso(row.get("started_at")),
+                            updated_at=coerce_iso(row.get("finished_at") or row.get("started_at")),
                             error=row.get("error"),
                         )
                     )
@@ -777,8 +778,8 @@ class SchedulerService:
                         run_id=record.run_id,
                         thread_id=record.thread_id,
                         status=record.status.value,
-                        created_at=record.created_at,
-                        updated_at=record.updated_at,
+                        created_at=coerce_iso(record.created_at),
+                        updated_at=coerce_iso(record.updated_at),
                         error=record.error,
                     )
                 )

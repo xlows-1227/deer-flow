@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
+import { downloadArtifactFile } from "@/core/artifacts/download";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import {
   appendHtmlPreviewBaseHref,
@@ -138,6 +139,7 @@ export function ArtifactFileDetail({
     artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [zoomDialogOpen, setZoomDialogOpen] = useState(false);
   const [zoomViewMode, setZoomViewMode] = useState<"code" | "preview">(
     "preview",
@@ -171,6 +173,22 @@ export function ArtifactFileDetail({
       setIsInstalling(false);
     }
   }, [threadId, filepath, isInstalling]);
+
+  const handleDownload = useCallback(async () => {
+    if (isDownloading) return;
+
+    setIsDownloading(true);
+    try {
+      await downloadArtifactFile({ filepath, threadId, isMock });
+      toast.success(t.common.downloadSuccess);
+    } catch (error) {
+      console.error("Failed to download artifact:", error);
+      toast.error(t.common.downloadFailed);
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [filepath, threadId, isMock, isDownloading, t.common]);
+
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
@@ -285,21 +303,12 @@ export function ArtifactFileDetail({
             )}
             {!isWriteFile && (
               <ArtifactAction
-                icon={DownloadIcon}
+                icon={isDownloading ? LoaderIcon : DownloadIcon}
                 label={t.common.download}
                 tooltip={t.common.download}
+                disabled={isDownloading}
                 onClick={() => {
-                  const w = window.open(
-                    urlOfArtifact({
-                      filepath,
-                      threadId,
-                      download: true,
-                      isMock,
-                    }),
-                    "_blank",
-                    "noopener,noreferrer",
-                  );
-                  if (w) w.opener = null;
+                  void handleDownload();
                 }}
               />
             )}
@@ -335,6 +344,8 @@ export function ArtifactFileDetail({
             filepath={filepath}
             threadId={threadId}
             isMock={isMock ?? false}
+            onDownload={handleDownload}
+            isDownloading={isDownloading}
           />
         )}
       </ArtifactContent>
@@ -671,19 +682,17 @@ function NonCodeFilePreview({
   filepath,
   threadId,
   isMock,
+  onDownload,
+  isDownloading,
 }: {
   filepath: string;
   threadId: string;
   isMock: boolean;
+  onDownload: () => void | Promise<void>;
+  isDownloading: boolean;
 }) {
   const { t } = useI18n();
   const artifactUrl = urlOfArtifact({ filepath, threadId, isMock });
-  const downloadUrl = urlOfArtifact({
-    filepath,
-    threadId,
-    isMock,
-    download: true,
-  });
 
   if (isImageFile(filepath)) {
     return (
@@ -721,12 +730,16 @@ function NonCodeFilePreview({
         </Button>
         <Button
           variant="default"
+          disabled={isDownloading}
           onClick={() => {
-            const w = window.open(downloadUrl, "_blank", "noopener,noreferrer");
-            if (w) w.opener = null;
+            void onDownload();
           }}
         >
-          <DownloadIcon className="mr-2 size-4" />
+          {isDownloading ? (
+            <LoaderIcon className="mr-2 size-4 animate-spin" />
+          ) : (
+            <DownloadIcon className="mr-2 size-4" />
+          )}
           {t.common.download}
         </Button>
       </div>

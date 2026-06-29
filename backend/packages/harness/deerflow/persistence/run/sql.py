@@ -146,12 +146,13 @@ class RunRepository(RunStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
         limit=100,
+        offset=0,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id)
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
-        stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
+        stmt = stmt.order_by(RunRow.created_at.desc()).offset(offset).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]

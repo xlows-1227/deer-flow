@@ -20,6 +20,8 @@ export interface Translations {
     search: string;
     loadMore: string;
     download: string;
+    downloadSuccess: string;
+    downloadFailed: string;
     thinking: string;
     artifacts: string;
     public: string;
@@ -39,6 +41,7 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    view: string;
   };
 
   home: {
@@ -149,6 +152,12 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    skills: string;
+    files: string;
+    memory: string;
+    scheduledTasks: string;
+    collapseSidebar: string;
+    expandSidebar: string;
     taskRecords: string;
     taskRecordsEmpty: string;
     taskRecordsLoadFailed: string;
@@ -392,6 +401,17 @@ export interface Translations {
           source: string;
           createdAt: string;
         };
+        export: {
+          longTermProfile: string;
+          dailySummary: string;
+          preferences: string;
+          communicationStyle: string;
+          skillUsagePatterns: string;
+          interests: string;
+          topOfMind: string;
+          corrections: string;
+          updatedAt: string;
+        };
       };
     };
     appearance: {
@@ -409,6 +429,32 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      imageGeneration: {
+        title: string;
+        description: string;
+        loading: string;
+        loadFailed: string;
+        noConfig: string;
+        enableTool: string;
+        enableToolDescription: string;
+        defaultProvider: string;
+        outputDir: string;
+        selectModel: string;
+        enabled: string;
+        disabled: string;
+        keyConfigured: string;
+        defaultModel: string;
+        apiKey: string;
+        keepExistingKey: string;
+        enterApiKey: string;
+        baseUrl: string;
+        timeoutSeconds: string;
+        saveConfig: string;
+        saving: string;
+        saveSuccess: string;
+        retry: string;
+        adapter: string;
+      };
     };
     connectors: {
       title: string;
@@ -494,6 +540,7 @@ export interface Translations {
       testTitle: string;
       testBody: string;
       notSupported: string;
+      secureContextRequired: string;
       disableNotification: string;
     };
     account: {

@@ -62,6 +62,13 @@ export interface ReferencedFile {
   mime_type: string | null;
   extension: string;
   size: number;
+  /**
+   * Present when the referenced file comes from a chat upload instead of the
+   * user document library. The backend uses this to resolve the file from that
+   * thread's uploads directory.
+   */
+  source_thread_id?: string;
+  source_thread_title?: string;
 }
 
 // ----------------------------------------------------------------------------

@@ -42,9 +42,7 @@ from .schemas import RunStatus
 logger = logging.getLogger(__name__)
 
 
-def _log_cleanup_exception(
-    task: asyncio.Task, run_id: str, logger: logging.Logger
-) -> None:
+def _log_cleanup_exception(task: asyncio.Task, run_id: str, logger: logging.Logger) -> None:
     """Log an exception raised by the bridge cleanup task."""
     if task.cancelled():
         return
@@ -335,6 +333,30 @@ def _next_channel_version(checkpointer: Any, current: Any) -> Any:
     return 1
 
 
+def _flash_direct_checkpoint_metadata(ckpt_tuple: Any | None) -> dict[str, Any]:
+    """Build LangGraph-compatible checkpoint metadata for flash-direct writes.
+
+    LangGraph resumes from the latest checkpoint via
+    ``checkpoint_metadata["step"] + 1`` (see ``AsyncPregelLoop.__aenter__``).
+    Flash-direct bypasses the graph, so we must advance ``step`` ourselves or
+    the next full-graph run (e.g. switching from flash to pro) raises
+    ``KeyError('step')``.
+    """
+    previous_metadata = getattr(ckpt_tuple, "metadata", None) if ckpt_tuple is not None else None
+    if not isinstance(previous_metadata, dict):
+        previous_metadata = {}
+
+    parents = previous_metadata.get("parents")
+    if not isinstance(parents, dict):
+        parents = {}
+
+    return {
+        "source": "flash_direct",
+        "step": previous_metadata.get("step", -1) + 1,
+        "parents": parents,
+    }
+
+
 async def _persist_flash_direct_checkpoint(
     *,
     checkpointer: Any | None,
@@ -379,7 +401,7 @@ async def _persist_flash_direct_checkpoint(
         "put",
         base_config,
         checkpoint,
-        {"source": "flash_direct"},
+        _flash_direct_checkpoint_metadata(ckpt_tuple),
         new_versions,
     )
 
@@ -862,9 +884,7 @@ async def run_agent(
         await bridge.publish_end(run_id)
 
         cleanup_task = asyncio.create_task(bridge.cleanup(run_id, delay=60))
-        cleanup_task.add_done_callback(
-            lambda task: _log_cleanup_exception(task, run_id, logger)
-        )
+        cleanup_task.add_done_callback(lambda task: _log_cleanup_exception(task, run_id, logger))
 
 
 # ---------------------------------------------------------------------------

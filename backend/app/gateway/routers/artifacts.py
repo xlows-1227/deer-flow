@@ -17,7 +17,17 @@ router = APIRouter(prefix="/api", tags=["artifacts"])
 ACTIVE_CONTENT_MIME_TYPES = {
     "text/html",
     "application/xhtml+xml",
-    "image/svg+xml",
+}
+
+SVG_MIME_TYPE = "image/svg+xml"
+
+# SVG is a valid image type that must render inline (chat markdown images and the
+# artifact preview both load it via <img>). It can also embed scripts, so when the
+# file is opened directly as a document we neutralize script execution with a strict
+# CSP sandbox instead of forcing a download (which would break inline rendering).
+SVG_SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+    "X-Content-Type-Options": "nosniff",
 }
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
@@ -164,6 +174,10 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
 
+        if mime_type == SVG_MIME_TYPE:
+            svg_headers = {"Content-Disposition": _build_content_disposition("inline", download_name), **cache_headers, **SVG_SECURITY_HEADERS}
+            return Response(content=content, media_type=mime_type, headers=svg_headers)
+
         if mime_type and mime_type.startswith("text/"):
             return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
 
@@ -192,6 +206,12 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
     # in the application origin when users open generated artifacts.
     if mime_type in ACTIVE_CONTENT_MIME_TYPES:
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
+
+    # Serve SVG inline so it renders in <img> tags, but block script execution on
+    # direct navigation with a strict CSP sandbox.
+    if mime_type == SVG_MIME_TYPE:
+        svg_headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name), **SVG_SECURITY_HEADERS}
+        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=svg_headers)
 
     if mime_type and mime_type.startswith("text/"):
         return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)

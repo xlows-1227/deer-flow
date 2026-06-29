@@ -54,10 +54,10 @@ class MemoryRunStore(RunStore):
             return None
         return run
 
-    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+    async def list_by_thread(self, thread_id, *, user_id=None, limit=100, offset=0):
         results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (user_id is None or r.get("user_id") == user_id)]
         results.sort(key=lambda r: r["created_at"], reverse=True)
-        return results[:limit]
+        return results[offset : offset + limit]
 
     async def update_status(self, run_id, status, *, error=None):
         if run_id in self._runs:

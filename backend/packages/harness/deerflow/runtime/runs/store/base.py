@@ -49,6 +49,7 @@ class RunStore(abc.ABC):
         *,
         user_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         pass
 

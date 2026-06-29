@@ -62,7 +62,7 @@ function collectToolExecutions(
   return executions;
 }
 
-function formatJson(value: unknown, maxLength = 800): string {
+function formatJson(value: unknown, maxLength = 20_000): string {
   try {
     const text =
       typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -96,9 +96,7 @@ function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
     executing: (
       <LoaderCircleIcon className="size-4 shrink-0 animate-spin text-blue-500" />
     ),
-    success: (
-      <CheckCircle2Icon className="size-4 shrink-0 text-emerald-500" />
-    ),
+    success: <CheckCircle2Icon className="size-4 shrink-0 text-emerald-500" />,
     pending: <WrenchIcon className="size-4 shrink-0 text-slate-400" />,
     error: <XCircleIcon className="size-4 shrink-0 text-red-500" />,
   }[status];
@@ -195,10 +193,7 @@ export function WorkspaceToolExecutionPanel({
 
   return (
     <div
-      className={cn(
-        "min-h-0 flex-1 space-y-2 overflow-y-auto p-3",
-        className,
-      )}
+      className={cn("min-h-0 flex-1 space-y-2 overflow-y-auto p-3", className)}
     >
       {executions.map((execution) => (
         <ToolExecutionItem key={execution.id} execution={execution} />

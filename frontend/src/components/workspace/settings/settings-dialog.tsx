@@ -46,7 +46,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const { t } = useI18n();
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
+  const [connectorFormOpen, setConnectorFormOpen] = useState(false);
   const settingsOpen = dialogProps.open;
+
+  const preventNestedDialogDismiss = connectorFormOpen
+    ? (event: Event) => {
+        event.preventDefault();
+      }
+    : undefined;
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
@@ -55,6 +62,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
       setActiveSection(defaultSection);
     }
   }, [defaultSection, dialogProps.open]);
+
+  useEffect(() => {
+    if (activeSection !== "connectors") {
+      setConnectorFormOpen(false);
+    }
+  }, [activeSection]);
 
   const sections = useMemo(
     () => [
@@ -104,6 +117,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <DialogContent
         className="flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col sm:max-w-5xl md:max-w-6xl"
         aria-describedby={undefined}
+        onInteractOutside={preventNestedDialogDismiss}
+        onPointerDownOutside={preventNestedDialogDismiss}
+        onFocusOutside={preventNestedDialogDismiss}
       >
         <DialogHeader className="gap-1">
           <DialogTitle>{t.settings.title}</DialogTitle>
@@ -142,7 +158,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
               {activeSection === "connectors" && (
-                <ConnectorSettingsPage settingsOpen={settingsOpen} />
+                <ConnectorSettingsPage
+                  settingsOpen={settingsOpen}
+                  onFormOpenChange={setConnectorFormOpen}
+                />
               )}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (

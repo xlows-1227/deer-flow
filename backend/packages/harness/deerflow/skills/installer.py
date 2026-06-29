@@ -7,6 +7,7 @@ Both Gateway and Client delegate to these functions.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import posixpath
 import shutil
 import stat
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
+_SANDBOX_READABLE_DIR_MODE = 0o755
+_SANDBOX_READABLE_FILE_MODE = 0o644
+_SANDBOX_READABLE_EXECUTABLE_MODE = 0o755
 
 
 class SkillAlreadyExistsError(ValueError):
@@ -61,6 +65,48 @@ def is_symlink_member(info: zipfile.ZipInfo) -> bool:
 def should_ignore_archive_entry(path: Path) -> bool:
     """Return True for macOS metadata dirs and dotfiles."""
     return path.name.startswith(".") or path.name == "__MACOSX"
+
+
+def _file_mode_for_sandbox(path: Path) -> int:
+    current_mode = stat.S_IMODE(path.stat().st_mode)
+    if current_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        return _SANDBOX_READABLE_EXECUTABLE_MODE
+    return _SANDBOX_READABLE_FILE_MODE
+
+
+def make_skill_path_sandbox_readable(path: Path) -> None:
+    """Ensure skill files are readable after being bind-mounted into a sandbox.
+
+    Custom skills are authored by the Gateway process, but read by a separate
+    sandbox container that may run as a different uid.  Normalise permissions
+    to avoid 0600 files or 0700 directories becoming unreadable in Docker/K8s.
+    Symlinks are intentionally skipped so chmod never escapes the skill tree.
+    """
+    if not path.exists() or path.is_symlink():
+        return
+
+    if path.is_file():
+        path.chmod(_file_mode_for_sandbox(path))
+        return
+
+    if not path.is_dir():
+        return
+
+    for current_root, dir_names, file_names in os.walk(path, followlinks=False):
+        root = Path(current_root)
+        if root.is_symlink():
+            dir_names[:] = []
+            continue
+        root.chmod(_SANDBOX_READABLE_DIR_MODE)
+
+        dir_names[:] = [name for name in dir_names if not name.startswith(".") and not (root / name).is_symlink()]
+        for filename in file_names:
+            if filename.startswith("."):
+                continue
+            file_path = root / filename
+            if file_path.is_symlink() or not file_path.is_file():
+                continue
+            file_path.chmod(_file_mode_for_sandbox(file_path))
 
 
 def resolve_skill_dir_from_archive(temp_path: Path) -> Path:
@@ -140,10 +186,11 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
     installed = False
     reserved = False
     try:
-        target.mkdir(mode=0o700)
+        target.mkdir(mode=_SANDBOX_READABLE_DIR_MODE)
         reserved = True
         for child in staging_target.iterdir():
             shutil.move(str(child), target / child.name)
+        make_skill_path_sandbox_readable(target)
         installed = True
     except FileExistsError as e:
         raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e

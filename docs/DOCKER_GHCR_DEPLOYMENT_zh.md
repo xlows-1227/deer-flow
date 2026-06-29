@@ -202,8 +202,7 @@ docker compose -p deer-flow \
   -f docker/docker-compose.yaml \
   -f docker/docker-compose.images.yaml \
   pull
-
-docker compose -p deer-flow \
+docker compose --env-file .env -p deer-flow \
   -f docker/docker-compose.yaml \
   -f docker/docker-compose.images.yaml \
   up -d --no-build frontend gateway nginx

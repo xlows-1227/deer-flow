@@ -346,6 +346,19 @@ async def test_list_by_thread(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_list_by_thread_offset(manager: RunManager):
+    """Offset should page through newest-first run lists."""
+    r1 = await manager.create("thread-1")
+    r2 = await manager.create("thread-1")
+    r3 = await manager.create("thread-1")
+
+    runs = await manager.list_by_thread("thread-1", limit=1, offset=1)
+    assert [run.run_id for run in runs] == [r2.run_id]
+    all_runs = await manager.list_by_thread("thread-1")
+    assert [run.run_id for run in all_runs] == [r3.run_id, r2.run_id, r1.run_id]
+
+
+@pytest.mark.anyio
 async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
     """Ordering should be stable (insertion order) even when timestamps tie."""
     monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
