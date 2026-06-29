@@ -26,6 +26,7 @@ from app.gateway.services import (
     resolve_agent_factory,
 )
 from deerflow.config.app_config import get_app_config
+from deerflow.config.effective_config import build_effective_app_config, effective_app_config_scope
 from deerflow.runtime import DisconnectMode, RunContext, RunRecord, RunStatus, run_agent
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.time import coerce_iso
@@ -354,14 +355,15 @@ class SchedulerService:
         return ScheduledTaskResponse.model_validate({**task, "timezone": task.get("timezone") or "UTC"})
 
     @staticmethod
-    def _validate_model_name(model_name: str | None) -> None:
+    async def _validate_model_name(model_name: str | None, *, user_id: str) -> None:
         if not model_name:
             return
-        if get_app_config().get_model_config(model_name) is None:
+        config = await build_effective_app_config(user_id=user_id)
+        if config.get_model_config(model_name) is None:
             raise ValueError(f"Model {model_name!r} is not in the configured model allowlist")
 
     async def create_task(self, data: ScheduledTaskCreate, *, user_id: str) -> ScheduledTaskResponse:
-        self._validate_model_name(data.model_name)
+        await self._validate_model_name(data.model_name, user_id=user_id)
         now = datetime.now(UTC)
         values = data.model_dump()
         values.update(
@@ -430,7 +432,7 @@ class SchedulerService:
 
         updates = data.model_dump(exclude_unset=True)
         if "model_name" in updates:
-            self._validate_model_name(updates["model_name"])
+            await self._validate_model_name(updates["model_name"], user_id=user_id)
 
         merged = {**current, **updates}
         merged["timezone"] = merged.get("timezone") or "UTC"
@@ -501,7 +503,7 @@ class SchedulerService:
             return ExecuteTaskResult(found=True, error_message="Task is already running")
 
         try:
-            self._validate_model_name(task.get("model_name"))
+            await self._validate_model_name(task.get("model_name"), user_id=user_id)
         except ValueError as exc:
             await self._store.mark_finished(task_id, status="error")
             return ExecuteTaskResult(found=True, error_message=str(exc))
@@ -635,17 +637,18 @@ class SchedulerService:
         token = set_current_user(SimpleNamespace(id=user_id))
         worker_error: BaseException | None = None
         try:
-            await run_agent(
-                self._app.state.stream_bridge,
-                self._app.state.run_manager,
-                record,
-                ctx=self._run_context(),
-                agent_factory=resolve_agent_factory("lead_agent"),
-                graph_input=graph_input,
-                config=config,
-                stream_modes=["values", "messages-tuple"],
-                stream_subgraphs=True,
-            )
+            async with effective_app_config_scope(user_id):
+                await run_agent(
+                    self._app.state.stream_bridge,
+                    self._app.state.run_manager,
+                    record,
+                    ctx=self._run_context(),
+                    agent_factory=resolve_agent_factory("lead_agent"),
+                    graph_input=graph_input,
+                    config=config,
+                    stream_modes=["values", "messages-tuple"],
+                    stream_subgraphs=True,
+                )
         except asyncio.CancelledError:
             if record.status not in (RunStatus.error, RunStatus.interrupted):
                 await self._app.state.run_manager.set_status(

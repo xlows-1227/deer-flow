@@ -208,15 +208,30 @@ export function mergeLoadedRunMessages(
   ]);
 }
 
+// When streaming, the backend often appends this turn's human input AFTER the
+// assistant output (thread.messages order becomes [AI, human]). Move the human
+// input back to the front of the turn so the user's question never "jumps"
+// below the model output once the optimistic message is cleared.
+function moveHumanInputToFront(messages: Message[]): Message[] {
+  const firstHumanIndex = messages.findIndex(
+    (message) => message.type === "human",
+  );
+  if (firstHumanIndex <= 0) {
+    return messages;
+  }
+  const human = messages[firstHumanIndex]!;
+  return [
+    human,
+    ...messages.slice(0, firstHumanIndex),
+    ...messages.slice(firstHumanIndex + 1),
+  ];
+}
+
 function mergeThreadAndOptimisticMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
 ): Message[] {
-  if (!optimisticMessages.some((message) => message.type === "human")) {
-    return [...threadMessages, ...optimisticMessages];
-  }
-
   const historyMessageIds = new Set(
     historyMessages.map(messageIdentity).filter(isNonEmptyString),
   );
@@ -225,14 +240,27 @@ function mergeThreadAndOptimisticMessages(
     return !identity || !historyMessageIds.has(identity);
   });
 
-  if (firstNewThreadMessageIndex === -1) {
-    return [...threadMessages, ...optimisticMessages];
+  const orderedThreadMessages =
+    firstNewThreadMessageIndex === -1
+      ? threadMessages
+      : [
+          ...threadMessages.slice(0, firstNewThreadMessageIndex),
+          ...moveHumanInputToFront(
+            threadMessages.slice(firstNewThreadMessageIndex),
+          ),
+        ];
+
+  if (
+    !optimisticMessages.some((message) => message.type === "human") ||
+    firstNewThreadMessageIndex === -1
+  ) {
+    return [...orderedThreadMessages, ...optimisticMessages];
   }
 
   return [
-    ...threadMessages.slice(0, firstNewThreadMessageIndex),
+    ...orderedThreadMessages.slice(0, firstNewThreadMessageIndex),
     ...optimisticMessages,
-    ...threadMessages.slice(firstNewThreadMessageIndex),
+    ...orderedThreadMessages.slice(firstNewThreadMessageIndex),
   ];
 }
 

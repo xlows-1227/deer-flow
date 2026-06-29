@@ -14,6 +14,7 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
+from app.gateway.effective_config_middleware import EffectiveConfigMiddleware
 from app.gateway.external.audit import ExternalAuditMiddleware
 from app.gateway.routers import (
     agents,
@@ -38,6 +39,7 @@ from app.gateway.routers import (
     threads,
     tools,
     uploads,
+    user_models,
 )
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.config.app_config import apply_logging_level
@@ -454,6 +456,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             },
         )
 
+    # Merge per-user custom models into AppConfig after auth context is set.
+    app.add_middleware(EffectiveConfigMiddleware)
+
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
 
@@ -478,6 +483,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         )
 
     # Include routers
+    # Custom model CRUD must register before /api/models/{model_name}, otherwise
+    # "custom" is captured as a model name.
+    app.include_router(user_models.router)
+
     # Models API is mounted at /api/models
     app.include_router(models.router)
 

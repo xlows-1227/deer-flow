@@ -100,6 +100,13 @@ def _default_image_generation_providers() -> dict[str, ImageGenerationProviderCo
             model="openai/gpt-image-2-free",
             base_url="https://aihubmix.com/v1",
         ),
+        "minimax": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="minimax",
+            display_name="MiniMax",
+            model="image-01",
+            base_url="https://api.minimaxi.com/v1",
+        ),
         "custom_openai_compatible": ImageGenerationProviderConfig(
             enabled=False,
             provider="custom_openai_compatible",

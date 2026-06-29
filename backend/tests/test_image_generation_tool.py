@@ -96,6 +96,8 @@ def test_effective_image_generation_config_merges_provider_defaults() -> None:
     assert "stability" in effective.providers
     assert effective.providers["aihubmix"].model == "openai/gpt-image-2-free"
     assert effective.providers["aihubmix"].base_url == "https://aihubmix.com/v1"
+    assert effective.providers["minimax"].model == "image-01"
+    assert effective.providers["minimax"].base_url == "https://api.minimaxi.com/v1"
 
 
 def test_generate_images_rejects_unsupported_provider_parameter_before_http() -> None:
@@ -228,6 +230,82 @@ def test_generate_images_calls_aihubmix_predictions_endpoint(monkeypatch: pytest
                     "moderation": "low",
                     "background": "auto",
                 }
+            },
+            "files": None,
+        }
+    ]
+
+
+def test_generate_images_calls_minimax_image_generation_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    client_options: list[dict[str, object]] = []
+
+    class _FakeResponse:
+        headers = {"content-type": "application/json"}
+        content = b""
+        text = ""
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, dict[str, list[str]]]:
+            return {"data": {"image_base64": [base64.b64encode(PNG_BYTES).decode()]}}
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            client_options.append(kwargs)
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def post(self, url, *, headers=None, json=None, files=None):
+            calls.append({"url": url, "headers": headers, "json": json, "files": files})
+            return _FakeResponse()
+
+        def get(self, url):
+            raise AssertionError(f"Unexpected download request: {url}")
+
+    monkeypatch.setattr(image_generation_module.httpx, "Client", _FakeClient)
+    config = ExtensionsConfig.model_validate(
+        {
+            "imageGeneration": {
+                "enabled": True,
+                "defaultProvider": "minimax",
+                "providers": {
+                    "minimax": {
+                        "enabled": True,
+                        "api_key": "sk-test-minimax",
+                    }
+                },
+            }
+        }
+    )
+
+    provider_name, metadata, images = generate_images(
+        prompt="A person standing at Venice beach",
+        size="16:9",
+        config=config,
+    )
+
+    assert provider_name == "minimax"
+    assert metadata.display_name == "MiniMax"
+    assert images[0].data == PNG_BYTES
+    assert images[0].mime_type == "image/png"
+    assert client_options == [{"timeout": 120.0, "trust_env": False}]
+    assert calls == [
+        {
+            "url": "https://api.minimaxi.com/v1/image_generation",
+            "headers": {"Authorization": "Bearer sk-test-minimax", "Content-Type": "application/json"},
+            "json": {
+                "model": "image-01",
+                "prompt": "A person standing at Venice beach",
+                "response_format": "base64",
+                "aspect_ratio": "16:9",
             },
             "files": None,
         }

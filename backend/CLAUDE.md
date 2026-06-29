@@ -227,6 +227,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | Router | Endpoints |
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
+| **Custom Models** (`/api/models/custom`) | `GET /` - list user's custom models; `POST /` - create; `PUT /{id}` - update; `DELETE /{id}` - delete |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
 | **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /custom` - create custom `SKILL.md`; `POST /custom/ai-draft` - generate an AI draft without saving; `POST /upload` - multipart install from `.zip` / `.skill`; `POST /install` - install from thread artifact archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |

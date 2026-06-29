@@ -207,6 +207,35 @@ test("mergeMessages places optimistic user input before streaming assistant outp
   ).toEqual([previousHuman, previousAi, optimisticHuman, streamingAi]);
 });
 
+test("mergeMessages keeps server human before streaming assistant output after optimistic cleared", () => {
+  const previousHuman = {
+    id: "human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const previousAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  // Backend streams this turn as [AI output, human input] and the optimistic
+  // message has already been cleared (third arg empty).
+  const streamingAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "周报需要这些信息",
+  } as Message;
+  const serverHuman = {
+    id: "server-human-2",
+    type: "human",
+    content: "帮我写一份周报需要什么信息",
+  } as Message;
+
+  expect(
+    mergeMessages([previousHuman, previousAi], [streamingAi, serverHuman], []),
+  ).toEqual([previousHuman, previousAi, serverHuman, streamingAi]);
+});
+
 test("mergeMessages keeps replaced history before optimistic user input", () => {
   const historyHuman = {
     id: "human-1",

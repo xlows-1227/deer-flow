@@ -137,6 +137,16 @@ PROVIDER_METADATA: dict[str, ImageGenerationProviderMetadata] = {
         max_images=4,
         docs_url="https://aihubmix.com",
     ),
+    "minimax": ImageGenerationProviderMetadata(
+        id="minimax",
+        display_name="MiniMax",
+        default_base_url="https://api.minimaxi.com/v1",
+        default_model="image-01",
+        models=("image-01",),
+        supported_parameters=("prompt", "model", "size"),
+        size_options=("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"),
+        max_images=1,
+    ),
     "custom_openai_compatible": ImageGenerationProviderMetadata(
         id="custom_openai_compatible",
         display_name="OpenAI-compatible",
@@ -426,6 +436,20 @@ def _aihubmix_payload(params: dict[str, Any], metadata: ImageGenerationProviderM
         if name in params and name in metadata.supported_parameters:
             input_payload[name] = params[name]
     return {"input": input_payload}
+
+
+def _minimax_payload(params: dict[str, Any], provider_defaults: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(provider_defaults)
+    payload.update(
+        {
+            "model": params["model"],
+            "prompt": params["prompt"],
+            "response_format": "base64",
+        }
+    )
+    if params.get("size"):
+        payload["aspect_ratio"] = params["size"]
+    return payload
 
 
 AIHUBMIX_GEMINI_BASE_URL = "https://aihubmix.com/gemini/v1beta"
@@ -785,6 +809,41 @@ def _generate_stability(
     return images
 
 
+def _generate_minimax(
+    *,
+    client: httpx.Client,
+    provider_name: str,
+    metadata: ImageGenerationProviderMetadata,
+    provider_config: ImageGenerationProviderConfig,
+    params: dict[str, Any],
+) -> list[GeneratedImage]:
+    api_key = _clean_string(provider_config.api_key)
+    if not api_key:
+        raise ImageGenerationConfigError("MiniMax API key is not configured. Ask the user to add it in Settings > Tools > Image generation.")
+    base_url = _clean_string(provider_config.base_url) or metadata.default_base_url
+    payload = _minimax_payload(params, provider_config.params)
+    endpoint = f"{base_url.rstrip('/')}/image_generation"
+    response = _post_provider_request(
+        client,
+        provider_name=provider_name,
+        metadata=metadata,
+        endpoint=endpoint,
+        params=params,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json_payload=payload,
+    )
+    _raise_http_error(response, provider_name)
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ImageGenerationProviderError("MiniMax returned a non-JSON image response") from exc
+
+    images = _images_from_mixed_json_value(client, body, provider_name)
+    if not images:
+        raise ImageGenerationProviderError("MiniMax response did not include image data")
+    return images
+
+
 def generate_images(
     *,
     prompt: str,
@@ -843,6 +902,14 @@ def generate_images(
             )
         elif adapter_id == "aihubmix":
             images = _generate_aihubmix(
+                client=client,
+                provider_name=provider_name,
+                metadata=metadata,
+                provider_config=provider_config,
+                params=params,
+            )
+        elif adapter_id == "minimax":
+            images = _generate_minimax(
                 client=client,
                 provider_name=provider_name,
                 metadata=metadata,
