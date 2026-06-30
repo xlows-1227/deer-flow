@@ -6,6 +6,7 @@ import {
   type LocalSettings,
 } from "./local";
 import {
+  copyThreadContext,
   getBaseSettingsSnapshot,
   getThreadContextSnapshot,
   subscribe,
@@ -26,6 +27,13 @@ export function useLocalSettings(): [LocalSettings, LocalSettingsSetter] {
   }, []);
 
   return [settings, setSettings];
+}
+
+export function copyThreadSettings(
+  sourceThreadId: string,
+  targetThreadId: string,
+) {
+  copyThreadContext(sourceThreadId, targetThreadId);
 }
 
 export function useThreadSettings(

@@ -353,6 +353,8 @@ class TestInjectImageMessage:
         assert len(result["messages"]) == 1
         injected = result["messages"][0]
         assert isinstance(injected, HumanMessage)
+        assert injected.additional_kwargs.get("hide_from_ui") is True
+        assert injected.additional_kwargs.get("view_image_context") is True
         # Mixed-content payload: list of text + image_url blocks
         assert isinstance(injected.content, list)
         assert any(isinstance(b, dict) and b.get("type") == "image_url" for b in injected.content)

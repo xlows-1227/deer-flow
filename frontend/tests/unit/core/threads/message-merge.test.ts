@@ -207,6 +207,59 @@ test("mergeMessages places optimistic user input before streaming assistant outp
   ).toEqual([previousHuman, previousAi, optimisticHuman, streamingAi]);
 });
 
+test("mergeMessages appends optimistic follow-up after prior turn when history is empty", () => {
+  const previousHuman = {
+    id: "human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const previousAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  const streamingAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "今天天气不错",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-2",
+    type: "human",
+    content: "今天天气怎么样",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [],
+      [previousHuman, previousAi, streamingAi],
+      [optimisticHuman],
+    ),
+  ).toEqual([previousHuman, previousAi, optimisticHuman, streamingAi]);
+});
+
+test("mergeMessages appends optimistic follow-up before streaming when prior turn only exists in thread", () => {
+  const previousHuman = {
+    id: "human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const previousAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-2",
+    type: "human",
+    content: "今天天气怎么样",
+  } as Message;
+
+  expect(
+    mergeMessages([], [previousHuman, previousAi], [optimisticHuman]),
+  ).toEqual([previousHuman, previousAi, optimisticHuman]);
+});
+
 test("mergeMessages keeps server human before streaming assistant output after optimistic cleared", () => {
   const previousHuman = {
     id: "human-1",
@@ -234,6 +287,37 @@ test("mergeMessages keeps server human before streaming assistant output after o
   expect(
     mergeMessages([previousHuman, previousAi], [streamingAi, serverHuman], []),
   ).toEqual([previousHuman, previousAi, serverHuman, streamingAi]);
+});
+
+test("mergeMessages does not reorder historical slices with multiple human messages", () => {
+  const firstHuman = {
+    id: "human-1",
+    type: "human",
+    content: "今天天气怎么样",
+  } as Message;
+  const secondHuman = {
+    id: "human-2",
+    type: "human",
+    content: "南京天气",
+  } as Message;
+  const clarificationAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "我需要先确认一下您想查询哪个城市的天气。",
+  } as Message;
+  const laterHuman = {
+    id: "human-3",
+    type: "human",
+    content: "南京天气",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [],
+      [firstHuman, secondHuman, clarificationAi, laterHuman],
+      [],
+    ),
+  ).toEqual([firstHuman, secondHuman, clarificationAi, laterHuman]);
 });
 
 test("mergeMessages keeps replaced history before optimistic user input", () => {
@@ -366,4 +450,126 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
     optimisticHuman,
   ]);
+});
+
+test("mergeMessages does not duplicate humans when history and thread ids differ but content overlaps", () => {
+  const historyH1 = {
+    id: "hist-h1",
+    type: "human",
+    content: "今天天气怎么样",
+    additional_kwargs: { timestamp: "2026-06-29T15:46:29+08:00" },
+  } as Message;
+  const historyH2 = {
+    id: "hist-h2",
+    type: "human",
+    content: "南京天气",
+    additional_kwargs: { timestamp: "2026-06-29T15:54:20+08:00" },
+  } as Message;
+  const threadH1 = {
+    id: "thread-h1",
+    type: "human",
+    content: "今天天气怎么样",
+    additional_kwargs: { timestamp: "2026-06-29T15:46:29+08:00" },
+  } as Message;
+  const threadH2 = {
+    id: "thread-h2",
+    type: "human",
+    content: "南京天气",
+    additional_kwargs: { timestamp: "2026-06-29T15:54:09+08:00" },
+  } as Message;
+  const ai = {
+    id: "ai-1",
+    type: "ai",
+    content: "我需要先确认一下您想查询哪个城市的天气。",
+  } as Message;
+
+  expect(
+    mergeMessages([historyH1, historyH2], [threadH1, threadH2, ai], []),
+  ).toEqual([threadH1, threadH2, ai]);
+});
+
+test("mergeMessages keeps repeated human text when positions align across history and thread", () => {
+  const history = [
+    {
+      id: "hist-h1",
+      type: "human",
+      content: "今天天气怎么样",
+    },
+    {
+      id: "hist-h2",
+      type: "human",
+      content: "南京天气",
+    },
+    {
+      id: "hist-ai",
+      type: "ai",
+      content: "clarification",
+    },
+    {
+      id: "hist-h3",
+      type: "human",
+      content: "南京天气",
+    },
+  ] as Message[];
+  const thread = [
+    {
+      id: "thread-h1",
+      type: "human",
+      content: "今天天气怎么样",
+    },
+    {
+      id: "thread-h2",
+      type: "human",
+      content: "南京天气",
+    },
+    {
+      id: "thread-ai",
+      type: "ai",
+      content: "clarification",
+    },
+    {
+      id: "thread-h3",
+      type: "human",
+      content: "南京天气",
+    },
+  ] as Message[];
+
+  expect(mergeMessages(history, thread, [])).toEqual(thread);
+});
+
+test("mergeMessages repairs dynamic context user copy order from checkpoint state", () => {
+  const reminder = {
+    id: "turn-1",
+    type: "human",
+    content: "<system-reminder></system-reminder>",
+    additional_kwargs: {
+      hide_from_ui: true,
+      dynamic_context_reminder: true,
+    },
+  } as Message;
+  const clarificationAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "我需要先确认一下您想查询哪个城市的天气。",
+  } as Message;
+  const secondHuman = {
+    id: "turn-2",
+    type: "human",
+    name: "user-input",
+    content: [{ type: "text", text: "南京天气" }],
+    additional_kwargs: { timestamp: "2026-06-29T07:54:20.150706+00:00" },
+  } as Message;
+  const firstHumanCopy = {
+    id: "turn-1__user",
+    type: "human",
+    content: [{ type: "text", text: "今天天气怎么样" }],
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [],
+      [reminder, clarificationAi, secondHuman, firstHumanCopy],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["turn-1", "turn-1__user", "ai-1", "turn-2"]);
 });

@@ -146,6 +146,26 @@ def _current_turn_has_attachment(graph_input: dict) -> bool:
     return False
 
 
+def _current_turn_has_tool_context(graph_input: dict) -> bool:
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    for message in messages:
+        if getattr(message, "type", None) == "tool":
+            return True
+        if isinstance(message, dict) and message.get("type") == "tool":
+            return True
+        if getattr(message, "tool_calls", None) or getattr(message, "invalid_tool_calls", None):
+            return True
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if additional_kwargs is None and isinstance(message, dict):
+            additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict) and additional_kwargs.get("tool_calls"):
+            return True
+    return False
+
+
 def _thread_has_historical_uploads(thread_id: str) -> bool:
     try:
         from deerflow.config.paths import get_paths
@@ -170,6 +190,10 @@ def _should_use_flash_direct_path(
         return False
     if cfg.get("skill_name"):
         return False
+    if cfg.get("connector_ids"):
+        return False
+    if cfg.get("external_allowed_skills") is not None:
+        return False
     if interrupt_before or interrupt_after:
         return False
     if cfg.get("mode") != "flash":
@@ -178,9 +202,24 @@ def _should_use_flash_direct_path(
         return False
     if _current_turn_has_attachment(graph_input):
         return False
+    if _current_turn_has_tool_context(graph_input):
+        return False
     if _thread_has_historical_uploads(thread_id):
         return False
     return True
+
+
+def _message_has_tool_call_request(message: Any) -> bool:
+    if getattr(message, "tool_calls", None):
+        return True
+    if getattr(message, "invalid_tool_calls", None):
+        return True
+    if getattr(message, "tool_call_chunks", None):
+        return True
+    additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+    if isinstance(additional_kwargs, dict) and additional_kwargs.get("tool_calls"):
+        return True
+    return False
 
 
 def _queue_flash_memory_capture(
@@ -472,16 +511,24 @@ async def _run_flash_direct_model(
     logger.info("Run %s: flash direct streaming with modes %s (requested: %s)", record.run_id, lg_modes, requested_modes)
 
     accumulated_chunk: Any | None = None
+    streamed_chunks: list[Any] = []
     metadata = {"langgraph_node": "agent", "tags": ["lead_agent"], "flash_direct": True}
     async for chunk in model.astream(model_messages, config=runnable_config):
         if record.abort_event.is_set():
             logger.info("Run %s abort requested - stopping flash direct stream", record.run_id)
             break
         accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
-        if "messages" in lg_modes:
-            await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize((chunk, metadata), mode="messages"))
+        streamed_chunks.append(chunk)
 
     final_ai_message = message_chunk_to_message(accumulated_chunk) if accumulated_chunk is not None else AIMessage(content="")
+    if not record.abort_event.is_set() and _message_has_tool_call_request(final_ai_message):
+        logger.info("Run %s: flash direct model requested tool calls; falling back to full agent graph", record.run_id)
+        return False
+
+    if "messages" in lg_modes:
+        for chunk in streamed_chunks:
+            await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize((chunk, metadata), mode="messages"))
+
     final_messages = [*conversation_messages, final_ai_message]
     channel_values = {
         **existing_values,
@@ -655,7 +702,7 @@ async def run_agent(
             interrupt_before=interrupt_before,
             interrupt_after=interrupt_after,
         ):
-            await _run_flash_direct_model(
+            flash_direct_handled = await _run_flash_direct_model(
                 bridge=bridge,
                 run_manager=run_manager,
                 record=record,
@@ -668,27 +715,28 @@ async def run_agent(
                 checkpointer=checkpointer,
                 pre_run_checkpoint_tuple=pre_run_checkpoint_tuple,
             )
-            if record.abort_event.is_set():
-                action = record.abort_action
-                if action == "rollback":
-                    await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
-                    try:
-                        await _rollback_to_pre_run_checkpoint(
-                            checkpointer=checkpointer,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            pre_run_checkpoint_id=pre_run_checkpoint_id,
-                            pre_run_snapshot=pre_run_snapshot,
-                            snapshot_capture_failed=snapshot_capture_failed,
-                        )
-                        logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-                    except Exception:
-                        logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+            if flash_direct_handled:
+                if record.abort_event.is_set():
+                    action = record.abort_action
+                    if action == "rollback":
+                        await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                        try:
+                            await _rollback_to_pre_run_checkpoint(
+                                checkpointer=checkpointer,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                pre_run_checkpoint_id=pre_run_checkpoint_id,
+                                pre_run_snapshot=pre_run_snapshot,
+                                snapshot_capture_failed=snapshot_capture_failed,
+                            )
+                            logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+                        except Exception:
+                            logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+                    else:
+                        await run_manager.set_status(run_id, RunStatus.interrupted)
                 else:
-                    await run_manager.set_status(run_id, RunStatus.interrupted)
-            else:
-                await run_manager.set_status(run_id, RunStatus.success)
-            return
+                    await run_manager.set_status(run_id, RunStatus.success)
+                return
 
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)

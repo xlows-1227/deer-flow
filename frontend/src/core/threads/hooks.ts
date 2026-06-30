@@ -15,6 +15,7 @@ import { useI18n } from "../i18n/hooks";
 import {
   extractTextFromMessage,
   getMessageTimestamp,
+  repairDynamicContextUserMessageOrder,
   stripUploadedFilesTag,
   type FileInMessage,
 } from "../messages/utils";
@@ -208,17 +209,29 @@ export function mergeLoadedRunMessages(
   ]);
 }
 
-// When streaming, the backend often appends this turn's human input AFTER the
-// assistant output (thread.messages order becomes [AI, human]). Move the human
-// input back to the front of the turn so the user's question never "jumps"
-// below the model output once the optimistic message is cleared.
-function moveHumanInputToFront(messages: Message[]): Message[] {
-  const firstHumanIndex = messages.findIndex(
-    (message) => message.type === "human",
+function messageIsAssistantSide(message: Message): boolean {
+  return message.type === "ai" || message.type === "tool";
+}
+
+// During streaming, the backend can temporarily expose the current turn as
+// [AI/tool..., human]. Only repair that narrow tail shape. Historical slices
+// may contain multiple user turns; moving the first human there scrambles the
+// conversation.
+function moveSingleTrailingHumanInputToFront(messages: Message[]): Message[] {
+  const humanIndexes = messages.flatMap((message, index) =>
+    message.type === "human" ? [index] : [],
   );
-  if (firstHumanIndex <= 0) {
+  if (humanIndexes.length !== 1) {
     return messages;
   }
+  const firstHumanIndex = humanIndexes[0]!;
+  if (
+    firstHumanIndex <= 0 ||
+    !messages.slice(0, firstHumanIndex).every(messageIsAssistantSide)
+  ) {
+    return messages;
+  }
+
   const human = messages[firstHumanIndex]!;
   return [
     human,
@@ -227,40 +240,142 @@ function moveHumanInputToFront(messages: Message[]): Message[] {
   ];
 }
 
-function mergeThreadAndOptimisticMessages(
-  historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
-  const historyMessageIds = new Set(
-    historyMessages.map(messageIdentity).filter(isNonEmptyString),
-  );
-  const firstNewThreadMessageIndex = threadMessages.findIndex((message) => {
-    const identity = messageIdentity(message);
-    return !identity || !historyMessageIds.has(identity);
-  });
-
-  const orderedThreadMessages =
-    firstNewThreadMessageIndex === -1
-      ? threadMessages
-      : [
-          ...threadMessages.slice(0, firstNewThreadMessageIndex),
-          ...moveHumanInputToFront(
-            threadMessages.slice(firstNewThreadMessageIndex),
-          ),
-        ];
-
-  if (
-    !optimisticMessages.some((message) => message.type === "human") ||
-    firstNewThreadMessageIndex === -1
+function findLastMessageIndex(
+  messages: Message[],
+  predicate: (message: Message) => boolean,
+  beforeIndex = messages.length,
+): number {
+  for (
+    let index = Math.min(beforeIndex, messages.length) - 1;
+    index >= 0;
+    index--
   ) {
-    return [...orderedThreadMessages, ...optimisticMessages];
+    const message = messages[index];
+    if (message && predicate(message)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+// When history has not caught up, thread.messages may already contain completed
+// prior turns plus the current in-flight tail. If a second assistant message
+// appears after an earlier completed reply, treat only the trailing block as the
+// new turn so optimistic input stays after prior turns.
+function splitThreadForOptimisticHuman(messages: Message[]): {
+  established: Message[];
+  currentTail: Message[];
+} {
+  const lastAiIndex = findLastMessageIndex(messages, messageIsAssistantSide);
+  if (lastAiIndex === -1) {
+    return { established: messages, currentTail: [] };
   }
 
+  const priorAiIndex = findLastMessageIndex(
+    messages,
+    (message) => message.type === "ai",
+    lastAiIndex,
+  );
+
+  if (priorAiIndex === -1) {
+    if (messages.length === 1) {
+      return {
+        established: [],
+        currentTail: moveSingleTrailingHumanInputToFront(messages),
+      };
+    }
+    return { established: messages, currentTail: [] };
+  }
+
+  const trailingStart = priorAiIndex + 1;
+  return {
+    established: messages.slice(0, trailingStart),
+    currentTail: moveSingleTrailingHumanInputToFront(
+      messages.slice(trailingStart),
+    ),
+  };
+}
+
+function messagesEquivalent(
+  historyMessage: Message,
+  threadMessage: Message,
+): boolean {
+  const historyId = messageIdentity(historyMessage);
+  const threadId = messageIdentity(threadMessage);
+  if (historyId && threadId && historyId === threadId) {
+    return true;
+  }
+  if (historyMessage.type !== threadMessage.type) {
+    return false;
+  }
+  if (historyMessage.type === "human") {
+    const historyText = normalizeHumanMessageText(historyMessage);
+    const threadText = normalizeHumanMessageText(threadMessage);
+    return historyText.length > 0 && historyText === threadText;
+  }
+  if (historyMessage.type === "ai") {
+    const historyText = extractTextFromMessage(historyMessage).trim();
+    const threadText = extractTextFromMessage(threadMessage).trim();
+    return historyText.length > 0 && historyText === threadText;
+  }
+  return false;
+}
+
+function findHistoryThreadOverlapCutoff(
+  historyMessages: Message[],
+  threadMessages: Message[],
+): number {
+  const maxOverlap = Math.min(historyMessages.length, threadMessages.length);
+  for (let overlapLen = maxOverlap; overlapLen >= 1; overlapLen -= 1) {
+    const historySuffix = historyMessages.slice(
+      historyMessages.length - overlapLen,
+    );
+    const threadPrefix = threadMessages.slice(0, overlapLen);
+    if (
+      historySuffix.every((message, index) =>
+        messagesEquivalent(message, threadPrefix[index]!),
+      )
+    ) {
+      return historyMessages.length - overlapLen;
+    }
+  }
+  return historyMessages.length;
+}
+
+function mergeThreadAndOptimisticMessages(
+  establishedThreadPrefix: Message[],
+  threadNewSegment: Message[],
+  optimisticMessages: Message[],
+): Message[] {
+  const humanOptimistic = optimisticMessages.filter(
+    (message) => message.type === "human",
+  );
+  const otherOptimistic = optimisticMessages.filter(
+    (message) => message.type !== "human",
+  );
+
+  if (humanOptimistic.length === 0) {
+    const currentTurnTail =
+      moveSingleTrailingHumanInputToFront(threadNewSegment);
+    return [...establishedThreadPrefix, ...currentTurnTail, ...otherOptimistic];
+  }
+
+  const { established: peeledEstablished, currentTail } =
+    splitThreadForOptimisticHuman(threadNewSegment);
+  const established = [...establishedThreadPrefix, ...peeledEstablished];
+  const base = [...established, ...currentTail];
+
+  const firstStreamingIndex = currentTail.findIndex(messageIsAssistantSide);
+  if (firstStreamingIndex === -1) {
+    return [...base, ...humanOptimistic, ...otherOptimistic];
+  }
+
+  const insertAt = established.length + firstStreamingIndex;
   return [
-    ...orderedThreadMessages.slice(0, firstNewThreadMessageIndex),
-    ...optimisticMessages,
-    ...orderedThreadMessages.slice(firstNewThreadMessageIndex),
+    ...base.slice(0, insertAt),
+    ...humanOptimistic,
+    ...otherOptimistic,
+    ...base.slice(insertAt),
   ];
 }
 
@@ -349,35 +464,30 @@ export function mergeMessages(
     historyMessages,
     threadMessages,
   );
-  const threadMessageIds = new Set(
-    timestampedThreadMessages.map(messageIdentity).filter(isNonEmptyString),
+
+  // History is a suffix-aligned prefix of thread. Match by id when available and
+  // by human text when run-event ids differ from live thread state.
+  const cutoff = findHistoryThreadOverlapCutoff(
+    historyMessages,
+    timestampedThreadMessages,
   );
+  const overlapLen = historyMessages.length - cutoff;
+  const establishedThreadPrefix = timestampedThreadMessages.slice(
+    0,
+    overlapLen,
+  );
+  const threadNewSegment = timestampedThreadMessages.slice(overlapLen);
 
-  // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
-  // Scan from the end: shrink cutoff while messages are already in thread, stop as soon as
-  // we hit one that isn't — everything before that point is non-overlapping.
-  let cutoff = historyMessages.length;
-  for (let i = historyMessages.length - 1; i >= 0; i--) {
-    const msg = historyMessages[i];
-    if (!msg) {
-      continue;
-    }
-    const identity = messageIdentity(msg);
-    if (identity && threadMessageIds.has(identity)) {
-      cutoff = i;
-    } else {
-      break;
-    }
-  }
-
-  return dedupeMessagesByIdentity([
-    ...historyMessages.slice(0, cutoff),
-    ...mergeThreadAndOptimisticMessages(
-      historyMessages,
-      timestampedThreadMessages,
-      optimisticMessages,
-    ),
-  ]);
+  return repairDynamicContextUserMessageOrder(
+    dedupeMessagesByIdentity([
+      ...historyMessages.slice(0, cutoff),
+      ...mergeThreadAndOptimisticMessages(
+        establishedThreadPrefix,
+        threadNewSegment,
+        optimisticMessages,
+      ),
+    ]),
+  );
 }
 
 function getMessagesAfterBaseline(
@@ -494,6 +604,7 @@ export function useThreadStream({
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
+  const activeRunThreadIdRef = useRef<string | null>(null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const listeners = useRef({
@@ -502,6 +613,10 @@ export function useThreadStream({
     onFinish,
     onToolEnd,
   });
+
+  const isCurrentStreamThread = useCallback((candidate?: string | null) => {
+    return Boolean(candidate) && threadIdRef.current === candidate;
+  }, []);
 
   const {
     messages: history,
@@ -518,6 +633,12 @@ export function useThreadStream({
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
+    if (
+      activeRunThreadIdRef.current &&
+      activeRunThreadIdRef.current !== normalizedThreadId
+    ) {
+      activeRunThreadIdRef.current = null;
+    }
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -530,6 +651,7 @@ export function useThreadStream({
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
+    activeRunThreadIdRef.current = _threadId;
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
@@ -567,6 +689,10 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data) {
+      const eventThreadId = activeRunThreadIdRef.current;
+      if (!eventThreadId || !isCurrentStreamThread(eventThreadId)) {
+        return;
+      }
       if (data["SummarizationMiddleware.before_model"]) {
         const _messages = [
           ...(data["SummarizationMiddleware.before_model"].messages ?? []),
@@ -653,6 +779,10 @@ export function useThreadStream({
       }
     },
     onError(error) {
+      const eventThreadId = activeRunThreadIdRef.current;
+      if (!eventThreadId || !isCurrentStreamThread(eventThreadId)) {
+        return;
+      }
       setOptimisticMessages([]);
       toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -660,13 +790,17 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      if (threadIdRef.current && !isMock) {
+      if (eventThreadId && !isMock) {
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+          queryKey: threadTokenUsageQueryKey(eventThreadId),
         });
       }
     },
     onFinish(state) {
+      const eventThreadId = activeRunThreadIdRef.current;
+      if (!eventThreadId || !isCurrentStreamThread(eventThreadId)) {
+        return;
+      }
       listeners.current.onFinish?.(state.values);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -674,28 +808,73 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      if (threadIdRef.current && !isMock) {
+      if (eventThreadId && !isMock) {
         void queryClient.invalidateQueries({
-          queryKey: sandboxFilesQueryKey(threadIdRef.current),
+          queryKey: sandboxFilesQueryKey(eventThreadId),
         });
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+          queryKey: threadTokenUsageQueryKey(eventThreadId),
         });
       }
     },
   });
 
-  // Auto-join active runs for threads that were not started from this client
-  // (e.g. scheduled tasks). reconnectOnMount only works when sessionStorage
-  // contains the run id from a previous submit() on this tab.
   const threadRef = useRef(thread);
   threadRef.current = thread;
 
+  // Re-attach to a still-running backend task when the SSE stream drops
+  // (common during long tool calls such as image generation). The SDK only
+  // auto-reconnects once on mount; this covers mid-conversation disconnects.
+  useEffect(() => {
+    const currentThreadId = onStreamThreadId;
+    if (!currentThreadId || isMock || thread.isLoading) return;
+    const streamThreadId = currentThreadId;
+
+    let cancelled = false;
+
+    async function rejoinActiveRun() {
+      try {
+        const apiClient = getAPIClient(isMock);
+        const runs = await apiClient.runs.list(streamThreadId);
+        if (
+          cancelled ||
+          threadRef.current?.isLoading ||
+          !isCurrentStreamThread(streamThreadId)
+        ) {
+          return;
+        }
+        const activeRun = runs.find(
+          (r) => r.status === "pending" || r.status === "running",
+        );
+        if (
+          activeRun &&
+          threadRef.current &&
+          isCurrentStreamThread(streamThreadId)
+        ) {
+          activeRunThreadIdRef.current = streamThreadId;
+          await threadRef.current.joinStream(activeRun.run_id);
+        }
+      } catch {
+        // Silently ignore — run may have finished before we could join
+      }
+    }
+
+    const timer = window.setTimeout(() => void rejoinActiveRun(), 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [onStreamThreadId, isMock, thread.isLoading, isCurrentStreamThread]);
+
+  // Auto-join active runs for threads that were not started from this client
+  // (e.g. scheduled tasks). reconnectOnMount only works when sessionStorage
+  // contains the run id from a previous submit() on this tab.
   useEffect(() => {
     const currentThreadId = onStreamThreadId;
     if (!currentThreadId || isMock) return;
+    const streamThreadId = currentThreadId;
 
-    const sessionKey = `lg:stream:${currentThreadId}`;
+    const sessionKey = `lg:stream:${streamThreadId}`;
     if (
       typeof window !== "undefined" &&
       window.sessionStorage.getItem(sessionKey)
@@ -708,12 +887,18 @@ export function useThreadStream({
     async function tryJoinRunning() {
       try {
         const apiClient = getAPIClient(isMock);
-        const runs = await apiClient.runs.list(currentThreadId!);
-        if (cancelled) return;
+        const runs = await apiClient.runs.list(streamThreadId);
+        if (cancelled || !isCurrentStreamThread(streamThreadId)) return;
         const activeRun = runs.find(
           (r) => r.status === "pending" || r.status === "running",
         );
-        if (activeRun && threadRef.current && !threadRef.current.isLoading) {
+        if (
+          activeRun &&
+          threadRef.current &&
+          !threadRef.current.isLoading &&
+          isCurrentStreamThread(streamThreadId)
+        ) {
+          activeRunThreadIdRef.current = streamThreadId;
           await threadRef.current.joinStream(activeRun.run_id);
         }
       } catch {
@@ -726,7 +911,7 @@ export function useThreadStream({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [onStreamThreadId, isMock]);
+  }, [onStreamThreadId, isMock, isCurrentStreamThread]);
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
@@ -748,6 +933,12 @@ export function useThreadStream({
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
     startedRef.current = false;
+    if (
+      activeRunThreadIdRef.current &&
+      activeRunThreadIdRef.current !== threadId
+    ) {
+      activeRunThreadIdRef.current = null;
+    }
     sendInFlightRef.current = false;
     optimisticBaselineHumanKeysRef.current = new Set();
     pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -974,6 +1165,7 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
+            onDisconnect: "continue",
             multitaskStrategy: options?.multitaskStrategy,
             config: {
               recursion_limit: 1000,
@@ -995,6 +1187,7 @@ export function useThreadStream({
                       : undefined),
               thread_id: threadId,
               skill_name: context.skill_name,
+              connector_ids: context.connector_ids,
             },
           },
         );

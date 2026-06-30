@@ -170,3 +170,28 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
 
   emitChange();
 }
+
+export function copyThreadContext(
+  sourceThreadId: string,
+  targetThreadId: string,
+) {
+  ensureBaseSettingsLoaded();
+  ensureStorageListenerRegistered();
+
+  if (!sourceThreadId || !targetThreadId || sourceThreadId === targetThreadId) {
+    return;
+  }
+
+  const sourceContext = getThreadContextSnapshot(sourceThreadId);
+  if (!sourceContext || Object.keys(sourceContext).length === 0) {
+    return;
+  }
+
+  const targetContext = {
+    ...(getThreadContextSnapshot(targetThreadId) ?? {}),
+    ...sourceContext,
+  };
+  threadContexts.set(targetThreadId, targetContext);
+  saveThreadContext(targetThreadId, targetContext);
+  emitChange();
+}

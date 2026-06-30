@@ -34,7 +34,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from .aio_sandbox import AioSandbox
-from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
+from .backend import SandboxBackend, _normalize_sandbox_access_url, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .remote_backend import RemoteSandboxBackend
 from .sandbox_info import SandboxInfo
@@ -488,7 +488,7 @@ class AioSandboxProvider(SandboxProvider):
                 return None
 
             info, _ = self._warm_pool.pop(sandbox_id)
-            sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+            sandbox = AioSandbox(id=sandbox_id, base_url=_normalize_sandbox_access_url(info.sandbox_url))
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
@@ -504,7 +504,7 @@ class AioSandboxProvider(SandboxProvider):
 
     def _register_discovered_sandbox(self, thread_id: str, info: SandboxInfo) -> str:
         """Track a sandbox discovered through the backend."""
-        sandbox = AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url)
+        sandbox = AioSandbox(id=info.sandbox_id, base_url=_normalize_sandbox_access_url(info.sandbox_url))
         with self._lock:
             self._sandboxes[info.sandbox_id] = sandbox
             self._sandbox_infos[info.sandbox_id] = info
@@ -516,7 +516,7 @@ class AioSandboxProvider(SandboxProvider):
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo) -> str:
         """Track a newly-created sandbox in the active maps."""
-        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        sandbox = AioSandbox(id=sandbox_id, base_url=_normalize_sandbox_access_url(info.sandbox_url))
         with self._lock:
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info

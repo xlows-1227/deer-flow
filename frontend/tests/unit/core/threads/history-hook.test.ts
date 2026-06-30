@@ -38,13 +38,13 @@ import { useThreadHistory } from "@/core/threads/hooks";
 type HistoryResult = ReturnType<typeof useThreadHistory>;
 
 type DeferredResponse = {
-  promise: Promise<{ json: () => Promise<unknown> }>;
-  resolve: (value: { json: () => Promise<unknown> }) => void;
+  promise: Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+  resolve: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
 };
 
 function deferredResponse(): DeferredResponse {
   let resolve!: DeferredResponse["resolve"];
-  const promise = new Promise<{ json: () => Promise<unknown> }>(
+  const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>(
     (resolvePromise) => {
       resolve = resolvePromise;
     },
@@ -63,6 +63,7 @@ function response(messageId: string, content: string) {
     content,
   } as Message;
   return {
+    ok: true,
     json: async () => ({
       data: [{ content: message, metadata: {}, created_at: null }],
       hasMore: false,
@@ -227,8 +228,8 @@ test("loads a new run discovered while another history request is pending", asyn
     await second.promise;
   });
   expect(latest.messages.map((message) => message.content)).toEqual([
-    "second",
     "first",
+    "second",
   ]);
 
   await act(async () => {

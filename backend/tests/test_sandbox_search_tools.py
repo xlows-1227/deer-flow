@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
-from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
+from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool, read_file_tool
 
 
 def _make_runtime(tmp_path):
@@ -459,3 +461,83 @@ def test_ls_tool_returns_empty_for_empty_directory(tmp_path, monkeypatch) -> Non
     )
 
     assert result == "(empty)"
+
+
+def test_read_file_tool_reads_skills_without_sandbox_init(tmp_path, monkeypatch) -> None:
+    """Skills files should be readable from host without initializing the sandbox."""
+    runtime = _make_runtime(tmp_path)
+    skills_dir = tmp_path / "skills"
+    skill_file = skills_dir / "public" / "find-skills" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("---\nname: find-skills\n---\n\n# Find Skills\n", encoding="utf-8")
+
+    def fail_if_called(_runtime):
+        raise AssertionError("ensure_sandbox_initialized should not be called for skills paths")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", fail_if_called)
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_dir)),
+    ):
+        result = read_file_tool.func(
+            runtime=runtime,
+            description="load skill",
+            path="/mnt/skills/public/find-skills/SKILL.md",
+        )
+
+    assert "Find Skills" in result
+    assert str(skills_dir) not in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_async_reads_skills_without_sandbox_init(tmp_path, monkeypatch) -> None:
+    """Async read_file should also bypass sandbox initialization for skills paths."""
+    runtime = _make_runtime(tmp_path)
+    skills_dir = tmp_path / "skills"
+    skill_file = skills_dir / "public" / "find-skills" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("# Find Skills\n", encoding="utf-8")
+
+    async def fail_if_called(_runtime):
+        raise AssertionError("ensure_sandbox_initialized_async should not be called for skills paths")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized_async", fail_if_called)
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_dir)),
+    ):
+        result = await read_file_tool.coroutine(
+            runtime=runtime,
+            description="load skill",
+            path="/mnt/skills/public/find-skills/SKILL.md",
+        )
+
+    assert "Find Skills" in result
+
+
+def test_ls_tool_lists_skills_without_sandbox_init(tmp_path, monkeypatch) -> None:
+    """Skills directories should be listable from host without initializing the sandbox."""
+    runtime = _make_runtime(tmp_path)
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "public" / "find-skills").mkdir(parents=True)
+    (skills_dir / "public" / "find-skills" / "SKILL.md").write_text("# Find Skills\n", encoding="utf-8")
+
+    def fail_if_called(_runtime):
+        raise AssertionError("ensure_sandbox_initialized should not be called for skills paths")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", fail_if_called)
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_dir)),
+    ):
+        result = ls_tool.func(
+            runtime=runtime,
+            description="list skill dir",
+            path="/mnt/skills/public/find-skills",
+        )
+
+    assert "/mnt/skills/public/find-skills/SKILL.md" in result
+    assert str(skills_dir) not in result

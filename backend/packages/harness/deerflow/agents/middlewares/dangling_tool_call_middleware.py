@@ -8,9 +8,9 @@ This middleware intercepts the model call to detect and patch such gaps by
 inserting synthetic ToolMessages with an error indicator immediately after the
 AIMessage that made the tool calls, ensuring correct message ordering.
 
-Note: Uses wrap_model_call instead of before_model to ensure patches are inserted
-at the correct positions (immediately after each dangling AIMessage), not appended
-to the end of the message list as before_model + add_messages reducer would do.
+Uses ``wrap_model_call`` to patch the outgoing model request, and ``before_model``
+to persist the same ordering fix into graph state (via ``RemoveMessage``) so
+checkpointed history stays valid across runs after SSE disconnect / cancellation.
 """
 
 import json
@@ -22,7 +22,9 @@ from typing import override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import RemoveMessage, ToolMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,33 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """
 
     @staticmethod
+    def _parse_raw_tool_call(raw_tc: object) -> dict | None:
+        if not isinstance(raw_tc, dict):
+            return None
+
+        function = raw_tc.get("function")
+        name = raw_tc.get("name")
+        if not name and isinstance(function, dict):
+            name = function.get("name")
+
+        args = raw_tc.get("args", {})
+        if not args and isinstance(function, dict):
+            raw_args = function.get("arguments")
+            if isinstance(raw_args, str):
+                try:
+                    parsed_args = json.loads(raw_args)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed_args = {}
+                args = parsed_args if isinstance(parsed_args, dict) else {}
+
+        raw_id = raw_tc.get("id")
+        return {
+            "id": raw_id if isinstance(raw_id, str) and raw_id else None,
+            "name": name or "unknown",
+            "args": args if isinstance(args, dict) else {},
+        }
+
+    @staticmethod
     def _message_tool_calls(msg) -> list[dict]:
         """Return normalized tool calls from structured fields or raw provider payloads.
 
@@ -45,40 +74,51 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         validators expect a matching ToolMessage. Treat them as dangling calls so
         the next model request stays well-formed and the model sees a recoverable
         tool error instead of another provider 400.
+
+        Some providers (e.g. Moonshot) keep canonical ids such as ``read_file:0`` only
+        in ``additional_kwargs["tool_calls"]`` while ``tool_calls`` is empty or
+        missing ids. Always merge both sources so dangling detection matches what
+        the provider adapter will serialize on the next request.
         """
         normalized: list[dict] = []
+        seen_ids: set[str] = set()
 
-        tool_calls = getattr(msg, "tool_calls", None) or []
-        normalized.extend(list(tool_calls))
-
+        structured_tool_calls = list(getattr(msg, "tool_calls", None) or [])
         raw_tool_calls = (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []
-        if not tool_calls:
-            for raw_tc in raw_tool_calls:
-                if not isinstance(raw_tc, dict):
+        if not isinstance(raw_tool_calls, list):
+            raw_tool_calls = []
+
+        for index, tc in enumerate(structured_tool_calls):
+            if not isinstance(tc, dict):
+                continue
+
+            entry = dict(tc)
+            tc_id = entry.get("id")
+            if not isinstance(tc_id, str) or not tc_id:
+                if index < len(raw_tool_calls):
+                    parsed_raw = DanglingToolCallMiddleware._parse_raw_tool_call(raw_tool_calls[index])
+                    if parsed_raw and parsed_raw.get("id"):
+                        entry["id"] = parsed_raw["id"]
+                        tc_id = parsed_raw["id"]
+            normalized.append(entry)
+            if isinstance(tc_id, str) and tc_id:
+                seen_ids.add(tc_id)
+
+        for index, raw_tc in enumerate(raw_tool_calls):
+            parsed = DanglingToolCallMiddleware._parse_raw_tool_call(raw_tc)
+            if parsed is None:
+                continue
+
+            tc_id = parsed.get("id")
+            if isinstance(tc_id, str) and tc_id:
+                if tc_id in seen_ids:
                     continue
+                seen_ids.add(tc_id)
+                normalized.append(parsed)
+                continue
 
-                function = raw_tc.get("function")
-                name = raw_tc.get("name")
-                if not name and isinstance(function, dict):
-                    name = function.get("name")
-
-                args = raw_tc.get("args", {})
-                if not args and isinstance(function, dict):
-                    raw_args = function.get("arguments")
-                    if isinstance(raw_args, str):
-                        try:
-                            parsed_args = json.loads(raw_args)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            parsed_args = {}
-                        args = parsed_args if isinstance(parsed_args, dict) else {}
-
-                normalized.append(
-                    {
-                        "id": raw_tc.get("id"),
-                        "name": name or "unknown",
-                        "args": args if isinstance(args, dict) else {},
-                    }
-                )
+            if index >= len(structured_tool_calls):
+                normalized.append(parsed)
 
         for invalid_tc in getattr(msg, "invalid_tool_calls", None) or []:
             if not isinstance(invalid_tc, dict):
@@ -160,6 +200,26 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         if patch_count:
             logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
         return patched
+
+    def _maybe_persist_patched_state(self, state: AgentState) -> dict | None:
+        messages = state.get("messages", [])
+        patched = self._build_patched_messages(messages)
+        if patched is None:
+            return None
+        return {
+            "messages": [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *patched,
+            ]
+        }
+
+    @override
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._maybe_persist_patched_state(state)
+
+    @override
+    async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._maybe_persist_patched_state(state)
 
     @override
     def wrap_model_call(

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import requests
@@ -13,6 +16,49 @@ import requests
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _is_running_in_container() -> bool:
+    """Best-effort detection of whether the current process runs inside a container."""
+    if os.environ.get("DEER_FLOW_RUNNING_IN_CONTAINER", "").lower() in {"1", "true", "yes"}:
+        return True
+    return Path("/.dockerenv").exists()
+
+
+def _get_sandbox_access_host() -> str:
+    """Resolve the host used in sandbox_url for health checks and API calls.
+
+    ``host.docker.internal`` is meant for gateway containers reaching sandboxes on
+    the host Docker daemon. When the gateway itself runs on bare metal, fall back
+    to localhost so readiness checks do not time out on an unresolvable hostname.
+    """
+    host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost").strip() or "localhost"
+    if host.lower() == "host.docker.internal" and not _is_running_in_container():
+        logger.debug("DEER_FLOW_SANDBOX_HOST=host.docker.internal ignored on bare-metal gateway; using localhost")
+        return "localhost"
+    return host
+
+
+def _normalize_sandbox_access_url(sandbox_url: str) -> str:
+    """Rewrite host.docker.internal to localhost for bare-metal gateway callers."""
+    parsed = urlparse(sandbox_url)
+    host = (parsed.hostname or "").lower()
+    if host == "host.docker.internal" and not _is_running_in_container() and parsed.port is not None:
+        return urlunparse(parsed._replace(netloc=f"localhost:{parsed.port}"))
+    return sandbox_url
+
+
+def _sandbox_ready_urls(sandbox_url: str) -> list[str]:
+    """Return candidate URLs for sandbox readiness checks, with localhost fallback."""
+    urls = [sandbox_url]
+    parsed = urlparse(sandbox_url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if host == "host.docker.internal" and not _is_running_in_container() and port is not None:
+        fallback = urlunparse(parsed._replace(netloc=f"localhost:{port}"))
+        if fallback not in urls:
+            urls.append(fallback)
+    return urls
 
 
 def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
@@ -27,12 +73,13 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=5)
-            if response.status_code == 200:
-                return True
-        except requests.exceptions.RequestException:
-            pass
+        for candidate_url in _sandbox_ready_urls(sandbox_url):
+            try:
+                response = requests.get(f"{candidate_url}/v1/sandbox", timeout=5)
+                if response.status_code == 200:
+                    return True
+            except requests.exceptions.RequestException:
+                pass
         time.sleep(1)
     return False
 
@@ -52,12 +99,13 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
-            try:
-                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
-                if response.status_code == 200:
-                    return True
-            except httpx.RequestError:
-                pass
+            for candidate_url in _sandbox_ready_urls(sandbox_url):
+                try:
+                    response = await client.get(f"{candidate_url}/v1/sandbox", timeout=min(5.0, remaining))
+                    if response.status_code == 200:
+                        return True
+                except httpx.RequestError:
+                    pass
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
