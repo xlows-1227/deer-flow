@@ -3,7 +3,6 @@
 import {
   CalendarClockIcon,
   CheckIcon,
-  ClockIcon,
   LoaderCircleIcon,
   SparklesIcon,
 } from "lucide-react";
@@ -168,8 +167,8 @@ export function ScheduledTaskDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-hidden p-0 sm:max-w-2xl">
-        <DialogHeader className="border-b border-slate-200 px-6 py-5">
+      <DialogContent className="flex max-h-[92vh] flex-col overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 border-b border-slate-200 px-6 py-5">
           <DialogTitle className="flex items-center gap-2">
             <CalendarClockIcon className="size-5 text-slate-600" />
             {task ? "编辑定时任务" : "新建定时任务"}
@@ -179,7 +178,7 @@ export function ScheduledTaskDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="max-h-[calc(92vh-150px)] overflow-y-auto px-6 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           <div className="grid gap-5">
             {error && (
               <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -248,33 +247,34 @@ export function ScheduledTaskDialog({
                 <span className="text-sm font-medium text-slate-800">
                   执行时间
                 </span>
-                <div className="relative">
-                  <ClockIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-slate-400" />
-                  <Input
-                    type="time"
-                    value={form.execution_time}
-                    onChange={(event) =>
-                      update("execution_time", event.target.value)
-                    }
-                    className="pl-9"
-                  />
-                </div>
+                <Input
+                  type="time"
+                  value={form.execution_time}
+                  onChange={(event) =>
+                    update("execution_time", event.target.value)
+                  }
+                />
               </label>
             </div>
 
             {form.repeat_type === "weekly" && (
-              <div className="grid gap-1.5">
+              <div className="relative z-10 grid gap-1.5">
                 <span className="text-sm font-medium text-slate-800">
                   每周几执行
                 </span>
-                <div className="grid grid-cols-7 gap-2">
+                <div
+                  className="flex gap-2"
+                  role="group"
+                  aria-label="每周几执行"
+                >
                   {weekdays.map((label, index) => (
                     <button
                       key={label}
                       type="button"
                       onClick={() => update("day_of_week", index)}
+                      aria-pressed={form.day_of_week === index}
                       className={cn(
-                        "h-10 rounded-lg border text-sm font-medium transition",
+                        "flex h-10 min-w-0 flex-1 cursor-pointer items-center justify-center rounded-lg border text-sm font-medium transition",
                         form.day_of_week === index
                           ? "border-slate-900 bg-slate-950 text-white"
                           : "border-slate-200 bg-white text-slate-600 hover:border-slate-300",
@@ -426,7 +426,7 @@ export function ScheduledTaskDialog({
           </div>
         </div>
 
-        <DialogFooter className="border-t border-slate-200 px-6 py-4">
+        <DialogFooter className="bg-background shrink-0 border-t border-slate-200 px-6 py-4">
           <Button
             type="button"
             variant="outline"
