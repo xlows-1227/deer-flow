@@ -64,4 +64,45 @@ describe("clipboard fallback", () => {
     await expect(copyTextToClipboard("hello")).resolves.toBe(true);
     expect(execCommand).toHaveBeenCalledWith("copy");
   });
+
+  test("patched clipboard.write falls back to legacy copy for table content", async () => {
+    const execCommand = vi.fn(() => true);
+    const textarea = {
+      value: "",
+      style: { position: "", left: "", top: "" },
+      setAttribute: vi.fn(),
+      select: vi.fn(),
+      setSelectionRange: vi.fn(),
+    };
+
+    Object.defineProperties(globalThis, {
+      window: { value: {}, configurable: true },
+      navigator: { value: {}, configurable: true },
+      document: {
+        value: {
+          body: {
+            appendChild: vi.fn(),
+            removeChild: vi.fn(),
+          },
+          createElement: vi.fn(() => textarea),
+          execCommand,
+        },
+        configurable: true,
+      },
+    });
+
+    const { ensureClipboardApi } = await import("@/lib/clipboard");
+
+    ensureClipboardApi();
+
+    const item = {
+      types: ["text/plain"],
+      getType: vi.fn(async () => ({
+        text: async () => "| a | b |\n| --- | --- |",
+      })),
+    } as unknown as ClipboardItem;
+
+    await expect(navigator.clipboard.write([item])).resolves.toBeUndefined();
+    expect(execCommand).toHaveBeenCalledWith("copy");
+  });
 });

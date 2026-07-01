@@ -514,9 +514,13 @@ def test_user_response_empty_string_role_rejected():
 
 def _make_auth_app():
     """Create FastAPI app with auth routes for contract testing."""
+    from support.invite_code_helpers import wire_invite_code_repo
+
     from app.gateway.app import create_app
 
-    return create_app()
+    app = create_app()
+    wire_invite_code_repo(app)
+    return app
 
 
 def _get_auth_client(*, base_url: str = "http://testserver"):
@@ -578,12 +582,14 @@ def test_api_login_bad_credentials_returns_structured_401():
 
 def test_api_login_success_no_token_in_body():
     """Successful login → response body has expires_in but NOT access_token."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client()
     # Register first
     client.post(
         "/api/v1/auth/register",
-        json={"email": "contract-test@test.com", "password": "securepassword123"},
+        json=register_payload(email="contract-test@test.com", password="securepassword123"),
     )
     # Login
     resp = client.post(
@@ -600,13 +606,15 @@ def test_api_login_success_no_token_in_body():
 
 def test_api_register_duplicate_returns_structured_400():
     """Register with duplicate email → 400 with {code: 'email_already_exists'}."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client()
     email = "dup-contract-test@test.com"
     # First register
-    client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
+    client.post("/api/v1/auth/register", json=register_payload(email=email))
     # Duplicate
-    resp = client.post("/api/v1/auth/register", json={"email": email, "password": "AnotherStr0ngPwd!"})
+    resp = client.post("/api/v1/auth/register", json=register_payload(email=email, password="AnotherStr0ngPwd!"))
     assert resp.status_code == 400
     body = resp.json()
     assert body["detail"]["code"] == "email_already_exists"
@@ -626,11 +634,13 @@ def _get_set_cookie_headers(resp) -> list[str]:
 
 def test_register_http_cookie_httponly_true_secure_false():
     """HTTP register → access_token cookie is httponly=True, secure=False, no max_age."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
         "/api/v1/auth/register",
-        json={"email": _unique_email("http-cookie"), "password": "Tr0ub4dor3a"},
+        json=register_payload(email=_unique_email("http-cookie")),
     )
     assert resp.status_code == 201
     cookie_header = resp.headers.get("set-cookie", "")
@@ -641,11 +651,13 @@ def test_register_http_cookie_httponly_true_secure_false():
 
 def test_register_https_cookie_httponly_true_secure_true():
     """HTTPS register → access_token cookie is httponly=True, secure=True, has max_age."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client(base_url="https://testserver")
     resp = client.post(
         "/api/v1/auth/register",
-        json={"email": _unique_email("https-cookie"), "password": "Tr0ub4dor3a"},
+        json=register_payload(email=_unique_email("https-cookie")),
     )
     assert resp.status_code == 201
     cookie_header = resp.headers.get("set-cookie", "")
@@ -657,10 +669,12 @@ def test_register_https_cookie_httponly_true_secure_true():
 
 def test_login_https_sets_secure_cookie():
     """HTTPS login → access_token cookie has secure flag."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client(base_url="https://testserver")
     email = _unique_email("https-login")
-    client.post("/api/v1/auth/register", json={"email": email, "password": "Tr0ub4dor3a"})
+    client.post("/api/v1/auth/register", json=register_payload(email=email))
     resp = client.post(
         "/api/v1/auth/login/local",
         data={"username": email, "password": "Tr0ub4dor3a"},
@@ -674,11 +688,13 @@ def test_login_https_sets_secure_cookie():
 
 def test_csrf_cookie_secure_on_https():
     """HTTPS register → csrf_token cookie has secure flag but NOT httponly."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client(base_url="https://testserver")
     resp = client.post(
         "/api/v1/auth/register",
-        json={"email": _unique_email("csrf-https"), "password": "Tr0ub4dor3a"},
+        json=register_payload(email=_unique_email("csrf-https")),
     )
     assert resp.status_code == 201
     csrf_cookies = [h for h in _get_set_cookie_headers(resp) if "csrf_token=" in h]
@@ -690,11 +706,13 @@ def test_csrf_cookie_secure_on_https():
 
 def test_csrf_cookie_not_secure_on_http():
     """HTTP register → csrf_token cookie does NOT have secure flag."""
+    from support.invite_code_helpers import register_payload
+
     _setup_config()
     client = _get_auth_client()
     resp = client.post(
         "/api/v1/auth/register",
-        json={"email": _unique_email("csrf-http"), "password": "Tr0ub4dor3a"},
+        json=register_payload(email=_unique_email("csrf-http")),
     )
     assert resp.status_code == 201
     csrf_cookies = [h for h in _get_set_cookie_headers(resp) if "csrf_token=" in h]

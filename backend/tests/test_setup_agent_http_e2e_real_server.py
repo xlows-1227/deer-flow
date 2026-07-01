@@ -239,9 +239,11 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         TestClient(isolated_app) as client,
     ):
         # --- 1. Register & auto-login ---
+        from support.invite_code_helpers import register_payload
+
         register = client.post(
             "/api/v1/auth/register",
-            json={"email": "e2e-user@example.com", "password": "very-strong-password-123"},
+            json=register_payload(email="e2e-user@example.com", password="very-strong-password-123"),
         )
         assert register.status_code == 201, register.text
         registered = register.json()
