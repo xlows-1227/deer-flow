@@ -57,6 +57,16 @@ def test_export_memory_route_returns_current_memory() -> None:
     assert response.json()["facts"] == exported_memory["facts"]
 
 
+def test_memory_routes_reject_user_id_override() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/memory?user_id=someone-else")
+
+    assert response.status_code == 403
+
+
 def test_import_memory_route_returns_imported_memory() -> None:
     app = FastAPI()
     app.include_router(memory.router)

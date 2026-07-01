@@ -130,6 +130,15 @@ def test_user_files_upload_limit_is_described_and_partial_file_removed(tmp_path,
         assert listed.json()["items"] == []
 
 
+def test_user_files_reject_user_id_override(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/files?user_id=11111111-1111-4111-8111-111111111111")
+
+    assert response.status_code == 403
+
+
 def test_gateway_app_mounts_files_router():
     app = create_app()
     paths = {getattr(route, "path", "") for route in app.routes}

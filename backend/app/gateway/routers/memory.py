@@ -1,6 +1,6 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from deerflow.agents.memory.compat import (
@@ -28,6 +28,11 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api", tags=["memory"])
+
+
+def _reject_user_id_override(requested_user_id: str | None, effective_user_id: str) -> None:
+    if requested_user_id and requested_user_id != effective_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
 
 class ContextSection(BaseModel):
@@ -156,7 +161,7 @@ def _get_memory_response_data(user_id: str) -> dict:
     summary="Get Memory Data",
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
-async def get_memory() -> MemoryResponse:
+async def get_memory(user_id: str | None = None) -> MemoryResponse:
     """Get the current global memory data.
 
     Returns:
@@ -190,7 +195,9 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
-    memory_data = _get_memory_response_data(get_effective_user_id())
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    memory_data = _get_memory_response_data(effective_user_id)
     return MemoryResponse(**memory_data)
 
 
@@ -201,7 +208,7 @@ async def get_memory() -> MemoryResponse:
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
-async def reload_memory() -> MemoryResponse:
+async def reload_memory(user_id: str | None = None) -> MemoryResponse:
     """Reload memory data from file.
 
     This forces a reload of the memory data from the storage file,
@@ -210,11 +217,12 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    user_id = get_effective_user_id()
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
     if getattr(get_memory_config(), "v2_enabled", False):
-        memory_data = profile_to_legacy_memory(get_memory_storage_v2().load_profile(user_id))
+        memory_data = profile_to_legacy_memory(get_memory_storage_v2().load_profile(effective_user_id))
     else:
-        memory_data = reload_memory_data(user_id=user_id)
+        memory_data = reload_memory_data(user_id=effective_user_id)
     return MemoryResponse(**memory_data)
 
 
@@ -225,16 +233,17 @@ async def reload_memory() -> MemoryResponse:
     summary="Clear All Memory Data",
     description="Delete all saved memory data and reset the memory structure to an empty state.",
 )
-async def clear_memory() -> MemoryResponse:
+async def clear_memory(user_id: str | None = None) -> MemoryResponse:
     """Clear all persisted memory data."""
     try:
-        user_id = get_effective_user_id()
+        effective_user_id = get_effective_user_id()
+        _reject_user_id_override(user_id, effective_user_id)
         if getattr(get_memory_config(), "v2_enabled", False):
-            get_memory_queue().clear_user(user_id)
-            get_memory_storage_v2().clear_user_memory(user_id)
-            memory_data = profile_to_legacy_memory(get_memory_storage_v2().load_profile(user_id))
+            get_memory_queue().clear_user(effective_user_id)
+            get_memory_storage_v2().clear_user_memory(effective_user_id)
+            memory_data = profile_to_legacy_memory(get_memory_storage_v2().load_profile(effective_user_id))
         else:
-            memory_data = clear_memory_data(user_id=user_id)
+            memory_data = clear_memory_data(user_id=effective_user_id)
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -248,19 +257,20 @@ async def clear_memory() -> MemoryResponse:
     summary="Create Memory Fact",
     description="Create a single saved memory fact manually.",
 )
-async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
+async def create_memory_fact_endpoint(request: FactCreateRequest, user_id: str | None = None) -> MemoryResponse:
     """Create a single fact manually."""
     try:
-        user_id = get_effective_user_id()
+        effective_user_id = get_effective_user_id()
+        _reject_user_id_override(user_id, effective_user_id)
         if getattr(get_memory_config(), "v2_enabled", False):
-            profile = add_manual_profile_item(request.content, request.category, request.confidence, user_id=user_id)
+            profile = add_manual_profile_item(request.content, request.category, request.confidence, user_id=effective_user_id)
             memory_data = profile_to_legacy_memory(profile)
         else:
             memory_data = create_memory_fact(
                 content=request.content,
                 category=request.category,
                 confidence=request.confidence,
-                user_id=user_id,
+                user_id=effective_user_id,
             )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
@@ -277,15 +287,16 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
     summary="Delete Memory Fact",
     description="Delete a single saved memory fact by its fact id.",
 )
-async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
+async def delete_memory_fact_endpoint(fact_id: str, user_id: str | None = None) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     try:
-        user_id = get_effective_user_id()
+        effective_user_id = get_effective_user_id()
+        _reject_user_id_override(user_id, effective_user_id)
         if getattr(get_memory_config(), "v2_enabled", False):
-            profile = delete_profile_item(fact_id, user_id=user_id)
+            profile = delete_profile_item(fact_id, user_id=effective_user_id)
             memory_data = profile_to_legacy_memory(profile)
         else:
-            memory_data = delete_memory_fact(fact_id, user_id=user_id)
+            memory_data = delete_memory_fact(fact_id, user_id=effective_user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
@@ -301,17 +312,18 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     summary="Patch Memory Fact",
     description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
 )
-async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
+async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, user_id: str | None = None) -> MemoryResponse:
     """Partially update a single fact manually."""
     try:
-        user_id = get_effective_user_id()
+        effective_user_id = get_effective_user_id()
+        _reject_user_id_override(user_id, effective_user_id)
         if getattr(get_memory_config(), "v2_enabled", False):
             profile = update_profile_item(
                 fact_id,
                 content=request.content,
                 category=request.category,
                 confidence=request.confidence,
-                user_id=user_id,
+                user_id=effective_user_id,
             )
             memory_data = profile_to_legacy_memory(profile)
         else:
@@ -320,7 +332,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
                 content=request.content,
                 category=request.category,
                 confidence=request.confidence,
-                user_id=user_id,
+                user_id=effective_user_id,
             )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
@@ -339,9 +351,11 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
     summary="Export Memory Data",
     description="Export the current global memory data as JSON for backup or transfer.",
 )
-async def export_memory() -> MemoryResponse:
+async def export_memory(user_id: str | None = None) -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = _get_memory_response_data(get_effective_user_id())
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    memory_data = _get_memory_response_data(effective_user_id)
     return MemoryResponse(**memory_data)
 
 
@@ -352,16 +366,17 @@ async def export_memory() -> MemoryResponse:
     summary="Import Memory Data",
     description="Import and overwrite the current global memory data from a JSON payload.",
 )
-async def import_memory(request: MemoryResponse) -> MemoryResponse:
+async def import_memory(request: MemoryResponse, user_id: str | None = None) -> MemoryResponse:
     """Import and persist memory data."""
     try:
-        user_id = get_effective_user_id()
+        effective_user_id = get_effective_user_id()
+        _reject_user_id_override(user_id, effective_user_id)
         if getattr(get_memory_config(), "v2_enabled", False):
-            profile = legacy_memory_to_profile(user_id, request.model_dump())
-            profile = get_memory_storage_v2().save_profile(user_id, profile)
+            profile = legacy_memory_to_profile(effective_user_id, request.model_dump())
+            profile = get_memory_storage_v2().save_profile(effective_user_id, profile)
             memory_data = profile_to_legacy_memory(profile)
         else:
-            memory_data = import_memory_data(request.model_dump(), user_id=user_id)
+            memory_data = import_memory_data(request.model_dump(), user_id=effective_user_id)
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -374,9 +389,11 @@ async def import_memory(request: MemoryResponse) -> MemoryResponse:
     summary="Get Memory Profile",
     description="Retrieve the v2 long-term memory profile for the current user.",
 )
-async def get_memory_profile() -> MemoryProfile:
+async def get_memory_profile(user_id: str | None = None) -> MemoryProfile:
     """Get the v2 memory profile."""
-    return _get_v2_profile_for_response(get_effective_user_id())
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    return _get_v2_profile_for_response(effective_user_id)
 
 
 @router.get(
@@ -385,13 +402,14 @@ async def get_memory_profile() -> MemoryProfile:
     summary="Get Daily Memory Summaries",
     description="Retrieve one daily summary by date, or recent daily summaries by limit.",
 )
-async def get_daily_memory(date: str | None = None, limit: int = 30):
+async def get_daily_memory(date: str | None = None, limit: int = 30, user_id: str | None = None):
     """Get daily summaries."""
     storage = get_memory_storage_v2()
-    user_id = get_effective_user_id()
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
     if date:
-        return storage.load_daily(user_id, date)
-    return storage.list_daily(user_id, limit=limit)
+        return storage.load_daily(effective_user_id, date)
+    return storage.list_daily(effective_user_id, limit=limit)
 
 
 @router.post(
@@ -400,17 +418,18 @@ async def get_daily_memory(date: str | None = None, limit: int = 30):
     summary="Roll Up Daily Memory",
     description="Manually roll up memory for a date or a specific thread.",
 )
-async def rollup_daily_memory(request: DailyRollupRequest) -> DailyPersonSummary | None:
+async def rollup_daily_memory(request: DailyRollupRequest, user_id: str | None = None) -> DailyPersonSummary | None:
     """Manually roll up daily memory."""
-    user_id = get_effective_user_id()
-    get_memory_queue().flush_user(user_id)
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    get_memory_queue().flush_user(effective_user_id)
     service = DailyRollupService()
     if request.threadId:
-        summary = service.rollup_thread(user_id, request.threadId, request.date)
+        summary = service.rollup_thread(effective_user_id, request.threadId, request.date)
     else:
-        summary = service.rollup_date(user_id, request.date, source_kind="manual")
+        summary = service.rollup_date(effective_user_id, request.date, source_kind="manual")
     if summary is not None:
-        ProfileConsolidator().rebuild_profile(user_id)
+        ProfileConsolidator().rebuild_profile(effective_user_id)
     return summary
 
 
@@ -420,11 +439,12 @@ async def rollup_daily_memory(request: DailyRollupRequest) -> DailyPersonSummary
     summary="Delete Daily Memory",
     description="Soft-delete a daily summary and rebuild the profile.",
 )
-async def delete_daily_memory(date: str) -> DailyPersonSummary | None:
+async def delete_daily_memory(date: str, user_id: str | None = None) -> DailyPersonSummary | None:
     """Soft-delete a daily memory summary."""
-    user_id = get_effective_user_id()
-    summary = get_memory_storage_v2().soft_delete_daily(user_id, date)
-    ProfileConsolidator().rebuild_profile(user_id)
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    summary = get_memory_storage_v2().soft_delete_daily(effective_user_id, date)
+    ProfileConsolidator().rebuild_profile(effective_user_id)
     return summary
 
 
@@ -433,11 +453,12 @@ async def delete_daily_memory(date: str) -> DailyPersonSummary | None:
     response_model=DailyPersonSummary | None,
     summary="Restore Daily Memory",
 )
-async def restore_daily_memory(date: str) -> DailyPersonSummary | None:
+async def restore_daily_memory(date: str, user_id: str | None = None) -> DailyPersonSummary | None:
     """Restore a soft-deleted daily memory summary."""
-    user_id = get_effective_user_id()
-    summary = get_memory_storage_v2().restore_daily(user_id, date)
-    ProfileConsolidator().rebuild_profile(user_id)
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    summary = get_memory_storage_v2().restore_daily(effective_user_id, date)
+    ProfileConsolidator().rebuild_profile(effective_user_id)
     return summary
 
 
@@ -446,11 +467,12 @@ async def restore_daily_memory(date: str) -> DailyPersonSummary | None:
     response_model=dict,
     summary="Purge Daily Memory",
 )
-async def purge_daily_memory(date: str) -> dict:
+async def purge_daily_memory(date: str, user_id: str | None = None) -> dict:
     """Permanently delete a daily memory summary."""
-    user_id = get_effective_user_id()
-    deleted = get_memory_storage_v2().purge_daily(user_id, date)
-    ProfileConsolidator().rebuild_profile(user_id)
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    deleted = get_memory_storage_v2().purge_daily(effective_user_id, date)
+    ProfileConsolidator().rebuild_profile(effective_user_id)
     return {"deleted": deleted}
 
 
@@ -459,9 +481,11 @@ async def purge_daily_memory(date: str) -> dict:
     response_model=MemoryProfile,
     summary="Consolidate Memory Profile",
 )
-async def consolidate_memory_profile() -> MemoryProfile:
+async def consolidate_memory_profile(user_id: str | None = None) -> MemoryProfile:
     """Rebuild the v2 profile from active daily summaries."""
-    return ProfileConsolidator().rebuild_profile(get_effective_user_id())
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    return ProfileConsolidator().rebuild_profile(effective_user_id)
 
 
 @router.post(
@@ -469,9 +493,11 @@ async def consolidate_memory_profile() -> MemoryProfile:
     response_model=MemoryProfile,
     summary="Migrate Legacy Memory",
 )
-async def migrate_legacy_memory_endpoint() -> MemoryProfile:
+async def migrate_legacy_memory_endpoint(user_id: str | None = None) -> MemoryProfile:
     """Back up and migrate legacy memory.json into v2 profile.json."""
-    return migrate_legacy_memory(get_effective_user_id(), force=True)
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    return migrate_legacy_memory(effective_user_id, force=True)
 
 
 @router.get(
@@ -480,7 +506,7 @@ async def migrate_legacy_memory_endpoint() -> MemoryProfile:
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
-async def get_memory_config_endpoint() -> MemoryConfigResponse:
+async def get_memory_config_endpoint(user_id: str | None = None) -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
@@ -500,6 +526,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         ```
     """
     config = get_memory_config()
+    _reject_user_id_override(user_id, get_effective_user_id())
     return MemoryConfigResponse(
         enabled=config.enabled,
         storage_path=config.storage_path,
@@ -525,14 +552,16 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
-async def get_memory_status() -> MemoryStatusResponse:
+async def get_memory_status(user_id: str | None = None) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
     Returns:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = _get_memory_response_data(get_effective_user_id())
+    effective_user_id = get_effective_user_id()
+    _reject_user_id_override(user_id, effective_user_id)
+    memory_data = _get_memory_response_data(effective_user_id)
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

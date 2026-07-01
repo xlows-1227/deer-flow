@@ -231,6 +231,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
 | **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /custom` - create custom `SKILL.md`; `POST /custom/ai-draft` - generate an AI draft without saving; `POST /upload` - multipart install from `.zip` / `.skill`; `POST /install` - install from thread artifact archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
+| **Files** (`/api/files`) | `GET /` - list user library; `GET /folders` - folder list; `POST /upload` - upload; `GET /{path}` - download/preview; `DELETE /{path}` - delete |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`) are always forced as download attachments to reduce XSS risk; `image/svg+xml` is served **inline** so it renders in chat/preview `<img>` tags, with a strict `Content-Security-Policy` sandbox (no scripts) to neutralize XSS on direct navigation (`?download=true` still forces SVG download); `?download=true` forces download for other file types |
@@ -246,6 +247,8 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
+
+**Auth invariant**: user-scoped APIs (e.g. Memory, Files) must not accept client-supplied `user_id` overrides; mismatches are rejected with 403.
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
