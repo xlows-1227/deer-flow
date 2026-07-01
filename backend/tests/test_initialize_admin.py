@@ -44,11 +44,14 @@ def _setup_auth(tmp_path):
 
 @pytest.fixture()
 def client(_setup_auth):
+    from support.invite_code_helpers import wire_invite_code_repo
+
     from app.gateway.app import create_app
     from app.gateway.auth.config import AuthConfig, set_auth_config
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
     app = create_app()
+    wire_invite_code_repo(app)
     # Do NOT use TestClient as a context manager — that would trigger the
     # full lifespan which requires config.yaml. The auth endpoints work
     # without the lifespan (persistence engine is set up by _setup_auth).
@@ -102,8 +105,10 @@ def test_initialize_rejected_when_admin_exists(client):
 
 def test_initialize_register_does_not_block_initialization(client):
     """/register creating a user before /initialize doesn't block admin creation."""
+    from support.invite_code_helpers import register_payload
+
     # Register a regular user first
-    client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
+    client.post("/api/v1/auth/register", json=register_payload(email="regular@example.com"))
     # /initialize should still succeed (checks admin_count, not total user_count)
     resp = client.post("/api/v1/auth/initialize", json=_init_payload())
     assert resp.status_code == 201
@@ -164,7 +169,9 @@ def test_setup_status_after_initialization(client):
 
 def test_setup_status_false_when_only_regular_user_exists(client):
     """setup-status returns needs_setup=True even when regular users exist (no admin)."""
-    client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
+    from support.invite_code_helpers import register_payload
+
+    client.post("/api/v1/auth/register", json=register_payload(email="regular@example.com"))
     resp = client.get("/api/v1/auth/setup-status")
     assert resp.status_code == 200
     assert resp.json()["needs_setup"] is True

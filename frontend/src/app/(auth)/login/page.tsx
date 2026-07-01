@@ -51,6 +51,7 @@ export default function LoginPage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -97,7 +98,7 @@ export default function LoginPage() {
         : "/api/v1/auth/register";
       const body = isLogin
         ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
-        : JSON.stringify({ email, password });
+        : JSON.stringify({ email, password, invite_code: inviteCode });
 
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
@@ -174,6 +175,21 @@ export default function LoginPage() {
               minLength={isLogin ? 6 : 8}
             />
           </div>
+          {!isLogin && (
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="inviteCode" className="text-sm font-medium">
+                Invite Code
+              </label>
+              <Input
+                id="inviteCode"
+                type="text"
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value)}
+                placeholder="Enter your invite code"
+                required
+              />
+            </div>
+          )}
 
           {error && <p className="text-sm text-red-500">{error}</p>}
 
@@ -192,6 +208,7 @@ export default function LoginPage() {
             onClick={() => {
               setIsLogin(!isLogin);
               setError("");
+              setInviteCode("");
             }}
             className="text-blue-500 hover:underline"
           >
@@ -200,7 +217,6 @@ export default function LoginPage() {
               : "Already have an account? Sign in"}
           </button>
         </div>
-
       </div>
     </div>
   );

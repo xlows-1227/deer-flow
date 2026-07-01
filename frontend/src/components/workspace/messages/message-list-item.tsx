@@ -170,10 +170,10 @@ export function MessageListItem({
             isHuman
               ? "absolute right-0 -bottom-9 left-0 justify-end"
               : "absolute right-0 bottom-0 left-0",
-            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
+            "pointer-events-none z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:pointer-events-auto group-hover/conversation-message:opacity-100",
           )}
         >
-          <div className="pointer-events-auto flex gap-1">
+          <div className="flex gap-1">
             <CopyButton
               clipboardData={
                 extractContentFromMessage(message) ??
@@ -552,7 +552,10 @@ function RichFileCard({
 function ReferencedFilesList({ files }: { files: ReferencedFile[] }) {
   if (files.length === 0) return null;
   return (
-    <div className="flex flex-wrap justify-end gap-2" data-testid="referenced-files-in-message">
+    <div
+      className="flex flex-wrap justify-end gap-2"
+      data-testid="referenced-files-in-message"
+    >
       {files.map((file) => (
         <ReferencedFileCard key={file.id} file={file} />
       ))}
@@ -598,7 +601,10 @@ function ReferencedFileCard({ file }: { file: ReferencedFile }) {
     >
       <div className="flex items-start gap-2">
         <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
-        <span className="text-foreground truncate text-sm font-medium" title={file.name}>
+        <span
+          className="text-foreground truncate text-sm font-medium"
+          title={file.name}
+        >
           {file.name}
         </span>
       </div>

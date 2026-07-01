@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from deerflow.persistence.external_audit import ExternalAuditRepository
     from deerflow.persistence.external_conversation import ExternalConversationRepository
     from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
+    from deerflow.persistence.invite_code import InviteCodeRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -147,6 +148,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.external_conversation import ExternalConversationRepository
             from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
             from deerflow.persistence.feedback import FeedbackRepository
+            from deerflow.persistence.invite_code import InviteCodeRepository
             from deerflow.persistence.run import RunRepository
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
 
@@ -160,6 +162,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.external_conversation_repo = ExternalConversationRepository(sf)
             app.state.external_idempotency_repo = ExternalIdempotencyRepository(sf)
             app.state.external_audit_repo = ExternalAuditRepository(sf)
+            app.state.invite_code_repo = InviteCodeRepository(sf)
         else:
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
             from deerflow.persistence.scheduled_task_run import MemoryScheduledTaskRunStore
@@ -173,6 +176,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.external_conversation_repo = None
             app.state.external_idempotency_repo = None
             app.state.external_audit_repo = None
+            app.state.invite_code_repo = None
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -234,6 +238,7 @@ get_api_key_repo: Callable[[Request], APIKeyRepository] = _require("api_key_repo
 get_external_conversation_repo: Callable[[Request], ExternalConversationRepository] = _require("external_conversation_repo", "External API persistence")
 get_external_idempotency_repo: Callable[[Request], ExternalIdempotencyRepository] = _require("external_idempotency_repo", "External API persistence")
 get_external_audit_repo: Callable[[Request], ExternalAuditRepository] = _require("external_audit_repo", "External API persistence")
+get_invite_code_repo: Callable[[Request], InviteCodeRepository] = _require("invite_code_repo", "Invite code")
 
 
 def get_store(request: Request):

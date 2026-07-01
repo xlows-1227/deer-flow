@@ -623,6 +623,9 @@ def test_get_client_ip_no_client_returns_unknown(monkeypatch):
 # ── Common-password blocklist ────────────────────────────────────────────────
 
 
+_INVITE_CODE = "TESTCODE01"
+
+
 def test_register_rejects_literal_password():
     """Pydantic validator rejects 'password' as a registration password."""
     from pydantic import ValidationError
@@ -630,7 +633,7 @@ def test_register_rejects_literal_password():
     from app.gateway.routers.auth import RegisterRequest
 
     with pytest.raises(ValidationError) as exc:
-        RegisterRequest(email="x@example.com", password="password")
+        RegisterRequest(email="x@example.com", password="password", invite_code=_INVITE_CODE)
     assert "too common" in str(exc.value)
 
 
@@ -642,14 +645,14 @@ def test_register_rejects_common_password_case_insensitive():
 
     for variant in ["PASSWORD", "Password1", "qwerty123", "letmein1"]:
         with pytest.raises(ValidationError):
-            RegisterRequest(email="x@example.com", password=variant)
+            RegisterRequest(email="x@example.com", password=variant, invite_code=_INVITE_CODE)
 
 
 def test_register_accepts_strong_password():
     """A non-blocklisted password of length >=8 is accepted."""
     from app.gateway.routers.auth import RegisterRequest
 
-    req = RegisterRequest(email="x@example.com", password="Tr0ub4dor&3-Horse")
+    req = RegisterRequest(email="x@example.com", password="Tr0ub4dor&3-Horse", invite_code=_INVITE_CODE)
     assert req.password == "Tr0ub4dor&3-Horse"
 
 
@@ -670,7 +673,7 @@ def test_password_blocklist_keeps_short_passwords_for_length_check():
     from app.gateway.routers.auth import RegisterRequest
 
     with pytest.raises(ValidationError) as exc:
-        RegisterRequest(email="x@example.com", password="abc")
+        RegisterRequest(email="x@example.com", password="abc", invite_code=_INVITE_CODE)
     # the length check should fire, not the blocklist
     assert "at least 8 characters" in str(exc.value)
 

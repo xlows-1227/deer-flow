@@ -261,9 +261,11 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def _register_user(client, *, email: str = "runtime-e2e@example.com") -> str:
+    from support.invite_code_helpers import register_payload
+
     response = client.post(
         "/api/v1/auth/register",
-        json={"email": email, "password": "very-strong-password-123"},
+        json=register_payload(email=email, password="very-strong-password-123"),
     )
     assert response.status_code == 201, response.text
     csrf_token = client.cookies.get("csrf_token")

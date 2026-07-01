@@ -17,7 +17,7 @@ from app.gateway.auth import (
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.csrf_middleware import is_secure_request
-from app.gateway.deps import get_current_user_from_request, get_local_provider
+from app.gateway.deps import get_current_user_from_request, get_invite_code_repo, get_local_provider
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,14 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    invite_code: str = Field(..., min_length=1)
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
+
+    @field_validator("invite_code")
+    @classmethod
+    def _normalize_invite_code(cls, value: str) -> str:
+        return value.strip().upper()
 
 
 class ChangePasswordRequest(BaseModel):
@@ -309,13 +315,23 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
     """
+    invite_repo = get_invite_code_repo(request)
+    if not await invite_repo.claim(body.invite_code):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(code=AuthErrorCode.INVITE_CODE_INVALID, message="Invalid or already used invite code").model_dump(),
+        )
+
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:
+        await invite_repo.release(body.invite_code)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
+
+    await invite_repo.complete(body.invite_code, str(user.id))
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)
