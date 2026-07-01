@@ -12,5 +12,6 @@ export function useSandboxFiles(threadId: string, enabled = true) {
     queryFn: () => listSandboxFiles(threadId),
     enabled: enabled && Boolean(threadId),
     staleTime: 1000,
+    retry: false,
   });
 }

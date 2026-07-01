@@ -33,6 +33,9 @@ export async function listSandboxFiles(
   );
 
   if (!response.ok) {
+    if (response.status === 403 || response.status === 404) {
+      return { files: [], count: 0 };
+    }
     throw new Error(
       await readErrorDetail(response, "Failed to list sandbox files"),
     );

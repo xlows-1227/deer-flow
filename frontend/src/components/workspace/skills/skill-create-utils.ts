@@ -174,7 +174,15 @@ ${displayNameLine}description: ${description || "Custom DeerFlow skill"}
   return body ? `${frontmatter}\n\n${body}` : frontmatter;
 }
 
-const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Restrict skill name input to hyphen-case characters while typing. */
+export function sanitizeSkillNameInput(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "")
+    .slice(0, 64);
+}
 
 export type SkillMarkdownValidationResult =
   | { valid: true }

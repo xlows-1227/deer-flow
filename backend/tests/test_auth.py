@@ -273,7 +273,7 @@ def test_require_permission_denies_wrong_permission():
 
     mock_auth = AuthContext(user=user, permissions=[Permissions.THREADS_READ])
 
-    with patch("app.gateway.authz._authenticate", return_value=mock_auth):
+    with patch("app.gateway.authz.authenticate", return_value=mock_auth):
         with TestClient(app) as client:
             response = client.get("/test")
             assert response.status_code == 403

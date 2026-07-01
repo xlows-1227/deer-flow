@@ -3,10 +3,13 @@ import json
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
+from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -459,7 +462,16 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(SimpleNamespace())
+    app = make_authed_test_app(
+        user_factory=lambda: User(
+            email="admin@example.com",
+            password_hash="x",
+            system_role="admin",
+            id=uuid4(),
+        ),
+    )
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    app.include_router(skills_router.router)
 
     with TestClient(app) as client:
         response = client.put("/api/skills/demo-skill", json={"enabled": False})

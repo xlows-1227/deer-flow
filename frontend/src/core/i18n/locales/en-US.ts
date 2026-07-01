@@ -546,9 +546,18 @@ export const enUS: Translations = {
       languageDescription: "Switch between languages.",
     },
     tools: {
-      title: "MCP",
-      description:
-        "Manage MCP server configuration, imports, exports, and enabled status.",
+      title: "Tools",
+      description: "Manage image generation and MCP tool configuration.",
+      tabs: {
+        imageGeneration: "Image Generation",
+        mcp: "MCP",
+      },
+      mcp: {
+        systemBadge: "System",
+        userBadge: "Mine",
+        readOnlyHint:
+          "System MCP servers can only be enabled or disabled for your account. Configuration is managed by administrators.",
+      },
       imageGeneration: {
         title: "Image Generation",
         description:

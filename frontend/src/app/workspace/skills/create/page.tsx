@@ -22,14 +22,13 @@ import {
   buildSkillMarkdown,
   formatSkillValidationError,
   parseSkillMarkdown,
-  slugifySkillName,
+  sanitizeSkillNameInput,
+  SKILL_NAME_PATTERN,
   syncSkillFrontmatter,
   validateSkillMarkdownContent,
 } from "@/components/workspace/skills/skill-create-utils";
 import { createCustomSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
-
-const NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export default function CreateSkillPage() {
   const router = useRouter();
@@ -40,7 +39,17 @@ export default function CreateSkillPage() {
   const [contentDirty, setContentDirty] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const normalizedName = useMemo(() => slugifySkillName(name), [name]);
+  const normalizedName = useMemo(() => {
+    const trimmed = name.trim();
+    return trimmed || "custom-skill";
+  }, [name]);
+
+  const nameFormatError = useMemo(() => {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    if (SKILL_NAME_PATTERN.test(trimmed)) return null;
+    return "仅可使用小写字母、数字和连字符，且不能以连字符开头或结尾。";
+  }, [name]);
 
   useEffect(() => {
     if (contentDirty) return;
@@ -54,7 +63,7 @@ export default function CreateSkillPage() {
   }, [contentDirty, description, displayName, normalizedName]);
 
   const canSubmit =
-    NAME_PATTERN.test(normalizedName) &&
+    SKILL_NAME_PATTERN.test(normalizedName) &&
     displayName.trim().length > 0 &&
     description.trim().length > 0 &&
     content.trim().length > 0 &&
@@ -140,7 +149,7 @@ export default function CreateSkillPage() {
                   <Input
                     value={name}
                     onChange={(event) => {
-                      setName(event.target.value);
+                      setName(sanitizeSkillNameInput(event.target.value));
                     }}
                     placeholder="research-brief"
                     className="bg-white"
@@ -148,6 +157,15 @@ export default function CreateSkillPage() {
                   <span className="block text-xs text-gray-500">
                     保存名称：{normalizedName}
                   </span>
+                  {nameFormatError ? (
+                    <span className="text-destructive block text-xs">
+                      {nameFormatError}
+                    </span>
+                  ) : (
+                    <span className="block text-xs text-gray-500">
+                      仅允许小写字母、数字和连字符（-）
+                    </span>
+                  )}
                 </label>
                 <label className="block space-y-2">
                   <span className="text-xs font-medium text-gray-600">
@@ -238,7 +256,7 @@ export default function CreateSkillPage() {
                     setContentDirty(true);
                     setContent(nextContent);
                     if (parsed.name) {
-                      setName(parsed.name);
+                      setName(sanitizeSkillNameInput(parsed.name));
                     }
                     if (
                       parsed.displayName ||

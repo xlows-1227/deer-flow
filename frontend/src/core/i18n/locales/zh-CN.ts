@@ -525,8 +525,17 @@ export const zhCN: Translations = {
       languageDescription: "在不同语言之间切换。",
     },
     tools: {
-      title: "MCP",
-      description: "管理 MCP 服务配置、导入导出和启用状态。",
+      title: "工具",
+      description: "管理图片生成与 MCP 工具配置。",
+      tabs: {
+        imageGeneration: "图片生成",
+        mcp: "MCP",
+      },
+      mcp: {
+        systemBadge: "系统默认",
+        userBadge: "我的",
+        readOnlyHint: "系统默认 MCP 仅可为自己开启或关闭，配置由管理员维护。",
+      },
       imageGeneration: {
         title: "图片生成",
         description:

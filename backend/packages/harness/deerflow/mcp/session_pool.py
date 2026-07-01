@@ -173,6 +173,35 @@ class MCPSessionPool:
             except Exception:
                 logger.debug("Error closing MCP session %s during sync close", key, exc_info=True)
 
+    def close_servers_by_prefix(self, prefix: str) -> None:
+        """Synchronously close every session whose server name starts with ``prefix``.
+
+        Used to tear down a user's namespaced sessions (``user_id::server``)
+        when their MCP configuration changes. Like :meth:`close_all_sync`, each
+        session is closed on the event loop that owns it, so this is safe to
+        call from any thread without an active event loop and avoids the
+        cross-loop resource leaks that scheduling ``create_task`` on the
+        current loop would cause.
+        """
+        with self._lock:
+            entries = [(k, v) for k, v in self._entries.items() if k[0].startswith(prefix)]
+            cms = {k: self._context_managers.pop(k, None) for k, _ in entries}
+            for k, _ in entries:
+                self._entries.pop(k, None)
+
+        for key, (_, loop) in entries:
+            cm = cms.get(key)
+            if cm is None or loop.is_closed():
+                continue
+            try:
+                if loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(cm.__aexit__(None, None, None), loop)
+                    future.result(timeout=self.SESSION_CLOSE_TIMEOUT)
+                else:
+                    loop.run_until_complete(cm.__aexit__(None, None, None))
+            except Exception:
+                logger.debug("Error closing MCP session %s by prefix", key, exc_info=True)
+
 
 # ------------------------------------------------------------------
 # Module-level singleton

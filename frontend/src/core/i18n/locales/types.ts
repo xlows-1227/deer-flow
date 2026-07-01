@@ -463,6 +463,15 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      tabs: {
+        imageGeneration: string;
+        mcp: string;
+      };
+      mcp: {
+        systemBadge: string;
+        userBadge: string;
+        readOnlyHint: string;
+      };
       imageGeneration: {
         title: string;
         description: string;

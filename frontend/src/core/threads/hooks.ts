@@ -92,10 +92,6 @@ function uploadedFileSizeToNumber(size: UploadedFileInfo["size"]): number {
   return Number.isFinite(normalized) ? normalized : 0;
 }
 
-function isNonEmptyString(value: string | undefined): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
 function messageIdentity(message: Message): string | undefined {
   if (
     "tool_call_id" in message &&
@@ -196,17 +192,31 @@ function sortRunsChronologically(runs: Run[]): Run[] {
   return [...runs].sort((a, b) => getRunCreatedAtMs(a) - getRunCreatedAtMs(b));
 }
 
+export type LoadedRunMessage = {
+  seq: number;
+  message: Message;
+};
+
 export function mergeLoadedRunMessages(
   runs: Run[],
-  messagesByRunId: ReadonlyMap<string, Message[]>,
+  messagesByRunId: ReadonlyMap<string, LoadedRunMessage[]>,
   appendedMessages: Message[] = [],
 ): Message[] {
-  return dedupeMessagesByIdentity([
-    ...sortRunsChronologically(runs).flatMap(
-      (run) => messagesByRunId.get(run.run_id) ?? [],
-    ),
-    ...appendedMessages,
-  ]);
+  const sequenced = runs.flatMap(
+    (run) => messagesByRunId.get(run.run_id) ?? [],
+  );
+
+  const orderedMessages =
+    sequenced.length > 0 &&
+    sequenced.every((entry) => Number.isFinite(entry.seq))
+      ? [...sequenced]
+          .sort((a, b) => a.seq - b.seq)
+          .map((entry) => entry.message)
+      : sortRunsChronologically(runs).flatMap((run) =>
+          (messagesByRunId.get(run.run_id) ?? []).map((entry) => entry.message),
+        );
+
+  return dedupeMessagesByIdentity([...orderedMessages, ...appendedMessages]);
 }
 
 function messageIsAssistantSide(message: Message): boolean {
@@ -1263,7 +1273,7 @@ export function useThreadHistory(threadId: string) {
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
-  const messagesByRunIdRef = useRef<Map<string, Message[]>>(new Map());
+  const messagesByRunIdRef = useRef<Map<string, LoadedRunMessage[]>>(new Map());
   const appendedMessagesRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
@@ -1327,7 +1337,10 @@ export function useThreadHistory(threadId: string) {
         );
         const _messages = runMessages
           .filter((m) => !m.metadata?.caller?.startsWith("middleware:"))
-          .map((m) => withMessageTimestamp(m.content, m.created_at));
+          .map((m) => ({
+            seq: m.seq,
+            message: withMessageTimestamp(m.content, m.created_at),
+          }));
         if (
           threadIdRef.current !== requestThreadId ||
           generationRef.current !== requestGeneration
@@ -1522,6 +1535,11 @@ export function useThreadRuns(threadId?: string) {
         );
 
         if (!response.ok) {
+          // Test / mixed deployments may not expose runs for all threads; avoid
+          // noisy retries + console errors for missing resources.
+          if (response.status === 403 || response.status === 404) {
+            return [];
+          }
           throw new Error("Failed to load thread runs.");
         }
 
@@ -1537,6 +1555,7 @@ export function useThreadRuns(threadId?: string) {
       return runs;
     },
     refetchOnWindowFocus: false,
+    retry: false,
   });
 }
 

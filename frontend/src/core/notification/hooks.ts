@@ -22,10 +22,19 @@ interface UseNotificationReturn {
 }
 
 export function useNotification(): UseNotificationReturn {
-  const [permission, setPermission] =
-    useState<NotificationPermission>("default");
-  const [isSupported, setIsSupported] = useState(false);
-  const [isSecureContext, setIsSecureContext] = useState(true);
+  const [permission, setPermission] = useState<NotificationPermission>(() => {
+    if (typeof window === "undefined") return "default";
+    if (!("Notification" in window)) return "default";
+    return Notification.permission;
+  });
+  const [isSupported, setIsSupported] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return "Notification" in window;
+  });
+  const [isSecureContext, setIsSecureContext] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.isSecureContext;
+  });
 
   const lastNotificationTime = useRef<Date | null>(null);
 
@@ -69,7 +78,6 @@ export function useNotification(): UseNotificationReturn {
     (title: string, options?: NotificationOptions) => {
       if (!isSupported) {
         console.warn("Notification API is not supported");
-        toast.error("当前浏览器不支持通知功能");
         return;
       }
       if (!isSecureContext) {
@@ -79,13 +87,11 @@ export function useNotification(): UseNotificationReturn {
 
       if (permission !== "granted") {
         console.warn("Notification permission not granted");
-        toast.error("未获得通知权限，请先开启通知权限");
         return;
       }
 
       if (!settings.notification.enabled) {
         console.warn("Notification is disabled");
-        toast.error("通知功能未启用，请先在设置中开启");
         return;
       }
 
@@ -101,7 +107,6 @@ export function useNotification(): UseNotificationReturn {
 
       try {
         const notification = new Notification(title, options);
-        toast.success("测试通知已发送");
 
         notification.onclick = () => {
           window.focus();

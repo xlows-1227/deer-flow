@@ -1,19 +1,16 @@
 import base64
 import importlib
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.gateway.routers.tools import (
-    ImageGenerationConfigUpdateRequest,
-    ImageGenerationProviderConfigUpdate,
-    _extensions_config_path_for_write,
-    _provider_update_to_raw,
-    update_image_generation_configuration,
-)
-from deerflow.config.extensions_config import ExtensionsConfig, reset_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.extensions_user.image_service import UserImageService
+from deerflow.extensions_user.schemas import MASKED_VALUE, ImageConfigUpdateRequest, ImageProviderUpdate
+from deerflow.persistence.base import Base
+from deerflow.persistence.user_extension import UserImageProviderRepository, UserImageSettingsRepository
 from deerflow.tools.builtins.generate_image_tool import generate_image_tool
 from deerflow.tools.image_generation import (
     GeneratedImage,
@@ -122,36 +119,31 @@ def test_generate_images_rejects_unsupported_provider_parameter_before_http() ->
     assert "does not support parameter(s): quality" in str(exc_info.value)
 
 
-def test_available_tools_reads_latest_image_generation_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config_path = tmp_path / "extensions_config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "imageGeneration": {
-                    "enabled": True,
-                    "defaultProvider": "aihubmix",
-                    "providers": {
-                        "aihubmix": {
-                            "enabled": True,
-                            "provider": "aihubmix",
-                            "api_key": "sk-test",
-                        }
-                    },
-                }
+def test_available_tools_includes_generate_image_from_effective_extensions(monkeypatch: pytest.MonkeyPatch) -> None:
+    enabled_extensions = ExtensionsConfig.model_validate(
+        {
+            "imageGeneration": {
+                "enabled": True,
+                "defaultProvider": "aihubmix",
+                "providers": {
+                    "aihubmix": {
+                        "enabled": True,
+                        "provider": "aihubmix",
+                        "api_key": "sk-test",
+                    }
+                },
             }
-        ),
-        encoding="utf-8",
+        }
     )
-    stale_extensions = ExtensionsConfig.model_validate({"imageGeneration": {"enabled": False}})
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
-    monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: _make_minimal_app_config(stale_extensions))
+    monkeypatch.setattr(
+        "deerflow.tools.tools.get_app_config",
+        lambda: _make_minimal_app_config(enabled_extensions),
+    )
     monkeypatch.setattr("deerflow.tools.tools.is_host_bash_allowed", lambda config: True)
-    reset_extensions_config()
 
     tools = get_available_tools(include_mcp=False)
 
     assert "generate_image" in {tool.name for tool in tools}
-    reset_extensions_config()
 
 
 def test_generate_images_calls_aihubmix_predictions_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -488,83 +480,90 @@ def test_generate_image_tool_reports_config_errors(monkeypatch: pytest.MonkeyPat
     assert "artifacts" not in result.update
 
 
-def test_image_generation_api_key_roundtrip_preserves_masked_secret() -> None:
-    incoming = ImageGenerationProviderConfigUpdate(
-        enabled=True,
-        provider="openai",
-        api_key="***",
-        base_url="https://api.openai.com/v1",
-        model="gpt-image-1",
+@pytest.mark.asyncio
+async def test_image_generation_api_key_roundtrip_preserves_masked_secret(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'img.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    service = UserImageService(UserImageSettingsRepository(sf), UserImageProviderRepository(sf))
+    await service.update_config(
+        "user-a",
+        ImageConfigUpdateRequest(
+            enabled=True,
+            providers={"openai": ImageProviderUpdate(enabled=True, api_key="sk-original")},
+        ),
     )
+    view = await service.get_config_view("user-a")
+    assert view.providers["openai"].has_api_key is True
 
-    raw = _provider_update_to_raw(
-        "openai",
-        incoming,
-        {"openai": {"api_key": "$OPENAI_API_KEY"}},
+    await service.update_config(
+        "user-a",
+        ImageConfigUpdateRequest(
+            enabled=True,
+            providers={"openai": ImageProviderUpdate(enabled=True, api_key=MASKED_VALUE)},
+        ),
     )
-
-    assert raw["api_key"] == "$OPENAI_API_KEY"
-
-
-def test_image_generation_api_key_roundtrip_can_replace_secret() -> None:
-    incoming = ImageGenerationProviderConfigUpdate(
-        enabled=True,
-        provider="openai",
-        api_key="sk-new",
-        base_url="https://api.openai.com/v1",
-        model="gpt-image-1",
-    )
-
-    raw = _provider_update_to_raw(
-        "openai",
-        incoming,
-        {"openai": {"api_key": "$OPENAI_API_KEY"}},
-    )
-
-    assert raw["api_key"] == "sk-new"
-
-
-def test_image_generation_write_path_falls_back_to_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ExtensionsConfig, "resolve_config_path", lambda config_path=None: None)
-
-    assert _extensions_config_path_for_write() == Path(__file__).resolve().parents[2] / "extensions_config.json"
+    runtime = await service.build_user_image_config("user-a")
+    assert runtime.providers["openai"].api_key == "sk-original"
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_image_generation_update_persists_enabled_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config_path = tmp_path / "extensions_config.json"
-    config_path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
-    reset_extensions_config()
-
-    request = ImageGenerationConfigUpdateRequest.model_validate(
-        {
-            "enabled": True,
-            "default_provider": "aihubmix",
-            "output_subdir": "generated-images",
-            "providers": {
-                "aihubmix": {
-                    "enabled": True,
-                    "provider": "aihubmix",
-                    "display_name": "Aihubmix",
-                    "api_key": "$AIHUBMIX_API_KEY",
-                    "base_url": "https://aihubmix.com/v1",
-                    "model": "openai/gpt-image-2-free",
-                    "timeout_seconds": 120,
-                    "params": {},
-                }
-            },
-        }
+async def test_image_generation_api_key_roundtrip_can_replace_secret(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'img2.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    service = UserImageService(UserImageSettingsRepository(sf), UserImageProviderRepository(sf))
+    await service.update_config(
+        "user-a",
+        ImageConfigUpdateRequest(
+            enabled=True,
+            providers={"openai": ImageProviderUpdate(enabled=True, api_key="sk-old")},
+        ),
     )
+    await service.update_config(
+        "user-a",
+        ImageConfigUpdateRequest(
+            enabled=True,
+            providers={"openai": ImageProviderUpdate(enabled=True, api_key="sk-new")},
+        ),
+    )
+    runtime = await service.build_user_image_config("user-a")
+    assert runtime.providers["openai"].api_key == "sk-new"
+    await engine.dispose()
 
-    response = await update_image_generation_configuration(request)
-    persisted = ExtensionsConfig.from_file(str(config_path))
+
+@pytest.mark.asyncio
+async def test_image_generation_update_persists_enabled_state(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'img3.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    service = UserImageService(UserImageSettingsRepository(sf), UserImageProviderRepository(sf))
+
+    response = await service.update_config(
+        "user-a",
+        ImageConfigUpdateRequest(
+            enabled=True,
+            default_provider="aihubmix",
+            providers={
+                "aihubmix": ImageProviderUpdate(
+                    enabled=True,
+                    api_key="sk-aihubmix",
+                    base_url="https://aihubmix.com/v1",
+                    model="openai/gpt-image-2-free",
+                )
+            },
+        ),
+    )
 
     assert response.enabled is True
     assert response.default_provider == "aihubmix"
     assert response.providers["aihubmix"].enabled is True
-    assert persisted.image_generation.enabled is True
-    assert persisted.image_generation.default_provider == "aihubmix"
-    assert persisted.image_generation.providers["aihubmix"].enabled is True
-
-    reset_extensions_config()
+    runtime = await service.build_user_image_config("user-a")
+    assert runtime.enabled is True
+    assert runtime.default_provider == "aihubmix"
+    assert runtime.providers["aihubmix"].enabled is True
+    await engine.dispose()

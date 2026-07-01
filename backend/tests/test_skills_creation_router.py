@@ -198,3 +198,77 @@ def test_non_admin_cannot_read_public_skill_content(tmp_path, monkeypatch):
     response = client.get(f"/api/skills/public/{skill_name}")
 
     assert response.status_code == 403
+
+
+def test_admin_can_toggle_public_skill(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="admin")
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    skill_name = "public-toggle-skill"
+    skill_dir = storage.get_skills_root_path() / "public" / skill_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(_valid_skill_md(skill_name), encoding="utf-8")
+
+    monkeypatch.setattr(
+        skills_router.ExtensionsConfig,
+        "resolve_config_path",
+        classmethod(lambda cls, config_path=None, path=config_path: path),
+    )
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.get_extensions_config",
+        lambda: SimpleNamespace(mcp_servers={}, skills={}),
+    )
+
+    async def _refresh_cache():
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh_cache)
+
+    response = client.put(f"/api/skills/{skill_name}", json={"enabled": False})
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+
+
+def test_non_admin_cannot_toggle_public_skill(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="user")
+    skill_name = "public-locked-toggle-skill"
+    skill_dir = storage.get_skills_root_path() / "public" / skill_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(_valid_skill_md(skill_name), encoding="utf-8")
+
+    response = client.put(f"/api/skills/{skill_name}", json={"enabled": False})
+
+    assert response.status_code == 403
+
+
+def test_non_admin_can_toggle_custom_skill(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="user")
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    skill_name = "custom-toggle-skill"
+    skill_dir = storage.get_skills_root_path() / "custom" / skill_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(_valid_skill_md(skill_name), encoding="utf-8")
+
+    monkeypatch.setattr(
+        skills_router.ExtensionsConfig,
+        "resolve_config_path",
+        classmethod(lambda cls, config_path=None, path=config_path: path),
+    )
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.get_extensions_config",
+        lambda: SimpleNamespace(mcp_servers={}, skills={}),
+    )
+
+    async def _refresh_cache():
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh_cache)
+
+    response = client.put(f"/api/skills/{skill_name}", json={"enabled": False})
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False

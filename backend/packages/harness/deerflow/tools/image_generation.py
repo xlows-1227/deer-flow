@@ -15,7 +15,7 @@ from deerflow.config.extensions_config import (
     ExtensionsConfig,
     ImageGenerationConfig,
     ImageGenerationProviderConfig,
-    _default_image_generation_providers,
+    default_image_generation_providers,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,7 +186,7 @@ def get_effective_image_generation_config(config: ExtensionsConfig | None = None
     """Merge user image-generation settings with built-in provider defaults."""
     config = config or ExtensionsConfig.from_file()
     image_config = config.image_generation
-    providers = _default_image_generation_providers()
+    providers = default_image_generation_providers()
 
     for name, provider in image_config.providers.items():
         base = providers.get(name)

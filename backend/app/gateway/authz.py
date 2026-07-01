@@ -158,7 +158,7 @@ def _make_test_request_stub() -> Any:
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
 
 
-async def _authenticate(request: Request) -> AuthContext:
+async def authenticate(request: Request) -> AuthContext:
     """Authenticate request and return AuthContext.
 
     Delegates to deps.get_optional_user_from_request() for the JWT→User pipeline.
@@ -213,7 +213,7 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
 
         auth_context = getattr(request.state, "auth", None)
         if auth_context is None or not auth_context.is_authenticated:
-            auth_context = await _authenticate(request)
+            auth_context = await authenticate(request)
             request.state.auth = auth_context
 
         if not auth_context.is_authenticated:
@@ -242,7 +242,7 @@ def require_admin[**P, T](func: Callable[P, T]) -> Callable[P, T]:
 
         user = getattr(request.state, "user", None)
         if user is None:
-            auth = await _authenticate(request)
+            auth = await authenticate(request)
             request.state.auth = auth
             user = auth.user
 
@@ -315,7 +315,7 @@ def require_permission(
 
             auth: AuthContext = getattr(request.state, "auth", None)
             if auth is None:
-                auth = await _authenticate(request)
+                auth = await authenticate(request)
                 request.state.auth = auth
 
             if not auth.is_authenticated:

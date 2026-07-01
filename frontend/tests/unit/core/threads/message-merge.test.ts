@@ -120,11 +120,87 @@ test("mergeLoadedRunMessages keeps newer runs after older history", () => {
     mergeLoadedRunMessages(
       [newerRun, olderRun],
       new Map([
-        [olderRun.run_id, [olderHuman, olderAi]],
-        [newerRun.run_id, [newerHuman]],
+        [
+          olderRun.run_id,
+          [
+            { seq: 1, message: olderHuman },
+            { seq: 2, message: olderAi },
+          ],
+        ],
+        [newerRun.run_id, [{ seq: 3, message: newerHuman }]],
       ]),
     ),
   ).toEqual([olderHuman, olderAi, newerHuman]);
+});
+
+test("mergeLoadedRunMessages orders by global seq when run created_at disagrees", () => {
+  const runA = {
+    run_id: "run-a",
+    created_at: "2026-06-30T06:46:44.000Z",
+  } as Run;
+  const runB = {
+    run_id: "run-b",
+    created_at: "2026-06-30T06:39:32.000Z",
+  } as Run;
+  const firstHuman = {
+    id: "human-1",
+    type: "human",
+    content: "暂时不用了",
+    additional_kwargs: { timestamp: "2026-06-30T06:39:32+08:00" },
+  } as Message;
+  const helloHuman = {
+    id: "human-2",
+    type: "human",
+    content: "hello",
+    additional_kwargs: { timestamp: "2026-06-30T06:40:03+08:00" },
+  } as Message;
+  const whatCanYouDoHuman = {
+    id: "human-3",
+    type: "human",
+    content: "你能做什么",
+    additional_kwargs: { timestamp: "2026-06-30T06:40:03+08:00" },
+  } as Message;
+  const secondHuman = {
+    id: "human-4",
+    type: "human",
+    content: "暂时不用了",
+    additional_kwargs: { timestamp: "2026-06-30T06:46:44+08:00" },
+  } as Message;
+  const assistantReply = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday, your AI assistant. How can I help you today?",
+    additional_kwargs: { timestamp: "2026-06-30T06:47:13+08:00" },
+  } as Message;
+
+  expect(
+    mergeLoadedRunMessages(
+      [runA, runB],
+      new Map([
+        [
+          runB.run_id,
+          [
+            { seq: 1, message: firstHuman },
+            { seq: 2, message: helloHuman },
+            { seq: 3, message: whatCanYouDoHuman },
+          ],
+        ],
+        [
+          runA.run_id,
+          [
+            { seq: 4, message: secondHuman },
+            { seq: 5, message: assistantReply },
+          ],
+        ],
+      ]),
+    ),
+  ).toEqual([
+    firstHuman,
+    helloHuman,
+    whatCanYouDoHuman,
+    secondHuman,
+    assistantReply,
+  ]);
 });
 
 test("mergeMessages deduplicates tool messages by tool_call_id", () => {

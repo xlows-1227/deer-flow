@@ -23,6 +23,8 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SkillDetailDialog } from "@/components/workspace/skills/skill-detail-dialog";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { isAdminUser } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
@@ -57,6 +59,8 @@ function SkillSettingsList({
   onClose?: () => void;
 }) {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const isAdmin = isAdminUser(user);
   const router = useRouter();
   const [filter, setFilter] = useState<string>("public");
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
@@ -115,7 +119,10 @@ function SkillSettingsList({
               </Button>
               <Switch
                 checked={skill.enabled}
-                disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                disabled={
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                  (skill.category === "public" && !isAdmin)
+                }
                 onCheckedChange={(checked) =>
                   enableSkill({ skillName: skill.name, enabled: checked })
                 }

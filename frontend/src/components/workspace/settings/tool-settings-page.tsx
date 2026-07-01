@@ -28,15 +28,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   loadImageGenerationConfig,
   updateImageGenerationConfig,
   type ImageGenerationConfig,
   type ImageGenerationProviderConfig,
 } from "@/core/tools";
-import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
@@ -455,11 +455,24 @@ function ImageGenerationSettings() {
 }
 
 export function ToolSettingsPage() {
+  const { t } = useI18n();
+
   return (
-    <div className={cn("flex flex-col gap-8")}>
-      <ImageGenerationSettings />
-      <Separator />
-      <MCPManagementPage embedded />
+    <div className={cn("flex flex-col gap-6")}>
+      <Tabs defaultValue="image">
+        <TabsList variant="line">
+          <TabsTrigger value="image">
+            {t.settings.tools.tabs.imageGeneration}
+          </TabsTrigger>
+          <TabsTrigger value="mcp">{t.settings.tools.tabs.mcp}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="image" className="mt-6">
+          <ImageGenerationSettings />
+        </TabsContent>
+        <TabsContent value="mcp" className="mt-6">
+          <MCPManagementPage embedded />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

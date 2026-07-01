@@ -34,3 +34,14 @@ class ModelSecretStore:
         if not isinstance(api_key, str) or not api_key:
             raise ValueError("Encrypted API key payload is missing api_key")
         return api_key
+
+    def encrypt_json(self, payload: dict[str, object]) -> str:
+        """Encrypt an arbitrary JSON-serializable dict and return a token."""
+        return self._fernet.encrypt(json.dumps(payload).encode()).decode()
+
+    def decrypt_json(self, token: str) -> dict[str, object]:
+        """Decrypt a token produced by :meth:`encrypt_json` back into a dict."""
+        data = json.loads(self._fernet.decrypt(token.encode()).decode())
+        if not isinstance(data, dict):
+            raise ValueError("Invalid encrypted JSON payload")
+        return data
