@@ -108,6 +108,8 @@ def _make_session_pool_tool(
     server_name: str,
     connection: dict[str, Any],
     tool_interceptors: list[Any] | None = None,
+    *,
+    pool_server_name: str | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -125,13 +127,14 @@ def _make_session_pool_tool(
         original_name = original_name[len(prefix) :]
 
     pool = get_session_pool()
+    session_server_name = pool_server_name or server_name
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
         thread_id = _extract_thread_id(runtime)
-        session = await pool.get_session(server_name, thread_id, connection)
+        session = await pool.get_session(session_server_name, thread_id, connection)
 
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
@@ -170,7 +173,15 @@ def _make_session_pool_tool(
     )
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+def _namespaced_server_name(user_id: str, server_name: str) -> str:
+    return f"{user_id}::{server_name}"
+
+
+async def get_mcp_tools(
+    *,
+    extensions_config: ExtensionsConfig | None = None,
+    user_id: str = "default",
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools are wrapped with persistent-session logic so that consecutive
@@ -189,7 +200,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     # to always read the latest configuration from disk. This ensures that changes
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
+    extensions_config = extensions_config or ExtensionsConfig.from_file()
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
@@ -260,7 +271,16 @@ async def get_mcp_tools() -> list[BaseTool]:
                     break
 
             if tool_server is not None:
-                wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                pool_server_name = _namespaced_server_name(user_id, tool_server)
+                wrapped_tools.append(
+                    _make_session_pool_tool(
+                        tool,
+                        tool_server,
+                        servers_config[tool_server],
+                        tool_interceptors,
+                        pool_server_name=pool_server_name,
+                    )
+                )
             else:
                 wrapped_tools.append(tool)
 

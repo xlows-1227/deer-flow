@@ -94,6 +94,12 @@ async def _require_user_id(request: Request) -> str:
     return str(user_id)
 
 
+def _reject_user_id_override(requested_user_id: str | None, effective_user_id: str) -> None:
+    """Reject attempts to override the authenticated user scope via query params."""
+    if requested_user_id and requested_user_id != effective_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+
 def _library_dir(user_id: str) -> Path:
     root = get_paths().user_documents_dir(user_id)
     root.mkdir(parents=True, exist_ok=True)
@@ -201,8 +207,11 @@ async def list_files(
     source: str = "all",
     type: str = "all",  # noqa: A002 - public query parameter
     q: str = "",
+    user_id: str | None = None,
 ) -> FileListResponse:
-    root = _library_dir(await _require_user_id(request))
+    effective_user_id = await _require_user_id(request)
+    _reject_user_id_override(user_id, effective_user_id)
+    root = _library_dir(effective_user_id)
     folder = _resolve_inside(root, folder_path)
     if not folder.exists():
         raise HTTPException(status_code=404, detail="Folder not found")
@@ -237,8 +246,10 @@ async def list_files(
 
 
 @router.get("/folders", response_model=FolderListResponse)
-async def list_folders(request: Request) -> FolderListResponse:
-    root = _library_dir(await _require_user_id(request))
+async def list_folders(request: Request, user_id: str | None = None) -> FolderListResponse:
+    effective_user_id = await _require_user_id(request)
+    _reject_user_id_override(user_id, effective_user_id)
+    root = _library_dir(effective_user_id)
     folders: list[str] = []
     for current_root, dir_names, _file_names in os.walk(root, followlinks=False):
         current_path = Path(current_root)
@@ -258,8 +269,10 @@ async def get_upload_config() -> FileUploadConfigResponse:
 
 
 @router.post("/folders", response_model=FileItem, status_code=status.HTTP_201_CREATED)
-async def create_folder(data: FolderCreateRequest, request: Request) -> FileItem:
-    root = _library_dir(await _require_user_id(request))
+async def create_folder(data: FolderCreateRequest, request: Request, user_id: str | None = None) -> FileItem:
+    effective_user_id = await _require_user_id(request)
+    _reject_user_id_override(user_id, effective_user_id)
+    root = _library_dir(effective_user_id)
     parent = _resolve_inside(root, data.parent_path)
     if not parent.exists():
         raise HTTPException(status_code=404, detail="Parent folder not found")
@@ -279,11 +292,14 @@ async def upload_files(
     request: Request,
     files: list[UploadFile] = File(...),
     folder_path: str = Form(""),
+    user_id: str | None = None,
 ) -> FileListResponse:
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    root = _library_dir(await _require_user_id(request))
+    effective_user_id = await _require_user_id(request)
+    _reject_user_id_override(user_id, effective_user_id)
+    root = _library_dir(effective_user_id)
     folder = _resolve_inside(root, folder_path)
     if not folder.exists():
         raise HTTPException(status_code=404, detail="Folder not found")
@@ -334,8 +350,10 @@ async def upload_files(
 
 
 @router.get("/{path:path}")
-async def get_file(path: str, request: Request, download: bool = False) -> FileResponse:
-    root = _library_dir(await _require_user_id(request))
+async def get_file(path: str, request: Request, download: bool = False, user_id: str | None = None) -> FileResponse:
+    effective_user_id = await _require_user_id(request)
+    _reject_user_id_override(user_id, effective_user_id)
+    root = _library_dir(effective_user_id)
     target = _resolve_inside(root, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
@@ -347,8 +365,10 @@ async def get_file(path: str, request: Request, download: bool = False) -> FileR
 
 
 @router.delete("/{path:path}", response_model=DeleteResponse)
-async def delete_file(path: str, request: Request) -> DeleteResponse:
-    root = _library_dir(await _require_user_id(request))
+async def delete_file(path: str, request: Request, user_id: str | None = None) -> DeleteResponse:
+    effective_user_id = await _require_user_id(request)
+    _reject_user_id_override(user_id, effective_user_id)
+    root = _library_dir(effective_user_id)
     target = _resolve_inside(root, path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")

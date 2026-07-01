@@ -2,6 +2,7 @@ import logging
 import os
 from types import SimpleNamespace
 
+from deerflow.community.aio_sandbox import backend as sandbox_backend
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _format_container_command_for_log,
@@ -234,3 +235,21 @@ def test_start_container_keeps_apple_container_port_format(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
 
     assert captured_cmd[captured_cmd.index("-p") + 1] == "18080:8080"
+
+
+def test_create_uses_localhost_sandbox_url_on_bare_metal(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(sandbox_backend, "_is_running_in_container", lambda: False)
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=8080: 18080)
+
+    info = backend.create(thread_id="thread-1", sandbox_id="abc123")
+
+    assert info.sandbox_url == "http://localhost:18080"

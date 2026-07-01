@@ -558,9 +558,80 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
   return undefined;
 }
 
+const VIEW_IMAGE_CONTEXT_MARKERS = [
+  "Here are the images you've viewed:",
+  "Here are the details of the images you've viewed:",
+] as const;
+
+function isViewImageContextMessage(message: Message): boolean {
+  if (message.type !== "human") {
+    return false;
+  }
+  if (message.additional_kwargs?.view_image_context === true) {
+    return true;
+  }
+  const text = extractTextFromMessage(message);
+  return VIEW_IMAGE_CONTEXT_MARKERS.some((marker) => text.includes(marker));
+}
+
+function isDynamicContextReminder(message: Message): boolean {
+  return (
+    message.type === "human" &&
+    message.additional_kwargs?.dynamic_context_reminder === true
+  );
+}
+
+function isDynamicContextUserCopy(message: Message): boolean {
+  return (
+    message.type === "human" &&
+    typeof message.id === "string" &&
+    message.id.endsWith("__user")
+  );
+}
+
+// DynamicContextMiddleware splits the first human turn into a hidden reminder
+// (original id) plus a visible copy (`{id}__user`). Later user turns append
+// after the assistant reply, which can leave the first visible copy stranded
+// below newer user messages in thread state.
+export function repairDynamicContextUserMessageOrder(
+  messages: Message[],
+): Message[] {
+  const result = [...messages];
+
+  for (let index = 0; index < result.length; index += 1) {
+    const userCopy = result[index];
+    if (!userCopy || !isDynamicContextUserCopy(userCopy)) {
+      continue;
+    }
+
+    const baseId = userCopy.id!.slice(0, -"__user".length);
+    const reminderIndex = result.findIndex(
+      (message) =>
+        message.type === "human" &&
+        message.id === baseId &&
+        isDynamicContextReminder(message),
+    );
+    if (reminderIndex === -1) {
+      continue;
+    }
+
+    const targetIndex = reminderIndex + 1;
+    if (index === targetIndex) {
+      continue;
+    }
+
+    result.splice(index, 1);
+    result.splice(targetIndex, 0, userCopy);
+    index = -1;
+  }
+
+  return result;
+}
+
 export function isHiddenFromUIMessage(message: Message) {
   return (
     message.additional_kwargs?.hide_from_ui === true ||
+    isViewImageContextMessage(message) ||
     (typeof message.name === "string" &&
       HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
   );

@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     DanglingToolCallMiddleware,
@@ -157,6 +157,27 @@ class TestBuildPatchedMessagesPatching:
         assert patched[1].tool_call_id == "call_1"
         assert patched[1].name == "bash"
         assert patched[1].status == "error"
+
+    def test_raw_tool_call_id_patched_when_structured_and_raw_ids_diverge(self):
+        mw = DanglingToolCallMiddleware()
+        msg = _ai_with_tool_calls([_tc("read_file", "call_abc")])
+        msg.additional_kwargs = {
+            "tool_calls": [
+                {
+                    "id": "read_file:0",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"/mnt/skills/public/image-generation/SKILL.md"}',
+                    },
+                }
+            ]
+        }
+        patched = mw._build_patched_messages([msg])
+        assert patched is not None
+        tool_msgs = [m for m in patched if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        assert {tm.tool_call_id for tm in tool_msgs} == {"call_abc", "read_file:0"}
 
     def test_non_adjacent_tool_result_is_moved_next_to_tool_call(self):
         middleware = DanglingToolCallMiddleware()
@@ -392,6 +413,31 @@ class TestWrapModelCall:
 
         handler.assert_called_once_with(patched_request)
         assert result == "response"
+
+
+class TestBeforeModel:
+    def test_persists_patched_messages_into_state(self):
+        mw = DanglingToolCallMiddleware()
+        state = {"messages": [_ai_with_tool_calls([_tc("read_file", "read_file:0")])]}
+
+        update = mw.before_model(state, runtime=MagicMock())
+
+        assert update is not None
+        assert len(update["messages"]) == 3
+        assert isinstance(update["messages"][0], RemoveMessage)
+        assert isinstance(update["messages"][2], ToolMessage)
+        assert update["messages"][2].tool_call_id == "read_file:0"
+
+    def test_no_update_when_history_is_valid(self):
+        mw = DanglingToolCallMiddleware()
+        state = {
+            "messages": [
+                _ai_with_tool_calls([_tc("bash", "call_1")]),
+                _tool_msg("call_1", "bash"),
+            ]
+        }
+
+        assert mw.before_model(state, runtime=MagicMock()) is None
 
 
 class TestAwrapModelCall:

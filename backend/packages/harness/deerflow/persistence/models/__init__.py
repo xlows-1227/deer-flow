@@ -28,6 +28,13 @@ from deerflow.persistence.scheduled_task_run.model import ScheduledTaskRunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_share.model import ThreadShareRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user_extension.model import (
+    UserImageProviderRow,
+    UserImageSettingsRow,
+    UserMcpServerRow,
+    UserMcpServerStateRow,
+)
+from deerflow.persistence.user_model.model import UserModelRow
 
 __all__ = [
     "FeedbackRow",
@@ -45,5 +52,10 @@ __all__ = [
     "ScheduledTaskRunRow",
     "ThreadMetaRow",
     "ThreadShareRow",
+    "UserImageProviderRow",
+    "UserImageSettingsRow",
+    "UserMcpServerRow",
+    "UserMcpServerStateRow",
+    "UserModelRow",
     "UserRow",
 ]

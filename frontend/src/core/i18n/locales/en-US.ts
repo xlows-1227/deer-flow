@@ -412,6 +412,7 @@ export const enUS: Translations = {
       appearance: "Appearance",
       memory: "Memory",
       connectors: "Connectors",
+      models: "Models",
       tools: "Tools",
       skills: "Skills",
       notification: "Notification",
@@ -495,6 +496,42 @@ export const enUS: Translations = {
         },
       },
     },
+    models: {
+      title: "Custom Models",
+      description:
+        "Configure your own LLM providers with a base URL and API key. Custom models appear in the chat model selector.",
+      hint: "Models are private to your account and stored with encrypted API keys.",
+      empty: "No custom models yet. Add one to use it in chat.",
+      addModel: "Add model",
+      editModel: "Edit model",
+      formDescription:
+        "Choose OpenAI or Anthropic protocol. The model name must be unique within your account.",
+      name: "Internal name",
+      namePlaceholder: "my-gpt4o",
+      displayName: "Display name",
+      displayNamePlaceholder: "My GPT-4o",
+      provider: "Provider protocol",
+      modelId: "Model ID",
+      modelIdPlaceholder: "gpt-4o",
+      baseUrl: "Base URL",
+      apiKey: "API key",
+      apiKeyPlaceholder: "sk-...",
+      apiKeyKeepExisting: "Leave unchanged to keep the existing key",
+      apiKeySet: "Configured (••••{lastFour})",
+      apiKeyMissing: "Not configured",
+      enabled: "Enabled",
+      enabledDescription:
+        "Disabled models stay saved but won't appear in chat.",
+      disabled: "Disabled",
+      loadFailed: "Failed to load custom models",
+      saveFailed: "Failed to save custom model",
+      createSuccess: "Custom model created",
+      updateSuccess: "Custom model updated",
+      deleteSuccess: "Custom model deleted",
+      deleteFailed: "Failed to delete custom model",
+      deleteConfirm: 'Delete model "{name}"?',
+      validationRequired: "Name and model ID are required",
+    },
     appearance: {
       themeTitle: "Theme",
       themeDescription:
@@ -509,9 +546,18 @@ export const enUS: Translations = {
       languageDescription: "Switch between languages.",
     },
     tools: {
-      title: "MCP",
-      description:
-        "Manage MCP server configuration, imports, exports, and enabled status.",
+      title: "Tools",
+      description: "Manage image generation and MCP tool configuration.",
+      tabs: {
+        imageGeneration: "Image Generation",
+        mcp: "MCP",
+      },
+      mcp: {
+        systemBadge: "System",
+        userBadge: "Mine",
+        readOnlyHint:
+          "System MCP servers can only be enabled or disabled for your account. Configuration is managed by administrators.",
+      },
       imageGeneration: {
         title: "Image Generation",
         description:

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import AuthContext, authenticate, require_permission
 from app.gateway.deps import get_config
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
@@ -252,6 +252,17 @@ async def _generate_ai_skill_draft(request: SkillAIDraftRequest, config: AppConf
     if description_match:
         description = description_match.group(1).strip().strip("\"'")
     return SkillAIDraftResponse(name=parsed_name, description=description, content=content)
+
+
+async def _require_system_admin(http_request: Request) -> None:
+    auth: AuthContext | None = getattr(http_request.state, "auth", None)
+    if auth is None:
+        auth = await authenticate(http_request)
+        http_request.state.auth = auth
+    if not auth.is_authenticated:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not auth.has_permission("system", "admin"):
+        raise HTTPException(status_code=403, detail="Permission denied: system:admin")
 
 
 def _skill_to_response(skill: Skill) -> SkillResponse:
@@ -958,9 +969,14 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Update Skill",
-    description="Update a skill's enabled status by modifying the extensions_config.json file.",
+    description="Update a skill's enabled status by modifying the extensions_config.json file. Toggling public skills requires admin access.",
 )
-async def update_skill(skill_name: str, request: SkillUpdateRequest, config: AppConfig = Depends(get_config)) -> SkillResponse:
+async def update_skill(
+    skill_name: str,
+    body: SkillUpdateRequest,
+    http_request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
@@ -969,13 +985,16 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
+        if skill.category == SkillCategory.PUBLIC:
+            await _require_system_admin(http_request)
+
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             config_path = Path.cwd().parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
         extensions_config = get_extensions_config()
-        extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
+        extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
 
         config_data = {
             "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
@@ -995,7 +1014,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
         if updated_skill is None:
             raise HTTPException(status_code=500, detail=f"Failed to reload skill '{skill_name}' after update")
 
-        logger.info(f"Skill '{skill_name}' enabled status updated to {request.enabled}")
+        logger.info(f"Skill '{skill_name}' enabled status updated to {body.enabled}")
         return _skill_to_response(updated_skill)
 
     except HTTPException:

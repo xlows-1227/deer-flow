@@ -42,6 +42,18 @@ def _prompt_slug(prompt: str) -> str:
     return slug[:48] or "image"
 
 
+def _resolve_extensions_config():
+    from deerflow.config import get_app_config
+
+    app_config = get_app_config()
+    extensions = getattr(app_config, "extensions", None)
+    if extensions is not None:
+        return extensions
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    return ExtensionsConfig.from_file()
+
+
 def _resolve_output_dirs(runtime: Runtime) -> tuple[Path, str]:
     thread_data = get_thread_data(runtime)
     if thread_data is None:
@@ -51,10 +63,9 @@ def _resolve_output_dirs(runtime: Runtime) -> tuple[Path, str]:
         raise ImageGenerationConfigError("Thread outputs directory is not available; cannot save generated images.")
 
     try:
-        from deerflow.config.extensions_config import ExtensionsConfig
         from deerflow.tools.image_generation import get_effective_image_generation_config
 
-        output_subdir = get_effective_image_generation_config(ExtensionsConfig.from_file()).output_subdir
+        output_subdir = get_effective_image_generation_config(_resolve_extensions_config()).output_subdir
     except Exception:
         output_subdir = _DEFAULT_OUTPUT_SUBDIR
 
@@ -136,6 +147,7 @@ def generate_image_tool(
             negative_prompt=negative_prompt,
             seed=seed,
             extra_params=extra_params,
+            config=_resolve_extensions_config(),
         )
         virtual_paths = _save_generated_images(runtime, prompt, images)
     except ImageGenerationConfigError as exc:

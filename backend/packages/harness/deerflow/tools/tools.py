@@ -96,16 +96,12 @@ def get_available_tools(
 
         builtin_tools.append(skill_manage_tool)
 
-    # Read the latest extensions config from disk for image generation.
-    # Settings are saved through the Gateway API while agent runs may happen
-    # in another process with a cached app_config, so app_config.extensions can
-    # be stale immediately after the user enables the tool.
-    if app_config is None:
+    # Use per-user extensions from the effective app config when available.
+    extensions_config = getattr(config, "extensions", None)
+    if extensions_config is None:
         from deerflow.config.extensions_config import ExtensionsConfig
 
         extensions_config = ExtensionsConfig.from_file()
-    else:
-        extensions_config = getattr(config, "extensions", None)
     if extensions_config is not None and has_enabled_image_generation_provider(extensions_config):
         builtin_tools.append(generate_image_tool)
         logger.info("Including generate_image_tool (image generation enabled)")
@@ -140,20 +136,16 @@ def get_available_tools(
         except Exception as e:
             logger.warning("Failed to load connector tools: %s", e)
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when loading MCP tools.
+    # Get cached MCP tools if enabled (per-user extensions + cache bucket).
     mcp_tools = []
     if include_mcp:
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
             from deerflow.mcp.cache import get_cached_mcp_tools
+            from deerflow.runtime.user_context import get_effective_user_id
 
-            extensions_config = ExtensionsConfig.from_file()
+            user_id = get_effective_user_id()
             if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
+                mcp_tools = get_cached_mcp_tools(user_id=user_id, extensions_config=extensions_config)
                 if mcp_tools:
                     logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 

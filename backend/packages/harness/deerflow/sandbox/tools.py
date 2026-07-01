@@ -143,7 +143,10 @@ def _resolve_skills_path(path: str) -> str:
 
     Raises:
         FileNotFoundError: If skills directory is not configured or doesn't exist.
+        PermissionError: If path traversal is detected.
     """
+    _reject_path_traversal(path)
+
     skills_container = _get_skills_container_path()
     skills_host = _get_skills_host_path()
     if skills_host is None:
@@ -153,7 +156,103 @@ def _resolve_skills_path(path: str) -> str:
         return skills_host
 
     relative = path[len(skills_container) :].lstrip("/")
-    return _join_path_preserving_style(skills_host, relative)
+    resolved = _join_path_preserving_style(skills_host, relative)
+
+    if "/" in skills_host and "\\" not in skills_host:
+        base_path = posixpath.normpath(skills_host)
+        candidate_path = posixpath.normpath(resolved)
+        try:
+            if posixpath.commonpath([base_path, candidate_path]) != base_path:
+                raise PermissionError("Access denied: path traversal detected")
+        except ValueError:
+            raise PermissionError("Access denied: path traversal detected") from None
+        return resolved
+
+    resolved_path = Path(resolved).resolve()
+    try:
+        resolved_path.relative_to(Path(skills_host).resolve())
+    except ValueError:
+        raise PermissionError("Access denied: path traversal detected") from None
+    return str(resolved_path)
+
+
+def _map_skills_host_path_to_container(host_path: str) -> str:
+    """Map a host skills path back to the container virtual path."""
+    skills_host = _get_skills_host_path()
+    skills_container = _get_skills_container_path()
+    if skills_host is None:
+        return host_path
+
+    normalized_host = host_path.replace("\\", "/")
+    normalized_base = skills_host.replace("\\", "/").rstrip("/")
+    if normalized_host == normalized_base:
+        return skills_container
+
+    prefix = f"{normalized_base}/"
+    if normalized_host.startswith(prefix):
+        relative = normalized_host[len(prefix) :]
+        return f"{skills_container}/{relative}"
+    return host_path
+
+
+def _read_skills_file_from_host(
+    requested_path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    """Read a skills file directly from the host filesystem.
+
+    Skills are read-only host mounts, so this bypasses sandbox initialization and
+    lets agents load SKILL.md even when the Docker sandbox is unavailable.
+    """
+    host_path = _resolve_skills_path(requested_path)
+    path_obj = Path(host_path)
+    if path_obj.is_dir():
+        raise IsADirectoryError(requested_path)
+    if not path_obj.is_file():
+        raise FileNotFoundError(requested_path)
+
+    content = path_obj.read_text(encoding="utf-8", errors="replace")
+    if not content:
+        return "(empty)"
+    if start_line is not None and end_line is not None:
+        content = "\n".join(content.splitlines()[start_line - 1 : end_line])
+    try:
+        sandbox_cfg = get_app_config().sandbox
+        max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+    except Exception:
+        max_chars = 50000
+    return _truncate_read_file_output(content, max_chars)
+
+
+def _list_skills_dir_from_host(requested_path: str) -> str:
+    """List a skills directory directly from the host filesystem."""
+    from deerflow.sandbox.local.list_dir import list_dir as local_list_dir
+
+    host_path = _resolve_skills_path(requested_path)
+    path_obj = Path(host_path)
+    if not path_obj.is_dir():
+        if path_obj.is_file():
+            raise NotADirectoryError(requested_path)
+        raise FileNotFoundError(requested_path)
+
+    entries = local_list_dir(host_path)
+    container_entries: list[str] = []
+    for entry in entries:
+        is_dir = entry.endswith(("/", "\\"))
+        stripped = entry.rstrip("/\\")
+        mapped = _map_skills_host_path_to_container(stripped)
+        container_entries.append(f"{mapped}/" if is_dir and not mapped.endswith("/") else mapped)
+
+    if not container_entries:
+        return "(empty)"
+
+    try:
+        sandbox_cfg = get_app_config().sandbox
+        max_chars = sandbox_cfg.ls_output_max_chars if sandbox_cfg else 20000
+    except Exception:
+        max_chars = 20000
+    return _truncate_ls_output("\n".join(container_entries), max_chars)
 
 
 def _is_acp_workspace_path(path: str) -> bool:
@@ -1389,10 +1488,22 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the directory to list.
     """
+    requested_path = path
+    if _is_skills_path(requested_path):
+        try:
+            return _list_skills_dir_from_host(requested_path)
+        except FileNotFoundError:
+            return f"Error: Directory not found: {requested_path}"
+        except NotADirectoryError:
+            return f"Error: Path is not a directory: {requested_path}"
+        except PermissionError:
+            return f"Error: Permission denied: {requested_path}"
+        except Exception as e:
+            return f"Error: Unexpected error listing directory: {e}"
+
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
@@ -1429,6 +1540,17 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
 
 
 async def _ls_tool_async(runtime: Runtime, description: str, path: str) -> str:
+    if _is_skills_path(path):
+        try:
+            return await asyncio.to_thread(_list_skills_dir_from_host, path)
+        except FileNotFoundError:
+            return f"Error: Directory not found: {path}"
+        except NotADirectoryError:
+            return f"Error: Path is not a directory: {path}"
+        except PermissionError:
+            return f"Error: Permission denied: {path}"
+        except Exception as e:
+            return f"Error: Unexpected error listing directory: {e}"
     return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, description, path)
 
 
@@ -1619,10 +1741,22 @@ def read_file_tool(
         start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
+    requested_path = path
+    if _is_skills_path(requested_path):
+        try:
+            return _read_skills_file_from_host(requested_path, start_line, end_line)
+        except FileNotFoundError:
+            return f"Error: File not found: {requested_path}"
+        except PermissionError:
+            return f"Error: Permission denied reading file: {requested_path}"
+        except IsADirectoryError:
+            return f"Error: Path is a directory, not a file: {requested_path}"
+        except Exception as e:
+            return f"Error: Unexpected error reading file: {e}"
+
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -1665,6 +1799,17 @@ async def _read_file_tool_async(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
+    if _is_skills_path(path):
+        try:
+            return await asyncio.to_thread(_read_skills_file_from_host, path, start_line, end_line)
+        except FileNotFoundError:
+            return f"Error: File not found: {path}"
+        except PermissionError:
+            return f"Error: Permission denied reading file: {path}"
+        except IsADirectoryError:
+            return f"Error: Path is a directory, not a file: {path}"
+        except Exception as e:
+            return f"Error: Unexpected error reading file: {e}"
     return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, description, path, start_line, end_line)
 
 

@@ -39,6 +39,8 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SkillDetailDialog } from "@/components/workspace/skills/skill-detail-dialog";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { isAdminUser } from "@/core/auth/types";
 import {
   useDeleteCustomSkill,
   useEnableSkill,
@@ -53,6 +55,8 @@ const FILTERS = [
 ] as const;
 
 export default function WorkspaceSkillsPage() {
+  const { user } = useAuth();
+  const isAdmin = isAdminUser(user);
   const { skills, isLoading, error } = useSkills();
   const { mutate: enableSkill, isPending } = useEnableSkill();
   const { mutateAsync: deleteCustomSkill, isPending: isDeleting } =
@@ -244,7 +248,10 @@ export default function WorkspaceSkillsPage() {
                       <div onClick={(event) => event.stopPropagation()}>
                         <Switch
                           checked={skill.enabled}
-                          disabled={isPending}
+                          disabled={
+                            isPending ||
+                            (skill.category === "public" && !isAdmin)
+                          }
                           onCheckedChange={(enabled) =>
                             enableSkill({ skillName: skill.name, enabled })
                           }

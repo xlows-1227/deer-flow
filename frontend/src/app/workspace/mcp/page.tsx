@@ -8,7 +8,6 @@ import {
   PlusIcon,
   TerminalIcon,
   Trash2Icon,
-  UploadIcon,
   XCircleIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -34,7 +33,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { loadMCPConfig, updateMCPConfig } from "@/core/mcp/api";
+import { useI18n } from "@/core/i18n/hooks";
+import {
+  createMCPServer,
+  deleteMCPServer,
+  loadMCPConfig,
+  setMCPServerEnabled,
+  updateMCPServer,
+} from "@/core/mcp/api";
 import type { MCPConfig, MCPServerConfig } from "@/core/mcp/types";
 import { cn } from "@/lib/utils";
 
@@ -100,6 +106,10 @@ function stringRecordValue(value: unknown) {
   return value as Record<string, string>;
 }
 
+function isEditable(server: MCPServerConfig) {
+  return server.editable !== false && server.source !== "system";
+}
+
 function toForm(name: string, server: MCPServerConfig): MCPForm {
   return {
     originalName: name,
@@ -115,7 +125,21 @@ function toForm(name: string, server: MCPServerConfig): MCPForm {
   };
 }
 
-function toServerConfig(form: MCPForm): MCPServerConfig {
+function toCreatePayload(form: MCPForm) {
+  return {
+    name: form.name.trim(),
+    enabled: form.enabled,
+    description: form.description,
+    type: form.type,
+    command: form.command || undefined,
+    args: parseJsonArray(form.argsText, "Args"),
+    url: form.url || undefined,
+    env: parseJsonRecord(form.envText, "Env"),
+    headers: parseJsonRecord(form.headersText, "Headers"),
+  };
+}
+
+function toUpdatePayload(form: MCPForm) {
   return {
     enabled: form.enabled,
     description: form.description,
@@ -133,13 +157,12 @@ export function MCPManagementPage({
 }: {
   embedded?: boolean;
 }) {
+  const { t } = useI18n();
   const [config, setConfig] = useState<MCPConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const [form, setForm] = useState<MCPForm>(emptyForm);
-  const [importText, setImportText] = useState("");
 
   const servers = useMemo(
     () => Object.entries(config?.mcp_servers ?? {}),
@@ -162,17 +185,17 @@ export function MCPManagementPage({
     void refresh();
   }, []);
 
-  async function persist(nextConfig: MCPConfig, message: string) {
-    setSaving(true);
-    try {
-      const updated = await updateMCPConfig(nextConfig);
-      setConfig(updated);
-      toast.success(message);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSaving(false);
-    }
+  function patchServer(name: string, server: MCPServerConfig) {
+    setConfig((current) =>
+      current
+        ? {
+            mcp_servers: {
+              ...current.mcp_servers,
+              [name]: server,
+            },
+          }
+        : current,
+    );
   }
 
   function openCreate() {
@@ -181,6 +204,7 @@ export function MCPManagementPage({
   }
 
   function openEdit(name: string, server: MCPServerConfig) {
+    if (!isEditable(server)) return;
     setForm(toForm(name, server));
     setFormOpen(true);
   }
@@ -191,44 +215,65 @@ export function MCPManagementPage({
       toast.error("请输入 MCP 名称");
       return;
     }
-    if (!config) return;
 
+    setSaving(true);
     try {
-      const nextServers = { ...config.mcp_servers };
-      if (form.originalName && form.originalName !== trimmedName) {
-        delete nextServers[form.originalName];
+      if (form.originalName) {
+        const updated = await updateMCPServer(
+          form.originalName,
+          toUpdatePayload(form),
+        );
+        if (form.originalName !== trimmedName) {
+          await refresh();
+        } else {
+          patchServer(trimmedName, { ...updated, name: trimmedName });
+        }
+      } else {
+        const created = await createMCPServer(
+          toCreatePayload({ ...form, name: trimmedName }),
+        );
+        patchServer(trimmedName, { ...created, name: trimmedName });
       }
-      nextServers[trimmedName] = toServerConfig({ ...form, name: trimmedName });
-      await persist({ mcp_servers: nextServers }, "MCP 配置已保存");
+      toast.success("MCP 配置已保存");
       setFormOpen(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
     }
   }
 
-  async function handleDelete(name: string) {
-    if (!config || !window.confirm(`确定删除 MCP「${name}」吗？`)) return;
-    const nextServers = { ...config.mcp_servers };
-    delete nextServers[name];
-    await persist({ mcp_servers: nextServers }, "MCP 已删除");
+  async function handleDelete(name: string, server: MCPServerConfig) {
+    if (!isEditable(server) || !window.confirm(`确定删除 MCP「${name}」吗？`))
+      return;
+    setSaving(true);
+    try {
+      await deleteMCPServer(name);
+      setConfig((current) => {
+        if (!current) return current;
+        const nextServers = { ...current.mcp_servers };
+        delete nextServers[name];
+        return { mcp_servers: nextServers };
+      });
+      toast.success("MCP 已删除");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleToggle(name: string, enabled: boolean) {
-    if (!config) return;
-    const existing = config.mcp_servers[name];
-    if (!existing) return;
-    await persist(
-      {
-        mcp_servers: {
-          ...config.mcp_servers,
-          [name]: {
-            ...existing,
-            enabled,
-          },
-        },
-      },
-      enabled ? "MCP 已启用" : "MCP 已停用",
-    );
+    setSaving(true);
+    try {
+      const updated = await setMCPServerEnabled(name, enabled);
+      patchServer(name, updated);
+      toast.success(enabled ? "MCP 已启用" : "MCP 已停用");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
   }
 
   function handleExport() {
@@ -248,28 +293,6 @@ export function MCPManagementPage({
     URL.revokeObjectURL(url);
   }
 
-  async function handleImport() {
-    if (!config) return;
-    try {
-      const parsed = JSON.parse(importText) as {
-        mcpServers?: Record<string, MCPServerConfig>;
-        mcp_servers?: Record<string, MCPServerConfig>;
-      };
-      const imported = parsed.mcpServers ?? parsed.mcp_servers;
-      if (!imported || typeof imported !== "object") {
-        throw new Error("JSON 需要包含 mcpServers 或 mcp_servers");
-      }
-      await persist(
-        { mcp_servers: { ...config.mcp_servers, ...imported } },
-        "MCP 配置已导入",
-      );
-      setImportOpen(false);
-      setImportText("");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
-    }
-  }
-
   return (
     <div className={cn("flex flex-col", embedded ? "min-h-0" : "size-full")}>
       <header
@@ -279,19 +302,15 @@ export function MCPManagementPage({
         )}
       >
         <div>
-          <h1 className="text-xl font-semibold">MCP 管理</h1>
+          <h1 className="text-xl font-semibold">{t.settings.tools.tabs.mcp}</h1>
           <p className="text-muted-foreground mt-0.5 text-sm">
-            管理 Model Context Protocol 工具服务器，支持新增、编辑、导入和导出。
+            {t.settings.tools.mcp.readOnlyHint}
           </p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={handleExport}>
             <DownloadIcon className="h-4 w-4" />
             导出
-          </Button>
-          <Button variant="outline" onClick={() => setImportOpen(true)}>
-            <UploadIcon className="h-4 w-4" />
-            导入
           </Button>
           <Button onClick={openCreate}>
             <PlusIcon className="h-4 w-4" />
@@ -350,6 +369,11 @@ export function MCPManagementPage({
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <CardTitle className="truncate">{name}</CardTitle>
+                          <Badge variant="outline">
+                            {server.source === "system"
+                              ? t.settings.tools.mcp.systemBadge
+                              : t.settings.tools.mcp.userBadge}
+                          </Badge>
                           <Badge variant="secondary">
                             <TerminalIcon className="h-3 w-3" />
                             {stringValue(server.type, "stdio")}
@@ -377,20 +401,24 @@ export function MCPManagementPage({
                             void handleToggle(name, enabled)
                           }
                         />
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          onClick={() => openEdit(name, server)}
-                        >
-                          <PencilIcon className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          onClick={() => void handleDelete(name)}
-                        >
-                          <Trash2Icon className="h-4 w-4" />
-                        </Button>
+                        {isEditable(server) ? (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() => openEdit(name, server)}
+                            >
+                              <PencilIcon className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() => void handleDelete(name, server)}
+                            >
+                              <Trash2Icon className="h-4 w-4" />
+                            </Button>
+                          </>
+                        ) : null}
                       </div>
                     </div>
                   </CardHeader>
@@ -421,7 +449,8 @@ export function MCPManagementPage({
               {form.originalName ? "编辑 MCP" : "添加 MCP"}
             </DialogTitle>
             <DialogDescription>
-              STDIO 类型填写 command 和 args；HTTP/SSE 类型填写 URL。
+              仅可添加属于自己的 MCP 服务器。STDIO 类型填写 command 和
+              args；HTTP/SSE 类型填写 URL。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
@@ -429,6 +458,7 @@ export function MCPManagementPage({
               <label className="text-sm font-medium">名称</label>
               <Input
                 value={form.name}
+                disabled={Boolean(form.originalName)}
                 onChange={(event) =>
                   setForm((current) => ({
                     ...current,
@@ -552,33 +582,6 @@ export function MCPManagementPage({
             </Button>
             <Button disabled={saving} onClick={() => void handleSave()}>
               保存
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>导入 MCP JSON</DialogTitle>
-            <DialogDescription>
-              粘贴 mcp.json 内容，支持 mcpServers 或 mcp_servers 字段。
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            value={importText}
-            onChange={(event) => setImportText(event.target.value)}
-            className="min-h-64 font-mono text-xs"
-            placeholder={
-              '{\n  "mcpServers": {\n    "memory": { "type": "stdio", "command": "npx", "args": [] }\n  }\n}'
-            }
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setImportOpen(false)}>
-              取消
-            </Button>
-            <Button disabled={saving} onClick={() => void handleImport()}>
-              导入
             </Button>
           </DialogFooter>
         </DialogContent>

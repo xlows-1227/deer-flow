@@ -337,6 +337,7 @@ export interface Translations {
       appearance: string;
       memory: string;
       connectors: string;
+      models: string;
       tools: string;
       skills: string;
       notification: string;
@@ -414,6 +415,39 @@ export interface Translations {
         };
       };
     };
+    models: {
+      title: string;
+      description: string;
+      hint: string;
+      empty: string;
+      addModel: string;
+      editModel: string;
+      formDescription: string;
+      name: string;
+      namePlaceholder: string;
+      displayName: string;
+      displayNamePlaceholder: string;
+      provider: string;
+      modelId: string;
+      modelIdPlaceholder: string;
+      baseUrl: string;
+      apiKey: string;
+      apiKeyPlaceholder: string;
+      apiKeyKeepExisting: string;
+      apiKeySet: string;
+      apiKeyMissing: string;
+      enabled: string;
+      enabledDescription: string;
+      disabled: string;
+      loadFailed: string;
+      saveFailed: string;
+      createSuccess: string;
+      updateSuccess: string;
+      deleteSuccess: string;
+      deleteFailed: string;
+      deleteConfirm: string;
+      validationRequired: string;
+    };
     appearance: {
       themeTitle: string;
       themeDescription: string;
@@ -429,6 +463,15 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      tabs: {
+        imageGeneration: string;
+        mcp: string;
+      };
+      mcp: {
+        systemBadge: string;
+        userBadge: string;
+        readOnlyHint: string;
+      };
       imageGeneration: {
         title: string;
         description: string;

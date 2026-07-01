@@ -344,7 +344,7 @@ export function MessageList({
     }) => {
       const aiMessage = messages.find((m) => m.type === "ai");
       let aiTimestamp = formatMessageTime(
-        getMessageTimestamp(aiMessage ?? messages[0]!),
+        aiMessage ? getMessageTimestamp(aiMessage) : null,
       );
 
       // Fallback: use frontend render time if no backend timestamp
@@ -389,15 +389,23 @@ export function MessageList({
         );
       }
 
-      if (aiTimestamp) {
-        return (
-          <div className="mt-1 text-right text-[10px] text-slate-400">
-            {aiTimestamp}
-          </div>
-        );
+      // Per-message timestamps are rendered in MessageListItem. Only show a
+      // turn-level fallback for assistant turns that lack a backend timestamp.
+      if (!aiMessage || getMessageTimestamp(aiMessage)) {
+        return null;
       }
 
-      return null;
+      const fallbackTimestamp =
+        aiTimestamp ?? (groupId ? timestampMap.get(groupId) : undefined);
+      if (!fallbackTimestamp) {
+        return null;
+      }
+
+      return (
+        <div className="mt-1 text-right text-[10px] text-slate-400">
+          {fallbackTimestamp}
+        </div>
+      );
     },
     [thread.isLoading, timestampMap, tokenDebugSteps, tokenUsageInlineMode],
   );
@@ -445,11 +453,12 @@ export function MessageList({
                     />
                   );
                 })}
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                  groupId: group.id,
-                })}
+                {group.type === "assistant" &&
+                  renderTokenUsage({
+                    messages: group.messages,
+                    turnUsageMessages,
+                    groupId: group.id,
+                  })}
                 {group.type === "assistant" &&
                   renderAssistantCopyButton(
                     group.messages,

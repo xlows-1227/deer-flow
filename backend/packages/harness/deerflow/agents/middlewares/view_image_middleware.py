@@ -11,6 +11,10 @@ from deerflow.agents.thread_state import ThreadState
 
 logger = logging.getLogger(__name__)
 
+_VIEW_IMAGE_CONTEXT_KEY = "view_image_context"
+_VIEW_IMAGE_CONTEXT_MARKER = "Here are the images you've viewed:"
+_LEGACY_VIEW_IMAGE_CONTEXT_MARKER = "Here are the details of the images you've viewed:"
+
 
 class ViewImageMiddlewareState(ThreadState):
     """Reuse the thread state so reducer-backed keys keep their annotations."""
@@ -106,7 +110,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return [{"type": "text", "text": "No images have been viewed."}]
 
         # Build the message with image information
-        content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
+        content_blocks: list[str | dict] = [{"type": "text", "text": _VIEW_IMAGE_CONTEXT_MARKER}]
 
         for image_path, image_data in viewed_images.items():
             mime_type = image_data.get("mime_type", "unknown")
@@ -158,7 +162,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
                 content_str = str(msg.content)
-                if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
+                if _VIEW_IMAGE_CONTEXT_MARKER in content_str or _LEGACY_VIEW_IMAGE_CONTEXT_MARKER in content_str:
                     # Already added, don't add again
                     return False
 
@@ -179,8 +183,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Create the image details message with text and image content
         image_content = self._create_image_details_message(state)
 
-        # Create a new human message with mixed content (text + images)
-        human_msg = HumanMessage(content=image_content)
+        # Create a new human message with mixed content (text + images).
+        # hide_from_ui keeps this model-only payload out of the chat transcript.
+        human_msg = HumanMessage(
+            content=image_content,
+            additional_kwargs={
+                "hide_from_ui": True,
+                _VIEW_IMAGE_CONTEXT_KEY: True,
+            },
+        )
 
         logger.debug("Injecting image details message with images before LLM call")
 

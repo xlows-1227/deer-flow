@@ -28,6 +28,30 @@ models:
     use: langchain_openai:ChatOpenAI  # LangChain class path
     model: gpt-4                   # Model identifier for API
     api_key: $OPENAI_API_KEY       # API key (use env var)
+```
+
+#### Per-user custom models (Settings UI)
+
+Users can add private LLM configurations from **Settings → Models**. These are stored per account in the database (not in `config.yaml`) and merged into the runtime model list for chat and scheduled tasks.
+
+Each custom model stores:
+
+- Provider protocol: `openai` (`langchain_openai:ChatOpenAI`) or `anthropic` (`langchain_anthropic:ChatAnthropic`)
+- `base_url`, model id, display name, and an encrypted API key
+
+Set a Fernet encryption key for API keys at rest:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+```env
+DEERFLOW_MODEL_KEY=your-generated-fernet-key
+```
+
+Without `DEERFLOW_MODEL_KEY`, DeerFlow uses a development-only fixed key (not safe for production). Rotating the key invalidates previously encrypted custom model keys; users must re-enter their API keys after rotation.
+
+API: `GET/POST /api/models/custom`, `PUT/DELETE /api/models/custom/{id}`. Responses never include plaintext API keys.
     max_tokens: 4096               # Max tokens per request
     temperature: 0.7               # Sampling temperature
 ```

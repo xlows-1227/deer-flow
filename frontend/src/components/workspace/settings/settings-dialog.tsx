@@ -2,6 +2,7 @@
 
 import {
   BellIcon,
+  BotIcon,
   BrainIcon,
   DatabaseIcon,
   PaletteIcon,
@@ -22,6 +23,7 @@ import { AccountSettingsPage } from "@/components/workspace/settings/account-set
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { ConnectorSettingsPage } from "@/components/workspace/settings/connector-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
+import { ModelSettingsPage } from "@/components/workspace/settings/model-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
@@ -33,6 +35,7 @@ type SettingsSection =
   | "appearance"
   | "memory"
   | "connectors"
+  | "models"
   | "tools"
   | "skills"
   | "notification";
@@ -47,13 +50,15 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
   const [connectorFormOpen, setConnectorFormOpen] = useState(false);
+  const [modelFormOpen, setModelFormOpen] = useState(false);
   const settingsOpen = dialogProps.open;
 
-  const preventNestedDialogDismiss = connectorFormOpen
-    ? (event: Event) => {
-        event.preventDefault();
-      }
-    : undefined;
+  const preventNestedDialogDismiss =
+    connectorFormOpen || modelFormOpen
+      ? (event: Event) => {
+          event.preventDefault();
+        }
+      : undefined;
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
@@ -66,6 +71,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
   useEffect(() => {
     if (activeSection !== "connectors") {
       setConnectorFormOpen(false);
+    }
+    if (activeSection !== "models") {
+      setModelFormOpen(false);
     }
   }, [activeSection]);
 
@@ -96,6 +104,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.connectors,
         icon: DatabaseIcon,
       },
+      {
+        id: "models",
+        label: t.settings.sections.models,
+        icon: BotIcon,
+      },
       { id: "tools", label: t.settings.sections.tools, icon: PlugIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
     ],
@@ -104,6 +117,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.appearance,
       t.settings.sections.memory,
       t.settings.sections.connectors,
+      t.settings.sections.models,
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
@@ -161,6 +175,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 <ConnectorSettingsPage
                   settingsOpen={settingsOpen}
                   onFormOpenChange={setConnectorFormOpen}
+                />
+              )}
+              {activeSection === "models" && (
+                <ModelSettingsPage
+                  settingsOpen={settingsOpen}
+                  onFormOpenChange={setModelFormOpen}
                 />
               )}
               {activeSection === "tools" && <ToolSettingsPage />}

@@ -10,6 +10,7 @@ import {
   getMessageRenderKey,
   getStreamingMessageLookup,
   isAssistantMessageGroupStreaming,
+  repairDynamicContextUserMessageOrder,
   stripInternalMarkers,
   stripUploadedFilesTag,
 } from "@/core/messages/utils";
@@ -622,4 +623,77 @@ test("ignores incomplete streaming tool placeholders", () => {
     "human",
     "assistant",
   ]);
+});
+
+test("repairDynamicContextUserMessageOrder moves first-turn user copy before later user turns", () => {
+  const reminder = {
+    id: "turn-1",
+    type: "human",
+    content: "<system-reminder></system-reminder>",
+    additional_kwargs: {
+      hide_from_ui: true,
+      dynamic_context_reminder: true,
+    },
+  } as Message;
+  const clarificationAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "我需要先确认一下您想查询哪个城市的天气。",
+  } as Message;
+  const secondHuman = {
+    id: "turn-2",
+    type: "human",
+    name: "user-input",
+    content: [{ type: "text", text: "南京天气" }],
+    additional_kwargs: { timestamp: "2026-06-29T07:54:20.150706+00:00" },
+  } as Message;
+  const firstHumanCopy = {
+    id: "turn-1__user",
+    type: "human",
+    content: [{ type: "text", text: "今天天气怎么样" }],
+  } as Message;
+
+  const repaired = repairDynamicContextUserMessageOrder([
+    reminder,
+    clarificationAi,
+    secondHuman,
+    firstHumanCopy,
+  ]);
+
+  expect(repaired.map((message) => message.id)).toEqual([
+    "turn-1",
+    "turn-1__user",
+    "ai-1",
+    "turn-2",
+  ]);
+  expect(getMessageGroups(repaired).map((group) => group.type)).toEqual([
+    "human",
+    "assistant",
+    "human",
+  ]);
+});
+
+test("hides view_image middleware context messages from the chat UI", () => {
+  const viewImageContext = {
+    id: "view-image-context",
+    type: "human",
+    content: [
+      { type: "text", text: "Here are the images you've viewed:" },
+      {
+        type: "text",
+        text: "\n- **/mnt/user-data/outputs/generated-images/example.jpg** (image/jpeg)",
+      },
+    ],
+  } as Message;
+
+  expect(
+    getMessageGroups([
+      viewImageContext,
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "Looks good.",
+      } as Message,
+    ]).map((group) => group.type),
+  ).toEqual(["assistant"]);
 });

@@ -21,6 +21,7 @@ from langchain_core.messages.utils import convert_to_messages
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
+from deerflow.config.effective_config import effective_app_config_scope
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -355,21 +356,26 @@ async def start_run(
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
-    task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_mgr,
-            record,
-            ctx=run_ctx,
-            agent_factory=agent_factory,
-            graph_input=graph_input,
-            config=config,
-            stream_modes=stream_modes,
-            stream_subgraphs=body.stream_subgraphs,
-            interrupt_before=body.interrupt_before,
-            interrupt_after=body.interrupt_after,
-        )
-    )
+    runtime_context = config.get("context", {})
+    user_id = runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
+
+    async def _run_with_effective_config() -> None:
+        async with effective_app_config_scope(str(user_id) if user_id else None):
+            await run_agent(
+                bridge,
+                run_mgr,
+                record,
+                ctx=run_ctx,
+                agent_factory=agent_factory,
+                graph_input=graph_input,
+                config=config,
+                stream_modes=stream_modes,
+                stream_subgraphs=body.stream_subgraphs,
+                interrupt_before=body.interrupt_before,
+                interrupt_after=body.interrupt_after,
+            )
+
+    task = asyncio.create_task(_run_with_effective_config())
     record.task = task
 
     # Title sync is handled by worker.py's finally block which reads the

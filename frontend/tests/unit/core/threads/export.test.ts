@@ -75,6 +75,25 @@ describe("formatThreadAsMarkdown", () => {
     expect(md).toContain("public answer");
   });
 
+  it("drops view_image middleware context messages", () => {
+    const hidden = human("Here are the images you've viewed:", {
+      content: [
+        { type: "text", text: "Here are the images you've viewed:" },
+        {
+          type: "text",
+          text: "\n- **/mnt/user-data/outputs/generated-images/example.jpg** (image/jpeg)",
+        },
+      ],
+    } as Partial<Message>);
+    const md = formatThreadAsMarkdown(makeThread(), [
+      hidden,
+      ai("public answer"),
+    ]);
+    expect(md).not.toContain("Here are the images you've viewed");
+    expect(md).not.toContain("example.jpg");
+    expect(md).toContain("public answer");
+  });
+
   it("does not emit reasoning_content by default", () => {
     const message = ai("final answer", {
       additional_kwargs: {

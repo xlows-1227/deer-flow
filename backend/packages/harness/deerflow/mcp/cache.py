@@ -1,158 +1,141 @@
 """Cache for MCP tools to avoid repeated loading."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
-import os
+from dataclasses import dataclass
 
 from langchain_core.tools import BaseTool
 
+from deerflow.config.effective_config import extensions_config_fingerprint
+from deerflow.config.extensions_config import ExtensionsConfig
+
 logger = logging.getLogger(__name__)
 
-_mcp_tools_cache: list[BaseTool] | None = None
-_cache_initialized = False
+
+@dataclass
+class _McpToolsCacheEntry:
+    tools: list[BaseTool]
+    fingerprint: str
+    initialized: bool = True
+
+
 _initialization_lock = asyncio.Lock()
-_config_mtime: float | None = None  # Track config file modification time
+_cache_by_user: dict[str, _McpToolsCacheEntry] = {}
 
 
-def _get_config_mtime() -> float | None:
-    """Get the modification time of the extensions config file.
+def _cache_key(user_id: str | None) -> str:
+    return user_id or "default"
 
-    Returns:
-        The modification time as a float, or None if the file doesn't exist.
+
+def invalidate_mcp_tools_cache_for_user(user_id: str) -> None:
+    """Drop the cached MCP tools for ``user_id`` and close their live sessions.
+
+    The MCP tools cache (``_cache_by_user``) has no TTL by design: it is kept
+    fresh via this push-based invalidation, triggered whenever a user's
+    extensions config changes. The matching persistent MCP sessions are
+    namespaced as ``"<user_id>::<server>"`` in the session pool, so we close
+    them by prefix.
+
+    Cross-process note: this only affects the current process. Standard
+    deployments (``make dev`` / Docker / prod) run the agent runtime inside
+    the Gateway process, so the write and the agent share this cache. The
+    LangGraph Studio dev workflow runs the graph in a separate process that
+    does not receive this push; there the cache self-heals within
+    ``_USER_EXTENSIONS_CACHE_TTL_SECONDS`` (see ``effective_config.py``) once
+    the fingerprint is recomputed.
     """
-    from deerflow.config.extensions_config import ExtensionsConfig
-
-    config_path = ExtensionsConfig.resolve_config_path()
-    if config_path and config_path.exists():
-        return os.path.getmtime(config_path)
-    return None
-
-
-def _is_cache_stale() -> bool:
-    """Check if the cache is stale due to config file changes.
-
-    Returns:
-        True if the cache should be invalidated, False otherwise.
-    """
-    global _config_mtime
-
-    if not _cache_initialized:
-        return False  # Not initialized yet, not stale
-
-    current_mtime = _get_config_mtime()
-
-    # If we couldn't get mtime before or now, assume not stale
-    if _config_mtime is None or current_mtime is None:
-        return False
-
-    # If the config file has been modified since we cached, it's stale
-    if current_mtime > _config_mtime:
-        logger.info(f"MCP config file has been modified (mtime: {_config_mtime} -> {current_mtime}), cache is stale")
-        return True
-
-    return False
-
-
-async def initialize_mcp_tools() -> list[BaseTool]:
-    """Initialize and cache MCP tools.
-
-    This should be called once at application startup.
-
-    Returns:
-        List of LangChain tools from all enabled MCP servers.
-    """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
-
-    async with _initialization_lock:
-        if _cache_initialized:
-            logger.info("MCP tools already initialized")
-            return _mcp_tools_cache or []
-
-        from deerflow.mcp.tools import get_mcp_tools
-
-        logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
-        _cache_initialized = True
-        _config_mtime = _get_config_mtime()  # Record config file mtime
-        logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
-
-        return _mcp_tools_cache
-
-
-def get_cached_mcp_tools() -> list[BaseTool]:
-    """Get cached MCP tools with lazy initialization.
-
-    If tools are not initialized, automatically initializes them.
-    This ensures MCP tools work in both FastAPI and LangGraph Studio contexts.
-
-    Also checks if the config file has been modified since last initialization,
-    and re-initializes if needed. This ensures that changes made through the
-    Gateway API (which runs in a separate process) are reflected in the
-    LangGraph Server.
-
-    Returns:
-        List of cached MCP tools.
-    """
-    global _cache_initialized
-
-    # Check if cache is stale due to config file changes
-    if _is_cache_stale():
-        logger.info("MCP cache is stale, resetting for re-initialization...")
-        reset_mcp_tools_cache()
-
-    if not _cache_initialized:
-        logger.info("MCP tools not initialized, performing lazy initialization...")
-        try:
-            # Try to initialize in the current event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If loop is already running (e.g., in LangGraph Studio),
-                # we need to create a new loop in a thread
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, initialize_mcp_tools())
-                    future.result()
-            else:
-                # If no loop is running, we can use the current loop
-                loop.run_until_complete(initialize_mcp_tools())
-        except RuntimeError:
-            # No event loop exists, create one
-            try:
-                asyncio.run(initialize_mcp_tools())
-            except Exception:
-                logger.exception("Failed to lazy-initialize MCP tools")
-                return []
-        except Exception:
-            logger.exception("Failed to lazy-initialize MCP tools")
-            return []
-
-    return _mcp_tools_cache or []
-
-
-def reset_mcp_tools_cache() -> None:
-    """Reset the MCP tools cache.
-
-    This is useful for testing or when you want to reload MCP tools.
-    Also closes all persistent MCP sessions so they are recreated on
-    the next tool load.
-    """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
-    _mcp_tools_cache = None
-    _cache_initialized = False
-    _config_mtime = None
-
-    # Close persistent sessions – they will be recreated by the next
-    # get_mcp_tools() call with the (possibly updated) connection config.
+    _cache_by_user.pop(_cache_key(user_id), None)
     try:
         from deerflow.mcp.session_pool import get_session_pool
 
         pool = get_session_pool()
-        pool.close_all_sync()
+        pool.close_servers_by_prefix(f"{_cache_key(user_id)}::")
     except Exception:
-        logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
+        logger.debug("Could not close MCP sessions for user %s", user_id, exc_info=True)
 
-    from deerflow.mcp.session_pool import reset_session_pool
 
-    reset_session_pool()
+def reset_mcp_tools_cache() -> None:
+    """Reset all MCP tools caches (for tests or global reload)."""
+    global _cache_by_user
+    _cache_by_user = {}
+    try:
+        from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+
+        pool = get_session_pool()
+        pool.close_all_sync()
+        reset_session_pool()
+    except Exception:
+        logger.debug("Could not reset MCP session pool on cache reset", exc_info=True)
     logger.info("MCP tools cache reset")
+
+
+async def initialize_mcp_tools(
+    *,
+    user_id: str | None = None,
+    extensions_config: ExtensionsConfig | None = None,
+) -> list[BaseTool]:
+    """Initialize and cache MCP tools for a user."""
+    return await _ensure_cached_tools(user_id=user_id, extensions_config=extensions_config)
+
+
+async def _ensure_cached_tools(
+    *,
+    user_id: str | None = None,
+    extensions_config: ExtensionsConfig | None = None,
+) -> list[BaseTool]:
+    from deerflow.config.extensions_config import ExtensionsConfig as ExtensionsConfigClass
+    from deerflow.mcp.tools import get_mcp_tools
+
+    key = _cache_key(user_id)
+    config = extensions_config or ExtensionsConfigClass.from_file()
+    fingerprint = extensions_config_fingerprint(config)
+    existing = _cache_by_user.get(key)
+    if existing is not None and existing.fingerprint == fingerprint and existing.initialized:
+        return existing.tools
+
+    async with _initialization_lock:
+        existing = _cache_by_user.get(key)
+        if existing is not None and existing.fingerprint == fingerprint and existing.initialized:
+            return existing.tools
+
+        logger.info("Initializing MCP tools for user %s...", key)
+        tools = await get_mcp_tools(extensions_config=config, user_id=key)
+        _cache_by_user[key] = _McpToolsCacheEntry(tools=tools, fingerprint=fingerprint)
+        logger.info("MCP tools initialized for user %s: %s tool(s)", key, len(tools))
+        return tools
+
+
+def get_cached_mcp_tools(
+    *,
+    user_id: str | None = None,
+    extensions_config: ExtensionsConfig | None = None,
+) -> list[BaseTool]:
+    """Get cached MCP tools with lazy initialization."""
+    key = _cache_key(user_id)
+    config = extensions_config
+    if config is not None:
+        fingerprint = extensions_config_fingerprint(config)
+        existing = _cache_by_user.get(key)
+        if existing is not None and existing.fingerprint == fingerprint:
+            return existing.tools
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    asyncio.run,
+                    _ensure_cached_tools(user_id=user_id, extensions_config=extensions_config),
+                )
+                return future.result()
+        return loop.run_until_complete(_ensure_cached_tools(user_id=user_id, extensions_config=extensions_config))
+    except RuntimeError:
+        try:
+            return asyncio.run(_ensure_cached_tools(user_id=user_id, extensions_config=extensions_config))
+        except Exception:
+            logger.exception("Failed to lazy-initialize MCP tools for user %s", key)
+            return []

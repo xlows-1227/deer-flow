@@ -69,7 +69,7 @@ class ImageGenerationProviderConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-def _default_image_generation_providers() -> dict[str, ImageGenerationProviderConfig]:
+def default_image_generation_providers() -> dict[str, ImageGenerationProviderConfig]:
     """Return provider defaults shown in Settings before users add secrets."""
     return {
         "openai": ImageGenerationProviderConfig(
@@ -100,6 +100,13 @@ def _default_image_generation_providers() -> dict[str, ImageGenerationProviderCo
             model="openai/gpt-image-2-free",
             base_url="https://aihubmix.com/v1",
         ),
+        "minimax": ImageGenerationProviderConfig(
+            enabled=False,
+            provider="minimax",
+            display_name="MiniMax",
+            model="image-01",
+            base_url="https://api.minimaxi.com/v1",
+        ),
         "custom_openai_compatible": ImageGenerationProviderConfig(
             enabled=False,
             provider="custom_openai_compatible",
@@ -116,7 +123,7 @@ class ImageGenerationConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether the built-in image generation tool may call providers")
     default_provider: str | None = Field(default="openai", alias="defaultProvider", description="Provider used when tool calls omit provider")
     output_subdir: str = Field(default="generated-images", alias="outputSubdir", description="Subdirectory under /mnt/user-data/outputs for generated images")
-    providers: dict[str, ImageGenerationProviderConfig] = Field(default_factory=_default_image_generation_providers, description="Map of provider name to configuration")
+    providers: dict[str, ImageGenerationProviderConfig] = Field(default_factory=default_image_generation_providers, description="Map of provider name to configuration")
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 

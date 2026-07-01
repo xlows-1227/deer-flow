@@ -17,6 +17,7 @@ from deerflow.runtime.runs.worker import (
     _install_runtime_context,
     _queue_flash_memory_capture,
     _rollback_to_pre_run_checkpoint,
+    _should_use_flash_direct_path,
     run_agent,
 )
 
@@ -260,6 +261,82 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
 
 
 @pytest.mark.anyio
+async def test_run_agent_flash_direct_tool_call_falls_back_to_full_graph(monkeypatch):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    record.model_name = "flash-model"
+    published: list[tuple[str, object]] = []
+    bridge = SimpleNamespace(
+        publish=AsyncMock(side_effect=lambda _run_id, event, data: published.append((event, data))),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class MockModelConfig:
+        use = "tests.fake:ChatModel"
+        supports_thinking = False
+        supports_vision = False
+
+    app_config = SimpleNamespace(get_model_config=lambda _name: MockModelConfig())
+
+    class FakeModel:
+        def with_config(self, **_kwargs):
+            return self
+
+        async def astream(self, messages, config=None):
+            yield AIMessageChunk(
+                content="",
+                additional_kwargs={
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ]
+                },
+            )
+
+    class FallbackAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield ("values", {"messages": [AIMessage(content="fallback")]})
+
+    factory = MagicMock(return_value=FallbackAgent())
+
+    monkeypatch.setattr("deerflow.agents.lead_agent.agent._resolve_model_name", lambda requested=None, *, app_config=None: requested or "flash-model")
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", lambda **_kwargs: "system prompt")
+    monkeypatch.setattr(
+        "deerflow.models.factory.create_chat_model",
+        lambda **_kwargs: FakeModel(),
+    )
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=factory,
+        graph_input={"messages": [HumanMessage(content="read file")]},
+        config={
+            "context": {
+                "mode": "flash",
+                "thinking_enabled": False,
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+            }
+        },
+        stream_modes=["values", "messages-tuple"],
+        stream_subgraphs=True,
+    )
+
+    factory.assert_called_once()
+    values_events = [data for event, data in published if event == "values"]
+    assert values_events
+    assert values_events[-1]["messages"][-1]["content"] == "fallback"
+    assert [event for event, _data in published].count("messages") == 0
+
+
+@pytest.mark.anyio
 async def test_flash_direct_path_persists_checkpoint_history(monkeypatch):
     run_manager = RunManager()
     checkpointer = InMemorySaver()
@@ -340,6 +417,31 @@ def test_flash_direct_checkpoint_metadata_defaults_step_to_zero():
 def test_flash_direct_checkpoint_metadata_matches_langgraph_resume_contract():
     metadata = _flash_direct_checkpoint_metadata(SimpleNamespace(metadata={"step": -1, "parents": {}, "source": "input"}))
     assert metadata["step"] + 1 == 1
+
+
+def test_flash_direct_path_rejects_tool_requiring_context(monkeypatch):
+    monkeypatch.setattr("deerflow.runtime.runs.worker._thread_has_historical_uploads", lambda _thread_id: False)
+
+    base_kwargs = {
+        "graph_input": {"messages": [HumanMessage(content="hi")]},
+        "thread_id": "thread-1",
+        "interrupt_before": None,
+        "interrupt_after": None,
+    }
+
+    assert _should_use_flash_direct_path(config={"context": {"mode": "flash"}}, **base_kwargs) is True
+    assert _should_use_flash_direct_path(config={"context": {"mode": "flash", "connector_ids": ["db-1"]}}, **base_kwargs) is False
+    assert _should_use_flash_direct_path(config={"context": {"mode": "flash", "external_allowed_skills": []}}, **base_kwargs) is False
+    assert (
+        _should_use_flash_direct_path(
+            graph_input={"messages": [AIMessage(content="", tool_calls=[{"name": "read_file", "args": {}, "id": "call-1"}])]},
+            config={"context": {"mode": "flash"}},
+            thread_id="thread-1",
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        is False
+    )
 
 
 @pytest.mark.anyio

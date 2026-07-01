@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -95,6 +96,11 @@ export function SkillDetailDialog({
           <DialogTitle className="text-lg font-semibold tracking-tight sm:text-xl">
             {displaySkill?.display_name ?? displaySkill?.name ?? skill?.name}
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            {displaySkill?.description ??
+              skill?.description ??
+              "查看 Skill 详情"}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
