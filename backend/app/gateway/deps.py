@@ -34,6 +34,7 @@ from deerflow.runtime.runs.store.base import RunStore
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from app.gateway.auth.ldap_provider import LdapAuthProvider
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.api_key import APIKeyRepository
@@ -280,6 +281,7 @@ def get_run_context(request: Request) -> RunContext:
 
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
+_cached_ldap_provider: LdapAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
 _cached_session_factory_id: int | None = None
 
@@ -307,14 +309,51 @@ def get_local_provider() -> LocalAuthProvider:
     if _cached_repo is None or _cached_session_factory_id != current_sf_id:
         _cached_repo = SQLiteUserRepository(sf)
         _cached_session_factory_id = current_sf_id
-        # The provider holds the repo, so recreate it when the repo changes.
+        # Both providers hold the repo, so recreate them when the repo changes.
         _cached_local_provider = None
+        _cached_ldap_provider = None
 
     if _cached_local_provider is None:
         from app.gateway.auth.local_provider import LocalAuthProvider
 
         _cached_local_provider = LocalAuthProvider(repository=_cached_repo)
     return _cached_local_provider
+
+
+def get_ldap_provider() -> LdapAuthProvider | None:
+    """Get the cached :class:`LdapAuthProvider` singleton, or ``None`` if LDAP disabled.
+
+    Shares the same :class:`SQLiteUserRepository` as the local provider so
+    LDAP shadow rows live in the same ``users`` table. Returns ``None``
+    when ``AUTH_LDAP_ENABLED`` is off so callers can short-circuit to the
+    local provider.
+    """
+    global _cached_ldap_provider, _cached_repo, _cached_session_factory_id
+
+    from app.gateway.auth.config import get_auth_config
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    ldap_config = get_auth_config().ldap
+    if not ldap_config.enabled:
+        return None
+
+    sf = get_session_factory()
+    if sf is None:
+        raise RuntimeError("get_ldap_provider() called before init_engine_from_config(); cannot access users table")
+
+    current_sf_id = id(sf)
+    if _cached_repo is None or _cached_session_factory_id != current_sf_id:
+        _cached_repo = SQLiteUserRepository(sf)
+        _cached_session_factory_id = current_sf_id
+        _cached_local_provider = None
+        _cached_ldap_provider = None
+
+    if _cached_ldap_provider is None:
+        from app.gateway.auth.ldap_provider import LdapAuthProvider
+
+        _cached_ldap_provider = LdapAuthProvider(repository=_cached_repo, config=ldap_config)
+    return _cached_ldap_provider
 
 
 async def get_current_user_from_request(request: Request):

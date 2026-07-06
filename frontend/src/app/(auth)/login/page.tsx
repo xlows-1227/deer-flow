@@ -49,8 +49,9 @@ export default function LoginPage() {
   const { isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
 
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
@@ -93,20 +94,18 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
+      // Login → unified JSON endpoint that dispatches between local admin
+      // and corporate LDAP. Register → local invite-code flow (unchanged).
       const endpoint = isLogin
-        ? "/api/v1/auth/login/local"
+        ? "/api/v1/auth/login"
         : "/api/v1/auth/register";
       const body = isLogin
-        ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
-        : JSON.stringify({ email, password, invite_code: inviteCode });
-
-      const headers: HeadersInit = isLogin
-        ? { "Content-Type": "application/x-www-form-urlencoded" }
-        : { "Content-Type": "application/json" };
+        ? JSON.stringify({ username: identifier, password })
+        : JSON.stringify({ email: inviteEmail, password, invite_code: inviteCode });
 
       const res = await fetch(endpoint, {
         method: "POST",
-        headers,
+        headers: { "Content-Type": "application/json" },
         body,
         credentials: "include", // Important: include HttpOnly cookie
       });
@@ -148,19 +147,40 @@ export default function LoginPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-2">
-          <div className="flex flex-col space-y-1">
-            <label htmlFor="email" className="text-sm font-medium">
-              Email
-            </label>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              required
-            />
-          </div>
+          {isLogin ? (
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="identifier" className="text-sm font-medium">
+                用户名 / Username
+              </label>
+              <Input
+                id="identifier"
+                type="text"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder="sAMAccountName（不含 @yumchina.com）"
+                required
+                autoComplete="username"
+              />
+              <p className="text-muted-foreground text-xs">
+                内网账户请使用 sAMAccountName 登录（不含 @yumchina.com）；管理员账户使用完整邮箱。
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="inviteEmail" className="text-sm font-medium">
+                Email
+              </label>
+              <Input
+                id="inviteEmail"
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
+                autoComplete="email"
+              />
+            </div>
+          )}
           <div className="flex flex-col space-y-1">
             <label htmlFor="password" className="text-sm font-medium">
               Password
@@ -208,6 +228,8 @@ export default function LoginPage() {
             onClick={() => {
               setIsLogin(!isLogin);
               setError("");
+              setIdentifier("");
+              setInviteEmail("");
               setInviteCode("");
             }}
             className="text-blue-500 hover:underline"

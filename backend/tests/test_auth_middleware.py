@@ -17,6 +17,7 @@ from app.gateway.auth_middleware import AuthMiddleware, _is_public
         "/docs/",
         "/redoc",
         "/openapi.json",
+        "/api/v1/auth/login",
         "/api/v1/auth/login/local",
         "/api/v1/auth/register",
         "/api/v1/auth/logout",
@@ -55,6 +56,7 @@ def test_protected_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
+        "/api/v1/auth/login/",
         "/api/v1/auth/login/local/",
         "/api/v1/auth/register/",
         "/api/v1/auth/logout/",

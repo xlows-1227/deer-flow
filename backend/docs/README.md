@@ -18,6 +18,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 |----------|-------------|
 | [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
+| [LDAP_AUTH.md](LDAP_AUTH.md) | LDAP 内网账户登录配置（环境变量、两阶段 bind、影子用户、登录接口） |
 | [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
 | [summarization.md](summarization.md) | Context summarization feature |
 | [plan_mode_usage.md](plan_mode_usage.md) | Plan mode with TodoList |

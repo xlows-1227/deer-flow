@@ -4,8 +4,11 @@ import logging
 import os
 import secrets
 
-from filelock import FileLock, Timeout as FileLockTimeout
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel, Field
+
+from app.gateway.auth.ldap_config import LdapConfig, load_ldap_config_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,9 @@ class AuthConfig(BaseModel):
     token_expiry_days: int = Field(default=7, ge=1, le=30)
     oauth_github_client_id: str | None = Field(default=None)
     oauth_github_client_secret: str | None = Field(default=None)
+    # LDAP (corporate intranet AD) login. Defaults to disabled so existing
+    # deployments are unaffected. Resolved once at first config access.
+    ldap: LdapConfig = Field(default_factory=LdapConfig)
 
 
 _auth_config: AuthConfig | None = None
@@ -128,7 +134,7 @@ def get_auth_config() -> AuthConfig:
                 "For production, add AUTH_JWT_SECRET to your .env file: "
                 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
-        _auth_config = AuthConfig(jwt_secret=jwt_secret)
+        _auth_config = AuthConfig(jwt_secret=jwt_secret, ldap=load_ldap_config_from_env())
     return _auth_config
 
 

@@ -94,6 +94,7 @@ def should_check_csrf(request: Request) -> bool:
 
 _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
     {
+        "/api/v1/auth/login",
         "/api/v1/auth/login/local",
         "/api/v1/auth/logout",
         "/api/v1/auth/register",
