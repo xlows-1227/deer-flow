@@ -11,13 +11,20 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.gateway.auth import (
+    LDAP_PROVIDER_TAG,
     UserResponse,
     create_access_token,
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.models import User
 from app.gateway.csrf_middleware import is_secure_request
-from app.gateway.deps import get_current_user_from_request, get_invite_code_repo, get_local_provider
+from app.gateway.deps import (
+    get_current_user_from_request,
+    get_invite_code_repo,
+    get_ldap_provider,
+    get_local_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,19 @@ class LoginResponse(BaseModel):
 
     expires_in: int  # seconds
     needs_setup: bool = False
+
+
+class UnifiedLoginRequest(BaseModel):
+    """Request body for the unified ``POST /api/v1/auth/login`` endpoint.
+
+    ``username`` accepts either a bare sAMAccountName (``john``) or a full
+    email (``john@yumchina.com`` / ``admin@yumchina.com``). The router
+    decides per-credential whether to authenticate locally (admin / LDAP
+    disabled) or against LDAP (everyone else).
+    """
+
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
 
 
 # Top common-password blocklist. Drawn from the public SecLists "10k worst
@@ -150,6 +170,78 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
         samesite="lax",
         max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
     )
+
+
+# ── Provider dispatch ────────────────────────────────────────────────────
+
+
+async def _authenticate_dispatch(identifier: str, password: str) -> User | None:
+    """Route a login credential to the correct provider.
+
+    Decision order (mirrors the approved LDAP design):
+
+    1. LDAP disabled → always local (legacy behaviour, unchanged).
+    2. Identifier matches the configured admin email (full or bare local
+       part) → local, so the platform always has an out-of-band admin
+       even if LDAP is down.
+    3. Anything else → LDAP. Non-admin credentials are **never** checked
+       against the local password store (strict mode), which prevents
+       anyone from bypassing the directory with a stale local hash.
+
+    The local provider accepts ``email`` in the credentials dict but the
+    admin identifier may legitimately be a bare username (``admin``) when
+    LDAP is enabled — in that case we append the configured domain so the
+    lookup hits the right row.
+    """
+    auth_config = get_auth_config()
+    ldap_config = auth_config.ldap
+
+    # Case 1: LDAP off → local only.
+    if not ldap_config.enabled:
+        return await get_local_provider().authenticate({"email": identifier, "password": password})
+
+    # Case 2: admin identifier → local. Normalise a bare local-part into
+    # the full admin email so the local lookup succeeds.
+    admin_email = identifier
+    if "@" not in identifier:
+        domain = ldap_config.domain if ldap_config.domain.startswith("@") else f"@{ldap_config.domain}"
+        admin_email = f"{identifier}{domain}"
+    return await get_local_provider().authenticate({"email": admin_email, "password": password})
+
+
+async def _authenticate_ldap(identifier: str, password: str) -> User | None:
+    """Authenticate non-admin credentials against LDAP.
+
+    Strips the domain suffix if the caller passed a full email, because
+    the directory lookup uses the bare ``sAMAccountName``. Returns ``None``
+    when LDAP is disabled (the caller should have routed to local already).
+    """
+    ldap_provider = get_ldap_provider()
+    if ldap_provider is None:
+        return None
+
+    username = identifier.split("@", 1)[0] if "@" in identifier else identifier
+    return await ldap_provider.authenticate({"username": username, "password": password})
+
+
+async def _resolve_login(identifier: str, password: str) -> User | None:
+    """Top-level login resolver used by both login endpoints.
+
+    Applies the admin-vs-LDAP policy in one place so the form-encoded and
+    JSON endpoints cannot drift. Returns the authenticated :class:`User` or
+    ``None``; the caller is responsible for the 401 + rate-limit bookkeeping.
+    """
+    auth_config = get_auth_config()
+    ldap_config = auth_config.ldap
+
+    # LDAP off → everything is local.
+    if not ldap_config.enabled:
+        return await get_local_provider().authenticate({"email": identifier, "password": password})
+
+    if ldap_config.is_admin_email(identifier):
+        return await _authenticate_dispatch(identifier, password)
+
+    return await _authenticate_ldap(identifier, password)
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
@@ -279,17 +371,54 @@ def _record_login_success(ip: str) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
 
+@router.post("/login", response_model=LoginResponse)
+async def login(request: Request, response: Response, body: UnifiedLoginRequest):
+    """Unified login endpoint (recommended for new clients).
+
+    Authenticates ``{username, password}`` against the configured policy:
+    the admin account (``AUTH_LDAP_LOCAL_ADMIN_EMAIL``) and any login when
+    LDAP is disabled go to the local provider; every other credential goes
+    to LDAP in strict mode (no local fallback).
+    """
+    client_ip = _get_client_ip(request)
+    _check_rate_limit(client_ip)
+
+    user = await _resolve_login(body.username, body.password)
+
+    if user is None:
+        _record_login_failure(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect username or password").model_dump(),
+        )
+
+    _record_login_success(client_ip)
+    token = create_access_token(str(user.id), token_version=user.token_version)
+    _set_session_cookie(response, token, request)
+
+    return LoginResponse(
+        expires_in=get_auth_config().token_expiry_days * 24 * 3600,
+        needs_setup=user.needs_setup,
+    )
+
+
 @router.post("/login/local", response_model=LoginResponse)
 async def login_local(
     request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
 ):
-    """Local email/password login."""
+    """Local email/password login (form-encoded, backwards compatible).
+
+    When LDAP is enabled this endpoint still honours the dispatch policy:
+    the admin identifier authenticates locally, everything else is routed
+    to LDAP. The ``username`` field therefore accepts either a bare
+    sAMAccountName or an email address.
+    """
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
-    user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
+    user = await _resolve_login(form_data.username, form_data.password)
 
     if user is None:
         _record_login_failure(client_ip)
@@ -359,6 +488,15 @@ async def change_password(request: Request, response: Response, body: ChangePass
     from app.gateway.auth.password import hash_password_async, verify_password_async
 
     user = await get_current_user_from_request(request)
+
+    if user.oauth_provider == LDAP_PROVIDER_TAG:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.INVALID_CREDENTIALS,
+                message="LDAP users cannot change their password here; use the corporate directory self-service instead",
+            ).model_dump(),
+        )
 
     if user.password_hash is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="OAuth users cannot change password").model_dump())

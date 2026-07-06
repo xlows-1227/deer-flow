@@ -9,6 +9,8 @@ This module provides:
 from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
 from app.gateway.auth.jwt import TokenPayload, create_access_token, decode_token
+from app.gateway.auth.ldap_config import LdapConfig, load_ldap_config_from_env
+from app.gateway.auth.ldap_provider import LDAP_PROVIDER_TAG, LdapAuthProvider
 from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.models import User, UserResponse
 from app.gateway.auth.password import hash_password, verify_password
@@ -37,6 +39,11 @@ __all__ = [
     # Providers
     "AuthProvider",
     "LocalAuthProvider",
+    # LDAP
+    "LdapConfig",
+    "load_ldap_config_from_env",
+    "LdapAuthProvider",
+    "LDAP_PROVIDER_TAG",
     # Repository
     "UserRepository",
 ]

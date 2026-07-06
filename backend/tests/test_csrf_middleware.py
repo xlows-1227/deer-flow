@@ -24,6 +24,10 @@ def _make_app() -> FastAPI:
     app = FastAPI()
     app.add_middleware(CSRFMiddleware)
 
+    @app.post("/api/v1/auth/login")
+    async def login():
+        return {"ok": True}
+
     @app.post("/api/v1/auth/login/local")
     async def login_local():
         return {"ok": True}
@@ -229,6 +233,21 @@ def test_auth_post_without_origin_still_allows_non_browser_clients():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post("/api/v1/auth/login/local")
+
+    assert response.status_code == 200
+    assert response.cookies.get("csrf_token")
+
+
+def test_unified_login_endpoint_is_csrf_exempt():
+    """``/api/v1/auth/login`` (unified LDAP/local dispatch) is CSRF-exempt.
+
+    Regression: the unified login endpoint was initially missing from the
+    CSRF allowlist, so first-time browser/curl clients without a CSRF token
+    were rejected with 403. Login routes must be reachable pre-session.
+    """
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.post("/api/v1/auth/login")
 
     assert response.status_code == 200
     assert response.cookies.get("csrf_token")

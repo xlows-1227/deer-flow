@@ -786,6 +786,7 @@ dependencies = [
     { name = "httpx" },
     { name = "langgraph-sdk" },
     { name = "lark-oapi" },
+    { name = "ldap3" },
     { name = "markdown-to-mrkdwn" },
     { name = "pyjwt" },
     { name = "python-multipart" },
@@ -826,6 +827,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "langgraph-sdk", specifier = ">=0.1.51" },
     { name = "lark-oapi", specifier = ">=1.4.0" },
+    { name = "ldap3", specifier = ">=2.9.1" },
     { name = "markdown-to-mrkdwn", specifier = ">=0.3.1" },
     { name = "pyjwt", specifier = ">=2.9.0" },
     { name = "python-multipart", specifier = ">=0.0.27" },
@@ -2128,6 +2130,18 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/72/c2e973066da57e9f6720c229364e673d89c884fac65c265a08e2c32eed3c/lark_oapi-1.5.5-py3-none-any.whl", hash = "sha256:c953d3f87e5b43d9e99cdee7c2d962568ac05d5c01ef57ad662fbb5d4ec0e69f", size = 6995394, upload-time = "2026-04-21T04:00:42.216Z" },
+]
+
+[[package]]
+name = "ldap3"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/ac/96bd5464e3edbc61595d0d69989f5d9969ae411866427b2500a8e5b812c0/ldap3-2.9.1.tar.gz", hash = "sha256:f3e7fc4718e3f09dda568b57100095e0ce58633bcabbed8667ce3f8fbaa4229f", size = 398830, upload-time = "2021-07-18T06:34:21.786Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/f6/71d6ec9f18da0b2201287ce9db6afb1a1f637dedb3f0703409558981c723/ldap3-2.9.1-py2.py3-none-any.whl", hash = "sha256:5869596fc4948797020d3f03b7939da938778a0f9e2009f7a072ccf92b8e8d70", size = 432192, upload-time = "2021-07-18T06:34:12.905Z" },
 ]
 
 [[package]]

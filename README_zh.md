@@ -240,6 +240,38 @@ make down   # 停止并移除容器
 5. **访问地址**：http://localhost:2026
 
 ### 进阶配置
+#### LDAP 内网账户登录
+
+DeerFlow 支持接入企业内网的 LDAP / Active Directory 进行账户登录。启用后：
+
+- **管理员账户**（由 `AUTH_LDAP_LOCAL_ADMIN_EMAIL` 指定，默认 `admin@yumchina.com`）仍使用本地数据库密码登录，保证即使 LDAP 不可用也能进入后台；
+- **其余账户**一律走 LDAP 校验，且为**严格模式**——LDAP 校验失败即拒绝，不会回退本地密码，避免用本地弱密码绕过目录策略；
+- 登录输入 **sAMAccountName**（不含 `@yumchina.com`），与 YumChina 现有 Spring Boot 配置一致；
+- LDAP 用户首次登录时会在本地 `users` 表创建一条影子记录（无密码哈希），用于后续 JWT 身份识别，对既有数据零侵入。
+
+在 `.env` 中配置以下环境变量即可启用：
+
+```bash
+AUTH_LDAP_ENABLED=true
+AUTH_LDAP_URL=ldap://ldap.yumchina.com
+AUTH_LDAP_BASE=ou=YumChina,DC=cn,DC=YumChina,DC=com
+AUTH_LDAP_BIND_USERNAME=serv-it-StarRocks
+AUTH_LDAP_BIND_PASSWORD=Yumc!0906
+AUTH_LDAP_OBJECTCLASS=sAMAccountName      # 百胜员工与外部员工混用时用 sAMAccountName
+AUTH_LDAP_ATTR_REALNAME=givenName
+AUTH_LDAP_ATTR_SN=sn
+AUTH_LDAP_ATTR_EMAIL=mail
+AUTH_LDAP_LOCAL_ADMIN_EMAIL=admin@yumchina.com
+AUTH_LDAP_DOMAIN=@yumchina.com
+```
+
+登录接口：
+
+- `POST /api/v1/auth/login`（推荐，JSON `{username, password}`）：根据标识自动分派到本地管理员或 LDAP；
+- `POST /api/v1/auth/login/local`（表单，向后兼容）：同样按上述策略分派。
+
+LDAP 用户的密码请通过企业目录自助修改，本地「修改密码」接口会拒绝 LDAP 用户。`AUTH_LDAP_ENABLED=false` 或未设置时，LDAP 完全关闭，所有账户走本地数据库（即默认行为）。
+
 #### Sandbox 模式
 
 DeerFlow 支持多种 sandbox 执行方式：
