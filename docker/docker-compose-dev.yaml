@@ -127,7 +127,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
       POSTGRES_DB: ${POSTGRES_DB:-deerflow}
     volumes:
-      - deerflow-pgdata:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_DIR:-/data/postgres}:/var/lib/postgresql/data
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:
@@ -219,7 +219,6 @@ volumes:
   gateway-venv:
   gateway-uv-cache:
   frontend-next-cache:
-  deerflow-pgdata:
 
 networks:
   deer-flow-dev:

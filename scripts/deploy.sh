@@ -186,7 +186,7 @@ ensure_runtime_files() {
     set_default_env
 
     info "DEER_FLOW_HOME=$DEER_FLOW_HOME"
-    mkdir -p "$DEER_FLOW_HOME"
+    mkdir -p "$DEER_FLOW_HOME" "${POSTGRES_DATA_DIR:-/data/postgres}"
 
     ensure_config_file
     ensure_extensions_config_file

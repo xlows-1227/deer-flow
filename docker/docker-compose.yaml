@@ -10,7 +10,8 @@
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
 #   DEER_FLOW_PROJECT_ROOT           — project root for relative runtime paths
-#   DEER_FLOW_HOME                   — runtime data dir, default .deer-flow under $DEER_FLOW_PROJECT_ROOT (or cwd)
+#   DEER_FLOW_HOME                   — runtime data dir, default backend/.deer-flow
+#   POSTGRES_DATA_DIR                — postgres data dir on host, default /data/postgres
 #   DEER_FLOW_CONFIG_PATH            — path to config.yaml
 #   DEER_FLOW_EXTENSIONS_CONFIG_PATH — path to extensions_config.json
 #   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
@@ -70,7 +71,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
       POSTGRES_DB: ${POSTGRES_DB:-deerflow}
     volumes:
-      - deerflow-pgdata:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_DIR:-/data/postgres}:/var/lib/postgresql/data
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:
@@ -176,8 +177,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-volumes:
-  deerflow-pgdata:
 
 networks:
   deer-flow:
