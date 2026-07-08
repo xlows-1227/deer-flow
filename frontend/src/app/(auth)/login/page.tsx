@@ -52,9 +52,13 @@ export default function LoginPage() {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [ldapAccount, setLdapAccount] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [isLogin, setIsLogin] = useState(true);
+  const [ldapEnabled, setLdapEnabled] = useState(false);
+  const [authConfigLoaded, setAuthConfigLoaded] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
 
   // Get next parameter for validated redirect
@@ -68,19 +72,23 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, redirectPath, router]);
 
-  // Redirect to setup if the system has no users yet
+  // Redirect to setup if the system has no users yet; also learn LDAP mode.
   useEffect(() => {
     let cancelled = false;
 
     void fetch("/api/v1/auth/setup-status")
       .then((r) => r.json())
-      .then((data: { needs_setup?: boolean }) => {
-        if (!cancelled && data.needs_setup) {
+      .then((data: { needs_setup?: boolean; ldap_enabled?: boolean }) => {
+        if (cancelled) return;
+        if (data.needs_setup) {
           router.push("/setup");
+          return;
         }
+        setLdapEnabled(Boolean(data.ldap_enabled));
+        setAuthConfigLoaded(true);
       })
       .catch(() => {
-        // Ignore errors; user stays on login page
+        setAuthConfigLoaded(true);
       });
 
     return () => {
@@ -91,17 +99,25 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccess("");
     setLoading(true);
 
     try {
-      // Login → unified JSON endpoint that dispatches between local admin
-      // and corporate LDAP. Register → local invite-code flow (unchanged).
-      const endpoint = isLogin
-        ? "/api/v1/auth/login"
-        : "/api/v1/auth/register";
+      const endpoint = isLogin ? "/api/v1/auth/login" : "/api/v1/auth/register";
+
       const body = isLogin
         ? JSON.stringify({ username: identifier, password })
-        : JSON.stringify({ email: inviteEmail, password, invite_code: inviteCode });
+        : ldapEnabled
+          ? JSON.stringify({
+              email: inviteEmail,
+              ldap_account: ldapAccount,
+              invite_code: inviteCode,
+            })
+          : JSON.stringify({
+              email: inviteEmail,
+              password,
+              invite_code: inviteCode,
+            });
 
       const res = await fetch(endpoint, {
         method: "POST",
@@ -113,11 +129,34 @@ export default function LoginPage() {
       if (!res.ok) {
         const data = await res.json();
         const authError = parseAuthError(data);
-        setError(authError.message);
+        if (authError.code === "user_not_registered") {
+          const account = identifier.trim();
+          setError(
+            authError.message || `域账号 ${account} 尚未注册，请先完成注册。`,
+          );
+          if (ldapEnabled && account) {
+            setLdapAccount(account);
+            setIsLogin(false);
+            setSuccess("");
+          }
+        } else {
+          setError(authError.message);
+        }
         return;
       }
 
-      // Both login and register set a cookie — redirect to workspace
+      if (!isLogin) {
+        const loginHandle = ldapEnabled ? ldapAccount : inviteEmail;
+        setIsLogin(true);
+        setIdentifier(loginHandle);
+        setPassword("");
+        setInviteEmail("");
+        setLdapAccount("");
+        setInviteCode("");
+        setSuccess("注册成功，请登录。");
+        return;
+      }
+
       router.push(redirectPath);
     } catch {
       setError("Network error. Please try again.");
@@ -162,9 +201,41 @@ export default function LoginPage() {
                 autoComplete="username"
               />
               <p className="text-muted-foreground text-xs">
-                内网账户请使用 sAMAccountName 登录（不含 @yumchina.com）；管理员账户使用完整邮箱。
+                内网账户请使用 sAMAccountName 登录（不含
+                @yumchina.com）；管理员账户使用完整邮箱。
               </p>
             </div>
+          ) : ldapEnabled ? (
+            <>
+              <div className="flex flex-col space-y-1">
+                <label htmlFor="ldapAccount" className="text-sm font-medium">
+                  域账号 / Domain account
+                </label>
+                <Input
+                  id="ldapAccount"
+                  type="text"
+                  value={ldapAccount}
+                  onChange={(e) => setLdapAccount(e.target.value)}
+                  placeholder="sAMAccountName（不含 @yumchina.com）"
+                  required
+                  autoComplete="username"
+                />
+              </div>
+              <div className="flex flex-col space-y-1">
+                <label htmlFor="inviteEmail" className="text-sm font-medium">
+                  Email
+                </label>
+                <Input
+                  id="inviteEmail"
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  autoComplete="email"
+                />
+              </div>
+            </>
           ) : (
             <div className="flex flex-col space-y-1">
               <label htmlFor="inviteEmail" className="text-sm font-medium">
@@ -181,20 +252,22 @@ export default function LoginPage() {
               />
             </div>
           )}
-          <div className="flex flex-col space-y-1">
-            <label htmlFor="password" className="text-sm font-medium">
-              Password
-            </label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="•••••••"
-              required
-              minLength={isLogin ? 6 : 8}
-            />
-          </div>
+          {(isLogin || !ldapEnabled) && (
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="password" className="text-sm font-medium">
+                Password
+              </label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="•••••••"
+                required
+                minLength={isLogin ? 6 : 8}
+              />
+            </div>
+          )}
           {!isLogin && (
             <div className="flex flex-col space-y-1">
               <label htmlFor="inviteCode" className="text-sm font-medium">
@@ -211,14 +284,21 @@ export default function LoginPage() {
             </div>
           )}
 
+          {success && <p className="text-sm text-green-600">{success}</p>}
           {error && <p className="text-sm text-red-500">{error}</p>}
 
-          <Button type="submit" className="w-full" disabled={loading}>
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={loading || !authConfigLoaded}
+          >
             {loading
               ? "Please wait..."
-              : isLogin
-                ? "Sign In"
-                : "Create Account"}
+              : !authConfigLoaded
+                ? "Loading..."
+                : isLogin
+                  ? "Sign In"
+                  : "Create Account"}
           </Button>
         </form>
 
@@ -228,8 +308,10 @@ export default function LoginPage() {
             onClick={() => {
               setIsLogin(!isLogin);
               setError("");
+              setSuccess("");
               setIdentifier("");
               setInviteEmail("");
+              setLdapAccount("");
               setInviteCode("");
             }}
             className="text-blue-500 hover:underline"

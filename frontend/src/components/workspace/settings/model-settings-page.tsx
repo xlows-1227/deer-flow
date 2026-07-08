@@ -56,7 +56,6 @@ import { SettingsSection } from "./settings-section";
 type ModelForm = {
   id: string | null;
   name: string;
-  displayName: string;
   provider: ModelProvider;
   model: string;
   baseUrl: string;
@@ -65,18 +64,24 @@ type ModelForm = {
   enabled: boolean;
 };
 
+const GAIA_DEFAULTS = {
+  name: "yumcode-pro",
+  model: "yumcode-pro",
+  baseUrl: "http://api.llm.prd.yumc.local/v1",
+} as const;
+
 const DEFAULT_BASE_URLS: Record<ModelProvider, string> = {
+  gaia: GAIA_DEFAULTS.baseUrl,
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
 };
 
 const emptyForm: ModelForm = {
   id: null,
-  name: "",
-  displayName: "",
-  provider: "openai",
-  model: "",
-  baseUrl: DEFAULT_BASE_URLS.openai,
+  name: GAIA_DEFAULTS.name,
+  provider: "gaia",
+  model: GAIA_DEFAULTS.model,
+  baseUrl: GAIA_DEFAULTS.baseUrl,
   apiKey: "",
   hasStoredKey: false,
   enabled: true,
@@ -91,7 +96,6 @@ function formFromModel(model: CustomModel): ModelForm {
   return {
     id: model.id,
     name: model.name,
-    displayName: model.display_name ?? "",
     provider: model.provider,
     model: model.model,
     baseUrl: model.base_url ?? DEFAULT_BASE_URLS[model.provider],
@@ -166,7 +170,6 @@ export function ModelSettingsPage({
         const apiKey = buildApiKeyUpdateValue(form.apiKey, form.hasStoredKey);
         await updateCustomModel(form.id, {
           name,
-          display_name: form.displayName.trim() || null,
           provider: form.provider,
           model: modelId,
           base_url: form.baseUrl.trim() || null,
@@ -177,7 +180,6 @@ export function ModelSettingsPage({
       } else {
         await createCustomModel({
           name,
-          display_name: form.displayName.trim() || null,
           provider: form.provider,
           model: modelId,
           base_url: form.baseUrl.trim() || null,
@@ -217,11 +219,24 @@ export function ModelSettingsPage({
   };
 
   const handleProviderChange = (provider: ModelProvider) => {
-    setForm((current) => ({
-      ...current,
-      provider,
-      baseUrl: DEFAULT_BASE_URLS[provider],
-    }));
+    setForm((current) => {
+      if (provider === "gaia") {
+        return {
+          ...current,
+          provider,
+          name: GAIA_DEFAULTS.name,
+          model: GAIA_DEFAULTS.model,
+          baseUrl: GAIA_DEFAULTS.baseUrl,
+        };
+      }
+      return {
+        ...current,
+        provider,
+        name: "",
+        model: "",
+        baseUrl: DEFAULT_BASE_URLS[provider],
+      };
+    });
   };
 
   return (
@@ -259,11 +274,9 @@ export function ModelSettingsPage({
                   <div className="space-y-1">
                     <CardTitle className="flex items-center gap-2 text-base">
                       <BotIcon className="size-4" />
-                      {model.display_name ?? model.name}
+                      {model.name}
                     </CardTitle>
-                    <CardDescription>
-                      {model.name} · {model.model}
-                    </CardDescription>
+                    <CardDescription>{model.model}</CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
                     <Badge variant={model.enabled ? "default" : "secondary"}>
@@ -335,6 +348,23 @@ export function ModelSettingsPage({
 
           <div className="grid gap-4">
             <label className="grid gap-2 text-sm">
+              <span>{t.settings.models.provider}</span>
+              <Select
+                value={form.provider}
+                onValueChange={handleProviderChange}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gaia">Gaia</SelectItem>
+                  <SelectItem value="openai">OpenAI</SelectItem>
+                  <SelectItem value="anthropic">Anthropic</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+
+            <label className="grid gap-2 text-sm">
               <span>{t.settings.models.name}</span>
               <Input
                 value={form.name}
@@ -346,36 +376,6 @@ export function ModelSettingsPage({
                 }
                 placeholder={t.settings.models.namePlaceholder}
               />
-            </label>
-
-            <label className="grid gap-2 text-sm">
-              <span>{t.settings.models.displayName}</span>
-              <Input
-                value={form.displayName}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    displayName: event.target.value,
-                  }))
-                }
-                placeholder={t.settings.models.displayNamePlaceholder}
-              />
-            </label>
-
-            <label className="grid gap-2 text-sm">
-              <span>{t.settings.models.provider}</span>
-              <Select
-                value={form.provider}
-                onValueChange={handleProviderChange}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="openai">OpenAI</SelectItem>
-                  <SelectItem value="anthropic">Anthropic</SelectItem>
-                </SelectContent>
-              </Select>
             </label>
 
             <label className="grid gap-2 text-sm">

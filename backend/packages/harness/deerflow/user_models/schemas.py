@@ -4,14 +4,16 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ProviderType = Literal["openai", "anthropic"]
+ProviderType = Literal["gaia", "openai", "anthropic"]
 
 PROVIDER_USE_MAP: dict[ProviderType, str] = {
+    "gaia": "langchain_openai:ChatOpenAI",
     "openai": "langchain_openai:ChatOpenAI",
     "anthropic": "langchain_anthropic:ChatAnthropic",
 }
 
 DEFAULT_BASE_URLS: dict[ProviderType, str] = {
+    "gaia": "http://api.llm.prd.yumc.local/v1",
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com",
 }

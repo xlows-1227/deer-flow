@@ -215,7 +215,8 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
 ):
     """The full real-server contract test.
 
-    1. Register a real user via POST /api/v1/auth/register (also auto-logs in)
+    1. Register a real user via POST /api/v1/auth/register
+    2. Log in via POST /api/v1/auth/login/local (cookie session)
     2. POST to /api/threads/{tid}/runs/stream with the **exact** body shape the
        frontend (LangGraph SDK) sends during the bootstrap flow.
     3. Wait for the background run to finish.
@@ -238,7 +239,7 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         ),
         TestClient(isolated_app) as client,
     ):
-        # --- 1. Register & auto-login ---
+        # --- 1. Register, then log in ---
         from support.invite_code_helpers import register_payload
 
         register = client.post(
@@ -248,11 +249,15 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         assert register.status_code == 201, register.text
         registered = register.json()
         auth_uid = registered["id"]
-        # The endpoint sets both access_token (auth) and csrf_token (CSRF Double
-        # Submit Cookie) cookies; the TestClient cookie jar propagates them.
-        assert client.cookies.get("access_token"), "register endpoint must set session cookie"
+
+        login = client.post(
+            "/api/v1/auth/login/local",
+            data={"username": "e2e-user@example.com", "password": "very-strong-password-123"},
+        )
+        assert login.status_code == 200, login.text
+        assert client.cookies.get("access_token"), "login endpoint must set session cookie"
         csrf_token = client.cookies.get("csrf_token")
-        assert csrf_token, "register endpoint must set csrf_token cookie"
+        assert csrf_token, "login flow must set csrf_token cookie"
 
         # --- 2. Create a thread (require_existing=True on /runs/stream means
         # we must call POST /api/threads first; the React frontend does the

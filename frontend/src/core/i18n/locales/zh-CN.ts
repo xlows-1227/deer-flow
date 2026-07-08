@@ -487,8 +487,8 @@ export const zhCN: Translations = {
       editModel: "编辑模型",
       formDescription:
         "选择 OpenAI 或 Anthropic 协议。模型名称在您的账户内必须唯一。",
-      name: "内部名称",
-      namePlaceholder: "my-gpt4o",
+      name: "名称",
+      namePlaceholder: "yumcode-pro",
       displayName: "显示名称",
       displayNamePlaceholder: "我的 GPT-4o",
       provider: "提供商协议",
@@ -510,7 +510,7 @@ export const zhCN: Translations = {
       deleteSuccess: "自定义模型已删除",
       deleteFailed: "删除自定义模型失败",
       deleteConfirm: "确定删除模型「{name}」？",
-      validationRequired: "内部名称和模型 ID 为必填项",
+      validationRequired: "名称和模型 ID 为必填项",
     },
     appearance: {
       themeTitle: "主题",

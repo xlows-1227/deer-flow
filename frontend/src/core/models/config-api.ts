@@ -1,7 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-export type ModelProvider = "openai" | "anthropic";
+export type ModelProvider = "gaia" | "openai" | "anthropic";
 
 export interface CustomModel {
   id: string;

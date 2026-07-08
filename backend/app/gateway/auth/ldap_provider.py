@@ -11,12 +11,11 @@ Implements the corporate intranet (Active Directory) login flow:
    the user typed. AD/LDAP considers a successful bind as authentication
    success; a wrong password yields an invalid-credentials bind error.
 
-On success the provider creates (or refreshes) a *shadow* row in the
-local ``users`` table so that the rest of the system — JWT issuance,
-``get_current_user_from_request``, per-user threading — keeps working with
-no awareness of LDAP. Shadow rows store ``password_hash=NULL`` and are
-tagged with ``oauth_provider="ldap"`` so the change-password endpoint can
-reject them.
+On success the provider refreshes the pre-registered local row (created
+via ``POST /api/v1/auth/register``) so JWT issuance and per-user threading
+keep working. Rows store ``password_hash=NULL`` and are tagged with
+``oauth_provider="ldap"`` so the change-password endpoint can reject them.
+Unregistered domain accounts are rejected even when LDAP bind succeeds.
 
 All ``ldap3`` calls are synchronous and blocking, so they are wrapped in
 ``asyncio.to_thread`` to avoid stalling the FastAPI event loop — the same
@@ -77,9 +76,9 @@ class LdapAuthProvider(AuthProvider):
 
         user_dn, attrs = result
         try:
-            return await self._find_or_create_shadow_user(username, attrs)
+            return await self._refresh_shadow_user(username, attrs)
         except Exception:  # noqa: BLE001 — shadow write must not crash login
-            logger.warning("Failed to upsert LDAP shadow user for %r", username, exc_info=True)
+            logger.warning("Failed to refresh LDAP shadow user for %r", username, exc_info=True)
             return None
 
     async def get_user(self, user_id: str) -> User | None:
@@ -147,53 +146,28 @@ class LdapAuthProvider(AuthProvider):
 
     # ── Shadow-user management ──────────────────────────────────────────
 
-    async def _find_or_create_shadow_user(self, username: str, attrs: dict[str, Any]) -> User:
-        """Return the local shadow row for an LDAP user, creating if needed.
+    async def _refresh_shadow_user(self, username: str, attrs: dict[str, Any]) -> User | None:
+        """Return the pre-registered local row for an LDAP user and refresh email if needed.
 
-        - Existing shadow row → refresh ``email`` from LDAP if it changed
-          (a user may rename their mailbox) but fall back to a domain
-          address if the new email collides with a non-LDAP account.
-        - No shadow row → create one with ``password_hash=None``,
-          ``system_role="user"``.
+        Registration must happen through ``POST /api/v1/auth/register`` before
+        the first LDAP login — this method never creates new rows.
         """
-        email = self._pick_email(username, attrs)
-
         existing = await self._repo.get_user_by_oauth(LDAP_PROVIDER_TAG, username)
-        if existing is not None:
-            desired = email
-            # Only mutate when the LDAP mail actually moved AND is free.
-            if desired and desired.lower() != existing.email.lower():
-                clash = await self._repo.get_user_by_email(desired)
-                if clash is None or str(clash.id) == str(existing.id):
-                    existing.email = desired
-                    try:
-                        existing = await self._repo.update_user(existing)
-                    except Exception:  # noqa: BLE001 — refresh is best-effort
-                        logger.warning("Shadow email refresh failed for %r", username, exc_info=True)
-            return existing
+        if existing is None:
+            logger.info("LDAP auth succeeded for %r but no local registration exists", username)
+            return None
 
-        # Pick a non-colliding email: prefer LDAP mail, fall back to
-        # ``<username>@<domain>`` if it is already taken by a local account.
-        final_email = email
-        if await self._repo.get_user_by_email(final_email) is not None:
-            final_email = self._domain_email(username)
-            if await self._repo.get_user_by_email(final_email) is not None:
-                # Both candidates taken — give up rather than overwrite
-                # someone else's row. This is an operator-visible misconfig.
-                logger.error(
-                    "Cannot create LDAP shadow user for %r: both %s and %s already exist",
-                    username, email, final_email,
-                )
-                raise ValueError(f"Email conflict for LDAP user {username}")
-
-        user = User(
-            email=final_email,
-            password_hash=None,
-            system_role="user",
-            oauth_provider=LDAP_PROVIDER_TAG,
-            oauth_id=username,
-        )
-        return await self._repo.create_user(user)
+        email = self._pick_email(username, attrs)
+        desired = email
+        if desired and desired.lower() != existing.email.lower():
+            clash = await self._repo.get_user_by_email(desired)
+            if clash is None or str(clash.id) == str(existing.id):
+                existing.email = desired
+                try:
+                    existing = await self._repo.update_user(existing)
+                except Exception:  # noqa: BLE001 — refresh is best-effort
+                    logger.warning("Shadow email refresh failed for %r", username, exc_info=True)
+        return existing
 
     # ── Helpers ─────────────────────────────────────────────────────────
 

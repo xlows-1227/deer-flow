@@ -632,8 +632,8 @@ def _get_set_cookie_headers(resp) -> list[str]:
     return [v for k, v in resp.headers.multi_items() if k.lower() == "set-cookie"]
 
 
-def test_register_http_cookie_httponly_true_secure_false():
-    """HTTP register → access_token cookie is httponly=True, secure=False, no max_age."""
+def test_register_http_does_not_set_access_token_cookie():
+    """HTTP register creates the account but does not auto-login."""
     from support.invite_code_helpers import register_payload
 
     _setup_config()
@@ -644,22 +644,41 @@ def test_register_http_cookie_httponly_true_secure_false():
     )
     assert resp.status_code == 201
     cookie_header = resp.headers.get("set-cookie", "")
+    assert "access_token=" not in cookie_header
+
+
+def test_login_http_cookie_httponly_true_secure_false():
+    """HTTP login → access_token cookie is httponly=True, secure=False, no max_age."""
+    from support.invite_code_helpers import register_payload
+
+    _setup_config()
+    client = _get_auth_client()
+    email = _unique_email("http-login-cookie")
+    client.post("/api/v1/auth/register", json=register_payload(email=email))
+    resp = client.post(
+        "/api/v1/auth/login/local",
+        data={"username": email, "password": "Tr0ub4dor3a"},
+    )
+    assert resp.status_code == 200
+    cookie_header = resp.headers.get("set-cookie", "")
     assert "access_token=" in cookie_header
     assert "httponly" in cookie_header.lower()
     assert "secure" not in cookie_header.lower().replace("samesite", "")
 
 
-def test_register_https_cookie_httponly_true_secure_true():
-    """HTTPS register → access_token cookie is httponly=True, secure=True, has max_age."""
+def test_login_https_cookie_httponly_true_secure_true():
+    """HTTPS login → access_token cookie is httponly=True, secure=True, has max_age."""
     from support.invite_code_helpers import register_payload
 
     _setup_config()
     client = _get_auth_client(base_url="https://testserver")
+    email = _unique_email("https-login-cookie")
+    client.post("/api/v1/auth/register", json=register_payload(email=email))
     resp = client.post(
-        "/api/v1/auth/register",
-        json=register_payload(email=_unique_email("https-cookie")),
+        "/api/v1/auth/login/local",
+        data={"username": email, "password": "Tr0ub4dor3a"},
     )
-    assert resp.status_code == 201
+    assert resp.status_code == 200
     cookie_header = resp.headers.get("set-cookie", "")
     assert "access_token=" in cookie_header
     assert "httponly" in cookie_header.lower()

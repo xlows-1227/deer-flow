@@ -76,8 +76,11 @@ class _MemoryRepo:
         return sum(1 for u in self.users.values() if u.system_role == "admin")
 
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
-        uid = self._by_oauth.get((provider, oauth_id))
-        return self.users.get(uid) if uid else None
+        normalized = oauth_id.strip().lower()
+        for (prov, oid), uid in self._by_oauth.items():
+            if prov == provider and oid.lower() == normalized:
+                return self.users.get(uid)
+        return None
 
 
 def _enabled_config(**overrides) -> LdapConfig:
@@ -191,8 +194,11 @@ def test_normalize_base_dn_preserves_case():
 
 def test_load_ldap_config_from_env_disabled_by_default(monkeypatch):
     for key in [
-        "AUTH_LDAP_ENABLED", "AUTH_LDAP_URL", "AUTH_LDAP_BASE",
-        "AUTH_LDAP_BIND_USERNAME", "AUTH_LDAP_BIND_PASSWORD",
+        "AUTH_LDAP_ENABLED",
+        "AUTH_LDAP_URL",
+        "AUTH_LDAP_BASE",
+        "AUTH_LDAP_BIND_USERNAME",
+        "AUTH_LDAP_BIND_PASSWORD",
     ]:
         monkeypatch.delenv(key, raising=False)
     config = load_ldap_config_from_env()
@@ -243,6 +249,17 @@ def test_escape_ldap_handles_filter_metachars():
 def test_authenticate_success_creates_shadow_user():
     repo = _MemoryRepo()
     provider = LdapAuthProvider(repo, _enabled_config())
+    asyncio.run(
+        repo.create_user(
+            User(
+                email="john.doe@yumchina.com",
+                password_hash=None,
+                system_role="user",
+                oauth_provider=LDAP_PROVIDER_TAG,
+                oauth_id="john",
+            )
+        )
+    )
 
     entry = _fake_entry(
         "CN=John Doe,ou=YumChina,DC=cn,DC=YumChina,DC=com",
@@ -267,6 +284,17 @@ def test_authenticate_success_creates_shadow_user():
 def test_authenticate_success_reuses_existing_shadow_user():
     repo = _MemoryRepo()
     provider = LdapAuthProvider(repo, _enabled_config())
+    asyncio.run(
+        repo.create_user(
+            User(
+                email="john.doe@yumchina.com",
+                password_hash=None,
+                system_role="user",
+                oauth_provider=LDAP_PROVIDER_TAG,
+                oauth_id="john",
+            )
+        )
+    )
 
     entry = _fake_entry(
         "CN=John,ou=YumChina,DC=cn,DC=YumChina,DC=com",
@@ -286,6 +314,17 @@ def test_authenticate_success_reuses_existing_shadow_user():
 def test_authenticate_success_refreshes_email_when_ldap_mail_changes():
     repo = _MemoryRepo()
     provider = LdapAuthProvider(repo, _enabled_config())
+    asyncio.run(
+        repo.create_user(
+            User(
+                email="old@yumchina.com",
+                password_hash=None,
+                system_role="user",
+                oauth_provider=LDAP_PROVIDER_TAG,
+                oauth_id="john",
+            )
+        )
+    )
 
     entry1 = _fake_entry(
         "CN=John,ou=YumChina,DC=cn,DC=YumChina,DC=com",
@@ -333,13 +372,9 @@ def test_authenticate_user_not_found_returns_none():
     assert asyncio.run(repo.count_users()) == 0
 
 
-def test_authenticate_email_collision_falls_back_to_domain_email():
-    """If LDAP mail is already taken by a local account, use <user>@domain."""
+def test_authenticate_unregistered_user_returns_none():
+    """LDAP bind may succeed but login is rejected without a prior registration row."""
     repo = _MemoryRepo()
-    # Pre-existing local account occupying the LDAP mail.
-    local = User(email="john.doe@yumchina.com", password_hash="hash", system_role="user")
-    asyncio.run(repo.create_user(local))
-
     provider = LdapAuthProvider(repo, _enabled_config())
 
     entry = _fake_entry(
@@ -350,14 +385,24 @@ def test_authenticate_email_collision_falls_back_to_domain_email():
     with _patch_ldap3(search_entries=[entry], user_bind_ok=True):
         user = asyncio.run(provider.authenticate({"username": "john", "password": "pw"}))
 
-    assert user is not None
-    assert user.email == "john@yumchina.com"
-    assert user.oauth_provider == LDAP_PROVIDER_TAG
+    assert user is None
+    assert asyncio.run(repo.count_users()) == 0
 
 
 def test_authenticate_no_mail_uses_domain_email():
-    """AD accounts without a mail attribute still get a usable email."""
+    """Registered LDAP users without AD mail keep their stored email on login."""
     repo = _MemoryRepo()
+    asyncio.run(
+        repo.create_user(
+            User(
+                email="ext.user@yumchina.com",
+                password_hash=None,
+                system_role="user",
+                oauth_provider=LDAP_PROVIDER_TAG,
+                oauth_id="ext.user",
+            )
+        )
+    )
     provider = LdapAuthProvider(repo, _enabled_config())
 
     entry = _fake_entry(
@@ -447,14 +492,16 @@ def _build_test_app(monkeypatch, *, ldap_enabled: bool):
 
     env = {"AUTH_JWT_SECRET": "test-secret-key-for-jwt-testing-minimum-32-chars"}
     if ldap_enabled:
-        env.update({
-            "AUTH_LDAP_ENABLED": "true",
-            "AUTH_LDAP_URL": "ldap://ldap.example.com",
-            "AUTH_LDAP_BASE": "ou=YumChina,DC=cn,DC=YumChina,DC=com",
-            "AUTH_LDAP_BIND_USERNAME": "svc",
-            "AUTH_LDAP_BIND_PASSWORD": "pw",
-            "AUTH_LDAP_LOCAL_ADMIN_EMAIL": "admin@yumchina.com",
-        })
+        env.update(
+            {
+                "AUTH_LDAP_ENABLED": "true",
+                "AUTH_LDAP_URL": "ldap://ldap.example.com",
+                "AUTH_LDAP_BASE": "ou=YumChina,DC=cn,DC=YumChina,DC=com",
+                "AUTH_LDAP_BIND_USERNAME": "svc",
+                "AUTH_LDAP_BIND_PASSWORD": "pw",
+                "AUTH_LDAP_LOCAL_ADMIN_EMAIL": "admin@yumchina.com",
+            }
+        )
     else:
         env["AUTH_LDAP_ENABLED"] = "false"
     for k, v in env.items():
@@ -480,6 +527,8 @@ def stub_providers(monkeypatch):
 
     local = MagicMock()
     local.authenticate = AsyncMock(return_value=None)
+    local.get_user_by_oauth = AsyncMock(return_value=None)
+    local.get_user_by_email = AsyncMock(return_value=None)
     ldap = MagicMock()
     ldap.authenticate = AsyncMock(return_value=None)
 
@@ -499,6 +548,7 @@ def test_login_ldap_disabled_routes_everything_local(monkeypatch, stub_providers
     with TestClient(app) as client:
         # Force the router-level patches to take effect after app build.
         import app.gateway.routers.auth as auth_router
+
         auth_router.get_local_provider = lambda: stub_providers["local"]
         auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
 
@@ -518,6 +568,7 @@ def test_login_admin_identifier_routes_local(monkeypatch, stub_providers):
     stub_providers["local"].authenticate.return_value = admin_user
 
     import app.gateway.routers.auth as auth_router
+
     auth_router.get_local_provider = lambda: stub_providers["local"]
     auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
 
@@ -532,14 +583,16 @@ def test_login_admin_identifier_routes_local(monkeypatch, stub_providers):
 
 
 def test_login_non_admin_routes_to_ldap(monkeypatch, stub_providers):
-    """Regular identifiers go to LDAP in strict mode (no local fallback)."""
+    """Registered LDAP users authenticate against the directory."""
     from fastapi.testclient import TestClient
 
     app = _build_test_app(monkeypatch, ldap_enabled=True)
     ldap_user = User(email="john.doe@yumchina.com", oauth_provider=LDAP_PROVIDER_TAG, oauth_id="john")
+    stub_providers["local"].get_user_by_oauth.return_value = ldap_user
     stub_providers["ldap"].authenticate.return_value = ldap_user
 
     import app.gateway.routers.auth as auth_router
+
     auth_router.get_local_provider = lambda: stub_providers["local"]
     auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
 
@@ -547,8 +600,9 @@ def test_login_non_admin_routes_to_ldap(monkeypatch, stub_providers):
         resp = client.post("/api/v1/auth/login", json={"username": "john", "password": "pw"})
 
     assert resp.status_code == 200
+    stub_providers["local"].get_user_by_oauth.assert_awaited_with(LDAP_PROVIDER_TAG, "john")
     stub_providers["ldap"].authenticate.assert_awaited()
-    # Strict mode: local provider never consulted for non-admin.
+    # Strict mode: local password check never runs for LDAP users.
     stub_providers["local"].authenticate.assert_not_awaited()
 
 
@@ -556,9 +610,12 @@ def test_login_ldap_failure_returns_401(monkeypatch, stub_providers):
     from fastapi.testclient import TestClient
 
     app = _build_test_app(monkeypatch, ldap_enabled=True)
+    ldap_user = User(email="john.doe@yumchina.com", oauth_provider=LDAP_PROVIDER_TAG, oauth_id="john")
+    stub_providers["local"].get_user_by_oauth.return_value = ldap_user
     stub_providers["ldap"].authenticate.return_value = None
 
     import app.gateway.routers.auth as auth_router
+
     auth_router.get_local_provider = lambda: stub_providers["local"]
     auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
 
@@ -569,15 +626,37 @@ def test_login_ldap_failure_returns_401(monkeypatch, stub_providers):
     assert resp.json()["detail"]["code"] == "invalid_credentials"
 
 
+def test_login_unregistered_returns_user_not_registered(monkeypatch, stub_providers):
+    from fastapi.testclient import TestClient
+
+    app = _build_test_app(monkeypatch, ldap_enabled=True)
+    stub_providers["local"].get_user_by_oauth.return_value = None
+    stub_providers["local"].get_user_by_email.return_value = None
+
+    import app.gateway.routers.auth as auth_router
+
+    auth_router.get_local_provider = lambda: stub_providers["local"]
+    auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
+
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/auth/login", json={"username": "john", "password": "pw"})
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["code"] == "user_not_registered"
+    stub_providers["ldap"].authenticate.assert_not_awaited()
+
+
 def test_login_local_endpoint_still_dispatches(monkeypatch, stub_providers):
     """Backwards-compatible form endpoint honours the same dispatch policy."""
     from fastapi.testclient import TestClient
 
     app = _build_test_app(monkeypatch, ldap_enabled=True)
     ldap_user = User(email="john.doe@yumchina.com", oauth_provider=LDAP_PROVIDER_TAG, oauth_id="john")
+    stub_providers["local"].get_user_by_oauth.return_value = ldap_user
     stub_providers["ldap"].authenticate.return_value = ldap_user
 
     import app.gateway.routers.auth as auth_router
+
     auth_router.get_local_provider = lambda: stub_providers["local"]
     auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
 
@@ -591,15 +670,42 @@ def test_login_local_endpoint_still_dispatches(monkeypatch, stub_providers):
     stub_providers["ldap"].authenticate.assert_awaited()
 
 
+def test_login_local_account_uses_password_when_oauth_provider_empty(monkeypatch, stub_providers):
+    from fastapi.testclient import TestClient
+
+    app = _build_test_app(monkeypatch, ldap_enabled=True)
+    local_user = User(email="local@yumchina.com", password_hash="h", system_role="user")
+    stub_providers["local"].get_user_by_oauth.return_value = None
+    stub_providers["local"].get_user_by_email.return_value = local_user
+    stub_providers["local"].authenticate.return_value = local_user
+
+    import app.gateway.routers.auth as auth_router
+
+    auth_router.get_local_provider = lambda: stub_providers["local"]
+    auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"username": "local@yumchina.com", "password": "pw"},
+        )
+
+    assert resp.status_code == 200
+    stub_providers["local"].authenticate.assert_awaited_with({"email": "local@yumchina.com", "password": "pw"})
+    stub_providers["ldap"].authenticate.assert_not_awaited()
+
+
 def test_login_strips_domain_when_routing_to_ldap(monkeypatch, stub_providers):
     """Full-email identifiers have the domain stripped before LDAP lookup."""
     from fastapi.testclient import TestClient
 
     app = _build_test_app(monkeypatch, ldap_enabled=True)
-    ldap_user = User(email="john.doe@yumchina.com", oauth_provider=LDAP_PROVIDER_TAG, oauth_id="john")
+    ldap_user = User(email="john.doe@yumchina.com", oauth_provider=LDAP_PROVIDER_TAG, oauth_id="john.doe")
+    stub_providers["local"].get_user_by_oauth.return_value = ldap_user
     stub_providers["ldap"].authenticate.return_value = ldap_user
 
     import app.gateway.routers.auth as auth_router
+
     auth_router.get_local_provider = lambda: stub_providers["local"]
     auth_router.get_ldap_provider = lambda: stub_providers["ldap"]
 
@@ -607,7 +713,7 @@ def test_login_strips_domain_when_routing_to_ldap(monkeypatch, stub_providers):
         resp = client.post("/api/v1/auth/login", json={"username": "john.doe@yumchina.com", "password": "pw"})
 
     assert resp.status_code == 200
-    # The provider received the bare sAMAccountName, not the email.
+    stub_providers["local"].get_user_by_oauth.assert_awaited_with(LDAP_PROVIDER_TAG, "john.doe")
     stub_providers["ldap"].authenticate.assert_awaited_with({"username": "john.doe", "password": "pw"})
 
 

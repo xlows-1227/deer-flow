@@ -128,15 +128,29 @@ class RegisterRequest(BaseModel):
     """Request model for user registration."""
 
     email: EmailStr
-    password: str = Field(..., min_length=8)
     invite_code: str = Field(..., min_length=1)
+    password: str | None = Field(None, min_length=8)
+    ldap_account: str | None = Field(None, min_length=1)
 
-    _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
+    @field_validator("password")
+    @classmethod
+    def _strong_password(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_strong_password(value)
 
     @field_validator("invite_code")
     @classmethod
     def _normalize_invite_code(cls, value: str) -> str:
         return value.strip().upper()
+
+    @field_validator("ldap_account")
+    @classmethod
+    def _normalize_ldap_account(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -158,6 +172,18 @@ class MessageResponse(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
+def _normalize_ldap_account_name(account: str) -> str:
+    """Normalise a corporate login handle to bare sAMAccountName.
+
+    Strips surrounding whitespace and any ``@domain`` suffix so
+    ``john@yumchina.com`` and ``john`` resolve to the same ``oauth_id``.
+    """
+    stripped = account.strip()
+    if "@" in stripped:
+        return stripped.split("@", 1)[0]
+    return stripped
+
+
 def _set_session_cookie(response: Response, token: str, request: Request) -> None:
     """Set the access_token HttpOnly cookie on the response."""
     config = get_auth_config()
@@ -173,6 +199,39 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
 
 
 # ── Provider dispatch ────────────────────────────────────────────────────
+
+
+class _LoginNotRegistered(Exception):
+    """Raised when LDAP mode requires pre-registration but no user row exists."""
+
+    def __init__(self, account: str) -> None:
+        self.account = account
+        super().__init__(account)
+
+
+def _bare_login_identifier(identifier: str) -> str:
+    """Strip a corporate email suffix so LDAP lookups use sAMAccountName."""
+    return _normalize_ldap_account_name(identifier)
+
+
+async def _lookup_user_for_login(identifier: str) -> User | None:
+    """Resolve a login handle to a registered user row.
+
+    In LDAP deployments regular users must register first; their domain account
+    is stored in ``oauth_id``. Local accounts (``oauth_provider`` empty) are
+    matched by email.
+    """
+    local = get_local_provider()
+    bare = _bare_login_identifier(identifier)
+
+    ldap_user = await local.get_user_by_oauth(LDAP_PROVIDER_TAG, bare)
+    if ldap_user is not None:
+        return ldap_user
+
+    if "@" in identifier:
+        return await local.get_user_by_email(identifier)
+
+    return None
 
 
 async def _authenticate_dispatch(identifier: str, password: str) -> User | None:
@@ -227,21 +286,36 @@ async def _authenticate_ldap(identifier: str, password: str) -> User | None:
 async def _resolve_login(identifier: str, password: str) -> User | None:
     """Top-level login resolver used by both login endpoints.
 
-    Applies the admin-vs-LDAP policy in one place so the form-encoded and
-    JSON endpoints cannot drift. Returns the authenticated :class:`User` or
-    ``None``; the caller is responsible for the 401 + rate-limit bookkeeping.
+    When LDAP is enabled, non-admin users must register before logging in.
+    Authentication mode is chosen from the stored ``oauth_provider``:
+
+    - ``ldap`` → directory bind
+    - empty / ``None`` → local email + password
+
+    Raises :class:`_LoginNotRegistered` when LDAP mode cannot find a row for
+    the supplied login handle.
     """
     auth_config = get_auth_config()
     ldap_config = auth_config.ldap
+    local = get_local_provider()
 
-    # LDAP off → everything is local.
+    # LDAP off → legacy local email/password for everyone.
     if not ldap_config.enabled:
-        return await get_local_provider().authenticate({"email": identifier, "password": password})
+        return await local.authenticate({"email": identifier, "password": password})
 
+    # Platform admin always authenticates locally, even when LDAP is down.
     if ldap_config.is_admin_email(identifier):
         return await _authenticate_dispatch(identifier, password)
 
-    return await _authenticate_ldap(identifier, password)
+    registered = await _lookup_user_for_login(identifier)
+    if registered is None:
+        raise _LoginNotRegistered(_bare_login_identifier(identifier))
+
+    if registered.oauth_provider == LDAP_PROVIDER_TAG:
+        username = registered.oauth_id or _bare_login_identifier(identifier)
+        return await _authenticate_ldap(username, password)
+
+    return await local.authenticate({"email": registered.email, "password": password})
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
@@ -383,7 +457,17 @@ async def login(request: Request, response: Response, body: UnifiedLoginRequest)
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
-    user = await _resolve_login(body.username, body.password)
+    try:
+        user = await _resolve_login(body.username, body.password)
+    except _LoginNotRegistered as exc:
+        _record_login_failure(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.USER_NOT_REGISTERED,
+                message=f"域账号 {exc.account} 尚未注册，请先完成注册",
+            ).model_dump(),
+        ) from None
 
     if user is None:
         _record_login_failure(client_ip)
@@ -418,7 +502,17 @@ async def login_local(
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
-    user = await _resolve_login(form_data.username, form_data.password)
+    try:
+        user = await _resolve_login(form_data.username, form_data.password)
+    except _LoginNotRegistered as exc:
+        _record_login_failure(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.USER_NOT_REGISTERED,
+                message=f"域账号 {exc.account} 尚未注册，请先完成注册",
+            ).model_dump(),
+        ) from None
 
     if user is None:
         _record_login_failure(client_ip)
@@ -442,8 +536,38 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     """Register a new user account (always 'user' role).
 
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
-    Auto-login by setting the session cookie.
+    When LDAP is enabled, registration binds a corporate domain account (``ldap_account``) to an
+    email + invite code — no local password is stored. Does not issue a session; clients should
+    redirect to the login page after a successful registration.
     """
+    ldap_enabled = get_auth_config().ldap.enabled
+    provider = get_local_provider()
+
+    if ldap_enabled:
+        ldap_account = _normalize_ldap_account_name(body.ldap_account or "")
+        if not ldap_account:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.INVALID_CREDENTIALS,
+                    message="Domain account (ldap_account) is required when LDAP is enabled",
+                ).model_dump(),
+            )
+        existing_ldap = await provider.get_user_by_oauth(LDAP_PROVIDER_TAG, ldap_account)
+        if existing_ldap is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.EMAIL_ALREADY_EXISTS,
+                    message=f"域账号 {ldap_account} 已注册，绑定邮箱为 {existing_ldap.email}",
+                ).model_dump(),
+            )
+    elif not body.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Password is required").model_dump(),
+        )
+
     invite_repo = get_invite_code_repo(request)
     if not await invite_repo.claim(body.invite_code):
         raise HTTPException(
@@ -452,18 +576,33 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         )
 
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
-    except ValueError:
+        if ldap_enabled:
+            user = await provider.create_user(
+                email=body.email,
+                password=None,
+                system_role="user",
+                oauth_provider=LDAP_PROVIDER_TAG,
+                oauth_id=ldap_account,
+            )
+        else:
+            user = await provider.create_user(email=body.email, password=body.password, system_role="user")
+    except ValueError as exc:
         await invite_repo.release(body.invite_code)
+        message = str(exc)
+        if message.startswith("Domain account already registered:"):
+            account = message.split(":", 1)[1].strip()
+            existing = await provider.get_user_by_oauth(LDAP_PROVIDER_TAG, account)
+            detail = f"域账号 {account} 已注册，绑定邮箱为 {existing.email}。" if existing else f"域账号 {account} 已注册。"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message=detail).model_dump(),
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-        )
+        ) from exc
 
     await invite_repo.complete(body.invite_code, str(user.id))
-
-    token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
 
@@ -585,7 +724,10 @@ async def setup_status(request: Request):
 
             async def _compute_setup_status() -> dict:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0}
+                return {
+                    "needs_setup": admin_count == 0,
+                    "ldap_enabled": get_auth_config().ldap.enabled,
+                }
 
             task = asyncio.create_task(_compute_setup_status())
             _SETUP_STATUS_INFLIGHT[client_ip] = task

@@ -506,8 +506,8 @@ export const enUS: Translations = {
       editModel: "Edit model",
       formDescription:
         "Choose OpenAI or Anthropic protocol. The model name must be unique within your account.",
-      name: "Internal name",
-      namePlaceholder: "my-gpt4o",
+      name: "Name",
+      namePlaceholder: "yumcode-pro",
       displayName: "Display name",
       displayNamePlaceholder: "My GPT-4o",
       provider: "Provider protocol",

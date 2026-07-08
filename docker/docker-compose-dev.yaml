@@ -5,6 +5,7 @@
 #   - nginx: Reverse proxy (port 2026)
 #   - frontend: Frontend Next.js dev server (port 3000)
 #   - gateway: Backend Gateway API + agent runtime (port 8001)
+#   - postgres: PostgreSQL (when database.backend: postgres in config.yaml)
 #   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
@@ -117,6 +118,27 @@ services:
       - deer-flow-dev
     restart: unless-stopped
 
+  # ── PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: deer-flow-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-deerflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
+      POSTGRES_DB: ${POSTGRES_DB:-deerflow}
+    volumes:
+      - deerflow-pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deerflow} -d ${POSTGRES_DB:-deerflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Backend - Gateway API
   gateway:
     build:
@@ -134,6 +156,9 @@ services:
     # this file readable and lets the script be linted (shellcheck-clean).
     # See PR #2767 / Issue #2754.
     command: ["sh", "/usr/local/bin/dev-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       # Mount the dev entrypoint as a read-only file so edits to the script
       # take effect on `make docker-restart` without requiring an image rebuild.
@@ -178,6 +203,7 @@ services:
       # Trust the fixed Docker Compose subnet so the bundled nginx can forward
       # protocol/origin headers. Override via GATEWAY_TRUSTED_PROXIES in .env.
       - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.200.0/24}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-deerflow}:${POSTGRES_PASSWORD:-deerflow}@postgres:5432/${POSTGRES_DB:-deerflow}
     env_file:
       - ../.env
     extra_hosts:
@@ -193,6 +219,7 @@ volumes:
   gateway-venv:
   gateway-uv-cache:
   frontend-next-cache:
+  deerflow-pgdata:
 
 networks:
   deer-flow-dev:

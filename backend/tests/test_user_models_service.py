@@ -98,6 +98,22 @@ def test_to_model_config_maps_provider_to_use():
     assert config.api_key == "sk-test"
 
 
+def test_to_model_config_maps_gaia_to_openai_use():
+    row = {
+        "name": "yumcode-pro",
+        "display_name": "Yumcode Pro",
+        "provider": "gaia",
+        "model": "yumcode-pro",
+        "base_url": "http://api.llm.prd.yumc.local/v1",
+        "api_key_ref": ModelSecretStore().encrypt_api_key("sk-gaia"),
+    }
+    config = to_model_config(row, secret_store=ModelSecretStore())
+    assert config.use == "langchain_openai:ChatOpenAI"
+    assert config.model == "yumcode-pro"
+    assert config.base_url == "http://api.llm.prd.yumc.local/v1"
+    assert config.api_key == "sk-gaia"
+
+
 def test_merge_model_configs_appends_and_overrides_by_name():
     from deerflow.config.app_config import AppConfig
     from deerflow.config.sandbox_config import SandboxConfig
