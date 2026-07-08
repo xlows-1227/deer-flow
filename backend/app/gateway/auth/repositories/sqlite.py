@@ -65,7 +65,11 @@ class SQLiteUserRepository(UserRepository):
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create_user(self, user: User) -> User:
-        """Insert a new user. Raises ``ValueError`` on duplicate email."""
+        """Insert a new user.
+
+        Raises ``ValueError`` with a short reason on unique-constraint violations
+        (duplicate email or duplicate ``oauth_provider`` + ``oauth_id`` pair).
+        """
         row = self._user_to_row(user)
         async with self._sf() as session:
             session.add(row)
@@ -73,6 +77,9 @@ class SQLiteUserRepository(UserRepository):
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
+                detail = str(exc.orig) if exc.orig else str(exc)
+                if user.oauth_provider and user.oauth_id and "idx_users_oauth_identity" in detail:
+                    raise ValueError(f"Domain account already registered: {user.oauth_id}") from exc
                 raise ValueError(f"Email already registered: {user.email}") from exc
         return user
 
@@ -120,7 +127,12 @@ class SQLiteUserRepository(UserRepository):
             return await session.scalar(stmt) or 0
 
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
-        stmt = select(UserRow).where(UserRow.oauth_provider == provider, UserRow.oauth_id == oauth_id)
+        # AD sAMAccountName matching is case-insensitive; normalise for lookup.
+        normalized = oauth_id.strip().lower()
+        stmt = select(UserRow).where(
+            UserRow.oauth_provider == provider,
+            func.lower(UserRow.oauth_id) == normalized,
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()

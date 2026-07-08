@@ -1,0 +1,18 @@
+services:
+  frontend:
+    image: ghcr.io/xlows-1227/deer-flow-frontend:${DEER_FLOW_IMAGE_TAG}
+    build: !reset null
+  gateway:
+    image: ghcr.io/xlows-1227/deer-flow-backend:${DEER_FLOW_IMAGE_TAG}
+    build: !reset null
+    security_opt:
+      - seccomp:unconfined
+    pids_limit: -1
+    command: >-
+      sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app
+      --host 0.0.0.0 --port 8001"
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535

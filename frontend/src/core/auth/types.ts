@@ -40,6 +40,7 @@ const AUTH_ERROR_CODES = [
   "token_expired",
   "token_invalid",
   "user_not_found",
+  "user_not_registered",
   "email_already_exists",
   "invite_code_invalid",
   "provider_not_found",

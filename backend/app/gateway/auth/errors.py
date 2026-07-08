@@ -17,6 +17,7 @@ class AuthErrorCode(StrEnum):
     TOKEN_EXPIRED = "token_expired"
     TOKEN_INVALID = "token_invalid"
     USER_NOT_FOUND = "user_not_found"
+    USER_NOT_REGISTERED = "user_not_registered"
     EMAIL_ALREADY_EXISTS = "email_already_exists"
     INVITE_CODE_INVALID = "invite_code_invalid"
     PROVIDER_NOT_FOUND = "provider_not_found"
