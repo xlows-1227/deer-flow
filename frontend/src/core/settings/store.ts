@@ -158,6 +158,10 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
       ...current,
       ...(value as ThreadContextSettings),
     };
+    // reasoning_effort is a global advanced setting (Settings page); never
+    // snapshot it into per-thread context, or later changes to the global
+    // value would not reach existing threads.
+    delete nextContext.reasoning_effort;
     threadContexts.set(threadId, nextContext);
     saveThreadContext(threadId, nextContext);
     emitChange();

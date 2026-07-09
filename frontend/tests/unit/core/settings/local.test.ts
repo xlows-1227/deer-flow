@@ -14,10 +14,12 @@ test("defaults token usage to header total plus per-turn breakdown", () => {
 
 test("defaults chat mode to flash", () => {
   expect(DEFAULT_LOCAL_SETTINGS.context.mode).toBe("flash");
-  expect(DEFAULT_LOCAL_SETTINGS.context.reasoning_effort).toBe("minimal");
+  // No default reasoning_effort: per-mode defaults apply at submit time and
+  // an explicit value would permanently override them.
+  expect(DEFAULT_LOCAL_SETTINGS.context.reasoning_effort).toBeUndefined();
 });
 
-test("thread settings do not inherit global chat context", () => {
+test("thread settings do not inherit global chat context except reasoning effort", () => {
   const settings = applyThreadContextOverride(
     {
       ...DEFAULT_LOCAL_SETTINGS,
@@ -32,7 +34,13 @@ test("thread settings do not inherit global chat context", () => {
     undefined,
   );
 
-  expect(settings.context).toEqual(DEFAULT_LOCAL_SETTINGS.context);
+  // model/mode/skill are per-thread and reset to defaults, but the
+  // reasoning-effort override is a global advanced setting that applies
+  // to every thread.
+  expect(settings.context).toEqual({
+    ...DEFAULT_LOCAL_SETTINGS.context,
+    reasoning_effort: "high",
+  });
 });
 
 test("thread settings restore only the selected thread context", () => {

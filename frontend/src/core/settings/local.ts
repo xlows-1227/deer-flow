@@ -12,7 +12,10 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   context: {
     model_name: undefined,
     mode: "flash",
-    reasoning_effort: "minimal",
+    // No default reasoning_effort: leave it undefined so per-mode defaults
+    // apply at submit time. Advanced users can set a global override from
+    // the Settings page.
+    reasoning_effort: undefined,
   },
 };
 
@@ -108,6 +111,10 @@ export function getThreadContext(
   if (json) {
     try {
       const context = JSON.parse(json) as ThreadContextSettings;
+      // Drop legacy per-thread reasoning_effort written by the removed
+      // input-box selector; the only override source now is the global
+      // setting from the Settings page.
+      delete context.reasoning_effort;
       return {
         ...context,
       };
@@ -145,6 +152,10 @@ export function applyThreadContextOverride(
     ...settings,
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
+      // Thread context deliberately does not inherit the global chat context,
+      // but the reasoning-effort override is a global advanced setting
+      // (Settings → Models) and must apply to every thread.
+      reasoning_effort: settings.context.reasoning_effort,
       ...threadContext,
     },
   };

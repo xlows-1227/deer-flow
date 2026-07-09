@@ -74,7 +74,7 @@ function defaultEffort(
   mode: ScheduledTaskMode,
 ): ScheduledTaskReasoningEffort | null {
   if (mode === "ultra") return "high";
-  if (mode === "pro") return "medium";
+  if (mode === "pro") return "low";
   if (mode === "thinking") return "low";
   return null;
 }

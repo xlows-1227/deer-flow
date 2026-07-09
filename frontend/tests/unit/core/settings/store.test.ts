@@ -35,6 +35,8 @@ test("copyThreadContext migrates temporary thread settings to created thread", a
   updateThreadSettings("temp-thread", "context", {
     model_name: "fast-model",
     mode: "flash",
+    // reasoning_effort is a global setting and is stripped from per-thread
+    // context snapshots.
     reasoning_effort: "minimal",
     skill_name: "sales-report",
     connector_ids: ["connector-1"],
@@ -49,7 +51,6 @@ test("copyThreadContext migrates temporary thread settings to created thread", a
   expect(getThreadContextSnapshot("created-thread")).toEqual({
     model_name: "fast-model",
     mode: "flash",
-    reasoning_effort: "minimal",
     skill_name: "sales-report",
     connector_ids: ["connector-1"],
   });

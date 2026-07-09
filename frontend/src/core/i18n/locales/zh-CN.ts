@@ -507,7 +507,11 @@ export const zhCN: Translations = {
         "允许使用思考、专业、超强模式。关闭后该模型仅可使用闪速模式。",
       supportsReasoningEffort: "推理力度",
       supportsReasoningEffortDescription:
-        "在聊天中显示推理力度选择器（minimal / low / medium / high）。",
+        "向该模型传递推理力度参数（minimal / low / medium / high）。",
+      reasoningEffortOverride: "推理深度（全局覆盖）",
+      reasoningEffortOverrideDescription:
+        "自动时跟随各模式默认值（思考/Pro：低，Ultra：高）；设置后对所有对话生效。",
+      reasoningEffortAuto: "自动",
       disabled: "已禁用",
       loadFailed: "加载自定义模型失败",
       saveFailed: "保存自定义模型失败",

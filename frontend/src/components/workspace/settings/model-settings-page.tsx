@@ -49,6 +49,7 @@ import {
   type CustomModel,
   type ModelProvider,
 } from "@/core/models/config-api";
+import { useLocalSettings } from "@/core/settings";
 import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
@@ -111,12 +112,17 @@ function formFromModel(model: CustomModel): ModelForm {
   };
 }
 
+type ReasoningEffortOverride = "minimal" | "low" | "medium" | "high";
+
+const REASONING_EFFORT_AUTO = "auto";
+
 export function ModelSettingsPage({
   settingsOpen = true,
   onFormOpenChange,
 }: ModelSettingsPageProps) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const [localSettings, setLocalSettings] = useLocalSettings();
   const [models, setModels] = useState<CustomModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -262,6 +268,47 @@ export function ModelSettingsPage({
           <PlusIcon className="size-4" />
           {t.settings.models.addModel}
         </Button>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+        <div>
+          <p className="text-sm font-medium">
+            {t.settings.models.reasoningEffortOverride}
+          </p>
+          <p className="text-muted-foreground text-xs">
+            {t.settings.models.reasoningEffortOverrideDescription}
+          </p>
+        </div>
+        <Select
+          value={localSettings.context.reasoning_effort ?? REASONING_EFFORT_AUTO}
+          onValueChange={(value) =>
+            setLocalSettings("context", {
+              reasoning_effort:
+                value === REASONING_EFFORT_AUTO
+                  ? undefined
+                  : (value as ReasoningEffortOverride),
+            })
+          }
+        >
+          <SelectTrigger className="w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={REASONING_EFFORT_AUTO}>
+              {t.settings.models.reasoningEffortAuto}
+            </SelectItem>
+            <SelectItem value="minimal">
+              {t.inputBox.reasoningEffortMinimal}
+            </SelectItem>
+            <SelectItem value="low">{t.inputBox.reasoningEffortLow}</SelectItem>
+            <SelectItem value="medium">
+              {t.inputBox.reasoningEffortMedium}
+            </SelectItem>
+            <SelectItem value="high">
+              {t.inputBox.reasoningEffortHigh}
+            </SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       {loading ? (
