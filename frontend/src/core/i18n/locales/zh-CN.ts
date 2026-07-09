@@ -389,7 +389,7 @@ export const zhCN: Translations = {
   // Settings
   settings: {
     title: "设置",
-    description: "根据你的偏好调整 DeerFlow 的界面和行为。",
+    description: "根据你的偏好调整 Friday 的界面和行为。",
     sections: {
       account: "账号",
       appearance: "外观",
@@ -659,7 +659,7 @@ export const zhCN: Translations = {
       deniedHint:
         "通知权限已被拒绝。可在浏览器的网站设置中重新开启，以接收完成提醒。",
       testButton: "发送测试通知",
-      testTitle: "DeerFlow",
+      testTitle: "Friday",
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       secureContextRequired:

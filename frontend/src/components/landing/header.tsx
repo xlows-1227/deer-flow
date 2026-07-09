@@ -31,7 +31,7 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
           target={isExternalHome ? "_blank" : "_self"}
           rel={isExternalHome ? "noopener noreferrer" : undefined}
         >
-          <h1 className="font-serif text-xl">DeerFlow</h1>
+          <h1 className="font-serif text-xl">Friday</h1>
         </a>
       </div>
       <nav className="mr-8 ml-auto flex items-center gap-8 text-sm font-medium">
