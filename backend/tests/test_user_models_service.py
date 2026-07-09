@@ -112,6 +112,38 @@ def test_to_model_config_maps_gaia_to_openai_use():
     assert config.model == "yumcode-pro"
     assert config.base_url == "http://api.llm.prd.yumc.local/v1"
     assert config.api_key == "sk-gaia"
+    assert config.supports_thinking is True
+    assert config.supports_reasoning_effort is True
+
+
+@pytest.mark.asyncio
+async def test_user_model_service_persists_capability_flags(user_model_service):
+    service, _secret_store = user_model_service
+    created = await service.create_model(
+        "user-a",
+        UserModelCreateRequest(
+            name="capable-model",
+            provider="openai",
+            model="gpt-4o",
+            supports_thinking=False,
+            supports_reasoning_effort=False,
+        ),
+    )
+
+    assert created.supports_thinking is False
+    assert created.supports_reasoning_effort is False
+
+    configs = await service.list_model_configs("user-a")
+    assert configs[0].supports_thinking is False
+    assert configs[0].supports_reasoning_effort is False
+
+    updated = await service.update_model(
+        "user-a",
+        created.id,
+        UserModelUpdateRequest(supports_thinking=True, supports_reasoning_effort=True),
+    )
+    assert updated.supports_thinking is True
+    assert updated.supports_reasoning_effort is True
 
 
 def test_merge_model_configs_appends_and_overrides_by_name():

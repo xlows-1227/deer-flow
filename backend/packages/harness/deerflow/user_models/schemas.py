@@ -30,6 +30,8 @@ class UserModelRecord(BaseModel):
     model: str
     base_url: str | None = None
     enabled: bool = True
+    supports_thinking: bool = True
+    supports_reasoning_effort: bool = True
     has_api_key: bool = False
     api_key_last_four: str | None = None
     created_at: str | None = None
@@ -44,6 +46,8 @@ class UserModelCreateRequest(BaseModel):
     base_url: str | None = Field(default=None, max_length=512)
     api_key: str | None = Field(default=None, max_length=512)
     enabled: bool = True
+    supports_thinking: bool = True
+    supports_reasoning_effort: bool = True
 
 
 class UserModelUpdateRequest(BaseModel):
@@ -54,6 +58,8 @@ class UserModelUpdateRequest(BaseModel):
     base_url: str | None = Field(default=None, max_length=512)
     api_key: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
+    supports_thinking: bool | None = None
+    supports_reasoning_effort: bool | None = None
 
 
 class UserModelListResponse(BaseModel):

@@ -12,6 +12,8 @@ export interface CustomModel {
   model: string;
   base_url: string | null;
   enabled: boolean;
+  supports_thinking: boolean;
+  supports_reasoning_effort: boolean;
   has_api_key: boolean;
   api_key_last_four: string | null;
   created_at: string | null;
@@ -26,6 +28,8 @@ export interface CustomModelCreateInput {
   base_url?: string | null;
   api_key?: string | null;
   enabled?: boolean;
+  supports_thinking?: boolean;
+  supports_reasoning_effort?: boolean;
 }
 
 export interface CustomModelUpdateInput {
@@ -36,6 +40,8 @@ export interface CustomModelUpdateInput {
   base_url?: string | null;
   api_key?: string | null;
   enabled?: boolean;
+  supports_thinking?: boolean;
+  supports_reasoning_effort?: boolean;
 }
 
 export const MASKED_API_KEY = "***";

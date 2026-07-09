@@ -522,6 +522,12 @@ export const enUS: Translations = {
       enabled: "Enabled",
       enabledDescription:
         "Disabled models stay saved but won't appear in chat.",
+      supportsThinking: "Thinking modes",
+      supportsThinkingDescription:
+        "Allow thinking, pro, and ultra modes. Disable to restrict this model to flash mode only.",
+      supportsReasoningEffort: "Reasoning effort",
+      supportsReasoningEffortDescription:
+        "Show the reasoning effort selector (minimal / low / medium / high) in chat.",
       disabled: "Disabled",
       loadFailed: "Failed to load custom models",
       saveFailed: "Failed to save custom model",

@@ -25,6 +25,8 @@ class UserModelRow(Base):
     api_key_ref: Mapped[str | None] = mapped_column(String(512))
     api_key_last_four: Mapped[str | None] = mapped_column(String(4))
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supports_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supports_reasoning_effort: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

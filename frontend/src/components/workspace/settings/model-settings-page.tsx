@@ -62,6 +62,8 @@ type ModelForm = {
   apiKey: string;
   hasStoredKey: boolean;
   enabled: boolean;
+  supportsThinking: boolean;
+  supportsReasoningEffort: boolean;
 };
 
 const GAIA_DEFAULTS = {
@@ -85,6 +87,8 @@ const emptyForm: ModelForm = {
   apiKey: "",
   hasStoredKey: false,
   enabled: true,
+  supportsThinking: true,
+  supportsReasoningEffort: true,
 };
 
 type ModelSettingsPageProps = {
@@ -102,6 +106,8 @@ function formFromModel(model: CustomModel): ModelForm {
     apiKey: model.has_api_key ? MASKED_API_KEY : "",
     hasStoredKey: model.has_api_key,
     enabled: model.enabled,
+    supportsThinking: model.supports_thinking ?? true,
+    supportsReasoningEffort: model.supports_reasoning_effort ?? true,
   };
 }
 
@@ -174,6 +180,8 @@ export function ModelSettingsPage({
           model: modelId,
           base_url: form.baseUrl.trim() || null,
           enabled: form.enabled,
+          supports_thinking: form.supportsThinking,
+          supports_reasoning_effort: form.supportsReasoningEffort,
           ...(apiKey !== undefined ? { api_key: apiKey } : {}),
         });
         toast.success(t.settings.models.updateSuccess);
@@ -185,6 +193,8 @@ export function ModelSettingsPage({
           base_url: form.baseUrl.trim() || null,
           api_key: form.apiKey.trim() || null,
           enabled: form.enabled,
+          supports_thinking: form.supportsThinking,
+          supports_reasoning_effort: form.supportsReasoningEffort,
         });
         toast.success(t.settings.models.createSuccess);
       }
@@ -427,6 +437,43 @@ export function ModelSettingsPage({
                 }
               />
             </label>
+
+            <div className="flex items-center justify-between rounded-lg border px-3 py-2">
+              <div>
+                <p className="text-sm font-medium">
+                  {t.settings.models.supportsThinking}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  {t.settings.models.supportsThinkingDescription}
+                </p>
+              </div>
+              <Switch
+                checked={form.supportsThinking}
+                onCheckedChange={(supportsThinking) =>
+                  setForm((current) => ({ ...current, supportsThinking }))
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg border px-3 py-2">
+              <div>
+                <p className="text-sm font-medium">
+                  {t.settings.models.supportsReasoningEffort}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  {t.settings.models.supportsReasoningEffortDescription}
+                </p>
+              </div>
+              <Switch
+                checked={form.supportsReasoningEffort}
+                onCheckedChange={(supportsReasoningEffort) =>
+                  setForm((current) => ({
+                    ...current,
+                    supportsReasoningEffort,
+                  }))
+                }
+              />
+            </div>
 
             <div className="flex items-center justify-between rounded-lg border px-3 py-2">
               <div>

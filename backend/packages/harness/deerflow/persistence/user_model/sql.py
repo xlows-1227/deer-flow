@@ -27,6 +27,8 @@ def _row_to_dict(row: UserModelRow) -> dict[str, Any]:
         "api_key_ref": row.api_key_ref,
         "api_key_last_four": row.api_key_last_four,
         "enabled": row.enabled,
+        "supports_thinking": row.supports_thinking,
+        "supports_reasoning_effort": row.supports_reasoning_effort,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -62,6 +64,8 @@ class UserModelRepository:
             api_key_ref=values.get("api_key_ref"),
             api_key_last_four=values.get("api_key_last_four"),
             enabled=bool(values.get("enabled", True)),
+            supports_thinking=bool(values.get("supports_thinking", True)),
+            supports_reasoning_effort=bool(values.get("supports_reasoning_effort", True)),
         )
         async with self._sf() as session:
             session.add(row)
@@ -101,6 +105,8 @@ class UserModelRepository:
                 "api_key_ref",
                 "api_key_last_four",
                 "enabled",
+                "supports_thinking",
+                "supports_reasoning_effort",
             ):
                 if field in values:
                     setattr(row, field, values[field])

@@ -66,6 +66,11 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: deer-flow-postgres
+    security_opt:
+      # Some CentOS 7 kernels/docker builds have overly restrictive default seccomp
+      # that can break PostgreSQL's startup file operations (EPERM on postmaster.pid / pg_wal).
+      # Prefer this over `privileged: true`.
+      - seccomp=unconfined
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-deerflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
