@@ -502,6 +502,12 @@ export const zhCN: Translations = {
       apiKeyMissing: "未配置",
       enabled: "启用",
       enabledDescription: "禁用的模型会保留但不会出现在聊天中。",
+      supportsThinking: "思考模式",
+      supportsThinkingDescription:
+        "允许使用思考、专业、超强模式。关闭后该模型仅可使用闪速模式。",
+      supportsReasoningEffort: "推理力度",
+      supportsReasoningEffortDescription:
+        "在聊天中显示推理力度选择器（minimal / low / medium / high）。",
       disabled: "已禁用",
       loadFailed: "加载自定义模型失败",
       saveFailed: "保存自定义模型失败",

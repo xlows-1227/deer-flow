@@ -91,10 +91,16 @@ async def _run_pending_alembic_revisions(engine: AsyncEngine, backend: str) -> N
     # stripping ``+aiosqlite`` to fall back to the sync driver would
     # fail with "asyncio extension requires an async driver".
     async_url = engine.url.render_as_string(hide_password=False)
+    # Alembic's Config uses Python's configparser interpolation, which treats
+    # `%` as a special token. If the database password is URL-escaped (e.g.
+    # `#` -> `%23`), `set_main_option()` would raise:
+    #   ValueError: invalid interpolation syntax in '...%23...'
+    # Escape percent signs so configparser will round-trip the raw URL.
+    alembic_url = async_url.replace("%", "%%")
 
     cfg = Config(str(migrations_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(migrations_dir))
-    cfg.set_main_option("sqlalchemy.url", async_url)
+    cfg.set_main_option("sqlalchemy.url", alembic_url)
 
     try:
         # ``command.upgrade`` is blocking; run it on a thread to keep

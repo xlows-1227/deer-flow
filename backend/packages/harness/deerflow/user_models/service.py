@@ -43,6 +43,8 @@ def _record_from_row(row: dict[str, Any]) -> UserModelRecord:
         model=row["model"],
         base_url=row.get("base_url"),
         enabled=bool(row.get("enabled", True)),
+        supports_thinking=bool(row.get("supports_thinking", True)),
+        supports_reasoning_effort=bool(row.get("supports_reasoning_effort", True)),
         has_api_key=bool(row.get("api_key_ref")),
         api_key_last_four=row.get("api_key_last_four"),
         created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
@@ -73,6 +75,9 @@ def to_model_config(row: dict[str, Any], *, secret_store: ModelSecretStore | Non
     if provider == "anthropic":
         kwargs.setdefault("max_tokens", 8192)
 
+    kwargs["supports_thinking"] = bool(row.get("supports_thinking", True))
+    kwargs["supports_reasoning_effort"] = bool(row.get("supports_reasoning_effort", True))
+
     return ModelConfig(**kwargs)
 
 
@@ -94,6 +99,8 @@ class UserModelService:
             "model": payload.model.strip(),
             "base_url": (payload.base_url or DEFAULT_BASE_URLS[payload.provider]).strip() or None,
             "enabled": payload.enabled,
+            "supports_thinking": payload.supports_thinking,
+            "supports_reasoning_effort": payload.supports_reasoning_effort,
         }
         api_key = (payload.api_key or "").strip()
         if api_key:
@@ -124,6 +131,10 @@ class UserModelService:
             values["base_url"] = payload.base_url.strip() or None
         if payload.enabled is not None:
             values["enabled"] = payload.enabled
+        if payload.supports_thinking is not None:
+            values["supports_thinking"] = payload.supports_thinking
+        if payload.supports_reasoning_effort is not None:
+            values["supports_reasoning_effort"] = payload.supports_reasoning_effort
 
         api_key = payload.api_key
         if api_key is not None:

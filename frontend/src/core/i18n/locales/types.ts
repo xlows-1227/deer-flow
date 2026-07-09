@@ -438,6 +438,10 @@ export interface Translations {
       apiKeyMissing: string;
       enabled: string;
       enabledDescription: string;
+      supportsThinking: string;
+      supportsThinkingDescription: string;
+      supportsReasoningEffort: string;
+      supportsReasoningEffortDescription: string;
       disabled: string;
       loadFailed: string;
       saveFailed: string;

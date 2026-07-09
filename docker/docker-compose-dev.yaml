@@ -122,6 +122,10 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: deer-flow-postgres
+    security_opt:
+      # Prefer this over `privileged: true` if PostgreSQL hits EPERM on startup
+      # (postmaster.pid / pg_wal) on older CentOS 7 docker/kernel combinations.
+      - seccomp=unconfined
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-deerflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
