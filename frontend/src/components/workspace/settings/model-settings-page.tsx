@@ -280,7 +280,9 @@ export function ModelSettingsPage({
           </p>
         </div>
         <Select
-          value={localSettings.context.reasoning_effort ?? REASONING_EFFORT_AUTO}
+          value={
+            localSettings.context.reasoning_effort ?? REASONING_EFFORT_AUTO
+          }
           onValueChange={(value) =>
             setLocalSettings("context", {
               reasoning_effort:

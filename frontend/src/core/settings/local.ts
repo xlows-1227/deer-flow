@@ -1,7 +1,10 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
 
+const LOCAL_SETTINGS_SCHEMA_VERSION = 2;
+
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
+  version: LOCAL_SETTINGS_SCHEMA_VERSION,
   notification: {
     enabled: true,
   },
@@ -28,6 +31,11 @@ function isBrowser(): boolean {
 }
 
 export interface LocalSettings {
+  /**
+   * Persisted schema version for browser-local preferences. Version 2 moves
+   * reasoning effort from a per-message choice to an optional global override.
+   */
+  version: number;
   notification: {
     enabled: boolean;
   };
@@ -53,11 +61,27 @@ export interface LocalSettings {
 export type ThreadContextSettings = Partial<LocalSettings["context"]>;
 
 function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
+  const savedVersion =
+    typeof settings?.version === "number" ? settings.version : undefined;
+  const preservesReasoningEffort =
+    savedVersion !== undefined && savedVersion >= LOCAL_SETTINGS_SCHEMA_VERSION;
+  const { reasoning_effort: savedReasoningEffort, ...savedContext } =
+    settings?.context ?? {};
+
   return {
     ...DEFAULT_LOCAL_SETTINGS,
+    version: preservesReasoningEffort
+      ? savedVersion
+      : LOCAL_SETTINGS_SCHEMA_VERSION,
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
-      ...settings?.context,
+      ...savedContext,
+      // Before version 2, this was the input-box's per-message value (and
+      // defaulted to "minimal"). It must not become a global override after
+      // upgrading, otherwise Pro/Thinking never reach their new low default.
+      reasoning_effort: preservesReasoningEffort
+        ? savedReasoningEffort
+        : undefined,
     },
     tokenUsage: {
       ...DEFAULT_LOCAL_SETTINGS.tokenUsage,

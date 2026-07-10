@@ -12,8 +12,9 @@ import {
 } from "./local";
 
 type Listener = () => void;
+type LocalSettingsSectionKey = Exclude<keyof LocalSettings, "version">;
 
-export type LocalSettingsSetter = <K extends keyof LocalSettings>(
+export type LocalSettingsSetter = <K extends LocalSettingsSectionKey>(
   key: K,
   value: Partial<LocalSettings[K]>,
 ) => void;
@@ -59,7 +60,7 @@ function maybeUnregisterStorageListener() {
   storageListenerRegistered = false;
 }
 
-function mergeSettingsSection<K extends keyof LocalSettings>(
+function mergeSettingsSection<K extends LocalSettingsSectionKey>(
   settings: LocalSettings,
   key: K,
   value: Partial<LocalSettings[K]>,
@@ -144,7 +145,7 @@ export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
   emitChange();
 };
 
-export function updateThreadSettings<K extends keyof LocalSettings>(
+export function updateThreadSettings<K extends LocalSettingsSectionKey>(
   threadId: string,
   key: K,
   value: Partial<LocalSettings[K]>,
