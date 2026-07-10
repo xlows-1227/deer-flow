@@ -15,6 +15,7 @@ import { useI18n } from "../i18n/hooks";
 import {
   extractTextFromMessage,
   getMessageTimestamp,
+  isHiddenFromUIMessage,
   repairDynamicContextUserMessageOrder,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -116,10 +117,25 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     }
   });
 
-  return messages.filter((message, index) => {
+  // Keep the earliest position of each message (so history ordering survives
+  // a failed history/thread alignment) but render the freshest copy — later
+  // duplicates usually come from live thread state whose content supersedes
+  // run-event history.
+  const emittedIdentities = new Set<string>();
+  const result: Message[] = [];
+  for (const message of messages) {
     const identity = messageIdentity(message);
-    return !identity || lastIndexByIdentity.get(identity) === index;
-  });
+    if (!identity) {
+      result.push(message);
+      continue;
+    }
+    if (emittedIdentities.has(identity)) {
+      continue;
+    }
+    emittedIdentities.add(identity);
+    result.push(messages[lastIndexByIdentity.get(identity)!]!);
+  }
+  return result;
 }
 
 function withMessageTimestamp(
@@ -331,25 +347,55 @@ function messagesEquivalent(
   return false;
 }
 
-function findHistoryThreadOverlapCutoff(
+// Messages that middlewares inject into checkpoint state (summarization
+// summaries, loop warnings, todo reminders, dynamic-context placeholders)
+// never appear in run-event history, so they must not participate in
+// history/thread overlap alignment — otherwise a single summary message at
+// the head of the live state breaks the strict positional match and the
+// whole thread gets re-appended after history.
+function isAlignmentNoiseMessage(message: Message): boolean {
+  return isHiddenFromUIMessage(message);
+}
+
+function findHistoryThreadOverlap(
   historyMessages: Message[],
   threadMessages: Message[],
-): number {
-  const maxOverlap = Math.min(historyMessages.length, threadMessages.length);
+): { cutoff: number; threadOverlapLen: number } {
+  const alignableHistoryIndexes: number[] = [];
+  historyMessages.forEach((message, index) => {
+    if (!isAlignmentNoiseMessage(message)) {
+      alignableHistoryIndexes.push(index);
+    }
+  });
+  const alignableThreadIndexes: number[] = [];
+  threadMessages.forEach((message, index) => {
+    if (!isAlignmentNoiseMessage(message)) {
+      alignableThreadIndexes.push(index);
+    }
+  });
+
+  const maxOverlap = Math.min(
+    alignableHistoryIndexes.length,
+    alignableThreadIndexes.length,
+  );
   for (let overlapLen = maxOverlap; overlapLen >= 1; overlapLen -= 1) {
-    const historySuffix = historyMessages.slice(
-      historyMessages.length - overlapLen,
-    );
-    const threadPrefix = threadMessages.slice(0, overlapLen);
-    if (
-      historySuffix.every((message, index) =>
-        messagesEquivalent(message, threadPrefix[index]!),
-      )
-    ) {
-      return historyMessages.length - overlapLen;
+    const historyStart = alignableHistoryIndexes.length - overlapLen;
+    const matches = alignableThreadIndexes
+      .slice(0, overlapLen)
+      .every((threadIndex, offset) =>
+        messagesEquivalent(
+          historyMessages[alignableHistoryIndexes[historyStart + offset]!]!,
+          threadMessages[threadIndex]!,
+        ),
+      );
+    if (matches) {
+      return {
+        cutoff: alignableHistoryIndexes[historyStart]!,
+        threadOverlapLen: alignableThreadIndexes[overlapLen - 1]! + 1,
+      };
     }
   }
-  return historyMessages.length;
+  return { cutoff: historyMessages.length, threadOverlapLen: 0 };
 }
 
 function mergeThreadAndOptimisticMessages(
@@ -476,17 +522,17 @@ export function mergeMessages(
   );
 
   // History is a suffix-aligned prefix of thread. Match by id when available and
-  // by human text when run-event ids differ from live thread state.
-  const cutoff = findHistoryThreadOverlapCutoff(
+  // by human text when run-event ids differ from live thread state. Middleware
+  // injected messages (summaries, reminders) are skipped during alignment.
+  const { cutoff, threadOverlapLen } = findHistoryThreadOverlap(
     historyMessages,
     timestampedThreadMessages,
   );
-  const overlapLen = historyMessages.length - cutoff;
   const establishedThreadPrefix = timestampedThreadMessages.slice(
     0,
-    overlapLen,
+    threadOverlapLen,
   );
-  const threadNewSegment = timestampedThreadMessages.slice(overlapLen);
+  const threadNewSegment = timestampedThreadMessages.slice(threadOverlapLen);
 
   return repairDynamicContextUserMessageOrder(
     dedupeMessagesByIdentity([

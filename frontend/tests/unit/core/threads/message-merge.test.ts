@@ -613,6 +613,108 @@ test("mergeMessages keeps repeated human text when positions align across histor
   expect(mergeMessages(history, thread, [])).toEqual(thread);
 });
 
+test("mergeMessages keeps history position when alignment fails and thread re-sends old messages", () => {
+  // Regression: after a failed run + resume, history/thread alignment can fail
+  // and the whole checkpoint message list is appended after history. The old
+  // dedupe kept the LAST occurrence, relocating early messages to the bottom.
+  const oldHuman = {
+    id: "human-1",
+    type: "human",
+    content: "帮我分析一下这个数据",
+    additional_kwargs: { timestamp: "2026-07-09T15:29:04+08:00" },
+  } as Message;
+  const oldAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "好的，我来分析。",
+  } as Message;
+  const continueHuman = {
+    id: "human-2",
+    type: "human",
+    content: "继续",
+  } as Message;
+  // Thread state diverges from history (e.g. summarization rewrote it), so no
+  // suffix/prefix overlap can be found; it still contains the old human.
+  const threadOldHumanCopy = {
+    id: "human-1",
+    type: "human",
+    content: "帮我分析一下这个数据",
+  } as Message;
+  const streamingAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "继续分析中",
+  } as Message;
+
+  const merged = mergeMessages(
+    [oldHuman, oldAi, continueHuman],
+    [threadOldHumanCopy, streamingAi],
+    [],
+  );
+
+  expect(merged.map((message) => message.id)).toEqual([
+    "human-1",
+    "ai-1",
+    "human-2",
+    "ai-2",
+  ]);
+  // The old human stays at its history position with its timestamp preserved.
+  expect(merged[0]!.additional_kwargs?.timestamp).toBe(
+    "2026-07-09T15:29:04+08:00",
+  );
+});
+
+test("mergeMessages aligns history with thread state despite a leading summary message", () => {
+  // Regression: summarization inserts HumanMessage(name="summary") at the head
+  // of checkpoint state. Strict positional alignment used to fail on it,
+  // causing the whole thread list to be re-appended after history.
+  const historyHuman = {
+    id: "human-1",
+    type: "human",
+    content: "hello",
+    additional_kwargs: { timestamp: "2026-07-09T15:00:00+08:00" },
+  } as Message;
+  const historyAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  const summaryMessage = {
+    id: "summary-1",
+    type: "human",
+    name: "summary",
+    content: "Here is a summary of the conversation to date:\n\n...",
+  } as Message;
+  const threadHuman = {
+    id: "human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const threadAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "Hello! I'm Friday.",
+  } as Message;
+  const streamingAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "streaming",
+  } as Message;
+
+  const merged = mergeMessages(
+    [historyHuman, historyAi],
+    [summaryMessage, threadHuman, threadAi, streamingAi],
+    [],
+  );
+
+  expect(merged.map((message) => message.id)).toEqual([
+    "summary-1",
+    "human-1",
+    "ai-1",
+    "ai-2",
+  ]);
+});
+
 test("mergeMessages repairs dynamic context user copy order from checkpoint state", () => {
   const reminder = {
     id: "turn-1",
