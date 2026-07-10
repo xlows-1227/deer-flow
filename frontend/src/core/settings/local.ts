@@ -1,7 +1,10 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
 
+const LOCAL_SETTINGS_SCHEMA_VERSION = 2;
+
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
+  version: LOCAL_SETTINGS_SCHEMA_VERSION,
   notification: {
     enabled: true,
   },
@@ -12,7 +15,10 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   context: {
     model_name: undefined,
     mode: "flash",
-    reasoning_effort: "minimal",
+    // No default reasoning_effort: leave it undefined so per-mode defaults
+    // apply at submit time. Advanced users can set a global override from
+    // the Settings page.
+    reasoning_effort: undefined,
   },
 };
 
@@ -25,6 +31,11 @@ function isBrowser(): boolean {
 }
 
 export interface LocalSettings {
+  /**
+   * Persisted schema version for browser-local preferences. Version 2 moves
+   * reasoning effort from a per-message choice to an optional global override.
+   */
+  version: number;
   notification: {
     enabled: boolean;
   };
@@ -50,11 +61,27 @@ export interface LocalSettings {
 export type ThreadContextSettings = Partial<LocalSettings["context"]>;
 
 function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
+  const savedVersion =
+    typeof settings?.version === "number" ? settings.version : undefined;
+  const preservesReasoningEffort =
+    savedVersion !== undefined && savedVersion >= LOCAL_SETTINGS_SCHEMA_VERSION;
+  const { reasoning_effort: savedReasoningEffort, ...savedContext } =
+    settings?.context ?? {};
+
   return {
     ...DEFAULT_LOCAL_SETTINGS,
+    version: preservesReasoningEffort
+      ? savedVersion
+      : LOCAL_SETTINGS_SCHEMA_VERSION,
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
-      ...settings?.context,
+      ...savedContext,
+      // Before version 2, this was the input-box's per-message value (and
+      // defaulted to "minimal"). It must not become a global override after
+      // upgrading, otherwise Pro/Thinking never reach their new low default.
+      reasoning_effort: preservesReasoningEffort
+        ? savedReasoningEffort
+        : undefined,
     },
     tokenUsage: {
       ...DEFAULT_LOCAL_SETTINGS.tokenUsage,
@@ -108,6 +135,10 @@ export function getThreadContext(
   if (json) {
     try {
       const context = JSON.parse(json) as ThreadContextSettings;
+      // Drop legacy per-thread reasoning_effort written by the removed
+      // input-box selector; the only override source now is the global
+      // setting from the Settings page.
+      delete context.reasoning_effort;
       return {
         ...context,
       };
@@ -145,6 +176,10 @@ export function applyThreadContextOverride(
     ...settings,
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
+      // Thread context deliberately does not inherit the global chat context,
+      // but the reasoning-effort override is a global advanced setting
+      // (Settings → Models) and must apply to every thread.
+      reasoning_effort: settings.context.reasoning_effort,
       ...threadContext,
     },
   };

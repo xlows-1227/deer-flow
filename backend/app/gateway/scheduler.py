@@ -120,10 +120,12 @@ def calculate_next_run(
 
 
 def _default_reasoning_effort(mode: str) -> str | None:
+    # Pro defaults to "low" (not "medium"): its planning behaviour comes from
+    # the TodoList middleware, and lower effort is significantly faster.
     if mode == "ultra":
         return "high"
     if mode == "pro":
-        return "medium"
+        return "low"
     if mode == "thinking":
         return "low"
     return None

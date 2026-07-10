@@ -442,6 +442,9 @@ export interface Translations {
       supportsThinkingDescription: string;
       supportsReasoningEffort: string;
       supportsReasoningEffortDescription: string;
+      reasoningEffortOverride: string;
+      reasoningEffortOverrideDescription: string;
+      reasoningEffortAuto: string;
       disabled: string;
       loadFailed: string;
       saveFailed: string;

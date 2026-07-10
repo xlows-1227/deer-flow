@@ -1232,15 +1232,15 @@ export function useThreadStream({
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
+              // Per-mode defaults; a global override from the Settings page
+              // (context.reasoning_effort) wins when set. Pro defaults to
+              // "low": its planning power comes from the TodoList middleware,
+              // not reasoning depth, and "low" is significantly faster.
               reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
+                context.mode === "flash"
+                  ? undefined
+                  : (context.reasoning_effort ??
+                    (context.mode === "ultra" ? "high" : "low")),
               thread_id: threadId,
               skill_name: context.skill_name,
               connector_ids: context.connector_ids,

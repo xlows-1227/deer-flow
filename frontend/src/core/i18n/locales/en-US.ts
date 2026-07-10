@@ -527,7 +527,11 @@ export const enUS: Translations = {
         "Allow thinking, pro, and ultra modes. Disable to restrict this model to flash mode only.",
       supportsReasoningEffort: "Reasoning effort",
       supportsReasoningEffortDescription:
-        "Show the reasoning effort selector (minimal / low / medium / high) in chat.",
+        "Pass the reasoning effort parameter (minimal / low / medium / high) to this model.",
+      reasoningEffortOverride: "Reasoning effort override",
+      reasoningEffortOverrideDescription:
+        "Auto follows each mode's default (Thinking/Pro: low, Ultra: high). Set a value to override it for all chats.",
+      reasoningEffortAuto: "Auto",
       disabled: "Disabled",
       loadFailed: "Failed to load custom models",
       saveFailed: "Failed to save custom model",
