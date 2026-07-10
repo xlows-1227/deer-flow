@@ -687,7 +687,7 @@ export const enUS: Translations = {
       deniedHint:
         "Notification permission was denied. You can enable it in your browser's site settings to receive completion alerts.",
       testButton: "Send test notification",
-      testTitle: "DeerFlow",
+      testTitle: "Friday",
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       secureContextRequired:
