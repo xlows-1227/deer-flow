@@ -180,11 +180,10 @@ async def patch_draft(
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     try:
-        if payload.skills is not None:
-            await service.set_skills(agent_id, owner_user_id=owner, skills=payload.skills)
-        if payload.connector_grants is not None:
-            await service.set_connector_grants(agent_id, owner_user_id=owner, grants=payload.connector_grants)
-        return await service.update_draft(
+        # Single atomic update: the main row and the skills/connector_grants
+        # sub-tables are committed together under the revision check, so a 409
+        # leaves the sub-tables untouched (code-review Critical-3).
+        return await service.update_draft_bundle(
             agent_id,
             owner_user_id=owner,
             revision=payload.revision,
@@ -193,6 +192,8 @@ async def patch_draft(
             model_name=payload.model_name,
             tool_groups=payload.tool_groups,
             quota_overrides=payload.quota_overrides,
+            skills=payload.skills,
+            connector_grants=payload.connector_grants,
         )
     except SkillNotSelectableError as exc:
         raise HTTPException(status_code=422, detail={"code": "skill_not_selectable", "message": str(exc)}) from exc

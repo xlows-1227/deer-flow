@@ -129,6 +129,58 @@ class DraftService:
             raise DraftConflictError("draft revision conflict or not found")
         return updated
 
+    async def update_draft_bundle(
+        self,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        revision: int,
+        agent_markdown: str | None = None,
+        soul_markdown: str | None = None,
+        model_name: str | None = None,
+        tool_groups: Sequence[str] | None = None,
+        quota_overrides: Mapping[str, Any] | None = None,
+        skills: Sequence[Mapping[str, str]] | None = None,
+        connector_grants: Sequence[Mapping[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically update the draft main row and its sub-tables (Critical-3).
+
+        Skills and connector grants are validated *before* any write, then the
+        main row + sub-tables are committed in a single transaction gated by the
+        ``revision`` check. A stale revision means nothing is written — unlike
+        the previous flow which called ``set_skills`` / ``set_connector_grants``
+        before the revision-checked ``update_draft``, leaving sub-tables mutated
+        on a 409.
+        """
+        # Pre-validate skills and connectors before touching the DB so a 422 is
+        # raised without any write, and a 409 leaves everything unchanged.
+        if skills is not None:
+            for entry in skills:
+                name = str(entry["skill_name"])
+                if not self._skills.is_selectable_by(name, owner_user_id):
+                    raise SkillNotSelectableError(f"skill not selectable: {name}")
+        if connector_grants is not None:
+            for entry in connector_grants:
+                instance_id = str(entry["connector_instance_id"])
+                instance = await self._connectors.get_instance(instance_id, owner_id=owner_user_id)
+                if instance is None:
+                    raise ConnectorNotGrantableError(f"connector not grantable: {instance_id}")
+        updated = await self._drafts.update_bundle(
+            agent_id,
+            owner_user_id=owner_user_id,
+            revision=revision,
+            agent_markdown=agent_markdown,
+            soul_markdown=soul_markdown,
+            model_name=model_name,
+            tool_groups=tool_groups,
+            quota_overrides=quota_overrides,
+            skills=skills,
+            connector_grants=connector_grants,
+        )
+        if updated is None:
+            raise DraftConflictError("draft revision conflict or not found")
+        return updated
+
     async def set_skills(
         self,
         agent_id: str,

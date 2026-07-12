@@ -129,6 +129,20 @@ class FakeDraftRepo:
         d["revision"] = revision + 1
         return dict(d)
 
+    async def update_bundle(self, agent_id, *, owner_user_id, revision, skills=None, connector_grants=None, **fields):
+        d = self.drafts.get(agent_id)
+        if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
+            return None
+        for k, v in fields.items():
+            if v is not None:
+                d[k] = v
+        if skills is not None:
+            d["skills"] = list(skills)
+        if connector_grants is not None:
+            d["connector_grants"] = list(connector_grants)
+        d["revision"] = revision + 1
+        return dict(d)
+
     async def replace_skills(self, agent_id, *, owner_user_id, skills):
         d = self.drafts.get(agent_id)
         if d is None or not self._owned(agent_id, owner_user_id):
@@ -331,3 +345,78 @@ async def test_lifecycle_cross_owner_noop(service):
     agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
     await service.suspend(agent["id"], owner_user_id="user-b")
     assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "draft"
+
+
+# ---------------------------------------------------------------------------
+# update_draft_bundle (atomic main + sub-tables under revision check)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_update_draft_bundle_applies_all_fields(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bundle", display_name="B")
+    result = await service.update_draft_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        soul_markdown="# Soul",
+        tool_groups=["web"],
+        skills=[{"skill_name": "reporting", "source": "public"}],
+        connector_grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}],
+    )
+    assert result["revision"] == 2
+    assert result["soul_markdown"] == "# Soul"
+    assert result["tool_groups"] == ["web"]
+    assert [s["skill_name"] for s in result["skills"]] == ["reporting"]
+    assert result["connector_grants"] == [{"connector_instance_id": "conn_1", "capability": "database.query"}]
+
+
+@pytest.mark.anyio
+async def test_update_draft_bundle_stale_revision_leaves_subtables_unchanged(service):
+    """Critical-3: a stale revision must not mutate skills/connector_grants."""
+    agent = await service.create_agent(owner_user_id="user-a", slug="atomic", display_name="A")
+    # First successful bundle write: skills = [reporting], revision -> 2.
+    await service.update_draft_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        skills=[{"skill_name": "reporting", "source": "public"}],
+    )
+    before = await service.get_draft(agent["id"], owner_user_id="user-a")
+    skills_before = {s["skill_name"] for s in before["skills"]}
+
+    # Stale-revision bundle that would change skills + grants. Must raise 409.
+    # Use a selectable skill (secret-tool, owned by user-a) that differs from
+    # the current selection so we can assert the sub-table did NOT change.
+    with pytest.raises(DraftConflictError):
+        await service.update_draft_bundle(
+            agent["id"],
+            owner_user_id="user-a",
+            revision=1,  # stale
+            skills=[{"skill_name": "secret-tool", "source": "private"}],
+            soul_markdown="# changed-by-stale",
+            connector_grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}],
+        )
+    after = await service.get_draft(agent["id"], owner_user_id="user-a")
+    # Sub-tables and revision untouched.
+    assert {s["skill_name"] for s in after["skills"]} == skills_before
+    assert after["connector_grants"] == []
+    assert after["revision"] == before["revision"]
+    assert after["soul_markdown"] == ""
+
+
+@pytest.mark.anyio
+async def test_update_draft_bundle_rejects_unselectable_skill_before_write(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="validate", display_name="V")
+    with pytest.raises(SkillNotSelectableError):
+        await service.update_draft_bundle(
+            agent["id"],
+            owner_user_id="user-a",
+            revision=1,
+            skills=[{"skill_name": "ghost", "source": "public"}],
+            soul_markdown="# should-not-apply",
+        )
+    # Nothing written.
+    after = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert after["revision"] == 1
+    assert after["soul_markdown"] == ""

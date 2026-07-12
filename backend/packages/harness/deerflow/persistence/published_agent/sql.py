@@ -265,6 +265,75 @@ class AgentDraftRepository:
             grants = await self._load_grants(session, agent_id)
             return _draft_to_dict(draft, skills=skills, connector_grants=grants)
 
+    async def update_bundle(
+        self,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        revision: int,
+        agent_markdown: str | None = None,
+        soul_markdown: str | None = None,
+        model_name: str | None = None,
+        tool_groups: Sequence[str] | None = None,
+        quota_overrides: Mapping[str, Any] | None = None,
+        skills: Sequence[Mapping[str, str]] | None = None,
+        connector_grants: Sequence[Mapping[str, str]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically update the draft main row and its sub-tables.
+
+        The revision check gates the *entire* update: if the supplied
+        ``revision`` is stale (or the draft is not owned by the caller) the
+        method returns ``None`` and writes nothing — including the sub-tables.
+        This is the atomic counterpart to calling ``update_with_revision`` +
+        ``replace_skills`` + ``replace_connector_grants`` separately, which
+        could leave sub-tables mutated even when the revision check fails
+        (code-review Critical-3). All changes commit in a single transaction.
+        """
+        async with self._sf() as session:
+            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
+            if draft is None or draft.revision != revision:
+                return None
+            if agent_markdown is not None:
+                draft.agent_markdown = agent_markdown
+            if soul_markdown is not None:
+                draft.soul_markdown = soul_markdown
+            if model_name is not None:
+                draft.model_name = model_name
+            if tool_groups is not None:
+                draft.tool_groups_json = list(tool_groups)
+            if quota_overrides is not None:
+                draft.quota_overrides_json = dict(quota_overrides)
+            if skills is not None:
+                await session.execute(delete(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id))
+                for entry in skills:
+                    session.add(
+                        AgentDraftSkillRow(
+                            agent_id=agent_id,
+                            skill_name=str(entry["skill_name"]),
+                            source=str(entry.get("source", "public")),
+                        )
+                    )
+            if connector_grants is not None:
+                await session.execute(
+                    delete(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id)
+                )
+                for entry in connector_grants:
+                    session.add(
+                        AgentDraftConnectorGrantRow(
+                            agent_id=agent_id,
+                            connector_instance_id=str(entry["connector_instance_id"]),
+                            capability=str(entry["capability"]),
+                        )
+                    )
+            draft.revision = revision + 1
+            draft.updated_by = str(owner_user_id)
+            draft.updated_at = _now()
+            await session.commit()
+            await session.refresh(draft)
+            skills_rows = await self._load_skills(session, agent_id)
+            grants_rows = await self._load_grants(session, agent_id)
+            return _draft_to_dict(draft, skills=skills_rows, connector_grants=grants_rows)
+
     async def replace_skills(
         self,
         agent_id: str,

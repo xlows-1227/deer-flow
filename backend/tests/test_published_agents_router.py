@@ -124,6 +124,21 @@ class _MemDrafts:
         d["revision"] = revision + 1
         return dict(d)
 
+    async def update_bundle(self, agent_id, *, owner_user_id, revision, skills=None, connector_grants=None, **fields):
+        """Atomic counterpart: revision check gates the whole update (Critical-3)."""
+        d = self.drafts.get(agent_id)
+        if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
+            return None
+        for k, v in fields.items():
+            if v is not None:
+                d[k] = v
+        if skills is not None:
+            d["skills"] = list(skills)
+        if connector_grants is not None:
+            d["connector_grants"] = list(connector_grants)
+        d["revision"] = revision + 1
+        return dict(d)
+
     async def replace_skills(self, agent_id, *, owner_user_id, skills):
         d = self.drafts.get(agent_id)
         if d is None or not self._owned(agent_id, owner_user_id):
@@ -262,6 +277,38 @@ def test_archive_suspend_resume():
     assert client.post(f"/api/published-agents/{agent['id']}/resume").status_code == 200
     assert client.post(f"/api/published-agents/{agent['id']}/archive").status_code == 200
     assert client.get(f"/api/published-agents/{agent['id']}").json()["status"] == "archived"
+
+
+def test_patch_draft_revision_conflict_leaves_subtables_unchanged():
+    """Regression (code-review Critical-3): a 409 PATCH must not have partially
+    written skills/connector_grants. The stale-revision PATCH below should leave
+    the draft's sub-tables in their pre-PATCH state."""
+    client, _, _ = _make_client()
+    agent = client.post("/api/published-agents", json={"slug": "bot", "display_name": "Bot"}).json()
+    # Successful first PATCH sets skills + bumps revision to 2.
+    client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={"revision": 1, "skills": [{"skill_name": "reporting", "source": "public"}]},
+    )
+    draft_before = client.get(f"/api/published-agents/{agent['id']}").json()["draft"]
+    skills_before = {s["skill_name"] for s in draft_before["skills"]}
+
+    # Stale-revision PATCH (revision 1 again) that would change skills + grants.
+    stale = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={
+            "revision": 1,
+            "skills": [{"skill_name": "public-tool", "source": "public"}],
+            "connector_grants": [{"connector_instance_id": "conn_own", "capability": "database.query"}],
+        },
+    )
+    assert stale.status_code == 409
+    draft_after = client.get(f"/api/published-agents/{agent['id']}").json()["draft"]
+    # Sub-tables must be unchanged by the rejected PATCH.
+    assert {s["skill_name"] for s in draft_after["skills"]} == skills_before
+    assert draft_after["connector_grants"] == []
+    # And the revision must not have advanced.
+    assert draft_after["revision"] == draft_before["revision"]
 
 
 def test_unknown_agent_returns_404():
