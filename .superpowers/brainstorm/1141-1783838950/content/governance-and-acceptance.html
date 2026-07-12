@@ -1,0 +1,63 @@
+<h2>第一版治理、异常处理与验收</h2>
+<p class="subtitle">Agent 发布与渠道接入解耦；创建者限额可选，平台硬性安全边界不可关闭。</p>
+
+<div class="mockup">
+  <div class="mockup-header">修订后的产品流程</div>
+  <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
+    <div class="placeholder" style="min-width:160px"><strong>创建草稿</strong><br>基本信息<br>AGENT.md / SOUL.md</div>
+    <div style="font-size:22px">→</div>
+    <div class="placeholder" style="min-width:160px"><strong>配置能力</strong><br>Skill<br>Connector 授权</div>
+    <div style="font-size:22px">→</div>
+    <div class="placeholder" style="min-width:160px"><strong>测试并发布</strong><br>无需飞书<br>无需自定义限额</div>
+    <div style="font-size:22px">→</div>
+    <div class="placeholder" style="min-width:180px"><strong>发布后接入</strong><br>创建 API Key<br>可选绑定飞书机器人<br>可选配置 Agent 限额</div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">两层额度模型</div>
+    <div class="mockup-body">
+      <div class="placeholder"><strong>平台硬上限（强制）</strong><br>最大并发、最大运行时长<br>最大输入大小、最大 Token<br>全局速率与异常熔断</div>
+      <div class="placeholder" style="margin-top:8px"><strong>创建者自定义限额（可选）</strong><br>每日 Runs / Tokens<br>Agent 并发、单次超时<br>单个 API Key 独立限额</div>
+      <p>未填写时继承平台默认值，不表示无限。</p>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">权限与密钥边界</div>
+    <div class="mockup-body">
+      <ul>
+        <li>飞书 Secret、Connector Secret 只保存 secret_ref。</li>
+        <li>API Key 仅创建时展示明文，服务端只存哈希。</li>
+        <li>运行时按 Release Skill 清单与 capability grant 取交集。</li>
+        <li>公开请求禁止记忆、管理工具、Skill 编辑和 Agent 自修改。</li>
+        <li>所有外部调用带 agent_id、来源与 correlation_id 审计。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">可预期的失败行为</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <div class="placeholder"><strong>未发布 / 已下线</strong><br>API 返回 404/410<br>飞书返回暂停服务提示</div>
+    <div class="placeholder"><strong>超额 / 过载</strong><br>429 + Retry-After<br>不创建 Runtime Run</div>
+    <div class="placeholder"><strong>Connector 失效</strong><br>工具调用失败可解释<br>通知创建者重新授权</div>
+    <div class="placeholder"><strong>新 Release 异常</strong><br>保留旧快照<br>创建者一键原子回滚</div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">第一版验收主线</div>
+  <div class="mockup-body">
+    <ol>
+      <li>两个平台用户各自创建多个 Agent，数据、Skill、Connector 与密钥严格隔离。</li>
+      <li>Agent 只填写 AGENT.md 或 SOUL.md 也可发布；发布后草稿修改不影响线上。</li>
+      <li>不配置飞书也能生成 Agent API Key，并完成多轮、流式和异步调用。</li>
+      <li>发布后绑定独立飞书应用，私聊用户和群聊会话互相隔离且不产生长期记忆。</li>
+      <li>重新发布、回滚不改变飞书机器人、API URL、API Key 与已有 conversation_id。</li>
+      <li>公开/私有 Skill 只能访问明确授权的 Connector capability，越权调用被拒绝并审计。</li>
+      <li>可选 Agent 限额与强制平台硬上限均能正确拦截，重复事件和重复请求不会重复计费。</li>
+    </ol>
+  </div>
+</div>

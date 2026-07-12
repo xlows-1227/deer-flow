@@ -1,0 +1,64 @@
+<h2>创建者工作台与外部执行链路</h2>
+<p class="subtitle">网页负责创建、配置、测试和发布；飞书与 API 共享同一套稳定的 Agent 执行入口。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Agent Studio · 四步发布向导</div>
+  <div class="mockup-body">
+    <div class="mock-nav">① 基本信息　→　② 指令与能力　→　③ 渠道与 API　→　④ 测试并发布</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px">
+      <div class="placeholder"><strong>1. 基本信息</strong><br>名称 / slug / 描述<br>头像 / 默认模型<br>运行限额</div>
+      <div class="placeholder"><strong>2. 指令与能力</strong><br>AGENT.md 编辑器<br>SOUL.md 编辑器<br>公共 + 私有 Skill<br>Connector 授权</div>
+      <div class="placeholder"><strong>3. 渠道与 API</strong><br>飞书 App ID / Secret<br>连通性测试<br>API Key 创建 / 吊销<br>接入示例</div>
+      <div class="placeholder"><strong>4. 测试并发布</strong><br>草稿沙盒聊天<br>权限与风险检查<br>变更摘要<br>发布 / 回滚</div>
+    </div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">飞书消息链路</div>
+    <div class="mockup-body">
+      <ol>
+        <li>独立机器人收到事件，验签并按 event_id 去重。</li>
+        <li>Channel Binding 解析稳定 agent_id。</li>
+        <li>按飞书用户/私聊/群聊映射独立 thread。</li>
+        <li>检查 Agent 状态、每日额度与并发。</li>
+        <li>加载 current_release 快照并调用 Runtime。</li>
+        <li>流式更新飞书消息，记录用量与审计。</li>
+      </ol>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">External API 链路</div>
+    <div class="mockup-body">
+      <ol>
+        <li>Bearer Key 哈希匹配到稳定 agent_id。</li>
+        <li>Idempotency-Key 去重，执行 Key 级与 Agent 级限额。</li>
+        <li>conversation_id 隔离调用方会话。</li>
+        <li>固定加载 current_release；禁止覆盖 Skill/模型/上下文。</li>
+        <li>支持同步、SSE 流式和异步 Run 查询。</li>
+        <li>响应只展示稳定 Agent 身份，不暴露内部 Release。</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">每次运行构造的 PublishedAgentContext</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <div class="placeholder"><strong>身份</strong><br>owner_user_id<br>agent_id<br>internal release_id</div>
+    <div class="placeholder"><strong>能力</strong><br>Skill revision allowlist<br>Connector capability grants<br>Tool group policy</div>
+    <div class="placeholder"><strong>会话</strong><br>source + external subject<br>internal thread_id<br>memory_enabled=false</div>
+    <div class="placeholder"><strong>治理</strong><br>quota reservation<br>timeout / token cap<br>audit correlation_id</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>与现有项目的衔接</h3>
+  <ul>
+    <li>保留现有 Agent 页面和对话式创建能力，但重构为可直接编辑的 Studio 草稿。</li>
+    <li>复用现有 Skill 列表、LangGraph RunManager、流式事件和飞书适配器。</li>
+    <li>现有全局 ChannelService 改为数据库驱动的多实例 Supervisor，可按单个 Agent 热启停。</li>
+    <li>现有 External API 的 Conversation/Run 能力下沉复用，新增 Agent 专属稳定 API 门面。</li>
+  </ul>
+</div>

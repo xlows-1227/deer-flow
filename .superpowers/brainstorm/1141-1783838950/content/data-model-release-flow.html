@@ -1,0 +1,54 @@
+<h2>数据模型与发布状态机</h2>
+<p class="subtitle">版本只属于创建者控制面；外部消费者始终使用稳定 Agent 身份，不感知版本号。</p>
+
+<div class="mockup">
+  <div class="mockup-header">核心关系</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:1.15fr .85fr 1fr;gap:12px;align-items:start">
+    <div>
+      <div class="placeholder"><strong>agents</strong><br>id · owner_user_id · slug<br>name · description · status<br><strong>current_release_id</strong></div>
+      <div style="text-align:center;font-size:22px">↓ 1:N</div>
+      <div class="placeholder"><strong>agent_releases</strong><br>id · agent_id · release_no<br>AGENT.md / SOUL.md 快照<br>model · limits · checksum<br>published_at · created_by</div>
+    </div>
+    <div>
+      <div class="placeholder"><strong>release_skills</strong><br>release_id · skill_id<br>skill_revision_id</div>
+      <div class="placeholder" style="margin-top:8px"><strong>release_connector_grants</strong><br>release_id · connector_id<br>capability allowlist</div>
+      <div class="placeholder" style="margin-top:8px"><strong>agent_drafts</strong><br>仅创建者编辑<br>保存不影响线上</div>
+    </div>
+    <div>
+      <div class="placeholder"><strong>agent_channels</strong><br>agent_id · type=feishu<br>secret_ref · status<br>稳定绑定，不绑版本</div>
+      <div class="placeholder" style="margin-top:8px"><strong>agent_api_keys</strong><br>agent_id · key_hash<br>name · status · limits<br>稳定凭据，不绑版本</div>
+      <div class="placeholder" style="margin-top:8px"><strong>agent_usage</strong><br>agent_id · source · subject<br>tokens · runs · latency</div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">创建者看到的生命周期</div>
+  <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
+    <div class="placeholder" style="min-width:150px"><strong>草稿</strong><br>自由编辑</div>
+    <div style="font-size:22px">→ 校验</div>
+    <div class="placeholder" style="min-width:150px"><strong>发布快照</strong><br>Release #N</div>
+    <div style="font-size:22px">→ 原子切换</div>
+    <div class="placeholder" style="min-width:170px"><strong>线上 Agent</strong><br>current_release_id = #N</div>
+    <div style="font-size:22px">↔</div>
+    <div class="placeholder" style="min-width:150px"><strong>历史版本</strong><br>一键回滚</div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">外部消费者看到的稳定接口</div>
+  <div class="mockup-body split">
+    <div class="placeholder"><strong>飞书机器人</strong><br>同一个 App / 机器人身份<br>发布和回滚均不改变入口</div>
+    <div class="placeholder"><strong>External API</strong><br>POST /api/v1/agents/{agent_id}/responses<br>响应不返回 release_id / release_no</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>发布校验</h3>
+  <ul>
+    <li>AGENT.md 与 SOUL.md 至少有一个非空，组合 Prompt 通过大小与安全检查。</li>
+    <li>选中的公共/私有 Skill 必须存在且锁定到具体修订；私有 Skill 必须归创建者所有。</li>
+    <li>Skill 声明的 Connector capability 必须全部获得 Agent 级授权。</li>
+    <li>模型、额度、并发、超时必须有效；飞书凭据可先保存，但启用渠道前必须连通性校验成功。</li>
+  </ul>
+</div>

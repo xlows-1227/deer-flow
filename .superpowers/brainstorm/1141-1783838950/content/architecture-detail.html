@@ -1,0 +1,52 @@
+<h2>总体架构：控制面与运行面分离</h2>
+<p class="subtitle">现有 DeerFlow Runtime 保持为核心执行引擎；新模块负责产品化发布、多租户路由与渠道治理。</p>
+
+<div class="mockup">
+  <div class="mockup-header">控制面（登录用户使用）</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <div class="placeholder"><strong>Agent Studio</strong><br>AGENT.md / SOUL.md<br>模型与基础配置</div>
+    <div class="placeholder"><strong>Capability Center</strong><br>公共 Skill / 私有 Skill<br>Connector 授权</div>
+    <div class="placeholder"><strong>Publish Service</strong><br>校验 / 快照 / 版本<br>发布 / 回滚 / 下线</div>
+    <div class="placeholder"><strong>Operations</strong><br>API Key / 配额<br>运行记录 / 审计</div>
+  </div>
+</div>
+
+<div style="text-align:center;font-size:28px;margin:10px 0">↓ <span style="font-size:14px">生成不可变 AgentVersion</span></div>
+
+<div class="mockup">
+  <div class="mockup-header">数据与密钥层</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+    <div class="placeholder"><strong>SQL 元数据</strong><br>Agent / Version / Binding<br>Key / Quota / Audit</div>
+    <div class="placeholder"><strong>版本内容快照</strong><br>AGENT.md / SOUL.md<br>Skill manifest + 校验和</div>
+    <div class="placeholder"><strong>Secret Store</strong><br>飞书 App Secret<br>Connector 凭据 / Key Hash</div>
+  </div>
+</div>
+
+<div style="text-align:center;font-size:28px;margin:10px 0">↓ <span style="font-size:14px">按 agent_id + version_id 解析执行上下文</span></div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">入口与渠道网关</div>
+    <div class="mockup-body">
+      <div class="placeholder"><strong>Feishu Bot Supervisor</strong><br>每个 Agent 一套 App 凭据<br>事件验签、去重、限流、路由</div>
+      <div class="placeholder" style="margin-top:8px"><strong>Agent External API</strong><br>Agent 专属 API Key<br>同步 / 流式 / 异步 Run</div>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">共享运行面</div>
+    <div class="mockup-body">
+      <div class="placeholder"><strong>Published Agent Resolver</strong><br>固定版本 + Owner 上下文<br>Skill / Connector / 配额策略</div>
+      <div class="placeholder" style="margin-top:8px"><strong>现有 DeerFlow Runtime</strong><br>LangGraph / Sandbox / Tools<br>线程、流式事件、产物</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>核心约束</h3>
+  <ul>
+    <li>外部请求永远不能通过参数切换 Agent、版本、Skill 或 Connector。</li>
+    <li>运行时使用 Agent 创建者的资源授权，但禁用全部长期记忆读写。</li>
+    <li>飞书用户和群聊只隔离会话；共享的是发布快照，不共享聊天上下文。</li>
+    <li>一个 Agent 的渠道异常、额度耗尽或密钥轮换不影响其他 Agent。</li>
+  </ul>
+</div>
