@@ -41,9 +41,30 @@ class ConnectorNotGrantableError(Exception):
 
 
 class SkillsIndex(Protocol):
-    """Minimal interface the service needs to authorize skill selection."""
+    """Minimal interface the service needs to authorize skill selection.
+
+    ``get`` returns the authoritative visibility/owner classification for a
+    skill so the service never trusts a client-supplied ``source`` (code-review
+    Important-1). It returns ``None`` for unknown skills.
+    """
 
     def is_selectable_by(self, name: str, owner_user_id: str) -> bool: ...
+
+    def get(self, name: str) -> dict[str, Any] | None: ...
+
+
+def _resolve_skill_source(skills_index: SkillsIndex, name: str, owner_user_id: str) -> str:
+    """Derive the authoritative ``source`` (public|private) for a skill.
+
+    Never trusts a client-supplied value: the platform owns the classification
+    (code-review Important-1). Falls back to ``public`` only when the index has
+    no metadata (legacy indexes), since ``is_selectable_by`` already gated
+    ownership.
+    """
+    info = skills_index.get(name)
+    if info is None:
+        return "public"
+    return "private" if info.get("visibility") == "private" else "public"
 
 
 class ConnectorRepoLike(Protocol):
@@ -154,11 +175,16 @@ class DraftService:
         """
         # Pre-validate skills and connectors before touching the DB so a 422 is
         # raised without any write, and a 409 leaves everything unchanged.
+        # The skill ``source`` is derived authoritatively from the index, never
+        # from the client-supplied value (code-review Important-1).
+        resolved_skills: list[Mapping[str, str]] | None = None
         if skills is not None:
+            resolved_skills = []
             for entry in skills:
                 name = str(entry["skill_name"])
                 if not self._skills.is_selectable_by(name, owner_user_id):
                     raise SkillNotSelectableError(f"skill not selectable: {name}")
+                resolved_skills.append({"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)})
         if connector_grants is not None:
             for entry in connector_grants:
                 instance_id = str(entry["connector_instance_id"])
@@ -174,7 +200,7 @@ class DraftService:
             model_name=model_name,
             tool_groups=tool_groups,
             quota_overrides=quota_overrides,
-            skills=skills,
+            skills=resolved_skills,
             connector_grants=connector_grants,
         )
         if updated is None:
@@ -188,11 +214,13 @@ class DraftService:
         owner_user_id: str,
         skills: Sequence[Mapping[str, str]],
     ) -> dict[str, Any]:
+        resolved: list[Mapping[str, str]] = []
         for entry in skills:
             name = str(entry["skill_name"])
             if not self._skills.is_selectable_by(name, owner_user_id):
                 raise SkillNotSelectableError(f"skill not selectable: {name}")
-        result = await self._drafts.replace_skills(agent_id, owner_user_id=owner_user_id, skills=skills)
+            resolved.append({"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)})
+        result = await self._drafts.replace_skills(agent_id, owner_user_id=owner_user_id, skills=resolved)
         if result is None:
             raise DraftConflictError("draft not found")
         return result

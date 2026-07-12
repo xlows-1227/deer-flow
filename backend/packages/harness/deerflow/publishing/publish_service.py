@@ -164,11 +164,17 @@ class PublishService:
             # every platform (Windows rejects ':' in paths).
             storage_key = checksum.split(":", 1)[1] if ":" in checksum else checksum
             content_ref = self._content.put(namespace="skills", checksum=storage_key, files=files)
-            declared_caps = (self._skills.get(name) or {}).get("caps", []) if hasattr(self._skills, "get") else []
+            info = self._skills.get(name) if hasattr(self._skills, "get") else None
+            declared_caps = (info or {}).get("caps", []) if isinstance(info, dict) else []
+            # Visibility/ownership are derived authoritatively from the skills
+            # index, never from the draft's client-supplied ``source`` (code-
+            # review Important-1).
+            visibility = (info or {}).get("visibility", "public") if isinstance(info, dict) else "public"
+            rev_owner = owner_user_id if visibility == "private" else None
             rev = await self._skill_revs.get_or_create(
                 skill_name=name,
-                owner_user_id=owner_user_id if entry.get("source") == "private" else None,
-                visibility=entry.get("source", "public"),
+                owner_user_id=rev_owner,
+                visibility=visibility,
                 content_checksum=checksum,
                 content_ref=content_ref,
                 declared_connector_caps=declared_caps,
@@ -176,22 +182,39 @@ class PublishService:
             skill_revision_ids.append(rev["id"])
             skill_links.append({"skill_revision_id": rev["id"]})
 
+        # Insert the immutable release row. Two concurrent publishes may both
+        # compute the same ``release_no`` from MAX(release_no)+1; the
+        # (agent_id, release_no) unique constraint turns that race into an
+        # IntegrityError on the loser, which we retry with a fresh release_no
+        # (code-review Important-2). The skill-revision content snapshots above
+        # are already idempotent on content checksum, so re-running the loop is
+        # safe.
+        from sqlalchemy.exc import IntegrityError
+
         release_no = await self._releases.next_release_no(agent_id)
-        release = await self._releases.create(
-            {
-                "agent_id": agent_id,
-                "release_no": release_no,
-                "agent_markdown": draft.get("agent_markdown") or "",
-                "soul_markdown": draft.get("soul_markdown") or "",
-                "model_name": draft.get("model_name"),
-                "tool_groups": draft.get("tool_groups") or [],
-                "quota_overrides": draft.get("quota_overrides") or {},
-                "manifest_checksum": _manifest_checksum(draft, skill_revision_ids),
-                "created_by": owner_user_id,
-            },
-            skills=skill_links,
-            connector_grants=draft.get("connector_grants") or [],
-        )
+        release: dict[str, Any] | None = None
+        for _attempt in range(8):
+            try:
+                release = await self._releases.create(
+                    {
+                        "agent_id": agent_id,
+                        "release_no": release_no,
+                        "agent_markdown": draft.get("agent_markdown") or "",
+                        "soul_markdown": draft.get("soul_markdown") or "",
+                        "model_name": draft.get("model_name"),
+                        "tool_groups": draft.get("tool_groups") or [],
+                        "quota_overrides": draft.get("quota_overrides") or {},
+                        "manifest_checksum": _manifest_checksum(draft, skill_revision_ids),
+                        "created_by": owner_user_id,
+                    },
+                    skills=skill_links,
+                    connector_grants=draft.get("connector_grants") or [],
+                )
+                break
+            except IntegrityError:
+                release_no = await self._releases.next_release_no(agent_id)
+        if release is None:
+            raise PublishError([PublishViolation("RELEASE_RACE", "Could not allocate a release number after retries.")])
         await self._agents.set_current_release(agent_id, owner_user_id=owner_user_id, release_id=release["id"])
         return {"release_id": release["id"], "release_no": release_no, "published_at": release["created_at"]}
 

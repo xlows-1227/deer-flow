@@ -172,6 +172,9 @@ class FakeSkillsIndex:
             return True
         return info["owner"] == owner_user_id
 
+    def get(self, name: str) -> dict[str, Any] | None:
+        return self.skills.get(name)
+
 
 class FakeConnectorRepo:
     def __init__(self, owners: dict[str, str] | None = None) -> None:

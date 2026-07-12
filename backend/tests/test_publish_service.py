@@ -138,6 +138,16 @@ async def test_publish_rejects_invalid_draft_without_changes(env):
 
 
 @pytest.mark.asyncio
+async def test_publish_unknown_agent_raises_agent_not_found(env):
+    """Code-review Important-4: a missing/cross-owner agent surfaces AGENT_NOT_FOUND
+    (which the router maps to 404), distinct from a validation failure (422)."""
+    service, _, _, _ = env
+    with pytest.raises(PublishError) as exc:
+        await service.publish("pa_missing", owner_user_id="user-a")
+    assert exc.value.violations[0].code == "AGENT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
 async def test_publish_without_bindings_succeeds(env):
     """An agent with no feishu/api-key can still publish (acceptance #6 first half)."""
     service, draft_service, _, _ = env

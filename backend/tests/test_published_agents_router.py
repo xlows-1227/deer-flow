@@ -158,6 +158,9 @@ class _MemSkillsIndex:
     def is_selectable_by(self, name, owner_user_id):
         return name in {"reporting", "public-tool"}
 
+    def get(self, name):
+        return {"visibility": "public"} if name in {"reporting", "public-tool"} else None
+
 
 class _MemConnectorRepo:
     async def get_instance(self, connector_id, *, owner_id=...):
@@ -189,13 +192,29 @@ def _build_service(owner: str) -> published_agents.DraftService:
     )
 
 
+class _StubPublishService:
+    """Minimal stub satisfying the router's publish-service surface.
+
+    Only ``list_releases`` is exercised at the router level here; full publish
+    behaviour is covered by the DB-backed ``test_publish_service.py``.
+    """
+
+    def __init__(self) -> None:
+        self.releases: dict[str, list[dict[str, Any]]] = {}
+
+    async def list_releases(self, agent_id, *, owner_user_id):
+        return list(self.releases.get(agent_id, []))
+
+
 def _make_client(owner: str = None):
     owner = owner or str(uuid4())
     app = FastAPI()
     app.add_middleware(_SessionMiddleware, user_id=owner)
     app.include_router(published_agents.router)
     service = _build_service(owner)
+    publish_service = _StubPublishService()
     app.dependency_overrides[published_agents.get_draft_service] = lambda: service
+    app.dependency_overrides[published_agents.get_publish_service] = lambda: publish_service
     return TestClient(app), service, owner
 
 
@@ -315,6 +334,13 @@ def test_unknown_agent_returns_404():
     client, _, _ = _make_client()
     assert client.get("/api/published-agents/pa_missing").status_code == 404
     assert client.patch("/api/published-agents/pa_missing/draft", json={"revision": 1, "soul_markdown": "x"}).status_code == 404
+
+
+def test_list_releases_unknown_or_cross_owner_agent_returns_404():
+    """Regression (code-review Important-4): missing/cross-owner agent must 404, not return []."""
+    client, _, _ = _make_client()
+    # Agent does not exist for this owner.
+    assert client.get("/api/published-agents/pa_missing/releases").status_code == 404
 
 
 def test_non_session_auth_rejected():

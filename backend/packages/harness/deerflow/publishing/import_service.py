@@ -150,12 +150,15 @@ class AgentImportService:
             )
 
         # Resolve skill names against the index; unresolvable ones are reported.
+        # The source/visibility classification is derived authoritatively from
+        # the index (code-review Important-1), never assumed public.
         unresolved: list[str] = []
         selected: list[dict[str, str]] = []
         for skill_name in candidate.skills:
             if self._skills.is_selectable_by(skill_name, owner_user_id):
-                # Source classification left to the caller / index; default public.
-                selected.append({"skill_name": skill_name, "source": "public"})
+                info = self._skills.get(skill_name) if hasattr(self._skills, "get") else None
+                visibility = (info or {}).get("visibility", "public") if isinstance(info, dict) else "public"
+                selected.append({"skill_name": skill_name, "source": "private" if visibility == "private" else "public"})
             else:
                 unresolved.append(skill_name)
         if selected:

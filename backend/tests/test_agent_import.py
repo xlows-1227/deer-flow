@@ -73,6 +73,9 @@ class _MemSkillsIndex:
     def is_selectable_by(self, name, owner_user_id):  # noqa: ARG002
         return name in self.known
 
+    def get(self, name):
+        return {"visibility": "public"} if name in self.known else None
+
 
 def _write_legacy_agent(base: Path, user_id: str, name: str, *, soul="# I am " + "x", model="gpt-x", tool_groups=None, skills=None):
     agent_dir = base / "users" / user_id / "agents" / name

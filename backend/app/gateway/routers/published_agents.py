@@ -263,6 +263,11 @@ async def publish_agent(
     try:
         return await service.publish(agent_id, owner_user_id=owner)
     except PublishError as exc:
+        # Distinguish "agent not found" (404) from validation failures (422) so
+        # the caller can tell a missing resource from an unpublishable draft
+        # (code-review Important-4).
+        if exc.violations and exc.violations[0].code == "AGENT_NOT_FOUND":
+            raise HTTPException(status_code=404, detail="Agent not found") from exc
         raise HTTPException(
             status_code=422,
             detail={
@@ -277,8 +282,15 @@ async def list_releases(
     agent_id: str,
     request: Request,
     service: PublishService = Depends(get_publish_service),
+    draft_service: DraftService = Depends(get_draft_service),
 ) -> list[dict[str, Any]]:
     owner = _user_id(request)
+    # Return 404 (not an empty list) when the agent is missing or belongs to
+    # another owner, so the caller can distinguish "no history" from "not mine"
+    # (code-review Important-4).
+    agent = await draft_service.get_agent(agent_id, owner_user_id=owner)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
     return await service.list_releases(agent_id, owner_user_id=owner)
 
 

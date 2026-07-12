@@ -13,14 +13,24 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 
-def _persist_draft_identity(*, owner_user_id: str, slug: str, display_name: str, soul_markdown: str) -> None:
+def _persist_draft_identity(
+    *,
+    owner_user_id: str,
+    slug: str,
+    display_name: str,
+    soul_markdown: str,
+    description: str,
+    skills: list[str] | None,
+) -> None:
     """Best-effort mirror of a just-created agent into the published-agent DB.
 
     The conversational ``setup_agent`` flow and the structured Studio editor must
-    land on the same draft source of truth (design §16.3). When persistence is
-    available we create the agent identity + draft through ``DraftService`` so
-    there is no "filesystem-only" agent. Failures are logged and swallowed: the
-    filesystem write is the compatibility fallback during the migration window.
+    land on the same draft source of truth (design §16.3, code-review
+    Important-3). When persistence is available we create the agent identity +
+    draft and write the soul/description/skills fields through the same
+    ``DraftService`` so there is no "filesystem-only" agent with missing fields.
+    Failures are logged and swallowed: the filesystem write is the compatibility
+    fallback during the migration window.
     """
     try:
         from deerflow.publishing.factory import build_draft_service
@@ -36,9 +46,30 @@ def _persist_draft_identity(*, owner_user_id: str, slug: str, display_name: str,
                     owner_user_id=owner_user_id,
                     slug=slug,
                     display_name=display_name,
+                    description=description or None,
                 )
             except ValueError:
                 # Already imported / duplicate slug — acceptable on re-runs.
+                return
+            agents = await service.list_agents(owner_user_id)
+            agent = next((a for a in agents if a["slug"] == slug), None)
+            if agent is None:
+                return
+            draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
+            if draft is None:
+                return
+            skill_entries = [{"skill_name": s, "source": "public"} for s in skills] if skills is not None else None
+            try:
+                await service.update_draft_bundle(
+                    agent["id"],
+                    owner_user_id=owner_user_id,
+                    revision=draft["revision"],
+                    soul_markdown=soul_markdown,
+                    skills=skill_entries,
+                )
+            except Exception:  # noqa: BLE001
+                # Skill validation may reject a name the legacy config allowed;
+                # the identity + soul are still mirrored. Swallow to stay best-effort.
                 return
 
         try:
@@ -106,6 +137,8 @@ def setup_agent(
                 slug=agent_name,
                 display_name=agent_name,
                 soul_markdown=soul,
+                description=description,
+                skills=skills,
             )
 
         logger.info(f"[agent_creator] Created agent '{agent_name}' at {agent_dir}")

@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.skill_revision.model import SkillRevisionRow
@@ -65,7 +66,15 @@ class SkillRevisionRepository:
                 declared_connector_caps_json=list(declared_connector_caps),
             )
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Concurrent publish won the insert race on the unique key
+                # (skill_name, owner_user_id, content_checksum): re-read the
+                # now-committed row instead of surfacing a 500 (code-review
+                # Important-2).
+                await session.rollback()
+                row = (await session.execute(stmt)).scalar_one()
             await session.refresh(row)
             return _to_dict(row)
 

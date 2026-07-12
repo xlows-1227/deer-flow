@@ -57,14 +57,25 @@ def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, An
             draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
             if draft is None:
                 return
-            await service.update_draft(
-                agent["id"],
-                owner_user_id=owner_user_id,
-                revision=draft["revision"],
-                soul_markdown=fields.get("soul"),
-                model_name=fields.get("model"),
-                tool_groups=fields.get("tool_groups"),
-            )
+            # Description, skills, tool_groups, model are mirrored alongside
+            # soul so the Studio draft matches the filesystem state (code-review
+            # Important-3). Skills are mapped to the draft shape; the service
+            # derives the authoritative source/visibility.
+            skills_value = fields.get("skills")
+            skill_entries = [{"skill_name": s, "source": "public"} for s in skills_value] if skills_value is not None else None
+            try:
+                await service.update_draft_bundle(
+                    agent["id"],
+                    owner_user_id=owner_user_id,
+                    revision=draft["revision"],
+                    soul_markdown=fields.get("soul"),
+                    model_name=fields.get("model"),
+                    tool_groups=fields.get("tool_groups"),
+                    skills=skill_entries,
+                )
+            except Exception:  # noqa: BLE001
+                # Skill/model validation may reject a legacy value; stay best-effort.
+                return
 
         try:
             loop = asyncio.get_running_loop()
@@ -279,7 +290,7 @@ def update_agent(
     _persist_draft_update(
         owner_user_id=user_id,
         slug=agent_name,
-        fields={"soul": soul, "model": model, "tool_groups": tool_groups},
+        fields={"soul": soul, "model": model, "tool_groups": tool_groups, "skills": skills},
     )
     return Command(
         update={
