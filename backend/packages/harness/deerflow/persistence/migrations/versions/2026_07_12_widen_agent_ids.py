@@ -111,24 +111,16 @@ def upgrade() -> None:
         # Add owner_scope with a server_default via raw ALTER TABLE (avoids a
         # batch rebuild whose INSERT-SELECT could violate NOT NULL on other
         # columns before we backfill them).
-        bind.execute(
-            sa.text(
-                "ALTER TABLE skill_revisions ADD COLUMN owner_scope VARCHAR(64) NOT NULL DEFAULT 'public'"
-            )
-        )
+        bind.execute(sa.text("ALTER TABLE skill_revisions ADD COLUMN owner_scope VARCHAR(64) NOT NULL DEFAULT 'public'"))
         # Backfill: private skills get owner_scope = owner_user_id.
-        bind.execute(
-            sa.text("UPDATE skill_revisions SET owner_scope = COALESCE(owner_user_id, 'public')")
-        )
+        bind.execute(sa.text("UPDATE skill_revisions SET owner_scope = COALESCE(owner_user_id, 'public')"))
         # Collapse duplicate public revisions before the unique constraint is
         # rebuilt (round-3 Critical-2).
         _collapse_duplicate_revisions(bind)
 
     # Backfill any NULL NOT NULL values before the table rebuild.
     bind.execute(sa.text("UPDATE skill_revisions SET visibility = 'public' WHERE visibility IS NULL"))
-    bind.execute(
-        sa.text("UPDATE skill_revisions SET declared_connector_caps_json = '[]' WHERE declared_connector_caps_json IS NULL")
-    )
+    bind.execute(sa.text("UPDATE skill_revisions SET declared_connector_caps_json = '[]' WHERE declared_connector_caps_json IS NULL"))
 
     # Rebuild the table with the widened id, owner_scope, and the new unique
     # constraint. SQLite cannot DROP/ADD CONSTRAINT in place; PostgreSQL can, so
@@ -169,12 +161,7 @@ def upgrade() -> None:
             bind.execute(sa.text("ALTER TABLE skill_revisions DROP CONSTRAINT IF EXISTS uq_skill_revisions_content"))
         except Exception:
             pass
-        bind.execute(
-            sa.text(
-                "ALTER TABLE skill_revisions ADD CONSTRAINT uq_skill_revisions_content "
-                "UNIQUE (skill_name, owner_scope, content_checksum)"
-            )
-        )
+        bind.execute(sa.text("ALTER TABLE skill_revisions ADD CONSTRAINT uq_skill_revisions_content UNIQUE (skill_name, owner_scope, content_checksum)"))
 
 
 def _backfill_not_null_columns(bind: sa.engine.Connection, existing: set[str]) -> None:
@@ -215,22 +202,11 @@ def _collapse_duplicate_revisions(bind: sa.engine.Connection) -> None:
     """
     existing_tables = set(sa.inspect(bind).get_table_names())
     has_release_skills = "agent_release_skills" in existing_tables
-    dup_groups = bind.execute(
-        sa.text(
-            "SELECT skill_name, owner_scope, content_checksum, COUNT(*) AS n "
-            "FROM skill_revisions "
-            "GROUP BY skill_name, owner_scope, content_checksum "
-            "HAVING COUNT(*) > 1"
-        )
-    ).fetchall()
+    dup_groups = bind.execute(sa.text("SELECT skill_name, owner_scope, content_checksum, COUNT(*) AS n FROM skill_revisions GROUP BY skill_name, owner_scope, content_checksum HAVING COUNT(*) > 1")).fetchall()
 
     for skill_name, owner_scope, content_checksum, _n in dup_groups:
         canonical = bind.execute(
-            sa.text(
-                "SELECT id FROM skill_revisions "
-                "WHERE skill_name = :skill_name AND owner_scope = :owner_scope AND content_checksum = :checksum "
-                "ORDER BY created_at ASC, id ASC LIMIT 1"
-            ),
+            sa.text("SELECT id FROM skill_revisions WHERE skill_name = :skill_name AND owner_scope = :owner_scope AND content_checksum = :checksum ORDER BY created_at ASC, id ASC LIMIT 1"),
             {"skill_name": skill_name, "owner_scope": owner_scope, "checksum": content_checksum},
         ).scalar_one_or_none()
         if canonical is None:
@@ -238,11 +214,7 @@ def _collapse_duplicate_revisions(bind: sa.engine.Connection) -> None:
         non_canonical_ids = [
             row[0]
             for row in bind.execute(
-                sa.text(
-                    "SELECT id FROM skill_revisions "
-                    "WHERE skill_name = :skill_name AND owner_scope = :owner_scope AND content_checksum = :checksum "
-                    "AND id <> :canonical"
-                ),
+                sa.text("SELECT id FROM skill_revisions WHERE skill_name = :skill_name AND owner_scope = :owner_scope AND content_checksum = :checksum AND id <> :canonical"),
                 {
                     "skill_name": skill_name,
                     "owner_scope": owner_scope,
@@ -258,20 +230,11 @@ def _collapse_duplicate_revisions(bind: sa.engine.Connection) -> None:
                 # (the PK is (release_id, skill_revision_id), so a blind UPDATE
                 # from dup->canonical could collide with an existing canonical row).
                 bind.execute(
-                    sa.text(
-                        "DELETE FROM agent_release_skills "
-                        "WHERE skill_revision_id = :dup "
-                        "AND EXISTS (SELECT 1 FROM agent_release_skills s "
-                        "  WHERE s.release_id = agent_release_skills.release_id "
-                        "  AND s.skill_revision_id = :canonical)"
-                    ),
+                    sa.text("DELETE FROM agent_release_skills WHERE skill_revision_id = :dup AND EXISTS (SELECT 1 FROM agent_release_skills s   WHERE s.release_id = agent_release_skills.release_id   AND s.skill_revision_id = :canonical)"),
                     {"canonical": canonical, "dup": dup_id},
                 )
                 bind.execute(
-                    sa.text(
-                        "UPDATE agent_release_skills SET skill_revision_id = :canonical "
-                        "WHERE skill_revision_id = :dup"
-                    ),
+                    sa.text("UPDATE agent_release_skills SET skill_revision_id = :canonical WHERE skill_revision_id = :dup"),
                     {"canonical": canonical, "dup": dup_id},
                 )
             bind.execute(sa.text("DELETE FROM skill_revisions WHERE id = :dup"), {"dup": dup_id})

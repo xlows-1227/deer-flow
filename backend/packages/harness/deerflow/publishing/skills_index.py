@@ -120,9 +120,22 @@ class ConnectorServiceRepo:
         if instance is None:
             return None
         data = instance.model_dump() if hasattr(instance, "model_dump") else dict(instance)
-        # A disabled/deleted connector instance is not grantable (rereview
-        # Important-3): only active instances may back a release grant.
+        # Strict active whitelist (third-review Important-3): only
+        # status == 'active' instances are grantable. Pending/error/unknown or
+        # future non-active states are rejected, matching the connector runtime.
         status = str(data.get("status") or "").lower()
-        if status in {"disabled", "deleted", "inactive"}:
+        if status != "active":
             return None
+        # Also reject connector types that the platform has disabled.
+        connector_type = str(data.get("type") or "").lower()
+        if connector_type:
+            try:
+                from deerflow.config.app_config import get_app_config
+
+                enabled_types = {t.lower() for t in get_app_config().connectors.enabled_types}
+                # If enabled_types is empty/unrestricted, allow all; otherwise enforce.
+                if enabled_types and connector_type not in enabled_types:
+                    return None
+            except Exception:
+                pass
         return data

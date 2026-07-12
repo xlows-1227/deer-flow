@@ -137,7 +137,24 @@ def build_publish_service():
         model_index=_resolve_available_model_names(),
         tool_group_whitelist=_resolve_tool_group_whitelist(),
         platform_quota=dict(PLATFORM_QUOTA_DEFAULTS),
+        model_resolver=_resolve_effective_models,
     )
+
+
+async def _resolve_effective_models(owner_user_id: str) -> set[str]:
+    """Owner-aware model resolver (third-review Important-2).
+
+    Returns the effective model names for the owner: config-declared models
+    merged with the owner's user-defined models, so a custom model the owner
+    configured is not misreported as MODEL_NOT_AVAILABLE at publish time.
+    """
+    try:
+        from deerflow.config.effective_config import build_effective_app_config
+
+        config = await build_effective_app_config(user_id=owner_user_id)
+        return {m.name for m in config.models}
+    except Exception:
+        return _resolve_available_model_names()
 
 
 def build_import_service():

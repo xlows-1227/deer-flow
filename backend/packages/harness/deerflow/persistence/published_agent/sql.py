@@ -259,11 +259,7 @@ class AgentDraftRepository:
                 set_values["tool_groups_json"] = list(tool_groups)
             if quota_overrides is not None:
                 set_values["quota_overrides_json"] = dict(quota_overrides)
-            owner_match = (
-                select(PublishedAgentRow.owner_user_id)
-                .where(PublishedAgentRow.id == AgentDraftRow.agent_id)
-                .scalar_subquery()
-            )
+            owner_match = select(PublishedAgentRow.owner_user_id).where(PublishedAgentRow.id == AgentDraftRow.agent_id).scalar_subquery()
             stmt = (
                 update(AgentDraftRow)
                 .where(
@@ -331,11 +327,7 @@ class AgentDraftRepository:
             # Conditional UPDATE gated on both revision AND ownership (ownership
             # is enforced by joining published_agents inside the WHERE clause,
             # since agent_drafts has no denormalised owner column).
-            owner_match = (
-                select(PublishedAgentRow.owner_user_id)
-                .where(PublishedAgentRow.id == AgentDraftRow.agent_id)
-                .scalar_subquery()
-            )
+            owner_match = select(PublishedAgentRow.owner_user_id).where(PublishedAgentRow.id == AgentDraftRow.agent_id).scalar_subquery()
             stmt = (
                 update(AgentDraftRow)
                 .where(
@@ -365,9 +357,7 @@ class AgentDraftRepository:
                         )
                     )
             if connector_grants is not None:
-                await session.execute(
-                    delete(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id)
-                )
+                await session.execute(delete(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id))
                 for entry in connector_grants:
                     session.add(
                         AgentDraftConnectorGrantRow(
@@ -380,9 +370,6 @@ class AgentDraftRepository:
             draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
             if draft is None:
                 return None
-            skills_rows = await self._load_skills(session, agent_id)
-            grants_rows = await self._load_grants(session, agent_id)
-            return _draft_to_dict(draft, skills=skills_rows, connector_grants=grants_rows)
             skills_rows = await self._load_skills(session, agent_id)
             grants_rows = await self._load_grants(session, agent_id)
             return _draft_to_dict(draft, skills=skills_rows, connector_grants=grants_rows)

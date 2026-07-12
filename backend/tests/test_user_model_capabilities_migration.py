@@ -211,33 +211,25 @@ def test_widen_migration_collapses_duplicate_public_revisions(tmp_path):
                 )
             )
             # Two duplicate public revisions (same skill_name, NULL owner, same checksum).
-            await conn.execute(
-                text(
-                    "INSERT INTO skill_revisions (id, skill_name, owner_user_id, content_checksum, content_ref, created_at) "
-                    "VALUES ('skr_a', 'reporting', NULL, 'sha256:x', 'cs://x', '2026-07-12')"
-                )
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO skill_revisions (id, skill_name, owner_user_id, content_checksum, content_ref, created_at) "
-                    "VALUES ('skr_b', 'reporting', NULL, 'sha256:x', 'cs://x', '2026-07-12')"
-                )
-            )
+            await conn.execute(text("INSERT INTO skill_revisions (id, skill_name, owner_user_id, content_checksum, content_ref, created_at) VALUES ('skr_a', 'reporting', NULL, 'sha256:x', 'cs://x', '2026-07-12')"))
+            await conn.execute(text("INSERT INTO skill_revisions (id, skill_name, owner_user_id, content_checksum, content_ref, created_at) VALUES ('skr_b', 'reporting', NULL, 'sha256:x', 'cs://x', '2026-07-12')"))
             # agent_release_skills referencing both duplicates.
-            await conn.execute(
-                text(
-                    "CREATE TABLE agent_release_skills ("
-                    "release_id VARCHAR(32) NOT NULL, "
-                    "skill_revision_id VARCHAR(32) NOT NULL, "
-                    "PRIMARY KEY (release_id, skill_revision_id))"
-                )
-            )
+            await conn.execute(text("CREATE TABLE agent_release_skills (release_id VARCHAR(32) NOT NULL, skill_revision_id VARCHAR(32) NOT NULL, PRIMARY KEY (release_id, skill_revision_id))"))
             await conn.execute(text("INSERT INTO agent_release_skills VALUES ('rel_1', 'skr_a')"))
             await conn.execute(text("INSERT INTO agent_release_skills VALUES ('rel_1', 'skr_b')"))
             # agent_releases is referenced by agent_release_skills.release_id but not
             # needed for this test; create a minimal stub so FK is not violated.
             await conn.execute(
-                text("CREATE TABLE agent_releases (id VARCHAR(32) PRIMARY KEY, agent_id VARCHAR(32) NOT NULL, release_no INT NOT NULL, agent_markdown TEXT NOT NULL DEFAULT '', soul_markdown TEXT NOT NULL DEFAULT '', model_name VARCHAR(128), tool_groups_json JSON NOT NULL DEFAULT '[]', quota_overrides_json JSON NOT NULL DEFAULT '{}', manifest_checksum VARCHAR(128) NOT NULL, created_by VARCHAR(36) NOT NULL, created_at DATETIME NOT NULL)")
+                text(
+                    "CREATE TABLE agent_releases ("
+                    "id VARCHAR(32) PRIMARY KEY, agent_id VARCHAR(32) NOT NULL, "
+                    "release_no INT NOT NULL, agent_markdown TEXT NOT NULL DEFAULT '', "
+                    "soul_markdown TEXT NOT NULL DEFAULT '', model_name VARCHAR(128), "
+                    "tool_groups_json JSON NOT NULL DEFAULT '[]', "
+                    "quota_overrides_json JSON NOT NULL DEFAULT '{}', "
+                    "manifest_checksum VARCHAR(128) NOT NULL, created_by VARCHAR(36) NOT NULL, "
+                    "created_at DATETIME NOT NULL)"
+                )
             )
             await conn.execute(text("INSERT INTO agent_releases (id, agent_id, release_no, manifest_checksum, created_by, created_at) VALUES ('rel_1', 'pa_1', 1, 'sha', 'user', '2026-07-12')"))
 
@@ -253,35 +245,11 @@ def test_widen_migration_collapses_duplicate_public_revisions(tmp_path):
     async def _verify() -> None:
         async with engine_check.connect() as conn:
             # Only one public revision remains.
-            count = (
-                await conn.execute(
-                    text(
-                        "SELECT COUNT(*) FROM skill_revisions "
-                        "WHERE skill_name='reporting' AND content_checksum='sha256:x'"
-                    )
-                )
-            ).scalar_one()
+            count = (await conn.execute(text("SELECT COUNT(*) FROM skill_revisions WHERE skill_name='reporting' AND content_checksum='sha256:x'"))).scalar_one()
             assert count == 1, f"expected 1 canonical revision, got {count}"
             # Both release->skill references now point at the canonical revision.
-            refs = [
-                row[0]
-                for row in (
-                    await conn.execute(
-                        text(
-                            "SELECT skill_revision_id FROM agent_release_skills "
-                            "WHERE release_id='rel_1'"
-                        )
-                    )
-                ).fetchall()
-            ]
-            canonical = (
-                await conn.execute(
-                    text(
-                        "SELECT id FROM skill_revisions "
-                        "WHERE skill_name='reporting' AND content_checksum='sha256:x'"
-                    )
-                )
-            ).scalar_one()
+            refs = [row[0] for row in (await conn.execute(text("SELECT skill_revision_id FROM agent_release_skills WHERE release_id='rel_1'"))).fetchall()]
+            canonical = (await conn.execute(text("SELECT id FROM skill_revisions WHERE skill_name='reporting' AND content_checksum='sha256:x'"))).scalar_one()
             assert set(refs) == {canonical}
 
     asyncio.run(_verify())
@@ -339,4 +307,3 @@ def test_widen_migration_preserves_non_null_constraints(tmp_path):
 
     asyncio.run(_inspect())
     asyncio.run(engine_check.dispose())
-

@@ -42,8 +42,8 @@ def _persist_draft_identity(
 
         async def _run() -> None:
             # Create the identity if it does not exist; on a duplicate slug,
-            # fall through to sync the existing draft rather than returning early
-            # (rereview Important-5).
+            # sync identity metadata + draft rather than returning early
+            # (third-review Important-5).
             try:
                 await service.create_agent(
                     owner_user_id=owner_user_id,
@@ -52,7 +52,17 @@ def _persist_draft_identity(
                     description=description or None,
                 )
             except ValueError:
-                pass  # Already imported / duplicate slug — sync below.
+                # Duplicate slug — still sync the identity metadata in case the
+                # filesystem write changed display_name/description.
+                try:
+                    await service.update_agent_meta(
+                        next((a["id"] for a in await service.list_agents(owner_user_id) if a["slug"] == slug), None),
+                        owner_user_id=owner_user_id,
+                        display_name=display_name,
+                        description=description or None,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             agents = await service.list_agents(owner_user_id)
             agent = next((a for a in agents if a["slug"] == slug), None)
             if agent is None:
@@ -61,8 +71,7 @@ def _persist_draft_identity(
             if draft is None:
                 return
             # Mirror soul first on its own so an unresolvable legacy skill name
-            # cannot block the soul write (rereview Important-5). Skills are
-            # mirrored in a separate best-effort pass.
+            # cannot block the soul write.
             try:
                 await service.update_draft_bundle(
                     agent["id"],
@@ -77,6 +86,9 @@ def _persist_draft_identity(
             refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
             if refreshed is None:
                 return
+            # Attempt to mirror the full skills list. If validation rejects any
+            # legacy name, the soul is already saved and we leave skills
+            # unchanged (best-effort; third-review Important-5).
             skill_entries = [{"skill_name": s, "source": "public"} for s in skills]
             try:
                 await service.update_draft_bundle(
@@ -86,7 +98,7 @@ def _persist_draft_identity(
                     skills=skill_entries,
                 )
             except Exception:  # noqa: BLE001
-                # Skill validation may reject a legacy name; soul is already saved.
+                # Skill validation rejected at least one name; keep soul, skip skills.
                 return
 
         try:

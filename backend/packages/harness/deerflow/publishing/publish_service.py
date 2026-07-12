@@ -96,6 +96,7 @@ class PublishService:
         model_index: set[str],
         tool_group_whitelist: set[str],
         platform_quota: dict[str, int] | None = None,
+        model_resolver: Any = None,
     ) -> None:
         self._agents = published_agent_repo
         self._drafts = draft_repo
@@ -107,6 +108,12 @@ class PublishService:
         self._model_index = model_index
         self._tool_group_whitelist = tool_group_whitelist
         self._platform_quota = platform_quota or dict(PLATFORM_QUOTA_DEFAULTS)
+        # Optional async resolver ``(owner_user_id) -> set[str]`` that returns the
+        # owner's effective model names (config + user-defined). When provided it
+        # is called per-publish so user model enable/disable and hot-reload are
+        # honoured (third-review Important-2). Falls back to the static
+        # ``model_index`` when None (tests / CLI).
+        self._model_resolver = model_resolver
 
     async def _build_sync_connector_repo(self, draft: dict[str, Any], owner_user_id: str) -> Any:
         """Resolve connector ownership synchronously for the validator.
@@ -140,12 +147,19 @@ class PublishService:
         # Pre-resolve async connector ownership into a sync adapter so the
         # pure validator stays synchronous and easily testable.
         sync_connector_repo = await self._build_sync_connector_repo(draft, owner_user_id)
+        # Resolve the owner's effective model set per-publish when a resolver is
+        # configured, so user-defined models and hot-reload are honoured
+        # (third-review Important-2).
+        if self._model_resolver is not None:
+            effective_models = await self._model_resolver(owner_user_id)
+        else:
+            effective_models = self._model_index
         violations = validate_draft_for_publish(
             draft,
             owner_user_id=owner_user_id,
             skills_index=self._skills,
             connector_repo=sync_connector_repo,
-            model_index=self._model_index,
+            model_index=effective_models,
             tool_group_whitelist=self._tool_group_whitelist,
             platform_quota=self._platform_quota,
         )
@@ -214,7 +228,14 @@ class PublishService:
                     connector_grants=draft.get("connector_grants") or [],
                 )
                 break
-            except IntegrityError:
+            except IntegrityError as exc:
+                # Only retry on the (agent_id, release_no) unique-constraint race.
+                # Other IntegrityErrors (FK, sub-table unique, etc.) indicate a
+                # real problem and must surface, not be silently retried as a
+                # release-number race (third-review Important-4).
+                msg = str(getattr(exc, "orig", "") or exc).lower()
+                if "release_no" not in msg and "uq_agent_releases_agent_release_no" not in msg:
+                    raise
                 release_no = await self._releases.next_release_no(agent_id)
         if release is None:
             raise PublishError([PublishViolation("RELEASE_RACE", "Could not allocate a release number after retries.")])

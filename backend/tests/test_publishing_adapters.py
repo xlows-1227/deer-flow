@@ -80,6 +80,27 @@ async def test_disabled_connector_is_not_grantable():
 
 
 @pytest.mark.anyio
+async def test_pending_or_error_connector_is_not_grantable():
+    """Third-review Important-3: only status == 'active' is grantable."""
+    for status in ("pending", "error", "unknown", ""):
+        cls = type(
+            "_Fake",
+            (),
+            {
+                "get_connector": lambda self, connector_id, owner_id=..., _s=status: SimpleNamespace(
+                    model_dump=lambda _cid=connector_id, _oid=owner_id, _s=_s: {
+                        "id": _cid,
+                        "owner_id": _oid,
+                        "status": _s,
+                    }
+                )
+            },
+        )
+        repo = ConnectorServiceRepo(cls())
+        assert await repo.get_instance("conn_1", owner_id="user-a") is None, f"status={status!r} should be rejected"
+
+
+@pytest.mark.anyio
 async def test_active_connector_is_grantable():
     class _FakeService:
         async def get_connector(self, connector_id, *, owner_id=...):
