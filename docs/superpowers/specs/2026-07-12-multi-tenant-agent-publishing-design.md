@@ -1,713 +1,713 @@
-# Multi-Tenant Agent Publishing Design
+# 多租户 Agent 发布方案设计
 
-**Status:** Approved design
+**状态：** 已批准设计
 
-**Date:** 2026-07-12
+**日期：** 2026-07-12
 
-## 1. Summary
+## 1. 概述
 
-DeerFlow will evolve from a user-scoped custom-agent workspace into a multi-tenant publishing platform. Each authenticated platform user can create multiple agents, define their behavior through `AGENT.md` and `SOUL.md`, select platform-public and owner-private Skills, grant specific Connector capabilities, and publish an immutable internal release.
+DeerFlow 将从“面向单用户作用域的自定义 Agent 工作区”演进为“多租户 Agent 发布平台”。每个已认证的平台用户都可以创建多个 Agent，通过 `AGENT.md` 与 `SOUL.md` 定义其行为，选择平台公开 Skill 与创建者私有 Skill，授予特定的 Connector 能力，并发布一个不可变的内部 Release。
 
-External consumers do not see releases or version numbers. They interact with a stable Agent identity through either:
+外部使用方看不到 Release 或版本号。他们只会通过一个稳定的 Agent 身份与之交互，入口包括：
 
-- an Agent-specific API protected by Agent-specific API Keys; or
-- an optional Feishu application and bot bound to that Agent after publication.
+- 受 Agent 专属 API Key 保护的 Agent API；或
+- 在发布后再绑定到该 Agent 的可选飞书应用与机器人。
 
-The design adds a control plane for authoring, publication, credentials, quotas, and operations while retaining the existing DeerFlow LangGraph runtime as the shared execution plane.
+本设计新增一个用于编写、发布、凭据、配额与运维的控制平面，同时保留现有 DeerFlow LangGraph 运行时作为共享执行平面。
 
-## 2. Existing Capabilities and Gaps
+## 2. 现有能力与缺口
 
-The repository already provides most execution primitives:
+当前仓库已经具备大部分执行原语：
 
-- user-scoped custom agents stored under `users/{user_id}/agents/{name}/`;
-- `SOUL.md`, `config.yaml`, model overrides, tool-group allowlists, and Skill allowlists;
-- public and custom Skill loading;
-- user isolation, Connectors, LangGraph threads and runs, streaming, artifacts, and audit-related middleware;
-- an External API with API Key, Conversation, and Run concepts;
-- Feishu, Slack, Telegram, DingTalk, Discord, WeChat, and WeCom channel adapters.
+- 存放在 `users/{user_id}/agents/{name}/` 下的用户级自定义 Agent；
+- `SOUL.md`、`config.yaml`、模型覆盖配置、工具组白名单与 Skill 白名单；
+- 公共 Skill 与自定义 Skill 的加载能力；
+- 用户隔离、Connectors、LangGraph 线程与 Run、流式输出、制品（artifact）以及审计相关中间件；
+- 具备 API Key、Conversation 与 Run 概念的 External API；
+- 飞书、Slack、Telegram、DingTalk、Discord、WeChat 与 WeCom 的渠道适配器。
 
-The current product is not yet a publishing platform:
+但当前产品还不是一个发布平台：
 
-- custom Agent definitions are mutable filesystem state rather than immutable published snapshots;
-- Agent metadata, publication state, credentials, and routing are not modeled as multi-tenant database entities;
-- the IM `ChannelService` is a process-wide singleton loaded from `config.yaml`;
-- internal channel calls currently use a synthetic default user rather than a published Agent owner principal;
-- API Keys are user-oriented rather than bound to one stable published Agent;
-- there is no draft/publish/rollback workflow or per-Agent operational surface.
+- 自定义 Agent 定义仍是可变的文件系统状态，而不是不可变的发布快照；
+- Agent 元数据、发布状态、凭据与路由尚未被建模为多租户数据库实体；
+- IM `ChannelService` 仍是从 `config.yaml` 读取的进程级单例；
+- 内部渠道调用当前使用的是一个合成的默认用户，而不是已发布 Agent 的拥有者主体；
+- API Key 仍以用户为中心，而不是绑定到某个稳定的已发布 Agent；
+- 缺少草稿 / 发布 / 回滚工作流，也没有按 Agent 维度的运维面。
 
-The redesign fills these gaps without replacing the LangGraph runtime.
+本次重构将在不替换 LangGraph 运行时的前提下补齐这些缺口。
 
-## 3. Product Decisions
+## 3. 产品决策
 
-The following decisions are fixed for the first release:
+以下决策在第一版中固定：
 
-1. A platform user can own and publish multiple Agents.
-2. Each Agent may define both files:
-   - `AGENT.md` describes purpose, responsibilities, workflows, boundaries, and output requirements.
-   - `SOUL.md` describes personality, values, tone, and interaction style.
-3. At least one of `AGENT.md` or `SOUL.md` must be non-empty. When both exist, the runtime composes `AGENT.md` first and `SOUL.md` second in separately labeled prompt sections.
-4. An Agent can select platform-public Skills and Skills privately owned by the Agent creator.
-5. A private Skill remains private. Publishing an Agent that uses it does not publish the Skill source to a marketplace or expose it to external callers.
-6. Connector calls use the creator's Connector credentials only after the creator grants specific capabilities to the Agent.
-7. Drafts and online releases are separate. Saving a draft never changes online behavior.
-8. Internal releases are immutable and available only in the creator control plane. External consumers never select, receive, or otherwise observe an Agent release.
-9. A published Agent can exist without a Feishu binding and without an API Key. Integrations are added after publication.
-10. The first IM integration delivered is Feishu. The architecture retains a generic channel adapter boundary for later channels.
-11. A Feishu binding uses one independent Feishu application and bot for one Agent. Anyone able to message that bot or add it to a group may use it; the first release has no Feishu user, department, or group allowlist.
-12. External conversations are isolated by caller or chat. The external runtime does not read, extract, or write long-term memory.
-13. Each Agent may have multiple named API Keys. Keys can be created, rotated, revoked, and limited independently.
-14. Usage is charged to the Agent owner.
-15. Creator-configured quotas are optional in the first release. Unset values inherit deployment-wide platform defaults; platform hard limits can never be disabled by an owner.
-16. The first release does not include an Agent marketplace or public Agent detail page.
+1. 一个平台用户可以拥有并发布多个 Agent。
+2. 每个 Agent 可以定义两个文件：
+   - `AGENT.md`：描述目标、职责、工作流、边界与输出要求。
+   - `SOUL.md`：描述人格、价值观、语气与互动风格。
+3. `AGENT.md` 与 `SOUL.md` 至少要有一个非空。当两个文件都存在时，运行时会先拼接 `AGENT.md`，再拼接 `SOUL.md`，并放入各自有明确标签的 Prompt 区块中。
+4. Agent 可以选择平台公开 Skill，以及创建者私有拥有的 Skill。
+5. 私有 Skill 仍然保持私有。发布一个使用该 Skill 的 Agent，并不会把该 Skill 源码发布到市场，也不会向外部调用方暴露。
+6. Connector 调用只能在创建者显式把对应能力授予 Agent 之后，使用创建者自己的 Connector 凭据执行。
+7. 草稿与线上 Release 分离。保存草稿不会改变线上行为。
+8. 内部 Release 是不可变的，只在创建者控制平面中可见。外部使用方永远不能选择、接收或观察到 Agent 的 Release。
+9. 已发布 Agent 可以没有飞书绑定，也可以没有 API Key。集成能力在发布后再添加。
+10. 第一版交付的 IM 集成仅为飞书。架构上保留通用 channel adapter 边界，以便后续扩展其他渠道。
+11. 一个飞书绑定对应一个 Agent 的一套独立飞书应用与机器人。任何能够给该机器人发消息或把它拉入群的人都可以使用它；第一版不提供飞书用户、部门或群组白名单。
+12. 外部会话按调用方或聊天上下文隔离。外部运行时不读取、不提取、也不写入长期记忆。
+13. 每个 Agent 可以拥有多个具名 API Key。每个 Key 都可以独立创建、轮换、撤销和限额。
+14. 用量计费归属于 Agent 拥有者。
+15. 创建者自定义配额在第一版中是可选项。未设置的值继承部署级平台默认值；平台硬性上限不能被拥有者关闭。
+16. 第一版不包含 Agent 市场，也不提供公开的 Agent 详情页。
 
-## 4. Goals
+## 4. 目标
 
-- Let every authenticated user create and manage multiple independent Agents.
-- Provide a direct web editor for Agent instructions and capability selection while retaining the existing conversational bootstrap as an optional authoring aid.
-- Produce immutable, reproducible online releases.
-- Expose one stable external Agent identity independent of internal publication history.
-- Support Agent-specific API integration and optional independent Feishu bots.
-- Preserve strict ownership, Skill, Connector, secret, conversation, and usage isolation.
-- Reuse the existing LangGraph runtime, RunManager, streaming, artifact, Skill, Connector, and channel adapter capabilities.
-- Make publication, rollback, channel restart, secret rotation, and Key revocation operationally safe.
+- 让每个已认证用户都可以创建并管理多个相互独立的 Agent。
+- 提供直接的 Web 编辑器，用于编辑 Agent 指令与能力选择，同时保留现有的对话式引导作为可选编写辅助。
+- 产出不可变、可复现的线上 Release。
+- 对外暴露一个稳定的 Agent 身份，不受内部发布历史影响。
+- 支持 Agent 专属 API 集成，以及可选的独立飞书机器人。
+- 严格保持拥有权、Skill、Connector、密钥、会话与用量的隔离。
+- 复用现有 LangGraph 运行时、RunManager、流式输出、artifact、Skill、Connector 与 channel adapter 能力。
+- 让发布、回滚、渠道重启、密钥轮换与 Key 撤销都具备运维上的安全性。
 
-## 5. Non-Goals
+## 5. 非目标
 
-- A public Agent marketplace, discovery page, ranking, reviews, or monetization.
-- External visibility or selection of internal Agent releases.
-- Feishu user, department, or group allowlists in the first release.
-- End-user OAuth or bring-your-own Connector credentials.
-- Long-term memory for public/API/IM execution.
-- Shipping every existing IM adapter in the first release.
-- Deploying one runtime service per Agent.
-- Publishing private Skill source code.
+- 公开 Agent 市场、发现页、排序、评价或商业化。
+- 对外暴露或允许选择内部 Release。
+- 在第一版中支持飞书用户、部门或群组白名单。
+- 终端用户 OAuth 或自带 Connector 凭据。
+- 面向 public/API/IM 执行的长期记忆。
+- 第一版一次性交付所有已有 IM adapter。
+- 为每个 Agent 单独部署一套运行时服务。
+- 发布私有 Skill 的源代码。
 
-## 6. Architecture
+## 6. 架构
 
-### 6.1 Control Plane
+### 6.1 控制平面
 
-The control plane is used by authenticated Agent owners and contains four bounded modules.
+控制平面面向已认证的 Agent 创建者使用，由四个边界清晰的模块组成。
 
-#### Agent Studio
+#### 智能体工作台（Agent Studio）
 
-- creates and edits Agent drafts;
-- edits `AGENT.md` and `SOUL.md` directly;
-- chooses the default model and permitted tool groups;
-- selects public and owner-private Skills;
-- grants Connector capabilities;
-- provides draft sandbox chat and optional conversational authoring.
+- 创建并编辑 Agent 草稿；
+- 直接编辑 `AGENT.md` 与 `SOUL.md`；
+- 选择默认模型与允许的工具组；
+- 选择公共 Skill 与创建者私有 Skill；
+- 授予 Connector 能力；
+- 提供草稿沙箱对话与可选的对话式编写辅助。
 
-#### Publication Service
+#### 发布服务
 
-- validates a draft and all referenced capabilities;
-- resolves each Skill to a concrete immutable Skill revision;
-- creates an immutable `AgentRelease` snapshot;
-- atomically moves the Agent's `current_release_id` pointer;
-- supports owner-visible history, comparison, and rollback;
-- never exposes release identifiers through external APIs or channels.
+- 校验草稿及其引用的全部能力；
+- 将每个 Skill 解析为一个具体、不可变的 Skill revision；
+- 创建不可变的 `AgentRelease` 快照；
+- 原子性切换 Agent 的 `current_release_id` 指针；
+- 支持仅创建者可见的历史、对比与回滚；
+- 绝不通过外部 API 或渠道暴露 Release 标识。
 
-#### Integration Management
+#### 集成管理
 
-- creates, rotates, names, limits, and revokes Agent API Keys;
-- creates, tests, starts, stops, and updates an optional Feishu binding;
-- stores only references to encrypted secrets;
-- reports integration health independently from publication health.
+- 创建、轮换、命名、限额与撤销 Agent API Key；
+- 创建、测试、启动、停止与更新可选的飞书绑定；
+- 只保存加密密钥的引用，而不是明文；
+- 将集成健康状态与发布健康状态分开报告。
 
-#### Operations
+#### 运维
 
-- shows run counts, token usage, errors, latency, quota consumption, and channel status;
-- exposes audit records to the Agent owner and platform administrators;
-- supports Agent suspension without deleting drafts, releases, bindings, or history.
+- 展示 Run 数量、Token 用量、错误、时延、配额消耗与渠道状态；
+- 向 Agent 拥有者与平台管理员暴露审计记录；
+- 支持暂停 Agent，而不删除草稿、Release、绑定或历史数据。
 
-### 6.2 Data and Secret Layer
+### 6.2 数据与密钥层
 
-- SQL stores ownership, mutable draft metadata, immutable release metadata, routing, quotas, usage, and audit records.
-- Versioned content storage stores immutable instruction and Skill-revision snapshots. A local filesystem backend may be used initially, behind a storage interface that can later use object storage.
-- Secret storage holds Feishu App Secrets and Connector secrets. Database rows store `secret_ref`, never plaintext.
-- API Key plaintext is displayed only at creation. The database stores a prefix for identification and a slow, salted hash for verification.
+- SQL 存储拥有权、可变草稿元数据、不可变 Release 元数据、路由、配额、用量与审计记录。
+- 带版本的内容存储负责保存不可变的指令快照与 Skill revision 快照。初期可以使用本地文件系统后端，但必须放在一个抽象存储接口之后，以便后续切换到对象存储。
+- 密钥存储负责保存飞书 App Secret 与 Connector 密钥。数据库行中只保存 `secret_ref`，绝不保存明文。
+- API Key 明文只在创建时展示一次。数据库中只保存用于识别的前缀以及用于校验的慢速、带盐哈希。
 
-### 6.3 Entry Plane
+### 6.3 接入平面
 
-#### Feishu Bot Supervisor
+#### 飞书机器人 Supervisor
 
-The current global, configuration-file-driven `ChannelService` becomes a database-driven supervisor. It can start, stop, and restart one Feishu channel instance per active Agent binding without restarting the Gateway or affecting other Agent bindings.
+当前全局的、由配置文件驱动的 `ChannelService` 将演进为一个由数据库驱动的 Supervisor。它能够为每个激活中的 Agent 绑定启动、停止和重启一个飞书 channel 实例，而无需重启 Gateway，也不会影响其他 Agent 绑定。
 
-The supervisor is responsible for:
+Supervisor 负责：
 
-- loading active bindings without returning secret values to callers;
-- event signature verification and replay protection;
-- event deduplication by Feishu event/message identifier;
-- mapping a binding to exactly one stable `agent_id`;
-- applying ingress rate limits before creating a run;
-- delivering streaming or final responses and attachments;
-- surfacing per-binding health and restart state.
+- 加载激活中的绑定，同时不向调用方返回密钥明文；
+- 做事件签名校验与重放保护；
+- 按飞书事件 / 消息标识做去重；
+- 将一个绑定映射到且仅映射到一个稳定的 `agent_id`；
+- 在创建 Run 前施加入站限流；
+- 发送流式响应或最终响应与附件；
+- 暴露每个绑定的健康状态与重启状态。
 
-#### Agent External API
+#### Agent 对外 API
 
-The external API is an Agent-specific facade over the existing Conversation and Run services. The protocol path may include `/v1`; that is the HTTP protocol version, not an Agent release.
+对外 API 是构建在现有 Conversation 与 Run 服务之上的、面向单个 Agent 的外观层。协议路径中可以包含 `/v1`；它表示 HTTP 协议版本，而不是 Agent 的 Release 版本。
 
-External callers can:
+外部调用方可以：
 
-- inspect safe, stable Agent metadata;
-- create an isolated Conversation;
-- submit synchronous, SSE-streaming, or asynchronous runs;
-- query or cancel asynchronous runs;
-- list safe API capability metadata and usage for their own Key where appropriate.
+- 查看安全且稳定的 Agent 元数据；
+- 创建隔离的 Conversation；
+- 提交同步、SSE 流式或异步 Run；
+- 查询或取消异步 Run；
+- 在合适的场景下，查看与自己 Key 相关的安全 API 能力元数据和用量信息。
 
-External callers cannot:
+外部调用方不能：
 
-- provide or override `owner_user_id`, internal `release_id`, model, Skill, tool group, Connector, runtime context, or memory settings;
-- access draft content, instruction source, private Skill source, Connector configuration, secrets, internal paths, or publication history;
-- use an API Key issued for one Agent to invoke another Agent.
+- 提供或覆盖 `owner_user_id`、内部 `release_id`、模型、Skill、工具组、Connector、运行时上下文或记忆设置；
+- 访问草稿内容、指令源码、私有 Skill 源码、Connector 配置、密钥、内部路径或发布历史；
+- 使用为某个 Agent 签发的 API Key 去调用另一个 Agent。
 
-### 6.4 Shared Execution Plane
+### 6.4 共享执行平面
 
-A new `PublishedAgentResolver` sits before the existing DeerFlow runtime. For every external request it:
+在现有 DeerFlow 运行时之前增加一个新的 `PublishedAgentResolver`。针对每一个外部请求，它会：
 
-1. resolves the stable Agent and confirms that it is published and active;
-2. reads the Agent's `current_release_id` internally;
-3. resolves the immutable instruction, model, Skill revisions, tool-group policy, and Connector capability grants;
-4. constructs a trusted `PublishedAgentContext`;
-5. reserves quota and concurrency capacity;
-6. invokes the existing RunManager/LangGraph runtime;
-7. finalizes idempotent usage accounting and audit records.
+1. 解析稳定的 Agent，并确认它已发布且处于可用状态；
+2. 在内部读取该 Agent 的 `current_release_id`；
+3. 解析不可变的指令、模型、Skill revision、工具组策略与 Connector 能力授权；
+4. 构造一个受信任的 `PublishedAgentContext`；
+5. 预留配额与并发容量；
+6. 调用现有的 RunManager / LangGraph 运行时；
+7. 以幂等方式完成用量记账与审计记录。
 
-The trusted context contains at least:
+该受信任上下文至少包含：
 
-- `owner_user_id`;
-- `agent_id`;
-- internal `release_id`;
-- source type and binding or API Key identifier;
-- external actor and conversation subject;
-- allowed Skill revision identifiers;
-- allowed Connector capabilities;
-- tool-group policy;
-- effective platform and owner quota policy;
-- correlation and idempotency identifiers;
-- `memory_enabled=false`.
+- `owner_user_id`；
+- `agent_id`；
+- 内部 `release_id`；
+- 来源类型，以及绑定或 API Key 标识；
+- 外部调用方与会话主体；
+- 允许使用的 Skill revision 标识；
+- 允许使用的 Connector 能力；
+- 工具组策略；
+- 生效的平台与拥有者配额策略；
+- 关联 ID 与幂等 ID；
+- `memory_enabled=false`。
 
-The runtime executes under the owner principal for authorized resource access while retaining the external actor as a separate audit identity. External actor identifiers must never be treated as platform owner identifiers.
+运行时在拥有者主体下执行，以访问被授权的资源，同时将外部调用方保留为独立的审计身份。外部调用方标识绝不能被当作平台拥有者标识处理。
 
-## 7. Domain Model
+## 7. 领域模型
 
 ### 7.1 `agents`
 
-Stable product identity owned by one platform user.
+由一个平台用户拥有的稳定产品身份。
 
-Key fields:
+关键字段：
 
-- `id`;
-- `owner_user_id`;
-- owner-unique `slug`;
-- display name, description, and avatar reference;
-- lifecycle status: `draft`, `published`, `suspended`, or `archived`;
-- nullable internal `current_release_id`;
-- timestamps.
+- `id`；
+- `owner_user_id`；
+- 在 owner 范围内唯一的 `slug`；
+- 展示名称、描述与头像引用；
+- 生命周期状态：`draft`、`published`、`suspended` 或 `archived`；
+- 可为空的内部 `current_release_id`；
+- 时间戳。
 
-An Agent becomes externally runnable only when status is `published` and `current_release_id` is set.
+只有当状态为 `published` 且 `current_release_id` 已设置时，Agent 才能对外运行。
 
 ### 7.2 `agent_drafts`
 
-Mutable creator-only state.
+仅创建者可见的可变状态。
 
-Key fields:
+关键字段：
 
-- `agent_id`;
-- `agent_markdown`;
-- `soul_markdown`;
-- selected model and tool groups;
-- optional creator quota overrides;
-- optimistic concurrency revision;
-- updated timestamp and user.
+- `agent_id`；
+- `agent_markdown`；
+- `soul_markdown`；
+- 已选择的模型与工具组；
+- 可选的创建者配额覆盖配置；
+- 乐观并发修订号；
+- 更新时间与更新用户。
 
-Draft Skill selections and Connector grants may use normalized child tables so ownership and capability validation remain queryable.
+草稿中的 Skill 选择与 Connector 授权可以使用规范化的子表，以便保持拥有权与能力校验可查询。
 
 ### 7.3 `agent_releases`
 
-Immutable creator-visible publication snapshot.
+不可变、仅创建者可见的发布快照。
 
-Key fields:
+关键字段：
 
-- internal `id`;
-- `agent_id` and monotonic owner-visible `release_no`;
-- complete `AGENT.md` and `SOUL.md` snapshots or immutable content references;
-- resolved model and runtime policy;
-- effective owner quota overrides at publication time;
-- canonical manifest and checksum;
-- creator and publication timestamp.
+- 内部 `id`；
+- `agent_id` 与对创建者单调递增可见的 `release_no`；
+- 完整的 `AGENT.md` 与 `SOUL.md` 快照，或其不可变内容引用；
+- 解析后的模型与运行时策略；
+- 发布时生效的创建者配额覆盖值；
+- 规范化清单与校验和；
+- 创建者与发布时间戳。
 
-Rows are never updated after creation. Rollback changes `agents.current_release_id`; it does not mutate or recreate a historical release.
+行在创建后永不更新。回滚通过修改 `agents.current_release_id` 完成；它不会修改，也不会重建历史 Release。
 
-### 7.4 `skill_revisions` and `agent_release_skills`
+### 7.4 `skill_revisions` 与 `agent_release_skills`
 
-Publication must lock every selected Skill to a concrete revision. Updating a public or private Skill after publication does not change an online Agent until the owner republishes.
+发布时必须将每个被选中的 Skill 锁定到一个具体 revision。发布后无论公共 Skill 还是私有 Skill 被更新，都不会影响线上 Agent，直到拥有者重新发布。
 
-The release manifest records:
+Release 清单需要记录：
 
-- Skill identity and revision;
-- ownership/visibility classification;
-- content checksum;
-- declared tools and Connector capability requirements;
-- compatibility metadata required by the runtime.
+- Skill 身份与 revision；
+- 拥有权 / 可见性分类；
+- 内容校验和；
+- 声明的工具与 Connector 能力要求；
+- 运行时所需的兼容性元数据。
 
 ### 7.5 `agent_release_connector_grants`
 
-An immutable release-level allowlist of Connector capabilities. It references owner-controlled Connector instances without embedding secrets.
+一个不可变的、Release 级别的 Connector 能力白名单。它引用由 owner 控制的 Connector 实例，但不嵌入密钥。
 
-Effective permission is always the intersection of:
+最终权限永远是以下四者的交集：
 
-1. platform policy;
-2. Skill-declared requirements;
-3. owner grant captured by the current release;
-4. current Connector status and credential validity.
+1. 平台策略；
+2. Skill 声明的要求；
+3. 当前 Release 中记录的 owner 授权；
+4. 当前 Connector 状态与凭据有效性。
 
-Granting a broad Connector does not implicitly grant every capability. Revoking a Connector or capability takes effect immediately as a security override, even for an older immutable release.
+授予一个范围较大的 Connector，并不意味着自动授予其全部能力。撤销某个 Connector 或某项能力后，应立即作为安全覆盖生效，即使当前线上使用的是更早的不可变 Release。
 
 ### 7.6 `agent_channels`
 
-Stable integration bound to an Agent, not a release.
+绑定到 Agent 而不是绑定到 Release 的稳定集成对象。
 
-First-release constraints:
+第一版约束：
 
-- channel type is `feishu`;
-- an Agent has zero or one active Feishu binding;
-- fields include App ID, encrypted secret reference, connection mode, status, health, and timestamps;
-- publication and rollback do not change the binding;
-- a binding may be added, updated, disabled, or removed after publication.
+- channel 类型为 `feishu`；
+- 一个 Agent 有零个或一个激活中的飞书绑定；
+- 字段包括 App ID、加密密钥引用、连接模式、状态、健康状态与时间戳；
+- 发布与回滚不会改变该绑定；
+- 绑定可以在发布后新增、更新、停用或删除。
 
 ### 7.7 `agent_api_keys`
 
-Stable credentials bound to exactly one Agent, not a release.
+精确绑定到某一个 Agent 而不是某个 Release 的稳定凭据。
 
-Key fields:
+关键字段：
 
-- internal Key ID and `agent_id`;
-- owner-defined name;
-- non-secret prefix and secret hash;
-- status and last-used timestamp;
-- optional Key-specific quota overrides;
-- creation, rotation, expiration, and revocation metadata.
+- 内部 Key ID 与 `agent_id`；
+- owner 自定义名称；
+- 非敏感前缀与密钥哈希；
+- 状态与最后使用时间；
+- 可选的 Key 级配额覆盖；
+- 创建、轮换、过期与撤销元数据。
 
-One Agent may have multiple active Keys to isolate different integrating systems.
+一个 Agent 可以同时拥有多个激活中的 Key，用于隔离不同接入系统。
 
-### 7.8 Conversations and Channel Mappings
+### 7.8 会话（Conversation）与 Channel 映射
 
-External conversation continuity is thread-scoped state, not long-term memory.
+外部会话连续性是线程作用域状态，而不是长期记忆。
 
-- API Conversations are scoped to `agent_id` and the authenticated Key/integration subject.
-- Feishu private chats map independently by binding, chat, and Feishu user.
-- Feishu group chats map by binding, chat, and topic/thread when available; group members intentionally share that group conversation context.
-- no mapping can be reused across Agents or bindings.
+- API Conversation 以 `agent_id` 和通过认证的 Key / 集成主体为作用域。
+- 飞书私聊按绑定、chat 与飞书用户独立映射。
+- 飞书群聊按绑定、chat 以及可用时的 topic / thread 映射；群成员有意共享该群对话上下文。
+- 任意映射都不能跨 Agent 或跨绑定复用。
 
-The mapping store moves from the current global JSON file to the configured persistence layer so it works across processes and replicas.
+映射存储将从当前的全局 JSON 文件迁移到配置的持久化层，以支持多进程与多副本运行。
 
-### 7.9 Usage, Reservations, and Audit
+### 7.9 用量、预留与审计
 
-Usage records include:
+用量记录包括：
 
-- owner and Agent;
-- source (`api` or `feishu`);
-- API Key or channel binding;
-- external subject and internal conversation/run identifiers;
-- model, tokens, latency, outcome, and error classification;
-- idempotency and correlation identifiers;
-- timestamps.
+- owner 与 Agent；
+- 来源（`api` 或 `feishu`）；
+- API Key 或 channel binding；
+- 外部主体与内部 Conversation / Run 标识；
+- 模型、Token、时延、结果状态与错误分类；
+- 幂等 ID 与关联 ID；
+- 时间戳。
 
-Quota reservations and final accounting use unique request/event identifiers so retries do not produce duplicate runs or duplicate charges.
+配额预留与最终记账使用唯一请求 / 事件标识，因此重试不会产生重复 Run，也不会重复计费。
 
-## 8. Authoring and Publication Flow
+## 8. 编写与发布流程
 
-### 8.1 Create and Edit
+### 8.1 创建与编辑
 
-1. The owner creates an Agent identity and draft.
-2. The owner edits basic metadata, `AGENT.md`, and `SOUL.md`.
-3. The owner selects public and owner-private Skills.
-4. The UI displays required Connector capabilities and asks the owner to grant them explicitly.
-5. Optional model, tool-group, and owner quota overrides can be configured.
-6. Draft sandbox chat uses draft configuration and is visibly marked as not online.
+1. owner 创建一个 Agent 身份与草稿。
+2. owner 编辑基础元数据、`AGENT.md` 与 `SOUL.md`。
+3. owner 选择公共 Skill 与创建者私有 Skill。
+4. UI 展示所需的 Connector 能力，并要求 owner 显式授予。
+5. 可以配置可选的模型、工具组与 owner 配额覆盖。
+6. 草稿沙箱对话使用草稿配置，并明确标识为“尚未上线”。
 
-The current conversational `setup_agent` workflow can remain as an authoring aid, but direct structured editing is the source of truth for the draft.
+当前对话式的 `setup_agent` 流程可以保留作为编写辅助，但草稿的事实来源必须是直接的结构化编辑。
 
-### 8.2 Validate and Publish
+### 8.2 校验与发布
 
-Publication rejects a draft unless:
+在以下任一条件不满足时，发布必须拒绝该草稿：
 
-- at least one instruction file is non-empty;
-- instruction size and safety checks pass;
-- the model is available to the owner;
-- all selected Skills exist, are enabled, are public or owned by the creator, and can produce immutable revisions;
-- declared Connector requirements are covered by explicit grants;
-- referenced Connector instances still belong to the owner;
-- tool groups and runtime settings are valid;
-- optional owner limits do not exceed platform limits.
+- 至少一个指令文件非空；
+- 指令大小与安全检查通过；
+- 模型对该 owner 可用；
+- 所有被选中的 Skill 都存在、已启用、属于公共或创建者自己，并且可以产出不可变 revision；
+- Skill 声明的 Connector 要求都被显式授权覆盖；
+- 被引用的 Connector 实例仍然属于该 owner；
+- 工具组与运行时设置合法；
+- 可选的 owner 限额没有超过平台限额。
 
-On success, the service creates an immutable release and atomically sets `current_release_id`. An Agent may be published with no Feishu binding and no API Key; it simply has no external entry point until the owner creates one.
+发布成功后，服务会创建一个不可变 Release，并原子性设置 `current_release_id`。Agent 可以在没有飞书绑定、没有 API Key 的情况下先被发布；只是此时还没有任何外部入口，直到 owner 后续创建它们。
 
-### 8.3 Republish and Rollback
+### 8.3 重新发布与回滚
 
-- Draft edits after publication do not affect the current release.
-- Republish creates a new immutable release and atomically changes the pointer.
-- Rollback atomically points to a selected prior release.
-- Feishu bindings, API endpoints, API Keys, and existing Conversation identifiers remain stable.
-- in-flight runs continue with the release resolved at run creation; new runs use the newly selected current release.
-- external responses never expose the resolved release identifier or number.
+- 发布后的草稿编辑不会影响当前 Release。
+- 重新发布会创建一个新的不可变 Release，并原子性切换指针。
+- 回滚会原子性指向一个指定的历史 Release。
+- 飞书绑定、API 端点、API Key 与既有 Conversation 标识保持稳定。
+- 正在执行中的 Run 会继续使用创建时已解析出的 Release；新 Run 才会使用新选中的当前 Release。
+- 对外响应永远不会暴露已解析的 Release 标识或版本号。
 
-### 8.4 Add Integrations After Publication
+### 8.4 发布后再添加集成
 
-The post-publication integration area lets the owner independently:
+发布后的集成区域允许 owner 独立完成：
 
-- create an API Key and copy API examples;
-- add and test a Feishu application;
-- rotate or revoke a Key;
-- rotate Feishu credentials;
-- pause or restart a channel;
-- add optional Agent or Key quota overrides.
+- 创建 API Key 并复制 API 示例；
+- 添加并测试飞书应用；
+- 轮换或撤销 Key；
+- 轮换飞书凭据；
+- 暂停或重启 channel；
+- 添加可选的 Agent 或 Key 级配额覆盖。
 
-Integration failure does not unpublish the Agent. It marks only that integration unhealthy or disabled.
+集成失败不会让 Agent 取消发布。它只会把该集成标记为不健康或已停用。
 
-## 9. External API Contract
+## 9. 对外 API 契约
 
-The exact route names may follow the repository's existing External API conventions, but the contract must preserve the following semantics.
+具体路由名称可以沿用仓库现有 External API 的约定，但契约语义必须满足以下要求。
 
-### 9.1 Authentication
+### 9.1 认证
 
-- `Authorization: Bearer <agent-api-key>` authenticates one Key and resolves exactly one `agent_id`.
-- If the route also contains `agent_id`, it must match the Key binding or return a non-enumerating not-found response.
-- API Key rotation can overlap old and new Keys intentionally; revocation is immediate.
-- Keys never grant access to Agent management APIs.
+- `Authorization: Bearer <agent-api-key>` 认证的是一个 Key，并且必须精确解析到一个 `agent_id`。
+- 如果路由中同时包含 `agent_id`，则它必须与 Key 绑定一致，否则返回一个不会暴露资源存在性的 not-found 响应。
+- API Key 轮换允许新旧 Key 在一段时间内重叠有效；撤销必须立即生效。
+- Key 永远不能授予 Agent 管理 API 的访问权限。
 
-### 9.2 Conversations and Runs
+### 9.2 会话（Conversation）与运行（Run）
 
-The API supports:
+API 需要支持：
 
-- Conversation creation;
-- message/run submission;
-- synchronous wait;
-- SSE streaming;
-- asynchronous Run creation, status, result, and cancellation;
-- idempotent creation with `Idempotency-Key`.
+- 创建 Conversation；
+- 提交消息 / Run；
+- 同步等待；
+- SSE 流式输出；
+- 异步 Run 创建、状态查询、结果获取与取消；
+- 基于 `Idempotency-Key` 的幂等创建。
 
-Callers may provide user messages, supported attachments, client metadata from a safe allowlist, and a Conversation identifier. They may not supply runtime policy or internal context.
+调用方可以提供用户消息、受支持的附件、来自安全白名单的客户端元数据，以及 Conversation 标识；但不能提供运行时策略或内部上下文。
 
-### 9.3 Safe Responses
+### 9.3 安全响应
 
-Responses can include:
+响应可以包含：
 
-- stable Agent ID and display metadata;
-- Conversation and Run identifiers;
-- status, messages, usage allowed by policy, artifacts, and errors;
-- request/correlation identifiers.
+- 稳定的 Agent ID 与展示元数据；
+- Conversation 与 Run 标识；
+- 状态、消息、策略允许范围内的用量、artifact 与错误；
+- 请求 / 关联标识。
 
-Responses exclude:
+响应必须排除：
 
-- internal release identifiers or numbers;
-- owner user ID;
-- Agent instruction source;
-- private Skill metadata or source;
-- Connector configuration and secrets;
-- filesystem paths and internal runtime configuration.
+- 内部 Release 标识或版本号；
+- owner user ID；
+- Agent 指令源码；
+- 私有 Skill 元数据或源代码；
+- Connector 配置与密钥；
+- 文件系统路径与内部运行时配置。
 
-## 10. Feishu Execution Flow
+## 10. 飞书执行流程
 
-1. The per-Agent Feishu adapter receives an event.
-2. It verifies the signature/token and rejects invalid or replayed events.
-3. It deduplicates the event before quota reservation.
-4. The binding resolves one stable Agent.
-5. The mapping service resolves or creates an isolated internal thread.
-6. The resolver checks Agent publication status and effective ingress limits.
-7. It resolves the current release and constructs `PublishedAgentContext`.
-8. The shared runtime processes the request.
-9. The adapter streams updates when supported and publishes the final response or attachments.
-10. Usage and audit records are finalized exactly once.
+1. 每个 Agent 独立的飞书适配器接收到一个事件。
+2. 它校验签名 / token，并拒绝无效或重放事件。
+3. 它在预留配额前先对事件去重。
+4. 绑定解析到一个稳定的 Agent。
+5. 映射服务解析或创建一个隔离的内部线程。
+6. Resolver 检查 Agent 的发布状态与生效中的入站限额。
+7. 它解析当前 Release，并构造 `PublishedAgentContext`。
+8. 共享运行时处理该请求。
+9. 适配器在支持时推送流式更新，并发布最终响应或附件。
+10. 用量与审计记录精确完成一次。
 
-Feishu users do not need DeerFlow platform accounts. The Agent is public to anyone who can interact with its bot.
+飞书用户不需要 DeerFlow 平台账号。任何能与该机器人交互的人都可以使用这个 Agent。
 
-## 11. No-Memory Runtime Policy
+## 11. 无记忆运行时策略
 
-External execution may retain messages inside the selected Conversation/thread so multi-turn chat works. It must not use DeerFlow long-term memory features.
+外部执行可以在选中的 Conversation / thread 内保留消息，以支持多轮对话，但绝不能启用 DeerFlow 的长期记忆特性。
 
-For API and Feishu sources, the runtime must:
+对于 API 与飞书来源，运行时必须：
 
-- disable memory extraction, consolidation, queues, and writes;
-- disable memory prompt injection;
-- exclude owner `USER.md`, owner profile memory, per-Agent memory, and global memory;
-- omit memory management tools;
-- prevent external callers from overriding this policy;
-- prevent `setup_agent`, `update_agent`, Skill-management, Connector-management, and other control-plane mutation tools from being exposed.
+- 禁用记忆提取、归并、队列与写入；
+- 禁用记忆 Prompt 注入；
+- 排除 owner `USER.md`、owner Profile Memory、每个 Agent 的记忆以及全局记忆；
+- 省略记忆管理工具；
+- 阻止外部调用方覆盖该策略；
+- 阻止暴露 `setup_agent`、`update_agent`、Skill 管理、Connector 管理以及其他控制平面变更工具。
 
-Published behavior is derived only from the current release, allowed Skills, authorized Connector capabilities, current Conversation messages, safe attachment context, and platform runtime policy.
+已发布 Agent 的行为只能由以下因素共同决定：当前 Release、允许使用的 Skill、已授权的 Connector 能力、当前 Conversation 消息、安全的附件上下文，以及平台运行时策略。
 
-## 12. Quotas and Abuse Protection
+## 12. 配额与滥用防护
 
-### 12.1 Mandatory Platform Limits
+### 12.1 强制平台限额
 
-Deployment-wide defaults and hard caps are required for:
+部署级默认值与硬性上限必须覆盖：
 
-- maximum concurrent runs per Agent and per Gateway instance;
-- maximum input and attachment sizes;
-- maximum execution duration;
-- maximum model tokens or cost per run;
-- ingress request/event rate;
-- queue size and overload shedding;
-- repeated failure circuit breaking.
+- 每个 Agent 与每个 Gateway 实例的最大并发 Run 数；
+- 最大输入体积与附件大小；
+- 最大执行时长；
+- 每次 Run 的最大模型 Token 或成本；
+- 入站请求 / 事件速率；
+- 队列大小与过载丢弃；
+- 重复失败的熔断机制。
 
-Owners cannot disable or exceed these caps.
+owner 不能关闭或突破这些硬性上限。
 
-### 12.2 Optional Owner Limits
+### 12.2 可选的 owner 限额
 
-Owners may optionally configure stricter limits for:
+owner 可以选择性配置更严格的限制，用于：
 
-- daily runs;
-- daily tokens or budget;
-- Agent concurrency;
-- per-run timeout or token limit;
-- individual API Keys.
+- 每日 Run 数；
+- 每日 Token 或预算；
+- Agent 并发度；
+- 单次 Run 的超时时间或 Token 上限；
+- 单个 API Key。
 
-An omitted value inherits the effective platform default. It never means unlimited.
+未设置某项值时，继承生效的平台默认值；绝不表示无限制。
 
-### 12.3 Enforcement
+### 12.3 执行规则
 
-- Limits are checked and reserved before a runtime Run is created.
-- An exceeded limit returns API `429` with `Retry-After` where meaningful and a friendly Feishu message.
-- Rejected requests do not create Runs or consume model quota.
-- Reservations are finalized or released on success, cancellation, timeout, and failure.
-- Duplicate Feishu events and duplicate idempotent API requests reuse the original outcome and are not charged twice.
+- 在创建运行时 Run 之前，必须先检查并预留限额。
+- 超出限额时，API 返回 `429`，并在有意义时附带 `Retry-After`；飞书侧返回友好的繁忙 / 配额提示。
+- 被拒绝的请求不会创建 Run，也不会消耗模型配额。
+- 预留会在成功、取消、超时与失败时被最终结算或释放。
+- 重复的飞书事件与重复的幂等 API 请求会复用原始结果，不会重复计费。
 
-## 13. Security
+## 13. 安全
 
-### 13.1 Principal Separation
+### 13.1 主体分离
 
-Every run carries two distinct identities:
+每个 Run 都携带两个清晰分离的身份：
 
-- owner principal: authorizes the Agent, Skill, model, and Connector resources;
-- external actor principal: identifies the API integration or Feishu subject for conversation isolation, limits, and audit.
+- owner principal：用于授权 Agent、Skill、模型与 Connector 资源；
+- external actor principal：用于标识 API 集成方或飞书主体，以实现会话隔离、限额与审计。
 
-No inbound field may set either trusted identity directly.
+任何入站字段都不能直接设置这两个受信任身份。
 
-### 13.2 Least-Privilege Capability Resolution
+### 13.2 最小权限能力解析
 
-Runtime tools are derived from allowlist intersections. The resolver does not pass raw secret material into prompts, Skill files, logs, or model-visible metadata. Connector tools exchange opaque connection identifiers for authorized execution inside the Connector layer.
+运行时工具必须由多个白名单求交后得到。Resolver 不会把原始密钥材料传入 Prompt、Skill 文件、日志或模型可见元数据。Connector 工具在 Connector 层内用不透明连接标识换取授权执行，而不是直接暴露凭据。
 
-### 13.3 Public-Agent Restrictions
+### 13.3 对外公开 Agent 限制
 
-The public runtime denies:
+对 public 运行时必须禁止：
 
-- control-plane mutations;
-- Agent self-modification;
-- Skill installation, editing, enablement, or deletion;
-- Connector creation, credential changes, or permission changes;
-- memory access or mutation;
-- cross-Agent and cross-owner resource access;
-- caller-provided internal context and hidden configuration fields.
+- 控制平面变更；
+- Agent 自我修改；
+- Skill 安装、编辑、启用或删除；
+- Connector 创建、凭据变更或权限变更；
+- 记忆访问或变更；
+- 跨 Agent 与跨 owner 的资源访问；
+- 调用方提供内部上下文与隐藏配置字段。
 
-Normal sandbox and file tools are available only when the release tool policy permits them and remain inside the thread's isolated workspace.
+普通沙箱与文件工具只有在 Release 的工具策略允许时才可用，并且仍然必须限制在线程隔离的工作区内。
 
-### 13.4 Secret Handling
+### 13.4 密钥处理
 
-- Feishu App Secrets and Connector credentials are encrypted and referenced by opaque IDs.
-- Secret values are redacted from structured logs, traces, errors, and audit payloads.
-- API Key plaintext cannot be recovered after creation.
-- credential validation returns safe status without echoing secrets.
+- 飞书 App Secret 与 Connector 凭据以加密形式存储，并通过不透明 ID 引用。
+- 结构化日志、链路追踪、错误与审计负载中必须对密钥值做脱敏处理。
+- API Key 明文在创建后不可恢复。
+- 凭据校验只返回安全状态，不回显密钥内容。
 
-## 14. Error Handling
+## 14. 错误处理
 
-| Condition | API behavior | Feishu behavior | Operational behavior |
+| 条件 | API 行为 | 飞书行为 | 运维行为 |
 |---|---|---|---|
-| Agent not published | `404` | generic unavailable message | no Run created |
-| Agent suspended or archived | `410` or policy-equivalent not-found | paused-service message | audit denial |
-| Invalid/revoked API Key | `401` | not applicable | rate-limited auth audit |
-| Quota or concurrency exceeded | `429` | friendly busy/quota message | no Run created |
-| Runtime timeout | timeout status with request ID | retry-later message | release reservation; record timeout |
-| Connector authorization missing | safe capability-denied error | safe task failure | audit denied capability |
-| Connector credential expired | safe dependency error | creator-contact message | mark Connector unhealthy; notify owner |
-| Feishu binding invalid | not applicable | channel cannot start | Agent remains published; binding unhealthy |
-| New release causes errors | stable external error | stable external error | owner can atomically roll back |
+| Agent 未发布 | `404` | 通用不可用提示 | 不创建 Run |
+| Agent 已暂停或已归档 | `410` 或策略等价的 not-found | 服务已暂停提示 | 审计拒绝 |
+| API Key 无效或已撤销 | `401` | 不适用 | 限流的认证审计 |
+| 配额或并发超限 | `429` | 友好的繁忙 / 配额提示 | 不创建 Run |
+| 运行时超时 | 带请求 ID 的超时状态 | 请稍后重试提示 | 释放预留；记录超时 |
+| Connector 授权缺失 | 安全的能力拒绝错误 | 安全的任务失败提示 | 审计记录能力拒绝 |
+| Connector 凭据过期 | 安全的依赖错误 | 请联系创建者提示 | 将 Connector 标记为不健康；通知 owner |
+| 飞书绑定无效 | 不适用 | channel 无法启动 | Agent 保持已发布；binding 标记为不健康 |
+| 新 Release 导致错误 | 稳定的对外错误 | 稳定的对外错误 | owner 可以原子回滚 |
 
-Errors exposed to external consumers never contain owner IDs, release IDs, internal paths, stack traces, prompts, secrets, or private capability details.
+向外部使用方暴露的错误中，绝不能包含 owner ID、Release ID、内部路径、堆栈、Prompt、密钥或私有能力细节。
 
-## 15. Observability and Operations
+## 15. 可观测性与运维
 
-Metrics and structured logs use stable operational identifiers:
+指标与结构化日志使用稳定的运维标识：
 
-- `agent_id`;
-- internal `release_id` in trusted telemetry only;
-- channel binding or API Key ID;
-- source and external subject hash;
-- Conversation and Run ID;
-- request/event idempotency key;
-- correlation ID;
-- latency, tokens, status, and error class.
+- `agent_id`；
+- 仅存在于受信遥测中的内部 `release_id`；
+- channel binding 或 API Key ID；
+- 来源与外部主体哈希；
+- Conversation 与 Run ID；
+- 请求 / 事件幂等 Key；
+- 关联 ID；
+- 时延、Token、状态与错误类别。
 
-Dashboards should cover:
+Dashboard 应覆盖：
 
-- active Agents and bindings;
-- runs, tokens, and cost by owner/Agent/source;
-- quota rejection and concurrency saturation;
-- Feishu connection health and event lag;
-- Connector failures and authorization denials;
-- error rates by current release so owners can identify regressions.
+- 激活中的 Agent 与绑定数；
+- 按 owner / Agent / 来源统计的 Run、Token 与成本；
+- 配额拒绝与并发饱和情况；
+- 飞书连接健康与事件延迟；
+- Connector 失败与授权拒绝；
+- 按当前 Release 维度的错误率，帮助 owner 识别回归。
 
-Owner views must not expose raw external user content by default. Platform administrators require an explicit support/audit path for sensitive payload access.
+默认情况下，owner 视图不应暴露原始外部用户内容。平台管理员访问敏感负载必须走显式的支持 / 审计路径。
 
-## 16. Web Experience
+## 16. Web 端产品体验
 
-### 16.1 Agent Gallery
+### 16.1 智能体总览（Agent Gallery）
 
-The existing gallery becomes the owner dashboard. Each card shows stable Agent status, current release summary, active integrations, recent usage, and health. It does not expose a public marketplace action.
+现有 Gallery 将演进为 owner 控制台。每张卡片展示稳定的 Agent 状态、当前 Release 摘要、激活中的集成、近期用量与健康状态；但不提供公开市场动作。
 
-### 16.2 Agent Studio
+### 16.2 智能体工作台（Agent Studio）
 
-The Studio has focused sections rather than requiring channel setup during creation:
+Studio 采用聚焦式分区，而不是在创建阶段就强制配置 channel：
 
-1. overview and basic metadata;
-2. `AGENT.md` and `SOUL.md` editors;
-3. public/private Skill selection and required Connector grants;
-4. draft sandbox test;
-5. publication validation, change summary, release history, and rollback.
+1. 概览与基础元数据；
+2. `AGENT.md` 与 `SOUL.md` 编辑器；
+3. 公共 / 私有 Skill 选择与所需 Connector 授权；
+4. 草稿沙箱测试；
+5. 发布校验、变更摘要、Release 历史与回滚。
 
-After publication, an Integration and Operations area provides:
+发布后，集成与运维区域提供：
 
-- API Keys and API examples;
-- optional Feishu binding and connection test;
-- optional Agent/Key quota overrides;
-- health, usage, audit, pause, and restart controls.
+- API Key 与 API 示例；
+- 可选的飞书绑定与连接测试；
+- 可选的 Agent / Key 配额覆盖；
+- 健康状态、用量、审计、暂停与重启控制。
 
-### 16.3 Authoring Compatibility
+### 16.3 编写兼容性
 
-The existing chat-driven Agent creation flow may generate or refine draft content, but it must write through the same draft service and authorization rules as the structured editor. It must not create filesystem-only Agents that bypass publication records.
+现有基于聊天的 Agent 创建流程可以用于生成或润色草稿内容，但它必须通过与结构化编辑器相同的草稿服务与授权规则落盘，不能创建绕过发布记录的“仅文件系统 Agent”。
 
-## 17. Migration and Compatibility
+## 17. 迁移与兼容性
 
-Existing per-user filesystem Agents are not silently published.
+现有按用户存储在文件系统中的 Agent 不会被静默发布。
 
-Migration behavior:
+迁移行为：
 
-1. list existing per-user Agent directories as import candidates;
-2. create stable `agents` and `agent_drafts` records owned by the same user;
-3. map existing `SOUL.md` and config fields into the draft;
-4. leave `AGENT.md` empty unless one exists;
-5. map current Skill names to visible current revisions, reporting unresolved Skills;
-6. require owner review and explicit first publication;
-7. preserve legacy runtime compatibility during a bounded migration window.
+1. 将现有的用户级 Agent 目录列为可导入候选；
+2. 创建由同一用户拥有的稳定 `agents` 与 `agent_drafts` 记录；
+3. 将现有 `SOUL.md` 与配置字段映射进草稿；
+4. 若不存在 `AGENT.md`，则保持其为空；
+5. 将当前 Skill 名称映射到可见的当前 revision，并报告无法解析的 Skill；
+6. 要求 owner 审核后显式完成首次发布；
+7. 在一个有界迁移窗口内保留旧运行时兼容能力。
 
-The existing External API remains available during migration. Agent-specific Keys and stable published-Agent routes are additive and must not reinterpret legacy user API Keys.
+现有 External API 在迁移期间继续可用。Agent 专属 Key 与稳定的已发布 Agent 路由属于增量能力，不能重新解释旧的用户级 API Key。
 
-## 18. Testing Strategy
+## 18. 测试策略
 
-### 18.1 Unit Tests
+### 18.1 单元测试
 
-- draft and release validation;
-- instruction composition order;
-- immutable release and checksum behavior;
-- Skill revision and ownership resolution;
-- Connector capability intersections;
-- stable Agent-to-current-release resolution;
-- API Key hashing, rotation, revocation, and Agent binding;
-- quota inheritance, reservations, release, and idempotency;
-- no-memory policy construction;
-- safe external serialization and error redaction.
+- 草稿与 Release 校验；
+- 指令拼接顺序；
+- 不可变 Release 与校验和行为；
+- Skill revision 与拥有权解析；
+- Connector 能力交集；
+- 稳定 Agent 到当前 Release 的解析；
+- API Key 哈希、轮换、撤销与 Agent 绑定；
+- 配额继承、预留、释放与幂等性；
+- 无记忆策略构造；
+- 安全的对外序列化与错误脱敏。
 
-### 18.2 Repository and Service Tests
+### 18.2 仓储与服务测试
 
-- owner-scoped CRUD for every new entity;
-- cross-owner and cross-Agent denial;
-- atomic publication and rollback pointer updates;
-- immediate security revocation of Connector grants;
-- stable bindings and Keys across republish/rollback;
-- multi-process-safe Conversation and Feishu mapping persistence.
+- 所有新实体的 owner 范围 CRUD；
+- 跨 owner 与跨 Agent 拒绝访问；
+- 原子发布与回滚指针更新；
+- Connector 授权撤销的即时安全生效；
+- 重新发布 / 回滚后绑定与 Key 仍保持稳定；
+- 多进程安全的 Conversation 与飞书映射持久化。
 
-### 18.3 Runtime Integration Tests
+### 18.3 运行时集成测试
 
-- published instructions and exact Skill revisions reach the runtime;
-- external fields cannot override model, Skill, Connector, owner, release, or memory policy;
-- owner Connector access succeeds only for granted capabilities;
-- memory middleware, memory prompts, `USER.md`, and management tools are absent;
-- in-flight runs remain on their resolved release while new runs use the new release;
-- usage is finalized exactly once on success, failure, cancellation, and timeout.
+- 已发布指令与准确的 Skill revision 能传达到运行时；
+- 外部字段不能覆盖模型、Skill、Connector、owner、Release 或记忆策略；
+- owner Connector 访问只会在已授权能力下成功；
+- 记忆中间件、记忆 Prompt、`USER.md` 与管理工具全部缺失；
+- 正在执行中的 Run 固定在创建时解析出的 Release，新 Run 使用新 Release；
+- 成功、失败、取消与超时时的用量都只结算一次。
 
-### 18.4 External API Tests
+### 18.4 对外 API 测试
 
-- multiple Keys for one Agent and strict rejection across Agents;
-- synchronous, streaming, asynchronous, cancellation, and idempotent flows;
-- multi-turn Conversation isolation;
-- no internal release fields or private metadata in responses;
-- correct `401`, `404/410`, `409`, `422`, `429`, and timeout behavior;
-- no duplicate run or charge on retry.
+- 一个 Agent 的多个 Key，以及跨 Agent 的严格拒绝；
+- 同步、流式、异步、取消与幂等流程；
+- 多轮 Conversation 隔离；
+- 响应中不含内部 Release 字段或私有元数据；
+- 正确的 `401`、`404/410`、`409`、`422`、`429` 与超时行为；
+- 重试时不重复创建 Run，也不重复计费。
 
-### 18.5 Feishu Tests
+### 18.5 飞书测试
 
-- multiple independent Agent bindings in one Gateway deployment;
-- connection start, stop, restart, and credential rotation;
-- event verification, replay rejection, and deduplication;
-- private-user, group, and topic Conversation mapping isolation;
-- streaming/final delivery and attachment handling;
-- no long-term memory across Conversations;
-- one unhealthy binding does not affect another.
+- 单个 Gateway 部署中的多个独立 Agent 绑定；
+- 连接启动、停止、重启与凭据轮换；
+- 事件校验、重放拒绝与去重；
+- 私聊用户、群聊与话题级 Conversation 映射隔离；
+- 流式 / 最终响应投递与附件处理；
+- Conversation 之间不存在长期记忆；
+- 一个不健康绑定不会影响另一个绑定。
 
-### 18.6 Frontend Tests
+### 18.6 前端测试
 
-- direct editing of both instruction files;
-- public/private Skill ownership filtering;
-- Connector requirement and grant UX;
-- publish validation and draft/online separation;
-- release comparison and rollback without exposing releases externally;
-- publication without Feishu or API Key;
-- post-publication API Key and Feishu setup;
-- optional limits inheriting platform defaults.
+- 两个指令文件的直接编辑；
+- 公共 / 私有 Skill 拥有权过滤；
+- Connector 要求与授权体验；
+- 发布校验以及草稿 / 线上分离；
+- 在不对外暴露 Release 的前提下做 Release 对比与回滚；
+- 无飞书、无 API Key 的发布；
+- 发布后再配置 API Key 与飞书；
+- 可选限额正确继承平台默认值。
 
-## 19. Acceptance Criteria
+## 19. 验收标准
 
-The first release is accepted when:
+当满足以下条件时，第一版即可验收：
 
-1. Two platform users can each create multiple Agents without reading or mutating the other's drafts, releases, Skills, Connectors, Keys, channels, usage, or audit data.
-2. An Agent can publish with only `AGENT.md`, only `SOUL.md`, or both.
-3. Saving a published Agent's draft does not change online behavior until republish.
-4. Public and owner-private Skills are selectable, and online execution is locked to the published Skill revisions.
-5. Connector calls use only owner-granted capabilities and never expose secrets.
-6. An Agent can publish without Feishu and later serve API requests after an Agent Key is created.
-7. An Agent can later bind an independent Feishu application without republishing.
-8. Feishu private and group Conversations are isolated correctly and no external run reads or writes long-term memory.
-9. Republish and rollback do not change the bot identity, external API path, API Keys, or existing Conversation identifiers.
-10. External callers cannot observe or select internal releases.
-11. Multiple named Agent Keys can be independently limited, rotated, and revoked.
-12. Optional owner limits and mandatory platform limits reject work before Run creation and account idempotently.
-13. Feishu event retries and API idempotency retries do not duplicate Runs or charges.
-14. One failed Feishu binding, Connector, or Agent does not interrupt other published Agents.
+1. 两个平台用户都可以各自创建多个 Agent，并且无法读取或修改对方的草稿、Release、Skill、Connector、Key、channel、用量或审计数据。
+2. 一个 Agent 可以只使用 `AGENT.md`、只使用 `SOUL.md`，或同时使用两者发布。
+3. 保存一个已发布 Agent 的草稿，不会在重新发布前改变线上行为。
+4. 公共 Skill 与 owner 私有 Skill 都可被选择，且线上执行严格锁定到发布时的 Skill revision。
+5. Connector 调用只使用 owner 显式授予的能力，并且绝不暴露密钥。
+6. Agent 可以先在没有飞书的情况下发布，并在创建 Agent Key 后再对外提供 API 服务。
+7. Agent 也可以在后续绑定一套独立飞书应用，而无需重新发布。
+8. 飞书私聊与群聊 Conversation 能被正确隔离，且任何外部 Run 都不会读取或写入长期记忆。
+9. 重新发布与回滚不会改变机器人身份、外部 API 路径、API Key 或既有 Conversation 标识。
+10. 外部调用方无法观察或选择内部 Release。
+11. 多个具名 Agent Key 可以独立限额、轮换与撤销。
+12. 可选的 owner 限额与强制平台限额都能在创建 Run 之前拒绝请求，并以幂等方式记账。
+13. 飞书事件重试与 API 幂等重试不会造成重复 Run 或重复计费。
+14. 某一个飞书绑定、Connector 或 Agent 失败时，不会中断其他已发布 Agent。
 
-## 20. Delivery Decomposition
+## 20. 交付拆分
 
-This redesign spans several bounded subsystems and should be implemented as four sequential milestones, each with its own implementation plan and review gate.
+本次重构跨越多个边界清晰的子系统，应该按四个顺序里程碑实施，每个里程碑都要有自己的实施计划与评审关口。
 
-### Milestone 1: Agent Control Plane and Releases
+### 里程碑 1：Agent 控制平面与 Release 管理
 
-- SQL entities and repositories;
-- draft service and direct editor APIs;
-- Skill revisions and publication validation;
-- immutable releases, atomic publish, history, and rollback;
-- migration/import path for existing custom Agents.
+- SQL 实体与仓储；
+- 草稿服务与直接编辑器 API；
+- Skill revision 与发布校验；
+- 不可变 Release、原子发布、历史与回滚；
+- 现有自定义 Agent 的迁移 / 导入路径。
 
-### Milestone 2: Published Runtime and Agent API
+### 里程碑 2：已发布运行时与 Agent API
 
-- `PublishedAgentResolver` and trusted context;
-- no-memory runtime profile and management-tool filtering;
-- Agent API Keys and stable external API facade;
-- quota reservation, usage, audit, sync/SSE/async runs;
-- cross-owner security and idempotency tests.
+- `PublishedAgentResolver` 与受信任上下文；
+- 无记忆运行时配置与管理工具过滤；
+- Agent API Key 与稳定的对外 API 外观层；
+- 配额预留、用量、审计，以及同步 / SSE / 异步 Run；
+- 跨 owner 安全性与幂等性测试。
 
-### Milestone 3: Multi-Agent Feishu Supervisor
+### 里程碑 3：多 Agent 飞书 Supervisor
 
-- database-backed channel bindings and secret references;
-- per-Agent Feishu lifecycle and health;
-- durable Conversation mapping and event deduplication;
-- quota-aware runtime routing and response delivery;
-- multi-binding isolation tests.
+- 数据库驱动的 channel binding 与密钥引用；
+- 每个 Agent 的飞书生命周期与健康状态；
+- 持久化 Conversation 映射与事件去重；
+- 感知配额的运行时路由与响应投递；
+- 多绑定隔离测试。
 
-### Milestone 4: Agent Studio and Operations
+### 里程碑 4：Agent Studio 与运维
 
-- draft editors, Skill selection, Connector grant UX, and sandbox test;
-- publish validation, history, comparison, and rollback UI;
-- post-publication API Key and optional Feishu setup;
-- optional limit controls, usage, health, and audit views;
-- end-to-end acceptance coverage and operational documentation.
+- 草稿编辑器、Skill 选择、Connector 授权体验与沙箱测试；
+- 发布校验、历史、对比与回滚 UI；
+- 发布后 API Key 与可选飞书配置；
+- 可选限额控制、用量、健康状态与审计视图；
+- 端到端验收覆盖与运维文档。
 
-The milestones preserve usable intermediate states and avoid combining persistence, runtime security, channel orchestration, and UI changes into one unreviewable implementation batch.
+这些里程碑能保证每一步都保持可用的中间状态，并避免把持久化、运行时安全、渠道编排与 UI 变更一次性混在同一个无法评审的大批次实现中。
