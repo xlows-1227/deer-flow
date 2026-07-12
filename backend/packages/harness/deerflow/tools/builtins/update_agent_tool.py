@@ -54,15 +54,20 @@ def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, An
             agent = next((a for a in agents if a["slug"] == slug), None)
             if agent is None:
                 return
+            # Description lives on the agent identity, not the draft. Mirror it
+            # via update_meta when provided (rereview Important-5).
+            description = fields.get("description")
+            if description is not None:
+                try:
+                    await service.update_agent_meta(agent["id"], owner_user_id=owner_user_id, description=description)
+                except Exception:  # noqa: BLE001
+                    pass
             draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
             if draft is None:
                 return
-            # Description, skills, tool_groups, model are mirrored alongside
-            # soul so the Studio draft matches the filesystem state (code-review
-            # Important-3). Skills are mapped to the draft shape; the service
-            # derives the authoritative source/visibility.
-            skills_value = fields.get("skills")
-            skill_entries = [{"skill_name": s, "source": "public"} for s in skills_value] if skills_value is not None else None
+            # Mirror soul / model / tool_groups first, separately from skills, so
+            # an unresolvable legacy skill name does not block the other fields
+            # (rereview Important-5).
             try:
                 await service.update_draft_bundle(
                     agent["id"],
@@ -71,10 +76,25 @@ def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, An
                     soul_markdown=fields.get("soul"),
                     model_name=fields.get("model"),
                     tool_groups=fields.get("tool_groups"),
+                )
+            except Exception:  # noqa: BLE001
+                return
+            skills_value = fields.get("skills")
+            if skills_value is None:
+                return
+            refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
+            if refreshed is None:
+                return
+            skill_entries = [{"skill_name": s, "source": "public"} for s in skills_value]
+            try:
+                await service.update_draft_bundle(
+                    agent["id"],
+                    owner_user_id=owner_user_id,
+                    revision=refreshed["revision"],
                     skills=skill_entries,
                 )
             except Exception:  # noqa: BLE001
-                # Skill/model validation may reject a legacy value; stay best-effort.
+                # Skill validation may reject a legacy name; other fields are saved.
                 return
 
         try:
@@ -290,7 +310,7 @@ def update_agent(
     _persist_draft_update(
         owner_user_id=user_id,
         slug=agent_name,
-        fields={"soul": soul, "model": model, "tool_groups": tool_groups, "skills": skills},
+        fields={"soul": soul, "model": model, "tool_groups": tool_groups, "skills": skills, "description": description},
     )
     return Command(
         update={

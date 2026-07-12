@@ -452,3 +452,36 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 第二轮复审文档：[2026-07-12-m1-agent-control-plane-code-rereview.md](./2026-07-12-m1-agent-control-plane-code-rereview.md)
 
 复审结论：**Ready to merge：No**。当前仍有 2 个 Critical 与 5 个 Important 问题待修复，重点包括 PostgreSQL 迁移升级安全性、draft 乐观并发的数据库级原子性、发布事务边界、公开 Skill revision 去重、生产可用性校验、导入适配器与对话式工具镜像完整性。
+
+第二轮全部 7 项已修复：
+
+### Critical-1：迁移列宽与升级安全
+- `skill_revisions.id` 在 Alembic 迁移中仍是 `String(32)`（ORM 已是 64），已就地修正为 `String(64)`。
+- 新增纠偏迁移 `2026_07_12_widen_published_agent_ids`，对已应用旧迁移的数据库显式 widen 所有受影响 ID/FK 列（batch alter，SQLite/PG 兼容）。
+- 新增 `test_migrated_schema_accepts_full_length_ids`：模拟旧库→跑全迁移链→插入 36 字符 `pa_` ID 成功。
+
+### Critical-2：draft 乐观并发改为数据库级 CAS
+- `update_with_revision` / `update_bundle` 改为单条条件 `UPDATE ... WHERE agent_id=? AND revision=?`（含 owner join 守卫），用 `rowcount` 判断是否抢到 revision。两个事务同时读同一 revision 时只有一个 UPDATE 命中行，杜绝 lost update。
+- 新增双 session 并发测试 `test_concurrent_draft_update_only_one_wins` / `test_concurrent_draft_bundle_only_one_wins`。
+
+### Important-1：发布改为单事务
+- 新增 `AgentReleaseRepository.create_and_point()`：release row + skill/connector 子表 + `current_release_id` 指针切换（含 owner 守卫与首次发布 draft→published）在同一 session 同一 commit 提交。指针失败则整事务回滚，不留孤儿 release。
+- `PublishService.publish()` 改用 `create_and_point`，不再分两次 commit。
+
+### Important-2：公开 Skill revision 去重
+- `skill_revisions` 新增非空列 `owner_scope`（公开 skill = `'public'`，私有 = owner id），唯一约束改为 `(skill_name, owner_scope, content_checksum)`。SQL NULL 在唯一约束下互不相同，旧约束无法保护公开 skill 去重。
+- 迁移回填 `owner_scope = COALESCE(owner_user_id, 'public')` 并重建约束。
+- 新增测试 `test_public_skill_revision_dedup_protected_against_null_owner`。
+
+### Important-3：生产可用性校验
+- `StorageSkillsIndex` 记录 `enabled` 标志，`is_selectable_by` 拒绝禁用 skill（即使 owner 本人）。
+- `ConnectorServiceRepo.get_instance` 对 `disabled`/`deleted`/`inactive` 状态的 connector 返回 None（不可授权）。
+- 新增 `test_publishing_adapters.py` 覆盖 disabled skill / disabled connector / active connector。
+
+### Important-4：导入适配器补 `get()`
+- factory 的 `_OwnerAwareImportIndex` 现实现 `get()`（委托 `StorageSkillsIndex.get`），导入流程不再把私有 skill 默认写成 public。
+
+### Important-5：对话式镜像补全
+- `setup_agent`：重复 slug 时改为同步已有 draft（不再直接 return）；soul 与 skills 分两次 `update_draft_bundle`，不可解析 skill 不阻断 soul 写入。
+- `update_agent`：镜像现包含 `description`（经新增的 `DraftService.update_agent_meta` → `PublishedAgentRepository.update_meta`）；soul/model/tool_groups 与 skills 分离写入。
+

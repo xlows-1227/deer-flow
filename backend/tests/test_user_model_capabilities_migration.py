@@ -142,15 +142,19 @@ def test_migrated_schema_accepts_full_length_ids(tmp_path):
         # published_agents migration: create the table at VARCHAR(32) and stamp
         # alembic at the base revision so the widen migration runs against it.
         async with engine_sync.begin() as conn:
-            await conn.execute(
-                text(
-                    "CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"
-                )
-            )
+            await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
             await conn.execute(text("INSERT INTO alembic_version VALUES ('2026_07_01_invite_codes')"))
             await conn.execute(
                 text(
-                    "CREATE TABLE published_agents (id VARCHAR(32) PRIMARY KEY, owner_user_id VARCHAR(36) NOT NULL, slug VARCHAR(64) NOT NULL, display_name VARCHAR(128) NOT NULL, description TEXT, avatar_ref VARCHAR(256), status VARCHAR(16) NOT NULL DEFAULT 'draft', current_release_id VARCHAR(32), created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+                    "CREATE TABLE published_agents ("
+                    "id VARCHAR(32) PRIMARY KEY, "
+                    "owner_user_id VARCHAR(36) NOT NULL, "
+                    "slug VARCHAR(64) NOT NULL, "
+                    "display_name VARCHAR(128) NOT NULL, "
+                    "description TEXT, avatar_ref VARCHAR(256), "
+                    "status VARCHAR(16) NOT NULL DEFAULT 'draft', "
+                    "current_release_id VARCHAR(32), "
+                    "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
                 )
             )
 
@@ -168,13 +172,9 @@ def test_migrated_schema_accepts_full_length_ids(tmp_path):
     async def _insert() -> None:
         async with engine_check.begin() as conn:
             await conn.execute(
-                text(
-                    "INSERT INTO published_agents (id, owner_user_id, slug, display_name, status, created_at, updated_at) "
-                    "VALUES (:id, 'owner', 'slug', 'Name', 'draft', '2026-07-12', '2026-07-12')"
-                ),
+                text("INSERT INTO published_agents (id, owner_user_id, slug, display_name, status, created_at, updated_at) VALUES (:id, 'owner', 'slug', 'Name', 'draft', '2026-07-12', '2026-07-12')"),
                 {"id": long_id},
             )
 
     asyncio.run(_insert())
     asyncio.run(engine_check.dispose())
-

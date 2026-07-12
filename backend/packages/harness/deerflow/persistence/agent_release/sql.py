@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.agent_release.model import (
@@ -93,6 +94,68 @@ class AgentReleaseRepository:
                         capability=str(entry["capability"]),
                     )
                 )
+            await session.commit()
+            await session.refresh(row)
+            skill_rows = await self._load_skills(session, row.id)
+            grant_rows = await self._load_grants(session, row.id)
+            return _release_to_dict(row, skills=skill_rows, connector_grants=grant_rows)
+
+    async def create_and_point(
+        self,
+        values: Mapping[str, Any],
+        *,
+        owner_user_id: str,
+        skills: Sequence[Mapping[str, str]] | None = None,
+        connector_grants: Sequence[Mapping[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically insert the release row + sub-tables AND flip the agent's
+        ``current_release_id`` pointer in a single transaction (rereview
+        Important-1).
+
+        Combining the release insert with the pointer update means a failure in
+        either leaves no orphan release and no rolled-back pointer. The owner
+        guard on the pointer update (via the published_agents join) ensures a
+        cross-owner caller cannot move someone else's pointer.
+        """
+        row = AgentReleaseRow(
+            id=str(values.get("id") or f"rel_{uuid4().hex}"),
+            agent_id=str(values["agent_id"]),
+            release_no=int(values["release_no"]),
+            agent_markdown=str(values.get("agent_markdown") or ""),
+            soul_markdown=str(values.get("soul_markdown") or ""),
+            model_name=values.get("model_name"),
+            tool_groups_json=list(values.get("tool_groups") or []),
+            quota_overrides_json=dict(values.get("quota_overrides") or {}),
+            manifest_checksum=str(values["manifest_checksum"]),
+            created_by=str(values["created_by"]),
+        )
+        async with self._sf() as session:
+            session.add(row)
+            for entry in skills or []:
+                session.add(
+                    AgentReleaseSkillRow(
+                        release_id=row.id,
+                        skill_revision_id=str(entry["skill_revision_id"]),
+                    )
+                )
+            for entry in connector_grants or []:
+                session.add(
+                    AgentReleaseConnectorGrantRow(
+                        release_id=row.id,
+                        connector_instance_id=str(entry["connector_instance_id"]),
+                        capability=str(entry["capability"]),
+                    )
+                )
+            # Flip the pointer in the same transaction. Owner guard + first-
+            # publish status transition mirror PublishedAgentRepository.
+            agent = await session.get(PublishedAgentRow, str(values["agent_id"]))
+            if agent is None or agent.owner_user_id != owner_user_id:
+                # Raise before commit so the whole transaction rolls back.
+                raise IntegrityError("agent not found or not owned by caller", params=None, orig=Exception("ownership"))
+            agent.current_release_id = row.id
+            if agent.status == "draft":
+                agent.status = "published"
+            agent.updated_at = _now()
             await session.commit()
             await session.refresh(row)
             skill_rows = await self._load_skills(session, row.id)

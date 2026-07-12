@@ -117,6 +117,29 @@ class DraftService:
     async def get_draft(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         return await self._drafts.get(agent_id, owner_user_id=owner_user_id)
 
+    async def update_agent_meta(
+        self,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        display_name: str | None = None,
+        description: str | None = None,
+        avatar_ref: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Update agent identity metadata (display name / description / avatar).
+
+        Description is identity-level (not draft-level), so conversational tools
+        that change it mirror through here (rereview Important-5). Returns the
+        updated agent or ``None`` if not found / not owned.
+        """
+        return await self._agents.update_meta(
+            agent_id,
+            owner_user_id=owner_user_id,
+            display_name=display_name,
+            description=description,
+            avatar_ref=avatar_ref,
+        )
+
     # ------------------------------------------------------------------
     # draft updates
     # ------------------------------------------------------------------

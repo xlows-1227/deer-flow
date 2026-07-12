@@ -35,6 +35,9 @@ class StorageSkillsIndex:
 
     def _ensure_index(self) -> dict[str, dict[str, Any]]:
         if self._index is None:
+            # Load all skills (including disabled) so ``get`` can still report
+            # metadata, but record the enabled flag so ``is_selectable_by``
+            # rejects disabled skills (rereview Important-3).
             skills = self._storage.load_skills(enabled_only=False)
             index: dict[str, dict[str, Any]] = {}
             for skill in skills:
@@ -49,6 +52,7 @@ class StorageSkillsIndex:
                     "owner": owner,
                     "caps": caps,
                     "skill_dir": skill.skill_dir,
+                    "enabled": bool(skill.enabled),
                 }
             self._index = index
         return self._index
@@ -56,6 +60,11 @@ class StorageSkillsIndex:
     def is_selectable_by(self, name: str, owner_user_id: str) -> bool:
         info = self._ensure_index().get(name)
         if info is None:
+            return False
+        # A disabled skill is never selectable, even for its owner (rereview
+        # Important-3): publishing an agent against a disabled skill would pin a
+        # revision the platform has turned off.
+        if not info.get("enabled", True):
             return False
         if info["visibility"] == "public":
             return True
@@ -111,4 +120,9 @@ class ConnectorServiceRepo:
         if instance is None:
             return None
         data = instance.model_dump() if hasattr(instance, "model_dump") else dict(instance)
+        # A disabled/deleted connector instance is not grantable (rereview
+        # Important-3): only active instances may back a release grant.
+        status = str(data.get("status") or "").lower()
+        if status in {"disabled", "deleted", "inactive"}:
+            return None
         return data

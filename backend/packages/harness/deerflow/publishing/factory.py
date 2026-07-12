@@ -163,10 +163,24 @@ def build_import_service():
     storage = get_or_new_skill_storage()
 
     class _OwnerAwareImportIndex:
-        def is_selectable_by(self, name, owner_user_id):  # noqa: ARG002
+        """Owner-aware skills index for the import path.
+
+        Implements both ``is_selectable_by`` and ``get`` so the import service
+        derives authoritative visibility/ownership rather than defaulting every
+        imported skill to ``public`` (rereview Important-4).
+        """
+
+        def _index(self, owner_user_id: str):
             from deerflow.publishing.skills_index import StorageSkillsIndex
 
-            return StorageSkillsIndex(storage, owner_user_id=owner_user_id).is_selectable_by(name, owner_user_id)
+            return StorageSkillsIndex(storage, owner_user_id=owner_user_id)
+
+        def is_selectable_by(self, name, owner_user_id):
+            return self._index(owner_user_id).is_selectable_by(name, owner_user_id)
+
+        def get(self, name):
+            # Visibility/caps are owner-independent; resolve with a placeholder.
+            return self._index("").get(name)
 
     return AgentImportService(
         published_agent_repo=PublishedAgentRepository(sf),
