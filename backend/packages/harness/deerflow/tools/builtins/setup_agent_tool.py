@@ -87,11 +87,13 @@ def _persist_draft_identity(
             if refreshed is None:
                 return
             # Filter to the selectable subset so one unresolvable legacy name
-            # does not block the valid skills (fourth-review Important-3).
-            # Always submit the filtered list (even if empty) when the caller
-            # provided a list, so skills=[] clears the selection (fifth-review
-            # Important-3).
-            selectable = service.filter_selectable_skills(skills, owner_user_id=owner_user_id)
+            # does not block the valid skills. Always submit the filtered list
+            # (even if empty) when the caller provided a list, so skills=[]
+            # clears the selection. Report unresolved names via logger (sixth-
+            # review Important-1).
+            selectable, unresolved = service.filter_selectable_skills(skills, owner_user_id=owner_user_id)
+            if unresolved:
+                logger.warning("[agent_creator] Skills not selectable (dropped from draft): %s", unresolved)
             skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
             try:
                 await service.update_draft_bundle(
@@ -173,10 +175,25 @@ def setup_agent(
             )
 
         logger.info(f"[agent_creator] Created agent '{agent_name}' at {agent_dir}")
+        # Build a success message that warns about unresolvable skills if any
+        # (sixth-review Important-1). The check is best-effort: if the draft
+        # service is unavailable the message stays generic.
+        success_msg = f"Agent '{agent_name}' created successfully!"
+        if agent_name and skills:
+            try:
+                from deerflow.publishing.factory import build_draft_service
+
+                svc = build_draft_service()
+                if svc is not None:
+                    _sel, unresolved = svc.filter_selectable_skills(skills, owner_user_id=resolve_runtime_user_id(runtime))
+                    if unresolved:
+                        success_msg += f" Warning: skills not available and were excluded: {', '.join(unresolved)}."
+            except Exception:
+                pass
         return Command(
             update={
                 "created_agent_name": agent_name,
-                "messages": [ToolMessage(content=f"Agent '{agent_name}' created successfully!", tool_call_id=runtime.tool_call_id)],
+                "messages": [ToolMessage(content=success_msg, tool_call_id=runtime.tool_call_id)],
             }
         )
 

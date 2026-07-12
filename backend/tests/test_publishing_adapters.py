@@ -38,13 +38,13 @@ def _make_storage(skills: list[dict[str, Any]], owners: dict[str, str] | None = 
             return out
 
         def _read_custom_skill_owner(self, skill_dir):  # noqa: ARG002
-            return owners.get(s["name"]) if (s := {"name": ""}) else None
+            # Match by skill_dir to find the skill name, then look up the owner.
+            for s in skills:
+                if s.get("skill_dir") == skill_dir and s["name"] in owners:
+                    return owners[s["name"]]
+            return None
 
     storage = _FakeStorage()
-    # Patch _read_custom_skill_owner to use the name→owner map by name lookup.
-    storage._read_custom_skill_owner = lambda skill_dir=None, _owners=owners, _skills=skills: next(  # noqa: E731
-        (_owners[sk["name"]] for sk in _skills if sk.get("skill_dir") == skill_dir and sk["name"] in _owners), None
-    )
     return storage
 
 
@@ -231,17 +231,27 @@ async def test_connector_rejected_when_type_not_in_whitelist(monkeypatch):
 
     repo = ConnectorServiceRepo(_FakeService())
     assert await repo.get_instance("conn_1", owner_id="user-a") is None
-    """Rereview Important-4: the production skills indexes must expose get().
 
-    The draft/publish factory index (``_OwnerAwareSkillsIndex``) is module-level
-    and used as the template for the import adapter; both now implement get()
-    so visibility/ownership is derived authoritatively.
-    """
-    from deerflow.publishing.factory import _OwnerAwareSkillsIndex
 
+def test_storage_skills_index_exposes_get_for_public():
+    """StorageSkillsIndex.get() returns metadata for a public skill."""
     storage = _make_storage([{"name": "reporting", "category": "public", "enabled": True}])
-    index = _OwnerAwareSkillsIndex(storage)
+    index = StorageSkillsIndex(storage, owner_user_id="user-a")
     assert hasattr(index, "get")
     info = index.get("reporting")
     assert info is not None
     assert info["visibility"] == "public"
+
+
+def test_storage_skills_index_reports_private_visibility():
+    """A private (custom) skill owned by the current user is reported as
+    visibility='private' with the correct owner."""
+    storage = _make_storage(
+        [{"name": "my-private", "category": "custom", "enabled": True, "skill_dir": "/p"}],
+        owners={"my-private": "user-a"},
+    )
+    index = StorageSkillsIndex(storage, owner_user_id="user-a")
+    info = index.get("my-private")
+    assert info is not None, "private skill metadata should resolve"
+    assert info["visibility"] == "private"
+    assert info["owner"] == "user-a"

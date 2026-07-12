@@ -86,9 +86,11 @@ def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, An
             if refreshed is None:
                 return
             # Filter to selectable subset. Always submit the filtered list (even
-            # if empty) when the caller provided a list, so skills=[] clears
-            # (fifth-review Important-3).
-            selectable = service.filter_selectable_skills(skills_value, owner_user_id=owner_user_id)
+            # if empty) when the caller provided a list, so skills=[] clears.
+            # Report unresolved names via logger (sixth-review Important-1).
+            selectable, unresolved = service.filter_selectable_skills(skills_value, owner_user_id=owner_user_id)
+            if unresolved:
+                logger.warning("[update_agent] Skills not selectable (dropped from draft): %s", unresolved)
             skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
             try:
                 await service.update_draft_bundle(
@@ -316,11 +318,25 @@ def update_agent(
         slug=agent_name,
         fields={"soul": soul, "model": model, "tool_groups": tool_groups, "skills": skills, "description": description},
     )
+    # Build a success message that warns about unresolvable skills (sixth-review
+    # Important-1). Best-effort: if the draft service is unavailable, generic.
+    success_msg = f"Agent '{agent_name}' updated successfully. Changed: {', '.join(updated_fields)}. The new configuration takes effect on the next user turn."
+    if skills:
+        try:
+            from deerflow.publishing.factory import build_draft_service
+
+            svc = build_draft_service()
+            if svc is not None:
+                _sel, unresolved = svc.filter_selectable_skills(skills, owner_user_id=user_id)
+                if unresolved:
+                    success_msg += f" Warning: skills not available and were excluded: {', '.join(unresolved)}."
+        except Exception:
+            pass
     return Command(
         update={
             "messages": [
                 ToolMessage(
-                    content=(f"Agent '{agent_name}' updated successfully. Changed: {', '.join(updated_fields)}. The new configuration takes effect on the next user turn."),
+                    content=success_msg,
                     tool_call_id=tool_call_id,
                 )
             ]

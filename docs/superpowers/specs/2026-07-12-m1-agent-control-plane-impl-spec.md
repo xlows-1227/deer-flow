@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第四轮修复已提交；第五轮复审仍有阻断项待修复
+**状态：** 已实现；第五轮修复已提交；第六轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -569,7 +569,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 18. 第五轮代码复审修复（2026-07-12）
+## 21. 第五轮代码复审修复（2026-07-12）
 
 第五轮复审文档：[2026-07-12-m1-agent-control-plane-code-fifth-review.md](./2026-07-12-m1-agent-control-plane-code-fifth-review.md)
 
@@ -586,3 +586,13 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 - 工具在 `skills is not None`（含空列表）时始终提交过滤后列表（即使为 `[]`），落实 `skills=[] = 禁用全部`。
 - duplicate setup 传原始 description（空字符串可清除旧值），不再 `description or None`。
 - UOW 失败测试新增 `skill_revisions` 计数断言（内容去重保证无重复）。
+
+---
+
+## 22. 第六轮代码复审（2026-07-13）
+
+第六轮复审文档：[2026-07-13-m1-agent-control-plane-code-sixth-review.md](./2026-07-13-m1-agent-control-plane-code-sixth-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认 PostgreSQL 长 revision stamp、Skill revision SAVEPOINT 并发去重、Connector registry 校验、`skills=[]`、全部无效 Skills 落库和空 description 清空语义已经修复；当前无 Critical，仍有 1 个 Important 与 6 个 Minor。
+
+唯一 Important 是 unresolved Skills 仍被静默丢弃：文件系统保存调用方原始列表，数据库草稿只保存有效子集，但工具继续返回通用成功消息。合并前应返回或结构化记录 unresolved 项，并让镜像写入失败对调用方可见。其余问题主要是 SQLite schema 声明漂移、Skill revision/Draft CAS 测试并非真实并发、生产 Import adapter 测试对象错误、失败 publish 断言过宽，以及 PostgreSQL 集成迁移门禁可被跳过。

@@ -248,13 +248,22 @@ class DraftService:
             raise DraftConflictError("draft not found")
         return result
 
-    def filter_selectable_skills(self, skill_names: Sequence[str], *, owner_user_id: str) -> list[str]:
-        """Return only the skills the owner can select (fourth-review Important-3).
+    def filter_selectable_skills(self, skill_names: Sequence[str], *, owner_user_id: str) -> tuple[list[str], list[str]]:
+        """Return ``(selectable, unresolved)`` skill names (sixth-review Important-1).
 
-        Tools that mirror a legacy skill list call this to drop unresolvable
-        names before writing, so one bad name does not block the valid subset.
+        ``selectable`` is the subset the owner can use; ``unresolved`` is the
+        remainder (unknown, disabled, or owned by someone else). Tools that
+        mirror a legacy skill list call this so they can report unresolved names
+        to the user instead of silently dropping them.
         """
-        return [name for name in skill_names if self._skills.is_selectable_by(name, owner_user_id)]
+        selectable: list[str] = []
+        unresolved: list[str] = []
+        for name in skill_names:
+            if self._skills.is_selectable_by(name, owner_user_id):
+                selectable.append(name)
+            else:
+                unresolved.append(name)
+        return selectable, unresolved
 
     async def set_connector_grants(
         self,

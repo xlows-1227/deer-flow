@@ -303,6 +303,9 @@ async def test_failed_publish_leaves_no_orphan_skill_revisions(env):
     refreshed = await service.list_releases(agent["id"], owner_user_id="user-a")
     assert refreshed == [], "no release should exist after a failed publish"
     revs_after = await skill_repo.list_by_skill("reporting")
-    # Revisions are content-deduplicated: a failed publish should not create
-    # duplicates even if the SAVEPOINT partially committed.
-    assert len(revs_after) <= 1, "at most one revision for the same content"
+    # The shared transaction rolled back. On PostgreSQL the SAVEPOINT is fully
+    # undone (0 revisions). On SQLite the aiosqlite driver may partially commit
+    # the SAVEPOINT, leaving at most 1 revision — but revisions are
+    # content-deduplicated, so re-publishing reuses the same row (no
+    # accumulation). The invariant is: no duplicates after a failed publish.
+    assert len(revs_after) <= 1, "at most one content revision; no duplicates from a failed publish"

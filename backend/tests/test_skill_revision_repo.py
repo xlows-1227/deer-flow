@@ -161,9 +161,12 @@ async def test_private_skill_owner_scope_is_owner_id(skill_repo):
 
 @pytest.mark.asyncio
 async def test_concurrent_get_or_create_in_session_dedupes(skill_repo, tmp_path):
-    """Fifth-review Important-1: two concurrent _get_or_create_in_session calls
-    for the same (skill_name, owner_scope, checksum) must not leave the shared
-    transaction in an error state. The SAVEPOINT handles the unique conflict."""
+    """Sixth-review Minor-2: two truly concurrent _get_or_create_in_session
+    calls for the same (skill_name, owner_scope, checksum) must both succeed and
+    return the same canonical revision. Uses asyncio.gather with two independent
+    sessions sharing one engine to force a real unique-key race."""
+    import asyncio
+
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from deerflow.persistence.base import Base
@@ -172,33 +175,25 @@ async def test_concurrent_get_or_create_in_session_dedupes(skill_repo, tmp_path)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def _create_revision(session_id: str) -> str:
+        async with sf() as session:
+            async with session.begin():
+                row = await skill_repo._get_or_create_in_session(  # noqa: SLF001
+                    session,
+                    skill_name="race-skill",
+                    owner_user_id=None,
+                    visibility="public",
+                    content_checksum="sha256:race",
+                    content_ref="cs://race/race",
+                    declared_connector_caps=[],
+                )
+            return row.id
+
     try:
-        # First call creates the revision in its own transaction.
-        async with sf() as s1:
-            row1 = await skill_repo._get_or_create_in_session(  # noqa: SLF001
-                s1,
-                skill_name="concurrent-skill",
-                owner_user_id=None,
-                visibility="public",
-                content_checksum="sha256:dup",
-                content_ref="cs://concurrent/dup",
-                declared_connector_caps=[],
-            )
-            await s1.commit()
-
-        # Second call in a new session should find the existing row (no conflict).
-        async with sf() as s2:
-            row2 = await skill_repo._get_or_create_in_session(  # noqa: SLF001
-                s2,
-                skill_name="concurrent-skill",
-                owner_user_id=None,
-                visibility="public",
-                content_checksum="sha256:dup",
-                content_ref="cs://concurrent/dup",
-                declared_connector_caps=[],
-            )
-            await s2.commit()
-
-        assert row1.id == row2.id, "concurrent get_or_create should dedupe to the same revision"
+        # Launch both concurrently — both SELECT miss, both INSERT, one wins
+        # the unique constraint, the SAVEPOINT lets the loser recover.
+        id_a, id_b = await asyncio.gather(_create_revision("a"), _create_revision("b"))
+        assert id_a == id_b, "concurrent get_or_create must dedupe to the same revision id"
     finally:
         await engine.dispose()

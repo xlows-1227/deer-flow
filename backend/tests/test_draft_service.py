@@ -423,3 +423,30 @@ async def test_update_draft_bundle_rejects_unselectable_skill_before_write(servi
     after = await service.get_draft(agent["id"], owner_user_id="user-a")
     assert after["revision"] == 1
     assert after["soul_markdown"] == ""
+
+
+# ---------------------------------------------------------------------------
+# filter_selectable_skills (unresolved feedback)
+# ---------------------------------------------------------------------------
+
+
+def test_filter_selectable_skills_returns_both_selectable_and_unresolved(service):
+    """Sixth-review Important-1: filter_selectable_skills must return unresolved
+    names alongside the selectable subset so tools can report them."""
+    selectable, unresolved = service.filter_selectable_skills(["reporting", "ghost", "secret-tool"], owner_user_id="user-a")
+    assert "reporting" in selectable
+    assert "secret-tool" in selectable  # private skill owned by user-a
+    assert "ghost" in unresolved
+
+
+def test_filter_selectable_skills_empty_input():
+    """Empty input returns empty selectable and unresolved."""
+    svc = DraftService(
+        published_agent_repo=FakePublishedAgentRepo(draft_repo := FakeDraftRepo()),
+        draft_repo=draft_repo,
+        skills_index=FakeSkillsIndex({}),
+        connector_repo=FakeConnectorRepo(),
+    )
+    selectable, unresolved = svc.filter_selectable_skills([], owner_user_id="user-a")
+    assert selectable == []
+    assert unresolved == []
