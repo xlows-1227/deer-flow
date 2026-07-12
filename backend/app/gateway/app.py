@@ -30,6 +30,7 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    published_agents,
     runs,
     scheduler,
     shares,
@@ -531,6 +532,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Connector Platform API is mounted at /api/connectors and /api/connector-types
     app.include_router(connectors.router)
+
+    # Published-agent control plane (draft CRUD). Mounted at /api/published-agents.
+    app.include_router(published_agents.router)
 
     # Assistants compatibility API (LangGraph Platform stub)
     app.include_router(assistants_compat.router)

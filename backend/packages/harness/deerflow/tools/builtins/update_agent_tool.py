@@ -33,6 +33,48 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 
+def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, Any]) -> None:
+    """Best-effort mirror of an agent edit into the published-agent draft store.
+
+    Keeps conversational edits and structured Studio edits consistent (design
+    §16.3): both land in the same draft. The filesystem two-phase commit above
+    remains the source of truth during the migration window; this mirror is
+    fire-and-forget and never raises into the tool result.
+    """
+    try:
+        from deerflow.publishing.factory import build_draft_service
+
+        service = build_draft_service()
+        if service is None:
+            return
+        import asyncio
+
+        async def _run() -> None:
+            agents = await service.list_agents(owner_user_id)
+            agent = next((a for a in agents if a["slug"] == slug), None)
+            if agent is None:
+                return
+            draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
+            if draft is None:
+                return
+            await service.update_draft(
+                agent["id"],
+                owner_user_id=owner_user_id,
+                revision=draft["revision"],
+                soul_markdown=fields.get("soul"),
+                model_name=fields.get("model"),
+                tool_groups=fields.get("tool_groups"),
+            )
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_run())
+        except RuntimeError:
+            asyncio.run(_run())
+    except Exception:
+        logger.debug("draft persistence unavailable; filesystem write remains source of truth", exc_info=True)
+
+
 def _stage_temp(path: Path, text: str) -> Path:
     """Write ``text`` into a sibling temp file and return its path.
 
@@ -233,6 +275,12 @@ def update_agent(
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})
 
     logger.info("[update_agent] Updated agent '%s' (user=%s) fields: %s", agent_name, user_id, updated_fields)
+    # Mirror the edit into the draft store (best-effort; see helper docstring).
+    _persist_draft_update(
+        owner_user_id=user_id,
+        slug=agent_name,
+        fields={"soul": soul, "model": model, "tool_groups": tool_groups},
+    )
     return Command(
         update={
             "messages": [

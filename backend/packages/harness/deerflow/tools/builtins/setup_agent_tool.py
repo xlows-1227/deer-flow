@@ -13,6 +13,43 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 
+def _persist_draft_identity(*, owner_user_id: str, slug: str, display_name: str, soul_markdown: str) -> None:
+    """Best-effort mirror of a just-created agent into the published-agent DB.
+
+    The conversational ``setup_agent`` flow and the structured Studio editor must
+    land on the same draft source of truth (design §16.3). When persistence is
+    available we create the agent identity + draft through ``DraftService`` so
+    there is no "filesystem-only" agent. Failures are logged and swallowed: the
+    filesystem write is the compatibility fallback during the migration window.
+    """
+    try:
+        from deerflow.publishing.factory import build_draft_service
+
+        service = build_draft_service()
+        if service is None:
+            return
+        import asyncio
+
+        async def _run() -> None:
+            try:
+                await service.create_agent(
+                    owner_user_id=owner_user_id,
+                    slug=slug,
+                    display_name=display_name,
+                )
+            except ValueError:
+                # Already imported / duplicate slug — acceptable on re-runs.
+                return
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_run())
+        except RuntimeError:
+            asyncio.run(_run())
+    except Exception:
+        logger.debug("draft persistence unavailable; filesystem write remains source of truth", exc_info=True)
+
+
 @tool(parse_docstring=True)
 def setup_agent(
     soul: str,
@@ -60,6 +97,16 @@ def setup_agent(
 
         soul_file = agent_dir / "SOUL.md"
         soul_file.write_text(soul, encoding="utf-8")
+
+        # Mirror into the published-agent draft store (best-effort, DB-backed).
+        # Keeps conversational and structured authoring consistent (design §16.3).
+        if agent_name:
+            _persist_draft_identity(
+                owner_user_id=resolve_runtime_user_id(runtime),
+                slug=agent_name,
+                display_name=agent_name,
+                soul_markdown=soul,
+            )
 
         logger.info(f"[agent_creator] Created agent '{agent_name}' at {agent_dir}")
         return Command(

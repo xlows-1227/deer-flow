@@ -1,0 +1,338 @@
+"""Unit tests for the DraftService (F1.4).
+
+The service is exercised against in-memory fakes mirroring the repository
+contracts, so these tests run without a database and focus purely on the
+authorization / validation rules: skill ownership, connector ownership,
+revision-conflict semantics, and the guarantee that saving a draft never
+mutates ``current_release_id``.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from deerflow.publishing.draft_service import (
+    DraftConflictError,
+    DraftService,
+    SkillNotSelectableError,
+    ConnectorNotGrantableError,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
+
+
+class FakePublishedAgentRepo:
+    def __init__(self, draft_repo: "FakeDraftRepo | None" = None) -> None:
+        self.agents: dict[str, dict[str, Any]] = {}
+        self._draft_repo = draft_repo
+
+    async def create_agent(self, *, owner_user_id, slug, display_name, description=None, avatar_ref=None, agent_id=None):
+        agent_id = agent_id or f"pa_{slug}"
+        if any(a["owner_user_id"] == owner_user_id and a["slug"] == slug for a in self.agents.values()):
+            raise ValueError(f"Agent slug already exists for owner: {slug}")
+        agent = {
+            "id": agent_id,
+            "owner_user_id": owner_user_id,
+            "slug": slug,
+            "display_name": display_name,
+            "description": description,
+            "avatar_ref": avatar_ref,
+            "status": "draft",
+            "current_release_id": None,
+            "created_at": None,
+            "updated_at": None,
+        }
+        self.agents[agent_id] = agent
+        if self._draft_repo is not None:
+            self._draft_repo._seed(agent_id)
+        return dict(agent)
+
+    async def get(self, agent_id, *, owner_user_id):
+        a = self.agents.get(agent_id)
+        if a is None or a["owner_user_id"] != owner_user_id:
+            return None
+        return dict(a)
+
+    async def list_by_owner(self, owner_user_id):
+        return [dict(a) for a in self.agents.values() if a["owner_user_id"] == owner_user_id]
+
+    async def update_meta(self, agent_id, *, owner_user_id, **fields):
+        a = self.agents.get(agent_id)
+        if a is None or a["owner_user_id"] != owner_user_id:
+            return None
+        for k, v in fields.items():
+            if v is not None:
+                a[k] = v
+        return dict(a)
+
+    async def set_status(self, agent_id, *, owner_user_id, status):
+        a = self.agents.get(agent_id)
+        if a is None or a["owner_user_id"] != owner_user_id:
+            return False
+        a["status"] = status
+        return True
+
+    async def set_current_release(self, agent_id, *, owner_user_id, release_id):
+        a = self.agents.get(agent_id)
+        if a is None or a["owner_user_id"] != owner_user_id:
+            return False
+        a["current_release_id"] = release_id
+        if release_id is not None and a["status"] == "draft":
+            a["status"] = "published"
+        return True
+
+
+class FakeDraftRepo:
+    def __init__(self, agent_repo: "FakePublishedAgentRepo | None" = None) -> None:
+        self.drafts: dict[str, dict[str, Any]] = {}
+        self._agent_repo = agent_repo
+
+    def _seed(self, agent_id):
+        self.drafts.setdefault(
+            agent_id,
+            {
+                "agent_id": agent_id,
+                "agent_markdown": "",
+                "soul_markdown": "",
+                "model_name": None,
+                "tool_groups": [],
+                "quota_overrides": {},
+                "revision": 1,
+                "updated_by": "",
+                "skills": [],
+                "connector_grants": [],
+            },
+        )
+
+    def _owned(self, agent_id, owner_user_id) -> bool:
+        if self._agent_repo is None:
+            return True
+        a = self._agent_repo.agents.get(agent_id)
+        return a is not None and a["owner_user_id"] == owner_user_id
+
+    async def get(self, agent_id, *, owner_user_id):
+        if agent_id not in self.drafts or not self._owned(agent_id, owner_user_id):
+            return None
+        return dict(self.drafts.get(agent_id))
+
+    async def update_with_revision(self, agent_id, *, owner_user_id, revision, **fields):
+        d = self.drafts.get(agent_id)
+        if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
+            return None
+        for k, v in fields.items():
+            if v is not None:
+                d[k] = v
+        d["revision"] = revision + 1
+        return dict(d)
+
+    async def replace_skills(self, agent_id, *, owner_user_id, skills):
+        d = self.drafts.get(agent_id)
+        if d is None or not self._owned(agent_id, owner_user_id):
+            return None
+        d["skills"] = list(skills)
+        return dict(d)
+
+    async def replace_connector_grants(self, agent_id, *, owner_user_id, grants):
+        d = self.drafts.get(agent_id)
+        if d is None or not self._owned(agent_id, owner_user_id):
+            return None
+        d["connector_grants"] = list(grants)
+        return dict(d)
+
+
+class FakeSkillsIndex:
+    """name -> {"visibility": public|private, "owner": user_id|None}"""
+
+    def __init__(self, skills: dict[str, dict[str, Any]] | None = None) -> None:
+        self.skills = skills or {}
+
+    def is_selectable_by(self, name: str, owner_user_id: str) -> bool:
+        info = self.skills.get(name)
+        if info is None:
+            return False
+        if info["visibility"] == "public":
+            return True
+        return info["owner"] == owner_user_id
+
+
+class FakeConnectorRepo:
+    def __init__(self, owners: dict[str, str] | None = None) -> None:
+        # connector_instance_id -> owner_user_id
+        self.owners = owners or {}
+
+    async def get_instance(self, connector_id, *, owner_id=...):
+        owner = self.owners.get(connector_id)
+        if owner is None:
+            return None
+        if owner_id is not ... and owner != owner_id:
+            return None
+        return {"id": connector_id, "owner_id": owner, "status": "active"}
+
+
+@pytest.fixture()
+def service():
+    agent_repo = FakePublishedAgentRepo()
+    draft_repo = FakeDraftRepo(agent_repo=agent_repo)
+    agent_repo._draft_repo = draft_repo
+    return DraftService(
+        published_agent_repo=agent_repo,
+        draft_repo=draft_repo,
+        skills_index=FakeSkillsIndex(
+            {
+                "reporting": {"visibility": "public", "owner": None},
+                "secret-tool": {"visibility": "private", "owner": "user-a"},
+            }
+        ),
+        connector_repo=FakeConnectorRepo({"conn_1": "user-a", "conn_2": "user-a"}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# create / get / list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_create_agent_and_empty_draft(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    assert agent["status"] == "draft"
+    draft = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert draft["revision"] == 1
+    assert draft["agent_markdown"] == ""
+
+
+@pytest.mark.anyio
+async def test_get_draft_cross_owner_returns_none(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    assert await service.get_draft(agent["id"], owner_user_id="user-b") is None
+
+
+# ---------------------------------------------------------------------------
+# update draft (revision conflict)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_update_draft_bumps_revision(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    updated = await service.update_draft(
+        agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# Soul"
+    )
+    assert updated["revision"] == 2
+    assert updated["soul_markdown"] == "# Soul"
+
+
+@pytest.mark.anyio
+async def test_update_draft_revision_conflict_raises(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    await service.update_draft(agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# v1")
+    with pytest.raises(DraftConflictError):
+        await service.update_draft(agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# stale")
+
+
+@pytest.mark.anyio
+async def test_update_draft_cross_owner_raises_conflict(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    with pytest.raises(DraftConflictError):
+        await service.update_draft(agent["id"], owner_user_id="user-b", revision=1, soul_markdown="evil")
+
+
+@pytest.mark.anyio
+async def test_update_draft_does_not_touch_current_release(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    await service.update_draft(agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# Soul")
+    again = await service.get_agent(agent["id"], owner_user_id="user-a")
+    assert again["current_release_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# skill selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_replace_skills_accepts_public_and_own_private(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    await service.set_skills(
+        agent["id"],
+        owner_user_id="user-a",
+        skills=[{"skill_name": "reporting", "source": "public"}, {"skill_name": "secret-tool", "source": "private"}],
+    )
+    draft = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert {s["skill_name"] for s in draft["skills"]} == {"reporting", "secret-tool"}
+
+
+@pytest.mark.anyio
+async def test_replace_skills_rejects_other_owners_private(service):
+    agent = await service.create_agent(owner_user_id="user-b", slug="bot", display_name="Bot")
+    with pytest.raises(SkillNotSelectableError):
+        await service.set_skills(
+            agent["id"],
+            owner_user_id="user-b",
+            skills=[{"skill_name": "secret-tool", "source": "private"}],  # owned by user-a
+        )
+
+
+@pytest.mark.anyio
+async def test_replace_skills_rejects_unknown_skill(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    with pytest.raises(SkillNotSelectableError):
+        await service.set_skills(
+            agent["id"], owner_user_id="user-a", skills=[{"skill_name": "ghost", "source": "public"}]
+        )
+
+
+# ---------------------------------------------------------------------------
+# connector grants
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_replace_connector_grants_accepts_own_connector(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    await service.set_connector_grants(
+        agent["id"],
+        owner_user_id="user-a",
+        grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}],
+    )
+    draft = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert draft["connector_grants"] == [{"connector_instance_id": "conn_1", "capability": "database.query"}]
+
+
+@pytest.mark.anyio
+async def test_replace_connector_grants_rejects_other_owners_connector(service):
+    agent = await service.create_agent(owner_user_id="user-b", slug="bot", display_name="Bot")
+    with pytest.raises(ConnectorNotGrantableError):
+        await service.set_connector_grants(
+            agent["id"],
+            owner_user_id="user-b",
+            grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}],  # owned by user-a
+        )
+
+
+# ---------------------------------------------------------------------------
+# lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_suspend_resume_archive(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    await service.suspend(agent["id"], owner_user_id="user-a")
+    assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "suspended"
+    await service.resume(agent["id"], owner_user_id="user-a")
+    assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "published"
+    await service.archive(agent["id"], owner_user_id="user-a")
+    assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "archived"
+
+
+@pytest.mark.anyio
+async def test_lifecycle_cross_owner_noop(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    await service.suspend(agent["id"], owner_user_id="user-b")
+    assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "draft"
