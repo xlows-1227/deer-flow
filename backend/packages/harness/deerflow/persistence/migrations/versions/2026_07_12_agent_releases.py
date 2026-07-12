@@ -32,9 +32,13 @@ def upgrade() -> None:
     if "skill_revisions" not in existing:
         op.create_table(
             "skill_revisions",
-            sa.Column("id", sa.String(32), primary_key=True),
+            sa.Column("id", sa.String(64), primary_key=True),
             sa.Column("skill_name", sa.String(128), nullable=False),
             sa.Column("owner_user_id", sa.String(36)),
+            # owner_scope is a non-NULL dedup key ('public' or the owner id) so
+            # the unique constraint below is effective for public skills too
+            # (SQL NULLs are distinct under default unique constraints).
+            sa.Column("owner_scope", sa.String(64), nullable=False, server_default="public"),
             sa.Column("visibility", sa.String(16), nullable=False, server_default="public"),
             sa.Column("content_checksum", sa.String(128), nullable=False),
             sa.Column("content_ref", sa.String(256), nullable=False),
@@ -42,7 +46,7 @@ def upgrade() -> None:
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.UniqueConstraint(
                 "skill_name",
-                "owner_user_id",
+                "owner_scope",
                 "content_checksum",
                 name="uq_skill_revisions_content",
             ),

@@ -117,3 +117,43 @@ async def test_list_by_skill_name(skill_repo):
     )
     revs = await skill_repo.list_by_skill("x")
     assert len(revs) == 2
+
+
+@pytest.mark.asyncio
+async def test_public_skill_revision_dedup_protected_against_null_owner(skill_repo):
+    """Regression (rereview Important-2): two public-skill get_or_create calls
+    with identical content must reuse a single revision. The original unique
+    constraint on (skill_name, owner_user_id, content_checksum) did not protect
+    this because SQL NULLs are distinct; owner_scope ('public') fixes it."""
+    a = await skill_repo.get_or_create(
+        skill_name="public-reporting",
+        owner_user_id=None,
+        visibility="public",
+        content_checksum="sha256:same",
+        content_ref="cs://public-reporting/same",
+        declared_connector_caps=[],
+    )
+    b = await skill_repo.get_or_create(
+        skill_name="public-reporting",
+        owner_user_id=None,
+        visibility="public",
+        content_checksum="sha256:same",
+        content_ref="cs://public-reporting/same",
+        declared_connector_caps=[],
+    )
+    assert a["id"] == b["id"], "public skill revisions with identical content must dedupe"
+    # And the owner_scope is recorded as 'public'.
+    assert a["owner_scope"] == "public"
+
+
+@pytest.mark.asyncio
+async def test_private_skill_owner_scope_is_owner_id(skill_repo):
+    rev = await skill_repo.get_or_create(
+        skill_name="private-tool",
+        owner_user_id="user-a",
+        visibility="private",
+        content_checksum="sha256:priv",
+        content_ref="cs://private-tool/priv",
+        declared_connector_caps=[],
+    )
+    assert rev["owner_scope"] == "user-a"

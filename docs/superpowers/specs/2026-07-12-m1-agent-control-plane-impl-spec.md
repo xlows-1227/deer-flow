@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现，已通过代码评审并修复
+**状态：** 已实现；第一轮代码评审修复已提交；第二轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -445,3 +445,10 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 - 发布找不到 agent → `AGENT_NOT_FOUND` 违规单独映射为 **404**（区别于 422 校验失败）。
 - `GET /{agent_id}/releases` 对不存在或跨 owner 的 agent 返回 **404**（而非空数组）。
 
+---
+
+## 16. 第二轮代码复审（2026-07-12）
+
+第二轮复审文档：[2026-07-12-m1-agent-control-plane-code-rereview.md](./2026-07-12-m1-agent-control-plane-code-rereview.md)
+
+复审结论：**Ready to merge：No**。当前仍有 2 个 Critical 与 5 个 Important 问题待修复，重点包括 PostgreSQL 迁移升级安全性、draft 乐观并发的数据库级原子性、发布事务边界、公开 Skill revision 去重、生产可用性校验、导入适配器与对话式工具镜像完整性。

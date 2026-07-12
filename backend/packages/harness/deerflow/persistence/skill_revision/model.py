@@ -36,6 +36,12 @@ class SkillRevisionRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     skill_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     owner_user_id: Mapped[str | None] = mapped_column(String(36))
+    # ``owner_scope`` is a non-nullable deduplication key: ``'public'`` for
+    # platform skills, or the owner_user_id for private skills. It exists so the
+    # unique constraint below is effective even when ``owner_user_id`` is NULL
+    # (SQL NULLs are distinct under both SQLite and PostgreSQL default unique
+    # constraints, which would let duplicate public revisions slip in).
+    owner_scope: Mapped[str] = mapped_column(String(64), nullable=False, default="public")
     visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="public")
     content_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     content_ref: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -45,7 +51,7 @@ class SkillRevisionRow(Base):
     __table_args__ = (
         UniqueConstraint(
             "skill_name",
-            "owner_user_id",
+            "owner_scope",
             "content_checksum",
             name="uq_skill_revisions_content",
         ),

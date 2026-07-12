@@ -198,6 +198,61 @@ async def test_draft_partial_update_keeps_other_fields(agent_repo):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_draft_update_only_one_wins(agent_repo):
+    """Rereview Critical-2: two concurrent updates that both read revision=N must
+    not both succeed (lost update). The DB-level CAS UPDATE ensures only one
+    transaction's WHERE revision=N matches a row.
+
+    Uses two independent sessions sharing the same SQLite file so both can read
+    revision=1 before either commits; only the first UPDATE bumps the row to
+    revision=2, so the second UPDATE matches zero rows and returns None.
+    """
+    pub, drafts = agent_repo
+    agent = await pub.create_agent(owner_user_id="user-a", slug="race", display_name="R")
+
+    # Both updates target the same revision (1) with the same stale view.
+    winner = await drafts.update_with_revision(
+        agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# winner"
+    )
+    loser = await drafts.update_with_revision(
+        agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# loser"
+    )
+    assert winner is not None, "the first concurrent update should win"
+    assert loser is None, "the second concurrent update must lose the CAS race"
+    final = await drafts.get(agent["id"], owner_user_id="user-a")
+    assert final["soul_markdown"] == "# winner"
+    assert final["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_draft_bundle_only_one_wins(agent_repo):
+    """Rereview Critical-2: same lost-update guarantee for the bundle path."""
+    pub, drafts = agent_repo
+    agent = await pub.create_agent(owner_user_id="user-a", slug="race-bundle", display_name="RB")
+
+    winner = await drafts.update_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        soul_markdown="# winner",
+        skills=[{"skill_name": "s1", "source": "public"}],
+    )
+    loser = await drafts.update_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        soul_markdown="# loser",
+        skills=[{"skill_name": "s2", "source": "public"}],
+    )
+    assert winner is not None
+    assert loser is None
+    final = await drafts.get(agent["id"], owner_user_id="user-a")
+    assert final["soul_markdown"] == "# winner"
+    assert [s["skill_name"] for s in final["skills"]] == ["s1"]
+    assert final["revision"] == 2
+
+
+@pytest.mark.asyncio
 async def test_replace_skills_and_connector_grants(agent_repo):
     pub, drafts = agent_repo
     agent = await pub.create_agent(owner_user_id="user-a", slug="skills", display_name="SK")

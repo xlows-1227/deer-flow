@@ -47,9 +47,12 @@ class SkillRevisionRepository:
         declared_connector_caps: Sequence[Mapping[str, Any] | str],
     ) -> dict[str, Any]:
         owner = owner_user_id
+        # ``owner_scope`` is the non-NULL dedup key ('public' or the owner id);
+        # see the model docstring for why it exists.
+        owner_scope = owner if owner is not None else "public"
         stmt = select(SkillRevisionRow).where(
             SkillRevisionRow.skill_name == skill_name,
-            (SkillRevisionRow.owner_user_id == owner) if owner is not None else SkillRevisionRow.owner_user_id.is_(None),
+            SkillRevisionRow.owner_scope == owner_scope,
             SkillRevisionRow.content_checksum == content_checksum,
         )
         async with self._sf() as session:
@@ -60,6 +63,7 @@ class SkillRevisionRepository:
                 id=f"skr_{uuid4().hex}",
                 skill_name=skill_name,
                 owner_user_id=owner,
+                owner_scope=owner_scope,
                 visibility=visibility,
                 content_checksum=content_checksum,
                 content_ref=content_ref,
@@ -70,9 +74,10 @@ class SkillRevisionRepository:
                 await session.commit()
             except IntegrityError:
                 # Concurrent publish won the insert race on the unique key
-                # (skill_name, owner_user_id, content_checksum): re-read the
+                # (skill_name, owner_scope, content_checksum): re-read the
                 # now-committed row instead of surfacing a 500 (code-review
-                # Important-2).
+                # Important-2). This now protects public skills too, because
+                # owner_scope is non-NULL.
                 await session.rollback()
                 row = (await session.execute(stmt)).scalar_one()
             await session.refresh(row)

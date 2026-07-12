@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -235,32 +235,52 @@ class AgentDraftRepository:
         tool_groups: Sequence[str] | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Conditionally update fields; returns ``None`` when revision is stale.
+        """Conditionally update fields via database-level CAS; ``None`` if stale.
 
-        Only fields explicitly passed (not ``None``) are written, so callers can
-        do partial updates. ``model_name`` may be cleared by passing an empty
-        string is intentionally not supported here — pass ``None`` to leave it
-        untouched. Bumping ``revision`` happens atomically in the same UPDATE.
+        Uses a single conditional ``UPDATE ... WHERE agent_id = ? AND revision = ?``
+        (plus an ownership guard) and checks the rowcount, so two transactions
+        that both read the same revision cannot both succeed — only the winner's
+        UPDATE matches a row (rereview Critical-2). Only fields explicitly passed
+        (not ``None``) are written.
         """
         async with self._sf() as session:
-            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
-            if draft is None or draft.revision != revision:
-                return None
+            set_values: dict[str, Any] = {
+                "revision": revision + 1,
+                "updated_by": str(owner_user_id),
+                "updated_at": _now(),
+            }
             if agent_markdown is not None:
-                draft.agent_markdown = agent_markdown
+                set_values["agent_markdown"] = agent_markdown
             if soul_markdown is not None:
-                draft.soul_markdown = soul_markdown
+                set_values["soul_markdown"] = soul_markdown
             if model_name is not None:
-                draft.model_name = model_name
+                set_values["model_name"] = model_name
             if tool_groups is not None:
-                draft.tool_groups_json = list(tool_groups)
+                set_values["tool_groups_json"] = list(tool_groups)
             if quota_overrides is not None:
-                draft.quota_overrides_json = dict(quota_overrides)
-            draft.revision = revision + 1
-            draft.updated_by = str(owner_user_id)
-            draft.updated_at = _now()
+                set_values["quota_overrides_json"] = dict(quota_overrides)
+            owner_match = (
+                select(PublishedAgentRow.owner_user_id)
+                .where(PublishedAgentRow.id == AgentDraftRow.agent_id)
+                .scalar_subquery()
+            )
+            stmt = (
+                update(AgentDraftRow)
+                .where(
+                    AgentDraftRow.agent_id == agent_id,
+                    AgentDraftRow.revision == revision,
+                    owner_match == owner_user_id,
+                )
+                .values(**set_values)
+            )
+            result = await session.execute(stmt)
+            if result.rowcount != 1:
+                await session.rollback()
+                return None
             await session.commit()
-            await session.refresh(draft)
+            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
+            if draft is None:
+                return None
             skills = await self._load_skills(session, agent_id)
             grants = await self._load_grants(session, agent_id)
             return _draft_to_dict(draft, skills=skills, connector_grants=grants)
@@ -279,30 +299,61 @@ class AgentDraftRepository:
         skills: Sequence[Mapping[str, str]] | None = None,
         connector_grants: Sequence[Mapping[str, str]] | None = None,
     ) -> dict[str, Any] | None:
-        """Atomically update the draft main row and its sub-tables.
+        """Atomically update the draft main row and its sub-tables via DB-level CAS.
 
-        The revision check gates the *entire* update: if the supplied
-        ``revision`` is stale (or the draft is not owned by the caller) the
-        method returns ``None`` and writes nothing — including the sub-tables.
-        This is the atomic counterpart to calling ``update_with_revision`` +
-        ``replace_skills`` + ``replace_connector_grants`` separately, which
-        could leave sub-tables mutated even when the revision check fails
-        (code-review Critical-3). All changes commit in a single transaction.
+        The main row is updated with a single conditional ``UPDATE ... WHERE
+        agent_id = ? AND revision = ?`` (plus an ownership guard through the
+        ``published_agents`` join); the result rowcount tells us whether we won
+        the revision. Only if we won (rowcount == 1) do we replace the sub-tables
+        and commit — all in one transaction. This closes the lost-update window
+        where two transactions both read revision=N, both pass the Python check,
+        and both write revision=N+1 (rereview Critical-2). A stale or
+        cross-owner call writes nothing and returns ``None``.
         """
         async with self._sf() as session:
-            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
-            if draft is None or draft.revision != revision:
-                return None
+            # Build a dynamic SET clause from the provided scalar fields.
+            set_values: dict[str, Any] = {
+                "revision": revision + 1,
+                "updated_by": str(owner_user_id),
+                "updated_at": _now(),
+            }
             if agent_markdown is not None:
-                draft.agent_markdown = agent_markdown
+                set_values["agent_markdown"] = agent_markdown
             if soul_markdown is not None:
-                draft.soul_markdown = soul_markdown
+                set_values["soul_markdown"] = soul_markdown
             if model_name is not None:
-                draft.model_name = model_name
+                set_values["model_name"] = model_name
             if tool_groups is not None:
-                draft.tool_groups_json = list(tool_groups)
+                set_values["tool_groups_json"] = list(tool_groups)
             if quota_overrides is not None:
-                draft.quota_overrides_json = dict(quota_overrides)
+                set_values["quota_overrides_json"] = dict(quota_overrides)
+
+            # Conditional UPDATE gated on both revision AND ownership (ownership
+            # is enforced by joining published_agents inside the WHERE clause,
+            # since agent_drafts has no denormalised owner column).
+            owner_match = (
+                select(PublishedAgentRow.owner_user_id)
+                .where(PublishedAgentRow.id == AgentDraftRow.agent_id)
+                .scalar_subquery()
+            )
+            stmt = (
+                update(AgentDraftRow)
+                .where(
+                    AgentDraftRow.agent_id == agent_id,
+                    AgentDraftRow.revision == revision,
+                    owner_match == owner_user_id,
+                )
+                .values(**set_values)
+            )
+            result = await session.execute(stmt)
+            if result.rowcount != 1:
+                # Either the draft doesn't exist, isn't owned by the caller, or
+                # the revision was stale. Nothing was written.
+                await session.rollback()
+                return None
+
+            # We won the revision; now replace the sub-tables in the same
+            # transaction. These writes commit atomically with the main-row CAS.
             if skills is not None:
                 await session.execute(delete(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id))
                 for entry in skills:
@@ -325,11 +376,13 @@ class AgentDraftRepository:
                             capability=str(entry["capability"]),
                         )
                     )
-            draft.revision = revision + 1
-            draft.updated_by = str(owner_user_id)
-            draft.updated_at = _now()
             await session.commit()
-            await session.refresh(draft)
+            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
+            if draft is None:
+                return None
+            skills_rows = await self._load_skills(session, agent_id)
+            grants_rows = await self._load_grants(session, agent_id)
+            return _draft_to_dict(draft, skills=skills_rows, connector_grants=grants_rows)
             skills_rows = await self._load_skills(session, agent_id)
             grants_rows = await self._load_grants(session, agent_id)
             return _draft_to_dict(draft, skills=skills_rows, connector_grants=grants_rows)

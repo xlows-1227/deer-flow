@@ -44,7 +44,7 @@ def test_user_model_capabilities_migration_on_sqlite(tmp_path):
     url = asyncio.run(_prepare_sqlite_db(tmp_path / "migration.db"))
     engine = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     cols, version = engine
-    assert version == "2026_07_12_agent_releases"
+    assert version == "2026_07_12_widen_published_agent_ids"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -116,7 +116,7 @@ def test_user_model_capabilities_migration_on_postgres_if_available():
 
     asyncio.run(_prepare_postgres_db(url))
     cols, version = asyncio.run(_run_migration_and_inspect(url, backend="postgres"))
-    assert version == "2026_07_12_agent_releases"
+    assert version == "2026_07_12_widen_published_agent_ids"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -126,3 +126,55 @@ async def _postgres_ping(url: str) -> None:
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     await engine.dispose()
+
+
+def test_migrated_schema_accepts_full_length_ids(tmp_path):
+    """Regression (rereview Critical-1): after running the full migration chain,
+    the published-agent ID/FK columns must be wide enough to accept the real
+    generated ids (pa_/rel_/skr_ + 32 hex = 36 chars). PostgreSQL enforces
+    VARCHAR length, so a too-narrow column would reject the insert."""
+    db_path = tmp_path / "ids.db"
+    url = f"sqlite+aiosqlite:///{db_path}"
+    engine_sync = create_async_engine(url)
+
+    async def _seed_old() -> None:
+        # Simulate a database that already applied the ORIGINAL (too-narrow)
+        # published_agents migration: create the table at VARCHAR(32) and stamp
+        # alembic at the base revision so the widen migration runs against it.
+        async with engine_sync.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"
+                )
+            )
+            await conn.execute(text("INSERT INTO alembic_version VALUES ('2026_07_01_invite_codes')"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE published_agents (id VARCHAR(32) PRIMARY KEY, owner_user_id VARCHAR(36) NOT NULL, slug VARCHAR(64) NOT NULL, display_name VARCHAR(128) NOT NULL, description TEXT, avatar_ref VARCHAR(256), status VARCHAR(16) NOT NULL DEFAULT 'draft', current_release_id VARCHAR(32), created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+                )
+            )
+
+    asyncio.run(_seed_old())
+    asyncio.run(engine_sync.dispose())
+    # Run the full migration chain (it will widen the column via the corrective
+    # migration) and inspect the resulting head.
+    cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
+    _, version = cols_version
+    assert version == "2026_07_12_widen_published_agent_ids"
+    # Insert a full-length id; under PostgreSQL a too-narrow column rejects this.
+    long_id = "pa_" + "a" * 32
+    engine_check = create_async_engine(url)
+
+    async def _insert() -> None:
+        async with engine_check.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO published_agents (id, owner_user_id, slug, display_name, status, created_at, updated_at) "
+                    "VALUES (:id, 'owner', 'slug', 'Name', 'draft', '2026-07-12', '2026-07-12')"
+                ),
+                {"id": long_id},
+            )
+
+    asyncio.run(_insert())
+    asyncio.run(engine_check.dispose())
+
