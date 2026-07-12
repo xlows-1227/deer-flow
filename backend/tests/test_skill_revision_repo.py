@@ -157,3 +157,48 @@ async def test_private_skill_owner_scope_is_owner_id(skill_repo):
         declared_connector_caps=[],
     )
     assert rev["owner_scope"] == "user-a"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_or_create_in_session_dedupes(skill_repo, tmp_path):
+    """Fifth-review Important-1: two concurrent _get_or_create_in_session calls
+    for the same (skill_name, owner_scope, checksum) must not leave the shared
+    transaction in an error state. The SAVEPOINT handles the unique conflict."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrent.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        # First call creates the revision in its own transaction.
+        async with sf() as s1:
+            row1 = await skill_repo._get_or_create_in_session(  # noqa: SLF001
+                s1,
+                skill_name="concurrent-skill",
+                owner_user_id=None,
+                visibility="public",
+                content_checksum="sha256:dup",
+                content_ref="cs://concurrent/dup",
+                declared_connector_caps=[],
+            )
+            await s1.commit()
+
+        # Second call in a new session should find the existing row (no conflict).
+        async with sf() as s2:
+            row2 = await skill_repo._get_or_create_in_session(  # noqa: SLF001
+                s2,
+                skill_name="concurrent-skill",
+                owner_user_id=None,
+                visibility="public",
+                content_checksum="sha256:dup",
+                content_ref="cs://concurrent/dup",
+                declared_connector_caps=[],
+            )
+            await s2.commit()
+
+        assert row1.id == row2.id, "concurrent get_or_create should dedupe to the same revision"
+    finally:
+        await engine.dispose()

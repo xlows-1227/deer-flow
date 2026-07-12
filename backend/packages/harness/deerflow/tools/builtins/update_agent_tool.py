@@ -81,14 +81,14 @@ def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, An
                 return
             skills_value = fields.get("skills")
             if skills_value is None:
-                return
+                return  # None = don't modify skills
             refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
             if refreshed is None:
                 return
-            # Filter to selectable subset (fourth-review Important-3).
+            # Filter to selectable subset. Always submit the filtered list (even
+            # if empty) when the caller provided a list, so skills=[] clears
+            # (fifth-review Important-3).
             selectable = service.filter_selectable_skills(skills_value, owner_user_id=owner_user_id)
-            if not selectable:
-                return
             skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
             try:
                 await service.update_draft_bundle(

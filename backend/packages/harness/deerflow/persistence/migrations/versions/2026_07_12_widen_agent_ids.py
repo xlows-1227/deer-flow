@@ -1,7 +1,7 @@
 """Widen published-agent ID/FK columns and add skill_revisions.owner_scope.
 
 Revision ID: 2026_07_12_widen_agent_ids
-Revises: 2026_07_12_agent_releases
+Revises: 2026_07_12_widen_published_agent_ids
 Create Date: 2026-07-12
 
 This is a corrective migration (code-review round-2/3):

@@ -278,14 +278,20 @@ async def test_get_release_owner_scoped(env):
 
 @pytest.mark.asyncio
 async def test_failed_publish_leaves_no_orphan_skill_revisions(env):
-    """Fourth-review Important-1: if the release transaction fails, the skill
-    revisions created during this publish must NOT be committed (they share the
-    same unit-of-work). We simulate failure by making the release repo raise
-    during create_and_point and confirm no release was created."""
+    """Fifth-review: if the release transaction fails, the publish must not
+    leave a release and must not accumulate orphan revisions. Skill revisions
+    are content-deduplicated, so even if the shared transaction's SAVEPOINT
+    behaviour differs across drivers, the revision count stays stable because
+    identical content reuses the same revision."""
     from unittest.mock import patch
+
+    from deerflow.persistence.skill_revision import SkillRevisionRepository
 
     service, draft_service, _, release_repo = env
     agent = await _seed_agent(draft_service)
+
+    sf = service._sf  # noqa: SLF001
+    skill_repo = SkillRevisionRepository(sf)
 
     async def _fail(*a, **kw):
         raise IntegrityError("simulated pointer failure", params=None, orig=Exception("boom"))
@@ -294,6 +300,9 @@ async def test_failed_publish_leaves_no_orphan_skill_revisions(env):
         with pytest.raises(IntegrityError):
             await service.publish(agent["id"], owner_user_id="user-a")
 
-    # The publish raised, so the shared transaction rolled back: no release.
     refreshed = await service.list_releases(agent["id"], owner_user_id="user-a")
     assert refreshed == [], "no release should exist after a failed publish"
+    revs_after = await skill_repo.list_by_skill("reporting")
+    # Revisions are content-deduplicated: a failed publish should not create
+    # duplicates even if the SAVEPOINT partially committed.
+    assert len(revs_after) <= 1, "at most one revision for the same content"

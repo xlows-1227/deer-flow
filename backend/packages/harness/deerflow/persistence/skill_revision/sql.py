@@ -75,7 +75,15 @@ class SkillRevisionRepository:
         Used by ``PublishService.publish`` so skill revisions and the release
         row land in the same transaction (fourth-review Important-1). If the
         caller's transaction is rolled back, the revision insert is undone too.
+
+        Concurrent inserts of the same ``(skill_name, owner_scope, checksum)``
+        are handled via a SAVEPOINT: the insert is attempted inside a nested
+        transaction, and on a unique-constraint conflict the savepoint is rolled
+        back (not the outer transaction) and the canonical row is re-read
+        (fifth-review Important-1).
         """
+        from sqlalchemy.exc import IntegrityError as SAIntegrityError
+
         owner = owner_user_id
         owner_scope = owner if owner is not None else "public"
         stmt = select(SkillRevisionRow).where(
@@ -96,8 +104,20 @@ class SkillRevisionRepository:
             content_ref=content_ref,
             declared_connector_caps_json=list(declared_connector_caps),
         )
-        session.add(row)
-        await session.flush()  # assign id, detect unique conflicts within the tx
+        # Use a SAVEPOINT so a unique-constraint conflict from a concurrent
+        # insert only rolls back this nested transaction, not the caller's
+        # outer publish transaction. The conflict is caught INSIDE the
+        # savepoint so begin_nested commits (a no-op rollback) cleanly.
+        inserted = True
+        async with session.begin_nested():
+            try:
+                session.add(row)
+                await session.flush()
+            except SAIntegrityError:
+                inserted = False
+        if not inserted:
+            # Concurrent insert won the race; re-read the canonical row.
+            return (await session.execute(stmt)).scalar_one()
         return row
 
     async def get(self, revision_id: str) -> dict[str, Any] | None:

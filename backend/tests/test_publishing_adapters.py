@@ -119,10 +119,42 @@ async def test_active_connector_is_grantable(monkeypatch):
         async def get_connector(self, connector_id, *, owner_id=...):
             return SimpleNamespace(model_dump=lambda: {"id": connector_id, "owner_id": owner_id, "status": "active", "type": "mysql"})
 
+        async def get_connector_type(self, type_name):
+            if type_name == "mysql":
+                return {"type": "mysql"}
+            raise KeyError(f"unknown type: {type_name}")
+
     repo = ConnectorServiceRepo(_FakeService())
     result = await repo.get_instance("conn_1", owner_id="user-a")
     assert result is not None
     assert result["status"] == "active"
+
+
+@pytest.mark.anyio
+async def test_unknown_type_rejected_even_with_empty_whitelist(monkeypatch):
+    """Fifth-review Important-2: an active instance of an unregistered type must
+    be rejected even when enabled_types is empty (unrestricted)."""
+
+    class _ConnCfg:
+        enabled = True
+        enabled_types: list = []
+
+    class _Cfg:
+        connectors = _ConnCfg()
+
+    import deerflow.config.app_config as app_cfg_mod
+
+    monkeypatch.setattr(app_cfg_mod, "get_app_config", lambda: _Cfg())
+
+    class _FakeService:
+        async def get_connector(self, connector_id, *, owner_id=...):
+            return SimpleNamespace(model_dump=lambda: {"id": connector_id, "status": "active", "type": "bogus"})
+
+        async def get_connector_type(self, type_name):
+            raise KeyError(f"unknown type: {type_name}")
+
+    repo = ConnectorServiceRepo(_FakeService())
+    assert await repo.get_instance("conn_1", owner_id="user-a") is None
 
 
 @pytest.mark.anyio

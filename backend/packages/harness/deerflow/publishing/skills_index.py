@@ -124,10 +124,14 @@ class ConnectorServiceRepo:
         status = str(data.get("status") or "").lower()
         if status != "active":
             return None
-        connector_type = str(data.get("type") or "").lower()
+        connector_type = str(data.get("type") or "")
         if not connector_type:
             return None  # unknown type — fail closed
-        # Fail-closed platform/type validation (fourth-review Important-2).
+        # Fail-closed platform + registry type validation (fifth-review
+        # Important-2): check platform enabled, enabled_types whitelist, and
+        # verify the type is a real registered connector via the authoritative
+        # ConnectorService.get_connector_type() (which raises on unknown or
+        # disabled types). Any exception → fail closed.
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -135,9 +139,12 @@ class ConnectorServiceRepo:
             if not getattr(connectors_cfg, "enabled", True):
                 return None  # platform connectors globally disabled
             enabled_types = {t.lower() for t in connectors_cfg.enabled_types}
-            if enabled_types and connector_type not in enabled_types:
+            if enabled_types and connector_type.lower() not in enabled_types:
                 return None  # type not in the platform whitelist
+            # Authoritative registry check: get_connector_type raises on unknown
+            # or disabled types.
+            await self._service.get_connector_type(connector_type)
         except Exception:
-            # Config failure — fail closed (do NOT grant).
+            # Config / registry / unknown-type failure — fail closed (do NOT grant).
             return None
         return data

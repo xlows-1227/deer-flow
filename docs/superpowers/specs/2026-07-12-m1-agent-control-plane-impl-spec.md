@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第三轮修复已提交；第四轮复审仍有阻断项待修复
+**状态：** 已实现；第四轮修复已提交；第五轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -536,7 +536,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 17. 第四轮代码复审修复（2026-07-12）
+## 19. 第四轮代码复审修复（2026-07-12）
 
 第四轮复审文档：[2026-07-12-m1-agent-control-plane-code-fourth-review.md](./2026-07-12-m1-agent-control-plane-code-fourth-review.md)
 
@@ -556,3 +556,33 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ### Minor
 - `.superpowers/` 运行态文件从 git 移除并 gitignore。
+
+---
+
+## 20. 第五轮代码复审（2026-07-12）
+
+第五轮复审文档：[2026-07-12-m1-agent-control-plane-code-fifth-review.md](./2026-07-12-m1-agent-control-plane-code-fifth-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认上一版 SQLite revision stamp 已能升级、普通 publish UOW 失败时不再留下孤儿 Skill revision、Connector 平台总开关/配置异常已 fail closed、混合 Skills 的有效子集可落库；但仍有 1 个 Critical、3 个 Important 与 5 个 Minor 问题。
+
+当前 Critical 是 PostgreSQL 仍必须先 stamp 36 字符兼容 stub，默认 `alembic_version.version_num VARCHAR(32)` 无法容纳。其余主要问题是 Skill revision 并发唯一冲突不重试、Connector type 未经过 registry 权威校验，以及 `skills=[]`、全部无效 Skills、空 description 与 unresolved 反馈语义仍未闭环。
+
+---
+
+## 18. 第五轮代码复审修复（2026-07-12）
+
+第五轮复审文档：[2026-07-12-m1-agent-control-plane-code-fifth-review.md](./2026-07-12-m1-agent-control-plane-code-fifth-review.md)
+
+### Critical-1：PostgreSQL 主链长 ID stamp
+兼容 stub 的 `upgrade()` 现在先将 `alembic_version.version_num` 扩为 `VARCHAR(64)`（PostgreSQL `ALTER TYPE` / SQLite batch），使 36 字符 revision 可被 stamp。新 PG 库从 `agent_releases` 升级时：stub 扩列→stamp 长 ID→短 ID 子迁移做实际工作→stamp 短 ID。同步修正短 ID 迁移文件头 `Revises:` 指向长 ID stub。
+
+### Important-1：Skill revision 并发去重
+`_get_or_create_in_session` 改用 SAVEPOINT（`session.begin_nested()`）包裹 INSERT+flush，唯一冲突时回滚 SAVEPOINT（不影响外层 publish 事务）并重读 canonical row。新增并发 dedup 回归测试。
+
+### Important-2：Connector type registry 权威校验
+`ConnectorServiceRepo.get_instance` 调用 `ConnectorService.get_connector_type(type)` 验证 type 在 registry 中注册且未禁用。未知/已删除 type 或 registry 异常一律 fail closed。新增空白名单+unknown type 回归测试。
+
+### Important-3：skills=[] 清空 + description 清空
+- 工具在 `skills is not None`（含空列表）时始终提交过滤后列表（即使为 `[]`），落实 `skills=[] = 禁用全部`。
+- duplicate setup 传原始 description（空字符串可清除旧值），不再 `description or None`。
+- UOW 失败测试新增 `skill_revisions` 计数断言（内容去重保证无重复）。

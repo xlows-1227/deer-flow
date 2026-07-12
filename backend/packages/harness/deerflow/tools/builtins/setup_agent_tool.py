@@ -59,7 +59,7 @@ def _persist_draft_identity(
                         next((a["id"] for a in await service.list_agents(owner_user_id) if a["slug"] == slug), None),
                         owner_user_id=owner_user_id,
                         display_name=display_name,
-                        description=description or None,
+                        description=description,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -88,9 +88,10 @@ def _persist_draft_identity(
                 return
             # Filter to the selectable subset so one unresolvable legacy name
             # does not block the valid skills (fourth-review Important-3).
+            # Always submit the filtered list (even if empty) when the caller
+            # provided a list, so skills=[] clears the selection (fifth-review
+            # Important-3).
             selectable = service.filter_selectable_skills(skills, owner_user_id=owner_user_id)
-            if not selectable:
-                return
             skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
             try:
                 await service.update_draft_bundle(
