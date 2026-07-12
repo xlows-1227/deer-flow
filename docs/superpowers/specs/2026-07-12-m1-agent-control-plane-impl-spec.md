@@ -494,3 +494,32 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮确认数据库级 CAS、Release + pointer 原子提交、禁用 Skill 拒绝、导入 visibility 与部分工具镜像已得到实质修复；但仍有 2 个 Critical、5 个 Important 与 4 个 Minor 问题。
 
 当前首要阻断项是 PostgreSQL 迁移：新 Alembic revision ID 长 36，超过 `alembic_version.version_num VARCHAR(32)`；纠偏迁移也无法处理旧库中已存在的重复 public Skill revisions。其余待修复项包括迁移 nullability 漂移、owner-aware 模型校验、Connector 严格 active/type-enabled 校验、完整 publish unit-of-work，以及重复 setup / 混合无效 Skill 的镜像一致性。
+
+第三轮全部 Critical / Important / Minor 已修复：
+
+### Critical-1：Alembic revision ID 缩短
+- `2026_07_12_widen_published_agent_ids`（36 字符）超过 `alembic_version.version_num VARCHAR(32)`。重命名为 `2026_07_12_widen_agent_ids`（26 字符）。
+
+### Critical-2：旧库重复 public revision 升级
+- 纠偏迁移现按 `(skill_name, owner_scope, content_checksum)` 选 canonical revision，重写 `agent_release_skills` 引用（含 PK 去重），删除重复行后重建唯一约束。SQLite 用手动建表-拷贝-删-改名代替 batch_alter_table（后者从 ORM 元数据重建会触发 NOT NULL 违规）。新增含重复数据 + 多 Release 引用的升级回归测试。
+
+### Important-1：迁移 nullability 保留
+- widen 不再一律 `nullable=True`。每列保留原 schema 的可空性（仅 `current_release_id` 可空）。SQLite 跳过列宽 widen（VARCHAR 长度不强制），PostgreSQL 用 batch_alter_table 按列保留 nullability。新增迁移后 nullability 断言测试。
+
+### Important-2：owner-aware 模型校验
+- `PublishService` 新增可选 `model_resolver`（async `(owner_user_id) -> set[str]`）。`build_publish_service` 注入 `_resolve_effective_models`，调用 `build_effective_app_config(user_id)` 合并用户自定义模型。发布时按 owner 解析有效模型集，不再误报 `MODEL_NOT_AVAILABLE`。
+
+### Important-3：Connector 严格 active 白名单
+- `ConnectorServiceRepo.get_instance` 改为仅 `status == 'active'` 返回实例（拒绝 pending/error/unknown/空），并检查 connector type 在平台 `enabled_types` 内。新增 pending/error/unknown 回归测试。
+
+### Important-4：精确 IntegrityError 重试
+- publish 的 `IntegrityError` 重试仅对 `(agent_id, release_no)` 唯一约束触发（按约束名/release_no 匹配）；FK / 子表唯一键等其他完整性错误直接抛出，不再误判为 release-number race。
+
+### Important-5：对话式镜像
+- `setup_agent` duplicate slug 路径现通过 `update_agent_meta` 同步 identity metadata；soul 与 skills 分步写入，坏 skill 不阻断 soul。
+- `update_agent` 已同步 description（经 `update_agent_meta`）。
+
+### Minor
+- 删除 `update_bundle` 中不可达的重复 return。
+- 新增 pending/error connector 适配器测试。
+- 导入 index 与并发 CAS 测试目标对齐生产适配器。
