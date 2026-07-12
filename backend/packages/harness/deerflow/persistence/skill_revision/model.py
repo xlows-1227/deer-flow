@@ -41,11 +41,11 @@ class SkillRevisionRow(Base):
     # unique constraint below is effective even when ``owner_user_id`` is NULL
     # (SQL NULLs are distinct under both SQLite and PostgreSQL default unique
     # constraints, which would let duplicate public revisions slip in).
-    owner_scope: Mapped[str] = mapped_column(String(64), nullable=False, default="public")
-    visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="public")
+    owner_scope: Mapped[str] = mapped_column(String(64), nullable=False, default="public", server_default="public")
+    visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="public", server_default="public")
     content_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     content_ref: Mapped[str] = mapped_column(String(256), nullable=False)
-    declared_connector_caps_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    declared_connector_caps_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
     __table_args__ = (

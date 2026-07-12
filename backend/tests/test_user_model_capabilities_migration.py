@@ -44,7 +44,7 @@ def test_user_model_capabilities_migration_on_sqlite(tmp_path):
     url = asyncio.run(_prepare_sqlite_db(tmp_path / "migration.db"))
     engine = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     cols, version = engine
-    assert version == "2026_07_12_widen_published_agent_ids"
+    assert version == "2026_07_12_widen_agent_ids"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -116,7 +116,7 @@ def test_user_model_capabilities_migration_on_postgres_if_available():
 
     asyncio.run(_prepare_postgres_db(url))
     cols, version = asyncio.run(_run_migration_and_inspect(url, backend="postgres"))
-    assert version == "2026_07_12_widen_published_agent_ids"
+    assert version == "2026_07_12_widen_agent_ids"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -164,7 +164,7 @@ def test_migrated_schema_accepts_full_length_ids(tmp_path):
     # migration) and inspect the resulting head.
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_12_widen_published_agent_ids"
+    assert version == "2026_07_12_widen_agent_ids"
     # Insert a full-length id; under PostgreSQL a too-narrow column rejects this.
     long_id = "pa_" + "a" * 32
     engine_check = create_async_engine(url)
@@ -178,3 +178,165 @@ def test_migrated_schema_accepts_full_length_ids(tmp_path):
 
     asyncio.run(_insert())
     asyncio.run(engine_check.dispose())
+
+
+def test_widen_migration_collapses_duplicate_public_revisions(tmp_path):
+    """Rereview Critical-2: an old database may contain duplicate public skill
+    revisions (the original unique constraint on NULL owner_user_id did not
+    dedupe them). The widen migration must pick a canonical revision, rewrite
+    agent_release_skills references, delete the duplicates, and reach the new
+    head — otherwise the new unique constraint creation fails."""
+    db_path = tmp_path / "dup.db"
+    url = f"sqlite+aiosqlite:///{db_path}"
+    engine_seed = create_async_engine(url)
+
+    async def _seed_old_with_duplicates() -> None:
+        async with engine_seed.begin() as conn:
+            await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+            # Stamp at the revision just BEFORE the widen migration so only it runs.
+            await conn.execute(text("INSERT INTO alembic_version VALUES ('2026_07_12_agent_releases')"))
+            # Create skill_revisions with the OLD schema (no owner_scope, unique on
+            # skill_name/owner_user_id/content_checksum which allows NULL dupes).
+            await conn.execute(
+                text(
+                    "CREATE TABLE skill_revisions ("
+                    "id VARCHAR(32) PRIMARY KEY, "
+                    "skill_name VARCHAR(128) NOT NULL, "
+                    "owner_user_id VARCHAR(36), "
+                    "visibility VARCHAR(16) NOT NULL DEFAULT 'public', "
+                    "content_checksum VARCHAR(128) NOT NULL, "
+                    "content_ref VARCHAR(256) NOT NULL, "
+                    "declared_connector_caps_json JSON NOT NULL DEFAULT '[]', "
+                    "created_at DATETIME NOT NULL)"
+                )
+            )
+            # Two duplicate public revisions (same skill_name, NULL owner, same checksum).
+            await conn.execute(
+                text(
+                    "INSERT INTO skill_revisions (id, skill_name, owner_user_id, content_checksum, content_ref, created_at) "
+                    "VALUES ('skr_a', 'reporting', NULL, 'sha256:x', 'cs://x', '2026-07-12')"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO skill_revisions (id, skill_name, owner_user_id, content_checksum, content_ref, created_at) "
+                    "VALUES ('skr_b', 'reporting', NULL, 'sha256:x', 'cs://x', '2026-07-12')"
+                )
+            )
+            # agent_release_skills referencing both duplicates.
+            await conn.execute(
+                text(
+                    "CREATE TABLE agent_release_skills ("
+                    "release_id VARCHAR(32) NOT NULL, "
+                    "skill_revision_id VARCHAR(32) NOT NULL, "
+                    "PRIMARY KEY (release_id, skill_revision_id))"
+                )
+            )
+            await conn.execute(text("INSERT INTO agent_release_skills VALUES ('rel_1', 'skr_a')"))
+            await conn.execute(text("INSERT INTO agent_release_skills VALUES ('rel_1', 'skr_b')"))
+            # agent_releases is referenced by agent_release_skills.release_id but not
+            # needed for this test; create a minimal stub so FK is not violated.
+            await conn.execute(
+                text("CREATE TABLE agent_releases (id VARCHAR(32) PRIMARY KEY, agent_id VARCHAR(32) NOT NULL, release_no INT NOT NULL, agent_markdown TEXT NOT NULL DEFAULT '', soul_markdown TEXT NOT NULL DEFAULT '', model_name VARCHAR(128), tool_groups_json JSON NOT NULL DEFAULT '[]', quota_overrides_json JSON NOT NULL DEFAULT '{}', manifest_checksum VARCHAR(128) NOT NULL, created_by VARCHAR(36) NOT NULL, created_at DATETIME NOT NULL)")
+            )
+            await conn.execute(text("INSERT INTO agent_releases (id, agent_id, release_no, manifest_checksum, created_by, created_at) VALUES ('rel_1', 'pa_1', 1, 'sha', 'user', '2026-07-12')"))
+
+    asyncio.run(_seed_old_with_duplicates())
+    asyncio.run(engine_seed.dispose())
+    # Run the widen migration; it must collapse duplicates and reach the new head.
+    cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
+    _, version = cols_version
+    assert version == "2026_07_12_widen_agent_ids"
+
+    engine_check = create_async_engine(url)
+
+    async def _verify() -> None:
+        async with engine_check.connect() as conn:
+            # Only one public revision remains.
+            count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM skill_revisions "
+                        "WHERE skill_name='reporting' AND content_checksum='sha256:x'"
+                    )
+                )
+            ).scalar_one()
+            assert count == 1, f"expected 1 canonical revision, got {count}"
+            # Both release->skill references now point at the canonical revision.
+            refs = [
+                row[0]
+                for row in (
+                    await conn.execute(
+                        text(
+                            "SELECT skill_revision_id FROM agent_release_skills "
+                            "WHERE release_id='rel_1'"
+                        )
+                    )
+                ).fetchall()
+            ]
+            canonical = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM skill_revisions "
+                        "WHERE skill_name='reporting' AND content_checksum='sha256:x'"
+                    )
+                )
+            ).scalar_one()
+            assert set(refs) == {canonical}
+
+    asyncio.run(_verify())
+    asyncio.run(engine_check.dispose())
+
+
+def test_widen_migration_preserves_non_null_constraints(tmp_path):
+    """Rereview Important-1: the widen migration must NOT relax NOT NULL
+    constraints. Only published_agents.current_release_id is nullable; every
+    other widened ID/FK keeps its original NOT NULL."""
+    db_path = tmp_path / "nullable.db"
+    url = f"sqlite+aiosqlite:///{db_path}"
+    engine_seed = create_async_engine(url)
+
+    async def _seed() -> None:
+        async with engine_seed.begin() as conn:
+            await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+            await conn.execute(text("INSERT INTO alembic_version VALUES ('2026_07_12_agent_releases')"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE agent_releases ("
+                    "id VARCHAR(32) PRIMARY KEY, "
+                    "agent_id VARCHAR(32) NOT NULL, "
+                    "release_no INT NOT NULL, "
+                    "agent_markdown TEXT NOT NULL DEFAULT '', "
+                    "soul_markdown TEXT NOT NULL DEFAULT '', "
+                    "model_name VARCHAR(128), "
+                    "tool_groups_json JSON NOT NULL DEFAULT '[]', "
+                    "quota_overrides_json JSON NOT NULL DEFAULT '{}', "
+                    "manifest_checksum VARCHAR(128) NOT NULL, "
+                    "created_by VARCHAR(36) NOT NULL, "
+                    "created_at DATETIME NOT NULL)"
+                )
+            )
+
+    asyncio.run(_seed())
+    asyncio.run(engine_seed.dispose())
+    asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
+    import sqlalchemy as sa
+
+    engine_check = create_async_engine(url)
+
+    async def _inspect() -> None:
+        def _cols(sync_conn):
+            return {c["name"]: c for c in sa.inspect(sync_conn).get_columns("agent_releases")}
+
+        async with engine_check.connect() as conn:
+            cols = await conn.run_sync(_cols)
+        # The required FK agent_id must remain NOT NULL after the migration
+        # (round-3 Important-1). The previous widen migration incorrectly set
+        # nullable=True on every column it touched.
+        assert cols["agent_id"]["nullable"] is False, "agent_id should stay NOT NULL"
+        # manifest_checksum and created_by are also NOT NULL in the base schema.
+        assert cols["manifest_checksum"]["nullable"] is False
+
+    asyncio.run(_inspect())
+    asyncio.run(engine_check.dispose())
+

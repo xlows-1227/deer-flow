@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第一轮代码评审修复已提交；第二轮复审仍有阻断项待修复
+**状态：** 已实现；第二轮修复已提交；第三轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -485,3 +485,12 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 - `setup_agent`：重复 slug 时改为同步已有 draft（不再直接 return）；soul 与 skills 分两次 `update_draft_bundle`，不可解析 skill 不阻断 soul 写入。
 - `update_agent`：镜像现包含 `description`（经新增的 `DraftService.update_agent_meta` → `PublishedAgentRepository.update_meta`）；soul/model/tool_groups 与 skills 分离写入。
 
+---
+
+## 17. 第三轮代码复审（2026-07-12）
+
+第三轮复审文档：[2026-07-12-m1-agent-control-plane-code-third-review.md](./2026-07-12-m1-agent-control-plane-code-third-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认数据库级 CAS、Release + pointer 原子提交、禁用 Skill 拒绝、导入 visibility 与部分工具镜像已得到实质修复；但仍有 2 个 Critical、5 个 Important 与 4 个 Minor 问题。
+
+当前首要阻断项是 PostgreSQL 迁移：新 Alembic revision ID 长 36，超过 `alembic_version.version_num VARCHAR(32)`；纠偏迁移也无法处理旧库中已存在的重复 public Skill revisions。其余待修复项包括迁移 nullability 漂移、owner-aware 模型校验、Connector 严格 active/type-enabled 校验、完整 publish unit-of-work，以及重复 setup / 混合无效 Skill 的镜像一致性。
