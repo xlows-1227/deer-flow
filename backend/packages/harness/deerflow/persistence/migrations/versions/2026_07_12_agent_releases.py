@@ -52,8 +52,8 @@ def upgrade() -> None:
     if "agent_releases" not in existing:
         op.create_table(
             "agent_releases",
-            sa.Column("id", sa.String(32), primary_key=True),
-            sa.Column("agent_id", sa.String(32), nullable=False),
+            sa.Column("id", sa.String(64), primary_key=True),
+            sa.Column("agent_id", sa.String(64), nullable=False),
             sa.Column("release_no", sa.Integer(), nullable=False),
             sa.Column("agent_markdown", sa.Text(), nullable=False, server_default=""),
             sa.Column("soul_markdown", sa.Text(), nullable=False, server_default=""),
@@ -70,14 +70,14 @@ def upgrade() -> None:
     if "agent_release_skills" not in existing:
         op.create_table(
             "agent_release_skills",
-            sa.Column("release_id", sa.String(32), sa.ForeignKey("agent_releases.id"), primary_key=True),
-            sa.Column("skill_revision_id", sa.String(32), primary_key=True),
+            sa.Column("release_id", sa.String(64), sa.ForeignKey("agent_releases.id"), primary_key=True),
+            sa.Column("skill_revision_id", sa.String(64), primary_key=True),
         )
 
     if "agent_release_connector_grants" not in existing:
         op.create_table(
             "agent_release_connector_grants",
-            sa.Column("release_id", sa.String(32), sa.ForeignKey("agent_releases.id"), primary_key=True),
+            sa.Column("release_id", sa.String(64), sa.ForeignKey("agent_releases.id"), primary_key=True),
             sa.Column("connector_instance_id", sa.String(64), primary_key=True),
             sa.Column("capability", sa.String(80), primary_key=True),
         )

@@ -204,6 +204,27 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
+        # Published-agent control plane services (M1). Built best-effort: when
+        # persistence or a subsystem is unavailable the factory returns None and
+        # the routers answer 503 rather than failing the whole startup. The
+        # conversational agent tools reuse the same factories (they cannot
+        # import app.*), so the Gateway and tool paths share one wiring.
+        try:
+            from deerflow.publishing.factory import (
+                build_draft_service,
+                build_import_service,
+                build_publish_service,
+            )
+
+            app.state.draft_service = build_draft_service()
+            app.state.publish_service = build_publish_service()
+            app.state.import_service = build_import_service()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Published-agent services unavailable: %s", exc)
+            app.state.draft_service = None
+            app.state.publish_service = None
+            app.state.import_service = None
+
         try:
             yield
         finally:

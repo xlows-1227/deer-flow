@@ -33,7 +33,7 @@ class SkillRevisionRow(Base):
 
     __tablename__ = "skill_revisions"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
     skill_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     owner_user_id: Mapped[str | None] = mapped_column(String(36))
     visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="public")

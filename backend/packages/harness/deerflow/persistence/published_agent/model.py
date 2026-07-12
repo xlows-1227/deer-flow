@@ -38,14 +38,14 @@ class PublishedAgentRow(Base):
 
     __tablename__ = "published_agents"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     avatar_ref: Mapped[str | None] = mapped_column(String(256))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft", index=True)
-    current_release_id: Mapped[str | None] = mapped_column(String(32))
+    current_release_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
@@ -63,7 +63,7 @@ class AgentDraftRow(Base):
 
     __tablename__ = "agent_drafts"
 
-    agent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     agent_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
     soul_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model_name: Mapped[str | None] = mapped_column(String(128))
@@ -84,7 +84,7 @@ class AgentDraftSkillRow(Base):
 
     __tablename__ = "agent_draft_skills"
 
-    agent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     skill_name: Mapped[str] = mapped_column(String(128), primary_key=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="public")
 
@@ -102,7 +102,7 @@ class AgentDraftConnectorGrantRow(Base):
 
     __tablename__ = "agent_draft_connector_grants"
 
-    agent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     connector_instance_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     capability: Mapped[str] = mapped_column(String(80), primary_key=True)
 

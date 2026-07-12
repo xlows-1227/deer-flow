@@ -120,3 +120,24 @@ def test_agent_draft_row_has_expected_columns():
         "updated_by",
     }
     assert expected <= set(table.columns.keys())
+
+
+def test_id_and_fk_columns_fit_generated_ids():
+    """ID/FK columns must be wide enough for the generated ids (pa_/rel_/skr_ + 32 hex = up to 36 chars).
+
+    SQLite does not enforce VARCHAR length, so a too-narrow column passes tests
+    but fails under PostgreSQL. This guard keeps the schema PostgreSQL-safe.
+    """
+    # Longest generated id is "rel_" + 32 hex chars = 36.
+    min_required = len("rel_") + 32
+    for tablename, columns in (
+        (PublishedAgentRow.__tablename__, ("id", "current_release_id")),
+        (AgentDraftRow.__tablename__, ("agent_id",)),
+        (AgentDraftSkillRow.__tablename__, ("agent_id",)),
+        (AgentDraftConnectorGrantRow.__tablename__, ("agent_id",)),
+    ):
+        table = Base.metadata.tables[tablename]
+        for name in columns:
+            length = table.columns[name].type.length
+            assert length >= min_required, f"{tablename}.{name} width {length} < {min_required}"
+

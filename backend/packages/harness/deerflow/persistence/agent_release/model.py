@@ -38,8 +38,8 @@ class AgentReleaseRow(Base):
 
     __tablename__ = "agent_releases"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    agent_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     release_no: Mapped[int] = mapped_column(Integer, nullable=False)
     agent_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
     soul_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -58,8 +58,8 @@ class AgentReleaseSkillRow(Base):
 
     __tablename__ = "agent_release_skills"
 
-    release_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_releases.id"), primary_key=True)
-    skill_revision_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_releases.id"), primary_key=True)
+    skill_revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
 
 class AgentReleaseConnectorGrantRow(Base):
@@ -73,6 +73,6 @@ class AgentReleaseConnectorGrantRow(Base):
 
     __tablename__ = "agent_release_connector_grants"
 
-    release_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_releases.id"), primary_key=True)
+    release_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_releases.id"), primary_key=True)
     connector_instance_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     capability: Mapped[str] = mapped_column(String(80), primary_key=True)

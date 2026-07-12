@@ -32,14 +32,14 @@ def upgrade() -> None:
     if "published_agents" not in existing:
         op.create_table(
             "published_agents",
-            sa.Column("id", sa.String(32), primary_key=True),
+            sa.Column("id", sa.String(64), primary_key=True),
             sa.Column("owner_user_id", sa.String(36), nullable=False),
             sa.Column("slug", sa.String(64), nullable=False),
             sa.Column("display_name", sa.String(128), nullable=False),
             sa.Column("description", sa.Text()),
             sa.Column("avatar_ref", sa.String(256)),
             sa.Column("status", sa.String(16), nullable=False, server_default="draft"),
-            sa.Column("current_release_id", sa.String(32)),
+            sa.Column("current_release_id", sa.String(64)),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
             sa.UniqueConstraint("owner_user_id", "slug", name="uq_published_agents_owner_slug"),
@@ -50,7 +50,7 @@ def upgrade() -> None:
     if "agent_drafts" not in existing:
         op.create_table(
             "agent_drafts",
-            sa.Column("agent_id", sa.String(32), primary_key=True),
+            sa.Column("agent_id", sa.String(64), primary_key=True),
             sa.Column("agent_markdown", sa.Text(), nullable=False, server_default=""),
             sa.Column("soul_markdown", sa.Text(), nullable=False, server_default=""),
             sa.Column("model_name", sa.String(128)),
@@ -64,7 +64,7 @@ def upgrade() -> None:
     if "agent_draft_skills" not in existing:
         op.create_table(
             "agent_draft_skills",
-            sa.Column("agent_id", sa.String(32), primary_key=True),
+            sa.Column("agent_id", sa.String(64), primary_key=True),
             sa.Column("skill_name", sa.String(128), primary_key=True),
             sa.Column("source", sa.String(16), nullable=False, server_default="public"),
         )
@@ -73,7 +73,7 @@ def upgrade() -> None:
     if "agent_draft_connector_grants" not in existing:
         op.create_table(
             "agent_draft_connector_grants",
-            sa.Column("agent_id", sa.String(32), primary_key=True),
+            sa.Column("agent_id", sa.String(64), primary_key=True),
             sa.Column("connector_instance_id", sa.String(64), primary_key=True),
             sa.Column("capability", sa.String(80), primary_key=True),
         )
