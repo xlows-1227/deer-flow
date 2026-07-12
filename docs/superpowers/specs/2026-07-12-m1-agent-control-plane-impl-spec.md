@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现
+**状态：** 已实现，已通过代码评审并修复
 
 **日期：** 2026-07-12
 
@@ -56,14 +56,14 @@ M1 在不替换 LangGraph 运行时的前提下，为 DeerFlow 增加了一个**
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| `id` | String(32) | PK | 稳定 agent_id，外部可见 |
+| `id` | String(64) | PK | 稳定 agent_id，外部可见 |
 | `owner_user_id` | String(36) | NOT NULL, INDEX | 拥有者 |
 | `slug` | String(64) | NOT NULL | owner 范围内唯一（见下） |
 | `display_name` | String(128) | NOT NULL | 展示名 |
 | `description` | Text | NULL | 描述 |
 | `avatar_ref` | String(256) | NULL | 头像引用 |
 | `status` | String(16) | NOT NULL, default `'draft'`, INDEX | `draft\|published\|suspended\|archived` |
-| `current_release_id` | String(32) | NULL | 内部指针，绝不对外；首次发布时置位并 draft→published |
+| `current_release_id` | String(64) | NULL | 内部指针，绝不对外；首次发布时置位并 draft→published |
 | `created_at` / `updated_at` | DateTime(tz) | NOT NULL | UTC 时间戳 |
 
 唯一约束：`UniqueConstraint(owner_user_id, slug, name='uq_published_agents_owner_slug')`。
@@ -74,7 +74,7 @@ M1 在不替换 LangGraph 运行时的前提下，为 DeerFlow 增加了一个**
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| `agent_id` | String(32) | PK | 1:1 于 `published_agents.id` |
+| `agent_id` | String(64) | PK | 1:1 于 `published_agents.id` |
 | `agent_markdown` | Text | NOT NULL, default `''` | AGENT.md 内容 |
 | `soul_markdown` | Text | NOT NULL, default `''` | SOUL.md 内容 |
 | `model_name` | String(128) | NULL | 模型覆盖 |
@@ -90,7 +90,7 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 
 | 列 | 类型 | 约束 |
 |----|------|------|
-| `agent_id` | String(32) | PK |
+| `agent_id` | String(64) | PK |
 | `skill_name` | String(128) | PK |
 | `source` | String(16) | NOT NULL, default `'public'` |
 
@@ -100,7 +100,7 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 
 | 列 | 类型 | 约束 |
 |----|------|------|
-| `agent_id` | String(32) | PK |
+| `agent_id` | String(64) | PK |
 | `connector_instance_id` | String(64) | PK |
 | `capability` | String(80) | PK |
 
@@ -110,8 +110,8 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| `id` | String(32) | PK | 内部 release_id，仅 owner 控制平面可见 |
-| `agent_id` | String(32) | NOT NULL, INDEX | |
+| `id` | String(64) | PK | 内部 release_id，仅 owner 控制平面可见 |
+| `agent_id` | String(64) | NOT NULL, INDEX | |
 | `release_no` | Integer | NOT NULL | 对 owner 单调递增 |
 | `agent_markdown` | Text | NOT NULL | 完整快照 |
 | `soul_markdown` | Text | NOT NULL | 完整快照 |
@@ -130,8 +130,8 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 
 | 列 | 类型 | 约束 |
 |----|------|------|
-| `release_id` | String(32) | PK, FK→agent_releases.id |
-| `skill_revision_id` | String(32) | PK |
+| `release_id` | String(64) | PK, FK→agent_releases.id |
+| `skill_revision_id` | String(64) | PK |
 
 复合主键 `(release_id, skill_revision_id)`；将发布锁定到具体的不可变 skill revision。
 
@@ -139,7 +139,7 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 
 | 列 | 类型 | 约束 |
 |----|------|------|
-| `release_id` | String(32) | PK, FK→agent_releases.id |
+| `release_id` | String(64) | PK, FK→agent_releases.id |
 | `connector_instance_id` | String(64) | PK |
 | `capability` | String(80) | PK |
 
@@ -149,7 +149,7 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| `id` | String(32) | PK | |
+| `id` | String(64) | PK | |
 | `skill_name` | String(128) | NOT NULL, INDEX | |
 | `owner_user_id` | String(36) | NULL | NULL = 平台公开 skill |
 | `visibility` | String(16) | NOT NULL, default `'public'` | `public|private` |
@@ -416,3 +416,32 @@ M1 的 `current_release_id` 指针切换为 M2 的"草稿/发布分离"与"运�
 - ✅ F1.6 指令拼接（AGENT.md + SOUL.md 标签区块）
 - ✅ F1.7 存量自定义 Agent 迁移导入（服务 + CLI + 路由）
 - ✅ M1 Review Gate：M1 测试全绿、lint 通过、`backend/CLAUDE.md` 更新
+
+---
+
+## 15. 代码评审修复（2026-07-12）
+
+M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-control-plane-code-review.md](./2026-07-12-m1-agent-control-plane-code-review.md)）：
+
+### Critical-1：ID/FK 列宽 PostgreSQL 兼容
+所有 ID/FK 列由 `String(32)` 扩为 `String(64)`。生成的 ID 形如 `pa_`/`rel_`/`skr_` + 32 位 hex（最长 36 字符），`String(32)` 在 PostgreSQL 下会插入失败。模型、两个 Alembic 迁移均已同步，并新增回归测试 `test_id_and_fk_columns_fit_generated_ids` 锁定列宽 ≥ 生成 ID 长度。
+
+### Critical-2：Gateway 启动接线
+`langgraph_runtime()` lifespan 现在构建并挂载 `draft_service` / `publish_service` / `import_service` 到 `app.state`（之前缺失，导致真实运行时 503）。`build_publish_service()` 补全所有必需依赖（skills index、connector adapter、model index、tool-group whitelist、platform quota），新增 `build_import_service()`。新增 `test_published_agents_app_wiring.py` 验证无 dependency override 也能获得 service。
+
+### Critical-3：PATCH /draft 原子化
+新增 `AgentDraftRepository.update_bundle()` 与 `DraftService.update_draft_bundle()`：主表 + skills + connector_grants 在同一事务、同一 revision 检查下提交。过期 revision 时子表保持不变（之前 set_skills/set_connector_grants 先执行，409 时子表已写入）。PATCH 路由改用 bundle 路径，并新增 service 与 router 层回归测试。
+
+### Important-1：Skill 来源元数据权威化
+`source`/`visibility` 不再信任客户端输入。`SkillsIndex` 协议新增 `get()` 返回权威分类；`DraftService`（set_skills / update_draft_bundle）、`AgentImportService`、`PublishService` 均由 index 推导，不从客户端或 legacy config 继承。
+
+### Important-2：并发发布冲突处理
+`SkillRevisionRepository.get_or_create()` 捕获唯一键 `IntegrityError` 后重读；`PublishService.publish()` 在 `(agent_id, release_no)` 唯一冲突时以新 release_no 重试（最多 8 次）。
+
+### Important-3：对话式工具字段对齐
+`setup_agent` 镜像现包含 soul_markdown / description / skills；`update_agent` 镜像现包含 soul / model / tool_groups / skills。两者均经 `update_draft_bundle` 落盘，使对话式与 Studio 编辑落到同一事实来源。
+
+### Important-4：HTTP 状态码收敛
+- 发布找不到 agent → `AGENT_NOT_FOUND` 违规单独映射为 **404**（区别于 422 校验失败）。
+- `GET /{agent_id}/releases` 对不存在或跨 owner 的 agent 返回 **404**（而非空数组）。
+
