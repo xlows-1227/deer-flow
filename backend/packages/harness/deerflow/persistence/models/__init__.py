@@ -16,6 +16,11 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.api_key.model import APIKeyRow
+from deerflow.persistence.agent_release.model import (
+    AgentReleaseConnectorGrantRow,
+    AgentReleaseRow,
+    AgentReleaseSkillRow,
+)
 from deerflow.persistence.connector.model import ConnectorAuditLogRow, ConnectorGrantRow, ConnectorInstanceRow, ConnectorMetadataCacheRow
 from deerflow.persistence.external_audit.model import ExternalAuditRow
 from deerflow.persistence.published_agent.model import (
@@ -24,6 +29,7 @@ from deerflow.persistence.published_agent.model import (
     AgentDraftSkillRow,
     PublishedAgentRow,
 )
+from deerflow.persistence.skill_revision.model import SkillRevisionRow
 from deerflow.persistence.external_conversation.model import ExternalConversationRow
 from deerflow.persistence.external_idempotency.model import ExternalIdempotencyRow
 from deerflow.persistence.feedback.model import FeedbackRow
@@ -50,6 +56,9 @@ __all__ = [
     "AgentDraftConnectorGrantRow",
     "AgentDraftRow",
     "AgentDraftSkillRow",
+    "AgentReleaseConnectorGrantRow",
+    "AgentReleaseRow",
+    "AgentReleaseSkillRow",
     "ConnectorAuditLogRow",
     "ConnectorGrantRow",
     "ConnectorInstanceRow",
@@ -70,4 +79,5 @@ __all__ = [
     "UserModelRow",
     "UserRow",
     "PublishedAgentRow",
+    "SkillRevisionRow",
 ]
