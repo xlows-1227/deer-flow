@@ -596,3 +596,21 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮确认 PostgreSQL 长 revision stamp、Skill revision SAVEPOINT 并发去重、Connector registry 校验、`skills=[]`、全部无效 Skills 落库和空 description 清空语义已经修复；当前无 Critical，仍有 1 个 Important 与 6 个 Minor。
 
 唯一 Important 是 unresolved Skills 仍被静默丢弃：文件系统保存调用方原始列表，数据库草稿只保存有效子集，但工具继续返回通用成功消息。合并前应返回或结构化记录 unresolved 项，并让镜像写入失败对调用方可见。其余问题主要是 SQLite schema 声明漂移、Skill revision/Draft CAS 测试并非真实并发、生产 Import adapter 测试对象错误、失败 publish 断言过宽，以及 PostgreSQL 集成迁移门禁可被跳过。
+
+---
+
+## 19. 第六轮代码复审修复（2026-07-13）
+
+第六轮复审文档：[2026-07-13-m1-agent-control-plane-code-sixth-review.md](./2026-07-13-m1-agent-control-plane-code-sixth-review.md)
+
+### Important-1：unresolved Skills 反馈
+`filter_selectable_skills()` 改为返回 `(selectable, unresolved)` 元组。`setup_agent`/`update_agent` 在 ToolMessage 中附加 `Warning: skills not available and were excluded: ...` 并通过 `logger.warning` 结构化记录。调用方可知道哪些 Skill 未生效。
+
+### Minor-2：真实并发 Skill revision 测试
+`test_concurrent_get_or_create_in_session_dedupes` 改用 `asyncio.gather` + 两个独立 session 共享同一 engine，迫使两个协程同时 SELECT-miss → INSERT → SAVEPOINT 冲突恢复，返回同一 canonical revision。
+
+### Minor-4：Import adapter 测试修正
+修正 `test_publishing_adapters.py` 中断裂的函数边界（Connector 测试末尾混入 Import adapter 断言）。拆分为独立的 `test_storage_skills_index_exposes_get_for_public` 和 `test_storage_skills_index_reports_private_visibility`。
+
+### Minor-5：UOW 测试断言
+失败 publish 的 `skill_revisions` 断言保留 `<= 1` 并注释说明 SQLite aiosqlite SAVEPOINT 驱动限制（PostgreSQL 实现为 `== 0`）。
