@@ -44,7 +44,7 @@ def test_user_model_capabilities_migration_on_sqlite(tmp_path):
     url = asyncio.run(_prepare_sqlite_db(tmp_path / "migration.db"))
     engine = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     cols, version = engine
-    assert version == "2026_07_09_umodel_caps"
+    assert version == "2026_07_12_agent_releases"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -116,7 +116,7 @@ def test_user_model_capabilities_migration_on_postgres_if_available():
 
     asyncio.run(_prepare_postgres_db(url))
     cols, version = asyncio.run(_run_migration_and_inspect(url, backend="postgres"))
-    assert version == "2026_07_09_umodel_caps"
+    assert version == "2026_07_12_agent_releases"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 

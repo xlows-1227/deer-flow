@@ -188,13 +188,9 @@ async def test_draft_update_cross_owner_rejected(agent_repo):
 async def test_draft_partial_update_keeps_other_fields(agent_repo):
     pub, drafts = agent_repo
     agent = await pub.create_agent(owner_user_id="user-a", slug="partial", display_name="P")
-    await drafts.update_with_revision(
-        agent["id"], owner_user_id="user-a", revision=1, agent_markdown="# Agent", model_name="gpt-x"
-    )
+    await drafts.update_with_revision(agent["id"], owner_user_id="user-a", revision=1, agent_markdown="# Agent", model_name="gpt-x")
     # Update only soul_markdown; agent_markdown/model_name must persist.
-    await drafts.update_with_revision(
-        agent["id"], owner_user_id="user-a", revision=2, soul_markdown="# Soul"
-    )
+    await drafts.update_with_revision(agent["id"], owner_user_id="user-a", revision=2, soul_markdown="# Soul")
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert draft["agent_markdown"] == "# Agent"
     assert draft["model_name"] == "gpt-x"
@@ -224,9 +220,7 @@ async def test_replace_skills_and_connector_grants(agent_repo):
     assert [s["skill_name"] for s in draft["skills"]] == ["only-one"]
 
     # Cross-owner replace rejected.
-    assert await drafts.replace_skills(
-        agent["id"], owner_user_id="user-b", skills=[{"skill_name": "evil", "source": "public"}]
-    ) is None
+    assert await drafts.replace_skills(agent["id"], owner_user_id="user-b", skills=[{"skill_name": "evil", "source": "public"}]) is None
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert [s["skill_name"] for s in draft["skills"]] == ["only-one"]
 
@@ -239,8 +233,6 @@ async def test_replace_skills_and_connector_grants(agent_repo):
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert draft["connector_grants"] == [{"connector_instance_id": "conn_1", "capability": "database.query"}]
 
-    assert await drafts.replace_connector_grants(
-        agent["id"], owner_user_id="user-b", grants=[]
-    ) is None
+    assert await drafts.replace_connector_grants(agent["id"], owner_user_id="user-b", grants=[]) is None
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert draft["connector_grants"] == [{"connector_instance_id": "conn_1", "capability": "database.query"}]

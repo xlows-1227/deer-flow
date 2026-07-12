@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from deerflow.publishing.draft_service import SkillsIndex
 from deerflow.skills.types import SkillCategory
 
 

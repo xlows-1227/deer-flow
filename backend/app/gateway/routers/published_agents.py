@@ -183,9 +183,7 @@ async def patch_draft(
         if payload.skills is not None:
             await service.set_skills(agent_id, owner_user_id=owner, skills=payload.skills)
         if payload.connector_grants is not None:
-            await service.set_connector_grants(
-                agent_id, owner_user_id=owner, grants=payload.connector_grants
-            )
+            await service.set_connector_grants(agent_id, owner_user_id=owner, grants=payload.connector_grants)
         return await service.update_draft(
             agent_id,
             owner_user_id=owner,
@@ -268,9 +266,7 @@ async def publish_agent(
             status_code=422,
             detail={
                 "code": "publish_validation_failed",
-                "violations": [
-                    {"code": v.code, "message": v.message, "field": v.field} for v in exc.violations
-                ],
+                "violations": [{"code": v.code, "message": v.message, "field": v.field} for v in exc.violations],
             },
         ) from exc
 

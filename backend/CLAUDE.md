@@ -250,6 +250,52 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 
 **Auth invariant**: user-scoped APIs (e.g. Memory, Files) must not accept client-supplied `user_id` overrides; mismatches are rejected with 403.
 
+#### Published-Agent Control Plane (M1)
+
+The multi-tenant agent publishing platform adds a control plane that database-ifies agent identity, drafts, and immutable releases. All persistence lives under `packages/harness/deerflow/persistence/` (so agent tools can reuse it without importing `app.*`); HTTP routes live in `app/gateway/routers/published_agents.py`.
+
+**Persistence entities** (each registered in `persistence/models/__init__.py` for Alembic):
+
+| Package | Tables | Purpose |
+|---------|--------|---------|
+| `persistence/published_agent/` | `published_agents`, `agent_drafts`, `agent_draft_skills`, `agent_draft_connector_grants` | Stable agent identity (owner+slug unique, `current_release_id` pointer) + 1:1 mutable draft with optimistic `revision`; skill/connector-grant sub-tables carry no secrets |
+| `persistence/agent_release/` | `agent_releases`, `agent_release_skills`, `agent_release_connector_grants` | Write-once publish snapshots (no `updated_at`, `(agent_id, release_no)` unique); the release repo exposes **no update mutators** — rollback repoints the pointer instead of mutating history |
+| `persistence/skill_revision/` | `skill_revisions` | Content-addressed skill snapshots; `(skill_name, owner_user_id, content_checksum)` unique so identical content reuses a revision |
+
+All repositories are owner-scoped: every read/write takes `owner_user_id` and cross-owner access returns `None`/404 without leaking existence. JSON columns use the `_json` suffix and are renamed by the repository layer.
+
+**Publishing services** (`packages/harness/deerflow/publishing/`):
+
+- `draft_service.py` — `DraftService`: create/edit agents, partial draft updates (revision-conflict → 409), skill selection (ownership-checked), connector grants (ownership-checked), lifecycle (suspend/resume/archive, never delete).
+- `validation.py` — `validate_draft_for_publish()`: pure function implementing the 8 publish rules (design §8.2); aggregates all violations rather than fail-fast.
+- `publish_service.py` — `PublishService.publish()` (validate → pin skill revisions via content store → insert immutable release → atomic pointer switch) and `rollback()` (repoint `current_release_id` only).
+- `content_store.py` — `ImmutableContentStore` protocol + `LocalContentStore`; opaque `cs://<ns>/<checksum>` refs, atomic writes, idempotent puts.
+- `instructions.py` — `compose_agent_instructions()`: AGENT.md then SOUL.md into labelled prompt blocks.
+- `import_service.py` — `AgentImportService`: imports legacy `users/{uid}/agents/{name}/` filesystem agents as `status=draft` rows (never auto-publishes, never deletes source files).
+- `factory.py` — `build_draft_service()` / `build_publish_service()`: wire the services to live persistence + skill/connector subsystems; return `None` when no DB engine is configured (CLI fallback).
+
+**Gateway routes** (`/api/published-agents`, session-only auth + CSRF):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `` | Create agent identity + empty draft |
+| GET | `` | List owner's agents |
+| GET | `/{agent_id}` | Agent detail + draft |
+| PATCH | `/{agent_id}/draft` | Update draft (revision required; 409 on conflict, 422 on unselectable skill/connector) |
+| POST | `/{agent_id}/archive` `/suspend` `/resume` | Lifecycle (no deletion) |
+| POST | `/{agent_id}/releases` | Publish (422 with aggregated violations on validation failure) |
+| GET | `/{agent_id}/releases` | Release history (owner-only) |
+| GET | `/{agent_id}/releases/{release_no}` | Single release detail |
+| POST | `/{agent_id}/rollback` | Atomic pointer rollback |
+| GET | `/import/candidates` | Legacy filesystem agents importable by caller |
+| POST | `/import` | Import one legacy agent as a draft |
+
+The conversational `setup_agent` / `update_agent` tools now best-effort mirror into the draft store via `build_draft_service()` so structured and conversational authoring share one source of truth; the legacy filesystem write path is retained read-compatible during the migration window.
+
+**Migration CLI**: `PYTHONPATH=. python scripts/migrate_published_agents.py [--dry-run] --user-id USER_ID` lists candidates and imports each as a draft.
+
+Alembic head after M1: `2026_07_12_agent_releases` (chain: `... → 2026_07_09_umodel_caps → 2026_07_12_published_agents → 2026_07_12_agent_releases`).
+
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`

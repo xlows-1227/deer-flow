@@ -160,9 +160,7 @@ def _build_service(owner: str) -> published_agents.DraftService:
     real_create = agents.create_agent
 
     async def create_agent(*, owner_user_id, slug, display_name, description=None, avatar_ref=None, agent_id=None):
-        agent = await real_create(
-            owner_user_id=owner_user_id, slug=slug, display_name=display_name, description=description, avatar_ref=avatar_ref, agent_id=agent_id
-        )
+        agent = await real_create(owner_user_id=owner_user_id, slug=slug, display_name=display_name, description=description, avatar_ref=avatar_ref, agent_id=agent_id)
         drafts._seed(agent["id"])
         return agent
 

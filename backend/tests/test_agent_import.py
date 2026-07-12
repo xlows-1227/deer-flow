@@ -12,16 +12,13 @@ same slug is rejected.
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from deerflow.publishing.import_service import (
     AgentImportService,
     ImportAlreadyExistsError,
-    ImportCandidate,
 )
 
 
@@ -102,9 +99,7 @@ def _service(base: Path, known_skills: set[str] | None = None):
     real_create = agents.create_agent
 
     async def create_and_seed(*, owner_user_id, slug, display_name, description=None, avatar_ref=None, agent_id=None):
-        agent = await real_create(
-            owner_user_id=owner_user_id, slug=slug, display_name=display_name, description=description, avatar_ref=avatar_ref, agent_id=agent_id
-        )
+        agent = await real_create(owner_user_id=owner_user_id, slug=slug, display_name=display_name, description=description, avatar_ref=avatar_ref, agent_id=agent_id)
         drafts.drafts[agent["id"]] = {
             "agent_id": agent["id"],
             "agent_markdown": "",

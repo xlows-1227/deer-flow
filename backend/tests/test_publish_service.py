@@ -9,8 +9,6 @@ without mutating history, and 404 semantics for unknown releases.
 
 from __future__ import annotations
 
-import hashlib
-
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -97,17 +95,13 @@ async def env(tmp_path):
 
 async def _seed_agent(draft_service, *, owner="user-a", slug="bot", skills=True, grants=True):
     agent = await draft_service.create_agent(owner_user_id=owner, slug=slug, display_name=slug.title())
-    await draft_service.update_draft(
-        agent["id"], owner_user_id=owner, revision=1, agent_markdown="# Agent", soul_markdown="# Soul", model_name="gpt-x", tool_groups=["web"]
-    )
+    await draft_service.update_draft(agent["id"], owner_user_id=owner, revision=1, agent_markdown="# Agent", soul_markdown="# Soul", model_name="gpt-x", tool_groups=["web"])
     if skills:
         await draft_service.set_skills(agent["id"], owner_user_id=owner, skills=[{"skill_name": "reporting", "source": "public"}])
     else:
         await draft_service.set_skills(agent["id"], owner_user_id=owner, skills=[])
     if grants:
-        await draft_service.set_connector_grants(
-            agent["id"], owner_user_id=owner, grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}]
-        )
+        await draft_service.set_connector_grants(agent["id"], owner_user_id=owner, grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}])
     return agent
 
 
@@ -133,9 +127,7 @@ async def test_publish_rejects_invalid_draft_without_changes(env):
     agent = await _seed_agent(draft_service)
     # Break rule 1: empty instructions.
     draft = await draft_service.get_draft(agent["id"], owner_user_id="user-a")
-    await draft_service.update_draft(
-        agent["id"], owner_user_id="user-a", revision=draft["revision"], agent_markdown="", soul_markdown=""
-    )
+    await draft_service.update_draft(agent["id"], owner_user_id="user-a", revision=draft["revision"], agent_markdown="", soul_markdown="")
     with pytest.raises(PublishError) as exc:
         await service.publish(agent["id"], owner_user_id="user-a")
     assert any(v.code == "EMPTY_INSTRUCTIONS" for v in exc.value.violations)
@@ -266,7 +258,7 @@ async def test_list_releases_owner_scoped(env):
 async def test_get_release_owner_scoped(env):
     service, draft_service, _, _ = env
     agent = await _seed_agent(draft_service)
-    result = await service.publish(agent["id"], owner_user_id="user-a")
+    await service.publish(agent["id"], owner_user_id="user-a")
     release = await service.get_release(agent["id"], owner_user_id="user-a", release_no=1)
     assert release is not None
     assert release["release_no"] == 1

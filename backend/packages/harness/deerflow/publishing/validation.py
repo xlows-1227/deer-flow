@@ -115,9 +115,7 @@ def validate_draft_for_publish(
         )
 
     # Rules 4 & 5 — skills
-    granted_caps = {
-        (g["connector_instance_id"], g["capability"]) for g in draft.get("connector_grants") or []
-    }
+    granted_caps = {(g["connector_instance_id"], g["capability"]) for g in draft.get("connector_grants") or []}
     for entry in draft.get("skills") or []:
         name = entry["skill_name"]
         if not skills_index.is_selectable_by(name, owner_user_id):

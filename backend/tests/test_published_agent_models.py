@@ -9,8 +9,6 @@ status default value, composite primary keys on the sub-tables).
 
 from __future__ import annotations
 
-from sqlalchemy import inspect
-
 from deerflow.persistence.base import Base
 from deerflow.persistence.published_agent.model import (
     AgentDraftConnectorGrantRow,

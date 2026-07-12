@@ -14,12 +14,11 @@ from typing import Any
 import pytest
 
 from deerflow.publishing.draft_service import (
+    ConnectorNotGrantableError,
     DraftConflictError,
     DraftService,
     SkillNotSelectableError,
-    ConnectorNotGrantableError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -27,7 +26,7 @@ from deerflow.publishing.draft_service import (
 
 
 class FakePublishedAgentRepo:
-    def __init__(self, draft_repo: "FakeDraftRepo | None" = None) -> None:
+    def __init__(self, draft_repo: FakeDraftRepo | None = None) -> None:
         self.agents: dict[str, dict[str, Any]] = {}
         self._draft_repo = draft_repo
 
@@ -88,7 +87,7 @@ class FakePublishedAgentRepo:
 
 
 class FakeDraftRepo:
-    def __init__(self, agent_repo: "FakePublishedAgentRepo | None" = None) -> None:
+    def __init__(self, agent_repo: FakePublishedAgentRepo | None = None) -> None:
         self.drafts: dict[str, dict[str, Any]] = {}
         self._agent_repo = agent_repo
 
@@ -220,9 +219,7 @@ async def test_get_draft_cross_owner_returns_none(service):
 @pytest.mark.anyio
 async def test_update_draft_bumps_revision(service):
     agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
-    updated = await service.update_draft(
-        agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# Soul"
-    )
+    updated = await service.update_draft(agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# Soul")
     assert updated["revision"] == 2
     assert updated["soul_markdown"] == "# Soul"
 
@@ -282,9 +279,7 @@ async def test_replace_skills_rejects_other_owners_private(service):
 async def test_replace_skills_rejects_unknown_skill(service):
     agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
     with pytest.raises(SkillNotSelectableError):
-        await service.set_skills(
-            agent["id"], owner_user_id="user-a", skills=[{"skill_name": "ghost", "source": "public"}]
-        )
+        await service.set_skills(agent["id"], owner_user_id="user-a", skills=[{"skill_name": "ghost", "source": "public"}])
 
 
 # ---------------------------------------------------------------------------

@@ -73,9 +73,7 @@ def _manifest_checksum(draft: dict[str, Any], skill_revision_ids: list[str]) -> 
     for group in sorted(draft.get("tool_groups") or []):
         h.update(group.encode())
         h.update(b"\0")
-    for grant in sorted(
-        (g["connector_instance_id"], g["capability"]) for g in draft.get("connector_grants") or []
-    ):
+    for grant in sorted((g["connector_instance_id"], g["capability"]) for g in draft.get("connector_grants") or []):
         h.update(f"{grant[0]}:{grant[1]}".encode())
         h.update(b"\0")
     for rid in sorted(skill_revision_ids):
@@ -202,9 +200,7 @@ class PublishService:
     # ------------------------------------------------------------------
 
     async def rollback(self, agent_id: str, *, owner_user_id: str, release_no: int) -> dict[str, Any]:
-        release = await self._releases.get_by_release_no(
-            agent_id, release_no=release_no, owner_user_id=owner_user_id
-        )
+        release = await self._releases.get_by_release_no(agent_id, release_no=release_no, owner_user_id=owner_user_id)
         if release is None:
             raise ReleaseNotFoundError(f"release {release_no} not found for agent {agent_id}")
         await self._agents.set_current_release(agent_id, owner_user_id=owner_user_id, release_id=release["id"])

@@ -50,9 +50,7 @@ class AgentReleaseRow(Base):
     created_by: Mapped[str] = mapped_column(String(36), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
-    __table_args__ = (
-        UniqueConstraint("agent_id", "release_no", name="uq_agent_releases_agent_release_no"),
-    )
+    __table_args__ = (UniqueConstraint("agent_id", "release_no", name="uq_agent_releases_agent_release_no"),)
 
 
 class AgentReleaseSkillRow(Base):

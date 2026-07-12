@@ -23,7 +23,6 @@ def build_draft_service() -> DraftService | None:
     sf = get_session_factory()
     if sf is None:
         return None
-    from deerflow.persistence.agent_release import AgentReleaseRepository
     from deerflow.persistence.published_agent import (
         AgentDraftRepository,
         PublishedAgentRepository,

@@ -53,9 +53,7 @@ class AgentReleaseRepository:
     async def next_release_no(self, agent_id: str) -> int:
         """Return the next ``release_no`` for an agent (1 if none yet)."""
         async with self._sf() as session:
-            current = await session.execute(
-                select(func.max(AgentReleaseRow.release_no)).where(AgentReleaseRow.agent_id == agent_id)
-            )
+            current = await session.execute(select(func.max(AgentReleaseRow.release_no)).where(AgentReleaseRow.agent_id == agent_id))
             value = current.scalar_one()
             return int(value) + 1 if value else 1
 
@@ -116,13 +114,7 @@ class AgentReleaseRepository:
             agent = await session.get(PublishedAgentRow, agent_id)
             if agent is None or agent.owner_user_id != owner_user_id:
                 return []
-            rows = (
-                await session.execute(
-                    select(AgentReleaseRow)
-                    .where(AgentReleaseRow.agent_id == agent_id)
-                    .order_by(AgentReleaseRow.release_no.desc())
-                )
-            ).scalars().all()
+            rows = (await session.execute(select(AgentReleaseRow).where(AgentReleaseRow.agent_id == agent_id).order_by(AgentReleaseRow.release_no.desc()))).scalars().all()
             results = []
             for row in rows:
                 skills = await self._load_skills(session, row.id)
@@ -172,22 +164,22 @@ class AgentReleaseRepository:
         return (await session.execute(stmt)).scalar_one_or_none()
 
     async def _load_skills(self, session: AsyncSession, release_id: str) -> list[dict[str, str]]:
-        rows = (
-            await session.execute(
-                select(AgentReleaseSkillRow).where(AgentReleaseSkillRow.release_id == release_id)
-            )
-        ).scalars().all()
+        rows = (await session.execute(select(AgentReleaseSkillRow).where(AgentReleaseSkillRow.release_id == release_id))).scalars().all()
         return [{"skill_revision_id": row.skill_revision_id} for row in rows]
 
     async def _load_grants(self, session: AsyncSession, release_id: str) -> list[dict[str, str]]:
         rows = (
-            await session.execute(
-                select(AgentReleaseConnectorGrantRow)
-                .where(AgentReleaseConnectorGrantRow.release_id == release_id)
-                .order_by(
-                    AgentReleaseConnectorGrantRow.connector_instance_id,
-                    AgentReleaseConnectorGrantRow.capability,
+            (
+                await session.execute(
+                    select(AgentReleaseConnectorGrantRow)
+                    .where(AgentReleaseConnectorGrantRow.release_id == release_id)
+                    .order_by(
+                        AgentReleaseConnectorGrantRow.connector_instance_id,
+                        AgentReleaseConnectorGrantRow.capability,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return [{"connector_instance_id": row.connector_instance_id, "capability": row.capability} for row in rows]

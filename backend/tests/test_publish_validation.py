@@ -8,8 +8,6 @@ together.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from deerflow.publishing.validation import (
@@ -68,9 +66,7 @@ def _connector_repo(owners):
 def collaborators():
     return {
         "owner_user_id": "user-a",
-        "skills_index": _skills_index(
-            {"reporting": {"visibility": "public", "owner": None, "caps": ["database.query"]}}
-        ),
+        "skills_index": _skills_index({"reporting": {"visibility": "public", "owner": None, "caps": ["database.query"]}}),
         "connector_repo": _connector_repo({"conn_1": "user-a"}),
         "model_index": {"gpt-x"},
         "tool_group_whitelist": {"web", "file:read"},
@@ -88,9 +84,7 @@ def codes(violations: list[PublishViolation]) -> set[str]:
 
 
 def test_rule1_empty_instructions_violation(collaborators):
-    violations = validate_draft_for_publish(
-        _draft(agent_markdown="   ", soul_markdown="\n"), **collaborators
-    )
+    violations = validate_draft_for_publish(_draft(agent_markdown="   ", soul_markdown="\n"), **collaborators)
     assert "EMPTY_INSTRUCTIONS" in codes(violations)
 
 
@@ -137,16 +131,12 @@ def test_rule3_model_available_ok(collaborators):
 
 
 def test_rule4_skill_not_found(collaborators):
-    violations = validate_draft_for_publish(
-        _draft(skills=[{"skill_name": "ghost", "source": "public"}]), **collaborators
-    )
+    violations = validate_draft_for_publish(_draft(skills=[{"skill_name": "ghost", "source": "public"}]), **collaborators)
     assert "SKILL_NOT_FOUND" in codes(violations)
 
 
 def test_rule4_skill_found_ok(collaborators):
-    violations = validate_draft_for_publish(
-        _draft(skills=[{"skill_name": "reporting", "source": "public"}]), **collaborators
-    )
+    violations = validate_draft_for_publish(_draft(skills=[{"skill_name": "reporting", "source": "public"}]), **collaborators)
     assert "SKILL_NOT_FOUND" not in codes(violations)
 
 
@@ -157,9 +147,7 @@ def test_rule4_skill_found_ok(collaborators):
 
 def test_rule5_skill_capability_not_granted(collaborators):
     # Skill requires "database.write" but only "database.query" is granted.
-    collaborators["skills_index"] = _skills_index(
-        {"reporting": {"visibility": "public", "owner": None, "caps": ["database.write"]}}
-    )
+    collaborators["skills_index"] = _skills_index({"reporting": {"visibility": "public", "owner": None, "caps": ["database.write"]}})
     violations = validate_draft_for_publish(_draft(), **collaborators)
     assert "CONNECTOR_NOT_GRANTED" in codes(violations)
 
@@ -214,9 +202,7 @@ def test_rule8_quota_exceeds_platform(collaborators):
 
 
 def test_rule8_quota_within_platform_ok(collaborators):
-    violations = validate_draft_for_publish(
-        _draft(quota_overrides={"max_concurrent_runs": 1}), **collaborators
-    )
+    violations = validate_draft_for_publish(_draft(quota_overrides={"max_concurrent_runs": 1}), **collaborators)
     assert "QUOTA_EXCEEDS_PLATFORM" not in codes(violations)
 
 

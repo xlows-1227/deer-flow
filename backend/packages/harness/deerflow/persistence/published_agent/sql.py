@@ -120,11 +120,7 @@ class PublishedAgentRepository:
             return _agent_to_dict(row) if row else None
 
     async def list_by_owner(self, owner_user_id: str) -> list[dict[str, Any]]:
-        stmt = (
-            select(PublishedAgentRow)
-            .where(PublishedAgentRow.owner_user_id == owner_user_id)
-            .order_by(PublishedAgentRow.created_at.desc())
-        )
+        stmt = select(PublishedAgentRow).where(PublishedAgentRow.owner_user_id == owner_user_id).order_by(PublishedAgentRow.created_at.desc())
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [_agent_to_dict(row) for row in rows]
@@ -305,9 +301,7 @@ class AgentDraftRepository:
             draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
             if draft is None:
                 return None
-            await session.execute(
-                delete(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id)
-            )
+            await session.execute(delete(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id))
             for entry in grants:
                 session.add(
                     AgentDraftConnectorGrantRow(
@@ -338,19 +332,13 @@ class AgentDraftRepository:
         return (await session.execute(stmt)).scalar_one_or_none()
 
     async def _load_skills(self, session: AsyncSession, agent_id: str) -> list[dict[str, str]]:
-        rows = (
-            await session.execute(
-                select(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id).order_by(AgentDraftSkillRow.skill_name)
-            )
-        ).scalars().all()
+        rows = (await session.execute(select(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id).order_by(AgentDraftSkillRow.skill_name))).scalars().all()
         return [_skill_to_dict(row) for row in rows]
 
     async def _load_grants(self, session: AsyncSession, agent_id: str) -> list[dict[str, str]]:
         rows = (
-            await session.execute(
-                select(AgentDraftConnectorGrantRow)
-                .where(AgentDraftConnectorGrantRow.agent_id == agent_id)
-                .order_by(AgentDraftConnectorGrantRow.connector_instance_id, AgentDraftConnectorGrantRow.capability)
-            )
-        ).scalars().all()
+            (await session.execute(select(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id).order_by(AgentDraftConnectorGrantRow.connector_instance_id, AgentDraftConnectorGrantRow.capability)))
+            .scalars()
+            .all()
+        )
         return [_grant_to_dict(row) for row in rows]

@@ -49,9 +49,7 @@ class PublishedAgentRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 
-    __table_args__ = (
-        UniqueConstraint("owner_user_id", "slug", name="uq_published_agents_owner_slug"),
-    )
+    __table_args__ = (UniqueConstraint("owner_user_id", "slug", name="uq_published_agents_owner_slug"),)
 
 
 class AgentDraftRow(Base):
