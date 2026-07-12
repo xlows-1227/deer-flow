@@ -40,7 +40,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "2026_07_12_widen_agent_ids"
-down_revision = "2026_07_12_agent_releases"
+down_revision = "2026_07_12_widen_published_agent_ids"
 branch_labels = None
 depends_on = None
 

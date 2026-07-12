@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第二轮修复已提交；第三轮复审仍有阻断项待修复
+**状态：** 已实现；第三轮修复已提交；第四轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -523,3 +523,13 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 - 删除 `update_bundle` 中不可达的重复 return。
 - 新增 pending/error connector 适配器测试。
 - 导入 index 与并发 CAS 测试目标对齐生产适配器。
+
+---
+
+## 18. 第四轮代码复审（2026-07-12）
+
+第四轮复审文档：[2026-07-12-m1-agent-control-plane-code-fourth-review.md](./2026-07-12-m1-agent-control-plane-code-fourth-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认短 Alembic revision、旧 public revision canonical 合并、nullability、owner-aware 模型、strict active 与精确 IntegrityError 重试均有实质修复；但仍有 1 个 Critical、3 个 Important 与 5 个 Minor 问题。
+
+当前 Critical 是迁移图升级兼容性：上一版 SQLite 可以成功写入已被删除的 `2026_07_12_widen_published_agent_ids`，当前代码无法识别该 version stamp。其余主要问题是 Skill revision 仍在 Release 事务前独立 commit、Connector 对平台整体关闭/未知 type/配置异常仍可能 fail open，以及混合有效/无效 Skills 的 setup/update 镜像仍会与文件系统分叉。

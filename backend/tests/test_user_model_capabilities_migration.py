@@ -307,3 +307,43 @@ def test_widen_migration_preserves_non_null_constraints(tmp_path):
 
     asyncio.run(_inspect())
     asyncio.run(engine_check.dispose())
+
+
+def test_old_long_revision_stamp_upgrades_to_current_head(tmp_path):
+    """Fourth-review Critical-1: a SQLite database that applied the original
+    long-id revision (2026_07_12_widen_published_agent_ids) must still be able
+    to upgrade to the current head. The old revision is retained as a no-op
+    stub so the migration graph recognises the stamp."""
+    db_path = tmp_path / "old_stamp.db"
+    url = f"sqlite+aiosqlite:///{db_path}"
+    engine_seed = create_async_engine(url)
+
+    async def _seed_old_stamp() -> None:
+        async with engine_seed.begin() as conn:
+            await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+            # Stamp at the OLD long-id revision (applied by third-round code).
+            await conn.execute(
+                text("INSERT INTO alembic_version VALUES ('2026_07_12_widen_published_agent_ids')")
+            )
+            # Create skill_revisions with owner_scope already present (the old
+            # revision would have added it). The short-id migration must be
+            # idempotent and not fail on the already-migrated schema.
+            await conn.execute(
+                text(
+                    "CREATE TABLE skill_revisions ("
+                    "id VARCHAR(64) PRIMARY KEY, skill_name VARCHAR(128) NOT NULL, "
+                    "owner_user_id VARCHAR(36), owner_scope VARCHAR(64) NOT NULL DEFAULT 'public', "
+                    "visibility VARCHAR(16) NOT NULL DEFAULT 'public', "
+                    "content_checksum VARCHAR(128) NOT NULL, content_ref VARCHAR(256) NOT NULL, "
+                    "declared_connector_caps_json JSON NOT NULL DEFAULT '[]', "
+                    "created_at DATETIME NOT NULL)"
+                )
+            )
+
+    asyncio.run(_seed_old_stamp())
+    asyncio.run(engine_seed.dispose())
+    cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
+    _, version = cols_version
+    assert version == "2026_07_12_widen_agent_ids", (
+        f"old stamp must upgrade to current head, got {version}"
+    )
