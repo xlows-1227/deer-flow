@@ -22,6 +22,7 @@ from deerflow.publishing.draft_service import (
     DraftService,
     SkillNotSelectableError,
 )
+from deerflow.publishing.import_service import AgentImportService, ImportAlreadyExistsError
 from deerflow.publishing.publish_service import (
     PublishError,
     PublishService,
@@ -61,6 +62,14 @@ def get_publish_service(request: Request) -> PublishService:
     service = getattr(request.app.state, "publish_service", None)
     if service is None:
         raise HTTPException(status_code=503, detail="Publish service not available")
+    return service
+
+
+def get_import_service(request: Request) -> AgentImportService:
+    """Return the process-wide ``AgentImportService`` (tests override this)."""
+    service = getattr(request.app.state, "import_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="Import service not available")
     return service
 
 
@@ -302,3 +311,49 @@ async def rollback_agent(
         return await service.rollback(agent_id, owner_user_id=owner, release_no=payload.release_no)
     except ReleaseNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Release not found") from exc
+
+
+# ---------------------------------------------------------------------------
+# legacy import (F1.7)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/import/candidates")
+async def list_import_candidates(
+    request: Request,
+    service: AgentImportService = Depends(get_import_service),
+) -> list[dict[str, Any]]:
+    """List legacy filesystem agents owned by the caller that can be imported."""
+    owner = _user_id(request)
+    candidates = service.list_candidates(owner)
+    return [
+        {
+            "name": c.name,
+            "display_name": c.display_name,
+            "description": c.description,
+            "model_name": c.model_name,
+            "tool_groups": c.tool_groups,
+            "skills": c.skills,
+            "has_soul": bool(c.soul_markdown),
+        }
+        for c in candidates
+    ]
+
+
+@router.post("/import", status_code=201)
+async def import_legacy_agent(
+    request: Request,
+    payload: dict[str, Any],
+    service: AgentImportService = Depends(get_import_service),
+) -> dict[str, Any]:
+    """Import one legacy filesystem agent as a draft. Never auto-publishes."""
+    owner = _user_id(request)
+    name = payload.get("name")
+    if not name:
+        raise HTTPException(status_code=422, detail="name is required")
+    try:
+        return await service.import_agent(owner, str(name))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ImportAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
