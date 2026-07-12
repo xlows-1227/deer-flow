@@ -107,15 +107,17 @@ class AgentReleaseRepository:
         owner_user_id: str,
         skills: Sequence[Mapping[str, str]] | None = None,
         connector_grants: Sequence[Mapping[str, str]] | None = None,
+        session: AsyncSession | None = None,
     ) -> dict[str, Any]:
         """Atomically insert the release row + sub-tables AND flip the agent's
         ``current_release_id`` pointer in a single transaction (rereview
         Important-1).
 
-        Combining the release insert with the pointer update means a failure in
-        either leaves no orphan release and no rolled-back pointer. The owner
-        guard on the pointer update (via the published_agents join) ensures a
-        cross-owner caller cannot move someone else's pointer.
+        When ``session`` is provided, the work runs on that shared session
+        WITHOUT committing — so the caller can include skill-revision upserts in
+        the same unit-of-work (fourth-review Important-1). The caller is
+        responsible for commit/rollback. When ``session`` is None, a new session
+        is opened and committed here.
         """
         row = AgentReleaseRow(
             id=str(values.get("id") or f"rel_{uuid4().hex}"),
@@ -129,38 +131,43 @@ class AgentReleaseRepository:
             manifest_checksum=str(values["manifest_checksum"]),
             created_by=str(values["created_by"]),
         )
-        async with self._sf() as session:
-            session.add(row)
+
+        async def _do(sess: AsyncSession) -> dict[str, Any]:
+            sess.add(row)
             for entry in skills or []:
-                session.add(
+                sess.add(
                     AgentReleaseSkillRow(
                         release_id=row.id,
                         skill_revision_id=str(entry["skill_revision_id"]),
                     )
                 )
             for entry in connector_grants or []:
-                session.add(
+                sess.add(
                     AgentReleaseConnectorGrantRow(
                         release_id=row.id,
                         connector_instance_id=str(entry["connector_instance_id"]),
                         capability=str(entry["capability"]),
                     )
                 )
-            # Flip the pointer in the same transaction. Owner guard + first-
-            # publish status transition mirror PublishedAgentRepository.
-            agent = await session.get(PublishedAgentRow, str(values["agent_id"]))
+            agent = await sess.get(PublishedAgentRow, str(values["agent_id"]))
             if agent is None or agent.owner_user_id != owner_user_id:
-                # Raise before commit so the whole transaction rolls back.
                 raise IntegrityError("agent not found or not owned by caller", params=None, orig=Exception("ownership"))
             agent.current_release_id = row.id
             if agent.status == "draft":
                 agent.status = "published"
             agent.updated_at = _now()
-            await session.commit()
-            await session.refresh(row)
-            skill_rows = await self._load_skills(session, row.id)
-            grant_rows = await self._load_grants(session, row.id)
+            await sess.flush()  # detect unique-constraint conflicts before commit
+            await sess.refresh(row)
+            skill_rows = await self._load_skills(sess, row.id)
+            grant_rows = await self._load_grants(sess, row.id)
             return _release_to_dict(row, skills=skill_rows, connector_grants=grant_rows)
+
+        if session is not None:
+            return await _do(session)
+        async with self._sf() as own_session:
+            result = await _do(own_session)
+            await own_session.commit()
+            return result
 
     async def get(self, release_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:

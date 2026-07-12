@@ -86,10 +86,12 @@ def _persist_draft_identity(
             refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
             if refreshed is None:
                 return
-            # Attempt to mirror the full skills list. If validation rejects any
-            # legacy name, the soul is already saved and we leave skills
-            # unchanged (best-effort; third-review Important-5).
-            skill_entries = [{"skill_name": s, "source": "public"} for s in skills]
+            # Filter to the selectable subset so one unresolvable legacy name
+            # does not block the valid skills (fourth-review Important-3).
+            selectable = service.filter_selectable_skills(skills, owner_user_id=owner_user_id)
+            if not selectable:
+                return
+            skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
             try:
                 await service.update_draft_bundle(
                     agent["id"],
@@ -98,7 +100,6 @@ def _persist_draft_identity(
                     skills=skill_entries,
                 )
             except Exception:  # noqa: BLE001
-                # Skill validation rejected at least one name; keep soul, skip skills.
                 return
 
         try:

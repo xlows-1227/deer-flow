@@ -248,6 +248,14 @@ class DraftService:
             raise DraftConflictError("draft not found")
         return result
 
+    def filter_selectable_skills(self, skill_names: Sequence[str], *, owner_user_id: str) -> list[str]:
+        """Return only the skills the owner can select (fourth-review Important-3).
+
+        Tools that mirror a legacy skill list call this to drop unresolvable
+        names before writing, so one bad name does not block the valid subset.
+        """
+        return [name for name in skill_names if self._skills.is_selectable_by(name, owner_user_id)]
+
     async def set_connector_grants(
         self,
         agent_id: str,

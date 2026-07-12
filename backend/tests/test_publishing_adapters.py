@@ -101,10 +101,23 @@ async def test_pending_or_error_connector_is_not_grantable():
 
 
 @pytest.mark.anyio
-async def test_active_connector_is_grantable():
+async def test_active_connector_is_grantable(monkeypatch):
+    """An active connector of an enabled type is grantable."""
+
+    class _ConnCfg:
+        enabled = True
+        enabled_types: list = []
+
+    class _Cfg:
+        connectors = _ConnCfg()
+
+    import deerflow.config.app_config as app_cfg_mod
+
+    monkeypatch.setattr(app_cfg_mod, "get_app_config", lambda: _Cfg())
+
     class _FakeService:
         async def get_connector(self, connector_id, *, owner_id=...):
-            return SimpleNamespace(model_dump=lambda: {"id": connector_id, "owner_id": owner_id, "status": "active"})
+            return SimpleNamespace(model_dump=lambda: {"id": connector_id, "owner_id": owner_id, "status": "active", "type": "mysql"})
 
     repo = ConnectorServiceRepo(_FakeService())
     result = await repo.get_instance("conn_1", owner_id="user-a")
@@ -122,7 +135,70 @@ async def test_deleted_connector_is_not_grantable():
     assert await repo.get_instance("conn_1", owner_id="user-a") is None
 
 
-def test_import_factory_index_has_get():
+@pytest.mark.anyio
+async def test_connector_rejected_when_platform_disabled(monkeypatch):
+    """Fourth-review Important-2: when connectors.enabled is False, even an
+    active instance must not be grantable."""
+
+    class _ConnCfg:
+        enabled = False
+        enabled_types: list = []
+
+    class _Cfg:
+        connectors = _ConnCfg()
+
+    import deerflow.config.app_config as app_cfg_mod
+
+    monkeypatch.setattr(app_cfg_mod, "get_app_config", lambda: _Cfg())
+
+    class _FakeService:
+        async def get_connector(self, connector_id, *, owner_id=...):
+            return SimpleNamespace(model_dump=lambda: {"id": connector_id, "owner_id": owner_id, "status": "active", "type": "mysql"})
+
+    repo = ConnectorServiceRepo(_FakeService())
+    assert await repo.get_instance("conn_1", owner_id="user-a") is None
+
+
+@pytest.mark.anyio
+async def test_connector_rejected_on_config_failure(monkeypatch):
+    """Fourth-review Important-2: a config read exception must fail closed."""
+    import deerflow.config.app_config as app_cfg_mod
+
+    def _boom():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(app_cfg_mod, "get_app_config", _boom)
+
+    class _FakeService:
+        async def get_connector(self, connector_id, *, owner_id=...):
+            return SimpleNamespace(model_dump=lambda: {"id": connector_id, "owner_id": owner_id, "status": "active", "type": "mysql"})
+
+    repo = ConnectorServiceRepo(_FakeService())
+    assert await repo.get_instance("conn_1", owner_id="user-a") is None
+
+
+@pytest.mark.anyio
+async def test_connector_rejected_when_type_not_in_whitelist(monkeypatch):
+    """Fourth-review Important-2: active instance of a type not in the
+    platform's enabled_types whitelist is rejected."""
+
+    class _ConnCfg:
+        enabled = True
+        enabled_types = ["mysql"]
+
+    class _Cfg:
+        connectors = _ConnCfg()
+
+    import deerflow.config.app_config as app_cfg_mod
+
+    monkeypatch.setattr(app_cfg_mod, "get_app_config", lambda: _Cfg())
+
+    class _FakeService:
+        async def get_connector(self, connector_id, *, owner_id=...):
+            return SimpleNamespace(model_dump=lambda: {"id": connector_id, "owner_id": owner_id, "status": "active", "type": "postgres"})
+
+    repo = ConnectorServiceRepo(_FakeService())
+    assert await repo.get_instance("conn_1", owner_id="user-a") is None
     """Rereview Important-4: the production skills indexes must expose get().
 
     The draft/publish factory index (``_OwnerAwareSkillsIndex``) is module-level

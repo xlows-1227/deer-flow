@@ -120,22 +120,24 @@ class ConnectorServiceRepo:
         if instance is None:
             return None
         data = instance.model_dump() if hasattr(instance, "model_dump") else dict(instance)
-        # Strict active whitelist (third-review Important-3): only
-        # status == 'active' instances are grantable. Pending/error/unknown or
-        # future non-active states are rejected, matching the connector runtime.
+        # Strict active whitelist: only status == 'active' is grantable.
         status = str(data.get("status") or "").lower()
         if status != "active":
             return None
-        # Also reject connector types that the platform has disabled.
         connector_type = str(data.get("type") or "").lower()
-        if connector_type:
-            try:
-                from deerflow.config.app_config import get_app_config
+        if not connector_type:
+            return None  # unknown type — fail closed
+        # Fail-closed platform/type validation (fourth-review Important-2).
+        try:
+            from deerflow.config.app_config import get_app_config
 
-                enabled_types = {t.lower() for t in get_app_config().connectors.enabled_types}
-                # If enabled_types is empty/unrestricted, allow all; otherwise enforce.
-                if enabled_types and connector_type not in enabled_types:
-                    return None
-            except Exception:
-                pass
+            connectors_cfg = get_app_config().connectors
+            if not getattr(connectors_cfg, "enabled", True):
+                return None  # platform connectors globally disabled
+            enabled_types = {t.lower() for t in connectors_cfg.enabled_types}
+            if enabled_types and connector_type not in enabled_types:
+                return None  # type not in the platform whitelist
+        except Exception:
+            # Config failure — fail closed (do NOT grant).
+            return None
         return data

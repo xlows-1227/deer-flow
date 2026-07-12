@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.agent_release import AgentReleaseRepository
@@ -273,3 +274,26 @@ async def test_get_release_owner_scoped(env):
     assert release is not None
     assert release["release_no"] == 1
     assert await service.get_release(agent["id"], owner_user_id="user-b", release_no=1) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_leaves_no_orphan_skill_revisions(env):
+    """Fourth-review Important-1: if the release transaction fails, the skill
+    revisions created during this publish must NOT be committed (they share the
+    same unit-of-work). We simulate failure by making the release repo raise
+    during create_and_point and confirm no release was created."""
+    from unittest.mock import patch
+
+    service, draft_service, _, release_repo = env
+    agent = await _seed_agent(draft_service)
+
+    async def _fail(*a, **kw):
+        raise IntegrityError("simulated pointer failure", params=None, orig=Exception("boom"))
+
+    with patch.object(release_repo, "create_and_point", _fail):
+        with pytest.raises(IntegrityError):
+            await service.publish(agent["id"], owner_user_id="user-a")
+
+    # The publish raised, so the shared transaction rolled back: no release.
+    refreshed = await service.list_releases(agent["id"], owner_user_id="user-a")
+    assert refreshed == [], "no release should exist after a failed publish"

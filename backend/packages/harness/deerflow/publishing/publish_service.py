@@ -108,6 +108,10 @@ class PublishService:
         self._model_index = model_index
         self._tool_group_whitelist = tool_group_whitelist
         self._platform_quota = platform_quota or dict(PLATFORM_QUOTA_DEFAULTS)
+        # Session factory shared by all repos — used to open a single transaction
+        # spanning skill-revision upserts + release creation + pointer switch
+        # (fourth-review Important-1).
+        self._sf = getattr(skill_revision_repo, "_sf", None)
         # Optional async resolver ``(owner_user_id) -> set[str]`` that returns the
         # owner's effective model names (config + user-defined). When provided it
         # is called per-publish so user model enable/disable and hot-reload are
@@ -166,51 +170,104 @@ class PublishService:
         if violations:
             raise PublishError(violations)
 
-        # Pin each selected skill to an immutable revision.
-        skill_revision_ids: list[str] = []
-        skill_links: list[dict[str, str]] = []
+        # Pre-compute skill checksums / content refs / visibility (pure, no DB).
+        prepared_skills: list[dict[str, Any]] = []
         for entry in draft.get("skills") or []:
             name = entry["skill_name"]
             files = self._skills.files_for(name) if hasattr(self._skills, "files_for") else {b"SKILL.md": b""}
             checksum = _skill_checksum(name, files)
-            # The content-store path is derived from the checksum; strip the
-            # algorithm prefix so the hex digest is a safe directory name on
-            # every platform (Windows rejects ':' in paths).
             storage_key = checksum.split(":", 1)[1] if ":" in checksum else checksum
             content_ref = self._content.put(namespace="skills", checksum=storage_key, files=files)
             info = self._skills.get(name) if hasattr(self._skills, "get") else None
             declared_caps = (info or {}).get("caps", []) if isinstance(info, dict) else []
-            # Visibility/ownership are derived authoritatively from the skills
-            # index, never from the draft's client-supplied ``source`` (code-
-            # review Important-1).
             visibility = (info or {}).get("visibility", "public") if isinstance(info, dict) else "public"
             rev_owner = owner_user_id if visibility == "private" else None
-            rev = await self._skill_revs.get_or_create(
-                skill_name=name,
-                owner_user_id=rev_owner,
-                visibility=visibility,
-                content_checksum=checksum,
-                content_ref=content_ref,
-                declared_connector_caps=declared_caps,
+            prepared_skills.append(
+                {
+                    "skill_name": name,
+                    "owner_user_id": rev_owner,
+                    "visibility": visibility,
+                    "content_checksum": checksum,
+                    "content_ref": content_ref,
+                    "declared_connector_caps": declared_caps,
+                }
             )
-            skill_revision_ids.append(rev["id"])
-            skill_links.append({"skill_revision_id": rev["id"]})
 
-        # Insert the immutable release row AND flip current_release_id in a
-        # single transaction (rereview Important-1): ``create_and_point`` commits
-        # the release row, its sub-tables, and the pointer update together, so a
-        # failure cannot leave an orphan release or a rolled-back pointer.
-        # Two concurrent publishes may both compute the same ``release_no`` from
-        # MAX(release_no)+1; the (agent_id, release_no) unique constraint turns
-        # that race into an IntegrityError on the loser, which we retry with a
-        # fresh release_no (code-review Important-2). The skill-revision content
-        # snapshots above are already idempotent on content checksum.
         from sqlalchemy.exc import IntegrityError
 
+        # Complete publish unit-of-work: skill-revision upserts + release row +
+        # sub-tables + pointer switch all commit (or roll back) together
+        # (fourth-review Important-1). On a (agent_id, release_no) unique
+        # conflict the whole transaction is retried with a fresh release_no.
         release_no = await self._releases.next_release_no(agent_id)
         release: dict[str, Any] | None = None
         for _attempt in range(8):
             try:
+                release = await self._publish_unit_of_work(
+                    agent_id=agent_id,
+                    owner_user_id=owner_user_id,
+                    draft=draft,
+                    prepared_skills=prepared_skills,
+                    release_no=release_no,
+                )
+                break
+            except IntegrityError as exc:
+                msg = str(getattr(exc, "orig", "") or exc).lower()
+                if "release_no" not in msg and "uq_agent_releases_agent_release_no" not in msg:
+                    raise
+                release_no = await self._releases.next_release_no(agent_id)
+        if release is None:
+            raise PublishError([PublishViolation("RELEASE_RACE", "Could not allocate a release number after retries.")])
+        return {"release_id": release["id"], "release_no": release_no, "published_at": release["created_at"]}
+
+    async def _publish_unit_of_work(
+        self,
+        *,
+        agent_id: str,
+        owner_user_id: str,
+        draft: dict[str, Any],
+        prepared_skills: list[dict[str, Any]],
+        release_no: int,
+    ) -> dict[str, Any]:
+        """Run skill-revision upserts + release create + pointer switch in ONE
+        transaction. If this raises, nothing is committed — no orphan revisions
+        or releases (fourth-review Important-1).
+        """
+        if self._sf is None:
+            # Fallback (tests without a shared factory): do it in two steps.
+            skill_revision_ids: list[str] = []
+            skill_links: list[dict[str, str]] = []
+            for ps in prepared_skills:
+                rev = await self._skill_revs.get_or_create(**ps)
+                skill_revision_ids.append(rev["id"])
+                skill_links.append({"skill_revision_id": rev["id"]})
+            return await self._releases.create_and_point(
+                {
+                    "agent_id": agent_id,
+                    "release_no": release_no,
+                    "agent_markdown": draft.get("agent_markdown") or "",
+                    "soul_markdown": draft.get("soul_markdown") or "",
+                    "model_name": draft.get("model_name"),
+                    "tool_groups": draft.get("tool_groups") or [],
+                    "quota_overrides": draft.get("quota_overrides") or {},
+                    "manifest_checksum": _manifest_checksum(draft, skill_revision_ids),
+                    "created_by": owner_user_id,
+                },
+                owner_user_id=owner_user_id,
+                skills=skill_links,
+                connector_grants=draft.get("connector_grants") or [],
+            )
+
+        # Single shared session: skill revisions + release + pointer.
+
+        async with self._sf() as session:
+            async with session.begin():
+                skill_revision_ids = []
+                skill_links = []
+                for ps in prepared_skills:
+                    row = await self._skill_revs._get_or_create_in_session(session, **ps)  # noqa: SLF001
+                    skill_revision_ids.append(row.id)
+                    skill_links.append({"skill_revision_id": row.id})
                 release = await self._releases.create_and_point(
                     {
                         "agent_id": agent_id,
@@ -226,20 +283,9 @@ class PublishService:
                     owner_user_id=owner_user_id,
                     skills=skill_links,
                     connector_grants=draft.get("connector_grants") or [],
+                    session=session,
                 )
-                break
-            except IntegrityError as exc:
-                # Only retry on the (agent_id, release_no) unique-constraint race.
-                # Other IntegrityErrors (FK, sub-table unique, etc.) indicate a
-                # real problem and must surface, not be silently retried as a
-                # release-number race (third-review Important-4).
-                msg = str(getattr(exc, "orig", "") or exc).lower()
-                if "release_no" not in msg and "uq_agent_releases_agent_release_no" not in msg:
-                    raise
-                release_no = await self._releases.next_release_no(agent_id)
-        if release is None:
-            raise PublishError([PublishViolation("RELEASE_RACE", "Could not allocate a release number after retries.")])
-        return {"release_id": release["id"], "release_no": release_no, "published_at": release["created_at"]}
+            return release
 
     # ------------------------------------------------------------------
     # rollback
