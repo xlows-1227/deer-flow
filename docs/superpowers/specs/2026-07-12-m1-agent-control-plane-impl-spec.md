@@ -533,3 +533,26 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮确认短 Alembic revision、旧 public revision canonical 合并、nullability、owner-aware 模型、strict active 与精确 IntegrityError 重试均有实质修复；但仍有 1 个 Critical、3 个 Important 与 5 个 Minor 问题。
 
 当前 Critical 是迁移图升级兼容性：上一版 SQLite 可以成功写入已被删除的 `2026_07_12_widen_published_agent_ids`，当前代码无法识别该 version stamp。其余主要问题是 Skill revision 仍在 Release 事务前独立 commit、Connector 对平台整体关闭/未知 type/配置异常仍可能 fail open，以及混合有效/无效 Skills 的 setup/update 镜像仍会与文件系统分叉。
+
+---
+
+## 17. 第四轮代码复审修复（2026-07-12）
+
+第四轮复审文档：[2026-07-12-m1-agent-control-plane-code-fourth-review.md](./2026-07-12-m1-agent-control-plane-code-fourth-review.md)
+
+### Critical-1：旧 revision 兼容升级
+删除已可能被 SQLite 应用的 `2026_07_12_widen_published_agent_ids` 导致迁移图断裂。已恢复该文件为 no-op stub（其工作由短 ID 子迁移完成），`2026_07_12_widen_agent_ids.down_revision` 指向它。图：`agent_releases → widen_published_agent_ids (no-op) → widen_agent_ids`。新增旧 stamp→新 head 升级回归测试。
+
+### Important-1：完整 publish unit-of-work
+- `SkillRevisionRepository` 拆出 `_get_or_create_in_session(session, ...)`（不在内部 commit）。
+- `AgentReleaseRepository.create_and_point(session=...)` 接受共享 session（不 commit）。
+- `PublishService._publish_unit_of_work()` 在单个 `session.begin()` 事务内完成 skill revision upsert + release row + 子表 + 指针切换。事务失败时无孤儿 revision/release。新增失败 publish 回归测试。
+
+### Important-2：Connector fail-closed
+`ConnectorServiceRepo.get_instance` 检查 `connectors.enabled`（平台关闭则拒绝）、`enabled_types` 白名单、未知 type 拒绝、配置异常 fail closed。新增平台禁用/配置异常/type 白名单回归测试。
+
+### Important-3：混合 Skills 镜像
+`DraftService.filter_selectable_skills()` 返回可选子集。`setup_agent`/`update_agent` 在写入前过滤，坏 skill 不阻断有效子集。
+
+### Minor
+- `.superpowers/` 运行态文件从 git 移除并 gitignore。
