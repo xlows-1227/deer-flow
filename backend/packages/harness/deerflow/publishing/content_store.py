@@ -67,6 +67,10 @@ class LocalContentStore:
         if target.exists():
             # Idempotent reuse: do not touch an existing snapshot.
             return _ref(namespace, checksum)
+        # Guard early against path-unsafe characters so callers get a clear
+        # error rather than a platform-specific OSError deep in pathlib.
+        if not namespace or not checksum or "/" in namespace or "/" in checksum or ":" in checksum:
+            raise ValueError(f"unsafe content-store key: namespace={namespace!r} checksum={checksum!r}")
         # Atomic write: stage into a sibling temp dir, then rename into place.
         # We never pre-create ``target`` so the final rename is always
         # "directory does not exist" -> "directory exists", which is the only

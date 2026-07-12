@@ -22,6 +22,11 @@ from deerflow.publishing.draft_service import (
     DraftService,
     SkillNotSelectableError,
 )
+from deerflow.publishing.publish_service import (
+    PublishError,
+    PublishService,
+    ReleaseNotFoundError,
+)
 
 router = APIRouter(prefix="/api/published-agents", tags=["published-agents"])
 
@@ -51,6 +56,14 @@ def get_draft_service(request: Request) -> DraftService:
     return service
 
 
+def get_publish_service(request: Request) -> PublishService:
+    """Return the process-wide ``PublishService`` (tests override this)."""
+    service = getattr(request.app.state, "publish_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="Publish service not available")
+    return service
+
+
 # ---------------------------------------------------------------------------
 # request / response models
 # ---------------------------------------------------------------------------
@@ -74,6 +87,11 @@ class PatchDraftRequest(BaseModel):
     quota_overrides: dict[str, Any] | None = None
     skills: list[dict[str, str]] | None = None
     connector_grants: list[dict[str, str]] | None = None
+
+
+class RollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    release_no: int = Field(..., ge=1)
 
 
 def _agent_summary(agent: dict[str, Any]) -> dict[str, Any]:
@@ -220,3 +238,67 @@ async def resume_agent(
     await service.resume(agent_id, owner_user_id=owner)
     updated = await service.get_agent(agent_id, owner_user_id=owner)
     return _agent_summary(updated or agent)
+
+
+# ---------------------------------------------------------------------------
+# publish / release history / rollback (F1.5)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{agent_id}/releases", status_code=201)
+async def publish_agent(
+    agent_id: str,
+    request: Request,
+    service: PublishService = Depends(get_publish_service),
+) -> dict[str, Any]:
+    owner = _user_id(request)
+    try:
+        return await service.publish(agent_id, owner_user_id=owner)
+    except PublishError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "publish_validation_failed",
+                "violations": [
+                    {"code": v.code, "message": v.message, "field": v.field} for v in exc.violations
+                ],
+            },
+        ) from exc
+
+
+@router.get("/{agent_id}/releases")
+async def list_releases(
+    agent_id: str,
+    request: Request,
+    service: PublishService = Depends(get_publish_service),
+) -> list[dict[str, Any]]:
+    owner = _user_id(request)
+    return await service.list_releases(agent_id, owner_user_id=owner)
+
+
+@router.get("/{agent_id}/releases/{release_no}")
+async def get_release(
+    agent_id: str,
+    release_no: int,
+    request: Request,
+    service: PublishService = Depends(get_publish_service),
+) -> dict[str, Any]:
+    owner = _user_id(request)
+    release = await service.get_release(agent_id, owner_user_id=owner, release_no=release_no)
+    if release is None:
+        raise HTTPException(status_code=404, detail="Release not found")
+    return release
+
+
+@router.post("/{agent_id}/rollback")
+async def rollback_agent(
+    agent_id: str,
+    payload: RollbackRequest,
+    request: Request,
+    service: PublishService = Depends(get_publish_service),
+) -> dict[str, Any]:
+    owner = _user_id(request)
+    try:
+        return await service.rollback(agent_id, owner_user_id=owner, release_no=payload.release_no)
+    except ReleaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Release not found") from exc
