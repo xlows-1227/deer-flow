@@ -671,3 +671,15 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮确认不同内容失败 publish 测试已补 `await` 并注册第二个 Skill，ON CONFLICT UOW 与 CLAUDE 基础事实保持修复；当前无 Critical，仍有 2 个 Important 与 7 个 Minor。
 
 两个 Important 分别是：setup/update 仍是无 coroutine 的同步 LangChain tool，标准 `ainvoke()` 会经 `run_in_executor()` 执行，因此 helper 实际走 `asyncio.run()` 新 loop，未关闭默认池 AsyncEngine 跨 loop 风险；当前 best-effort 文件系统优先语义允许 DB mirror 失败时仍返回成功并留下“仅文件系统 Agent”，违反 F1.4 开发计划与设计 §16.3。其余问题主要是缺少真实工具镜像、Skill barrier、生产 Import、并发 CAS 与 PostgreSQL 门禁测试，以及 SQLite schema 漂移和规格编号问题。
+
+---
+
+## 22. 第九轮代码复审修复（2026-07-13）
+
+第九轮复审文档：[2026-07-13-m1-agent-control-plane-code-ninth-review.md](./2026-07-13-m1-agent-control-plane-code-ninth-review.md)
+
+### Important-1：async tool 直接 await DraftService
+`setup_agent` 和 `update_agent` 改为 `async def`（原生 async LangChain tool）。LangChain `_arun()` 直接在 Gateway 事件循环上调用 coroutine（不经 executor），因此 `DraftService` 的 `await` 在拥有全局 `AsyncEngine` 的同一 loop 上执行——无跨 loop 共享。
+
+### Important-2：DB 写入成功为必要条件
+当持久化已配置时，`DraftService` 写入成功是工具成功的必要条件。DB 写入失败 → 工具清理文件系统并返回错误——不产生 F1.4 明确禁止的"仅文件系统 Agent"。当持久化不可用（CLI）时，工具正常成功（文件系统为事实来源）。unresolved skills 在 ToolMessage 中列出。
