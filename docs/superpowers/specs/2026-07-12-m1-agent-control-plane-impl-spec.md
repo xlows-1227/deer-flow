@@ -693,3 +693,18 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮确认 setup/update 已改为原生 async LangChain tool，Gateway 异步路径不再经 executor/new loop 使用全局 AsyncEngine；持久化已配置时，DB 失败也会返回错误。当前无 Critical，仍有 2 个 Important 与 8 个 Minor。
 
 两个 Important 分别是：setup/update 的数据库镜像由多个各自提交的 DraftService 调用组成，且文件系统先于数据库提交，中途失败仍会留下 DB-only 身份、部分更新的 DB 草稿或文件/DB 分叉状态，尚未满足 F1.4 唯一事实来源；async-only 工具没有同步 `func`，而公开的 `DeerFlowClient.stream()` 使用同步 `agent.stream()`，真实工具调用会抛出 `StructuredTool does not support sync invocation`。此外，两条 setup 数据保护测试仅创建协程而未 await，完整回归虽通过但明确输出未 await warning。其余遗留项包括真实镜像测试、Skill barrier、生产 Import、并发 CAS、SQLite schema 与 PostgreSQL 必跑门禁。
+
+---
+
+## 23. 第十轮代码复审修复（2026-07-13）
+
+第十轮复审文档：[2026-07-13-m1-agent-control-plane-code-tenth-review.md](./2026-07-13-m1-agent-control-plane-code-tenth-review.md)
+
+### Important-1：DB-first 写入顺序，无部分状态
+setup_agent 和 update_agent 改为 **先 DB 写入（DraftService，权威事实来源），再写兼容文件系统**。DB 失败（且持久化已配置）时文件系统完全不被触碰——不产生 DB-only 身份、仅文件系统 Agent 或分叉状态。当持久化不可用（CLI）时，文件系统是事实来源，文件系统错误向上传播为工具失败。setup 的多次 DraftService 调用合并为 create/metadata + 单次 update_draft_bundle（soul + skills 一次提交）。
+
+### Important-2：恢复同步 Embedded Client 支持
+两个工具提供 sync `.func` 入口（`_setup_agent_sync` / `_update_agent_sync`），通过 `_run_async` 桥接执行 async 核心。同步入口在无运行 loop 时使用 `asyncio.run()`（CLI 环境下 `build_draft_service()` 返回 None，不触碰全局 AsyncEngine），在有运行 loop 时使用专用线程。恢复 `DeerFlowClient.stream()` 对工具的同步调用能力。
+
+### Minor-1：修复未 await 的 setup 测试
+两条数据保护测试的 `.coroutine()` 调用已正确用 `asyncio.run()` 包裹。
