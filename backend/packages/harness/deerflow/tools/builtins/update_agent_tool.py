@@ -240,15 +240,13 @@ async def update_agent(
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
 
-    # Stage every file we intend to rewrite into a temp sibling. Only after
-    # *all* temp files exist do we rename them into place — so a failure on
-    # SOUL.md cannot leave config.yaml already replaced.
+    # Stage every file we intend to rewrite into a temp sibling. Files are
+    # committed to disk ONLY after the DB write succeeds (tenth-review
+    # Important-1: DB-first, no partial/divergent state).
     pending: list[tuple[Path, Path]] = []
     staged_temps: list[Path] = []
 
     try:
-        agent_dir.mkdir(parents=True, exist_ok=True)
-
         if config_changed:
             yaml_text = yaml.dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
             config_target = agent_dir / "config.yaml"
@@ -263,43 +261,18 @@ async def update_agent(
             pending.append((soul_tmp, soul_target))
             updated_fields.append("soul")
 
-        # Commit phase. ``Path.replace`` is atomic per file on POSIX/NTFS and
-        # the staging step above means any earlier failure has already been
-        # reported. The remaining failure mode is a crash *between* two
-        # ``replace`` calls, which is reported via the partial-write error
-        # branch below so the caller knows which files are now on disk.
-        committed: list[Path] = []
-        try:
-            for tmp, target in pending:
-                tmp.replace(target)
-                committed.append(target)
-        except Exception as e:
-            _cleanup_temps([t for t, _ in pending if t not in committed])
-            if committed:
-                logger.error(
-                    "[update_agent] Partial write for agent '%s' (user=%s): committed=%s, failed during rename: %s",
-                    agent_name,
-                    user_id,
-                    [p.name for p in committed],
-                    e,
-                    exc_info=True,
-                )
-                return _err(f"Partial update for agent '{agent_name}': {[p.name for p in committed]} were updated, but the rest failed ({e}). Re-run update_agent to retry the remaining fields.")
-            raise
-
     except Exception as e:
         _cleanup_temps(staged_temps)
-        logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
+        logger.error("[update_agent] Failed to stage files for '%s': %s", agent_name, e, exc_info=True)
         return _err(f"Failed to update agent '{agent_name}': {e}")
 
     if not updated_fields:
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})
 
     logger.info("[update_agent] Updated agent '%s' (user=%s) fields: %s", agent_name, user_id, updated_fields)
-    # Write to DB draft store (DraftService) as the authoritative source.
-    # This is an async tool, so we directly await on the same event loop.
-    # DB success is required when persistence is configured (ninth-review
-    # Important-2).
+    # DB-first: write to DraftService (authoritative source), THEN filesystem.
+    # If DB fails and persistence IS configured, filesystem is NOT touched —
+    # no partial/divergent state (tenth-review Important-1).
     mirror = await _persist_draft_update(
         owner_user_id=user_id,
         slug=agent_name,
@@ -308,7 +281,25 @@ async def update_agent(
     if not mirror["succeeded"] and mirror.get("error") != "unavailable":
         err = mirror.get("error", "unknown")
         logger.error("[update_agent] DB draft update failed for '%s': %s", agent_name, err)
-        return _err(f"Failed to update agent '{agent_name}' in the database: {err}. Filesystem was updated; the draft may be out of sync.")
+        return _err(f"Failed to update agent '{agent_name}' in the database: {err}.")
+
+    # Filesystem compat write — only after DB success or unavailable.
+    # When DB is unavailable (CLI), filesystem IS the source of truth — errors
+    # must propagate.
+    db_unavailable = mirror.get("error") == "unavailable"
+    try:
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        committed: list[Path] = []
+        for tmp, target in pending:
+            tmp.replace(target)
+            committed.append(target)
+    except Exception as e:
+        _cleanup_temps(staged_temps)
+        if db_unavailable:
+            logger.error("[update_agent] Failed to update agent '%s': %s", agent_name, e, exc_info=True)
+            return _err(f"Failed to update agent '{agent_name}': {e}")
+        logger.error("[update_agent] Filesystem write failed for '%s' (DB succeeded): %s", agent_name, e)
+
     success_msg = f"Agent '{agent_name}' updated successfully. Changed: {', '.join(updated_fields)}. The new configuration takes effect on the next user turn."
     unresolved = mirror.get("unresolved", [])
     if unresolved:
@@ -323,3 +314,13 @@ async def update_agent(
             ]
         }
     )
+
+
+# Sync entry for StructuredTool._run() (DeerFlowClient.stream() path).
+def _update_agent_sync(runtime, soul=None, description=None, skills=None, tool_groups=None, model=None):
+    from deerflow.tools.builtins.setup_agent_tool import _run_async
+
+    return _run_async(update_agent.coroutine(runtime=runtime, soul=soul, description=description, skills=skills, tool_groups=tool_groups, model=model))
+
+
+update_agent.func = _update_agent_sync

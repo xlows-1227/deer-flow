@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第八轮修复已提交；第九轮复审仍有阻断项待修复
+**状态：** 已实现；第九轮修复已提交；第十轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -674,7 +674,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 22. 第九轮代码复审修复（2026-07-13）
+## 29. 第九轮代码复审修复（2026-07-13）
 
 第九轮复审文档：[2026-07-13-m1-agent-control-plane-code-ninth-review.md](./2026-07-13-m1-agent-control-plane-code-ninth-review.md)
 
@@ -683,3 +683,13 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ### Important-2：DB 写入成功为必要条件
 当持久化已配置时，`DraftService` 写入成功是工具成功的必要条件。DB 写入失败 → 工具清理文件系统并返回错误——不产生 F1.4 明确禁止的"仅文件系统 Agent"。当持久化不可用（CLI）时，工具正常成功（文件系统为事实来源）。unresolved skills 在 ToolMessage 中列出。
+
+---
+
+## 30. 第十轮代码复审（2026-07-13）
+
+第十轮复审文档：[2026-07-13-m1-agent-control-plane-code-tenth-review.md](./2026-07-13-m1-agent-control-plane-code-tenth-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认 setup/update 已改为原生 async LangChain tool，Gateway 异步路径不再经 executor/new loop 使用全局 AsyncEngine；持久化已配置时，DB 失败也会返回错误。当前无 Critical，仍有 2 个 Important 与 8 个 Minor。
+
+两个 Important 分别是：setup/update 的数据库镜像由多个各自提交的 DraftService 调用组成，且文件系统先于数据库提交，中途失败仍会留下 DB-only 身份、部分更新的 DB 草稿或文件/DB 分叉状态，尚未满足 F1.4 唯一事实来源；async-only 工具没有同步 `func`，而公开的 `DeerFlowClient.stream()` 使用同步 `agent.stream()`，真实工具调用会抛出 `StructuredTool does not support sync invocation`。此外，两条 setup 数据保护测试仅创建协程而未 await，完整回归虽通过但明确输出未 await warning。其余遗留项包括真实镜像测试、Skill barrier、生产 Import、并发 CAS、SQLite schema 与 PostgreSQL 必跑门禁。

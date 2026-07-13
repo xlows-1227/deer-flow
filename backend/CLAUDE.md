@@ -290,7 +290,7 @@ All repositories are owner-scoped: every read/write takes `owner_user_id` and cr
 | GET | `/import/candidates` | Legacy filesystem agents importable by caller |
 | POST | `/import` | Import one legacy agent as a draft |
 
-The conversational `setup_agent` / `update_agent` tools are **async LangChain tools** (`async def`) that directly `await` `DraftService` on the Gateway's event loop — no executor, no cross-loop `AsyncEngine` sharing. DB write success is required when persistence is configured (F1.4: no "filesystem-only" agent). If the DB write fails and persistence IS configured, the tool cleans up the filesystem and reports failure. Unresolved skills are listed in the ToolMessage. The legacy filesystem write path is retained for read-compatible migration.
+The conversational `setup_agent` / `update_agent` tools are **async LangChain tools** (`async def`) that directly `await` `DraftService` on the Gateway's event loop — no executor, no cross-loop `AsyncEngine` sharing. They also provide a sync `.func` entry (via `_run_async`) for `DeerFlowClient.stream()` compatibility. DB write is **first** (authoritative source), filesystem compat write is **second** — DB failure prevents filesystem mutation entirely (no DB-only, filesystem-only, or divergent state). When persistence is unavailable (CLI), filesystem IS the source of truth and filesystem errors propagate. Unresolved skills are listed in the ToolMessage.
 
 **Migration CLI**: `PYTHONPATH=. python scripts/migrate_published_agents.py [--dry-run] --user-id USER_ID` lists candidates and imports each as a draft.
 

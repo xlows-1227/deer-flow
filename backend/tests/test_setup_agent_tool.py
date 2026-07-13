@@ -95,12 +95,13 @@ class TestSetupAgentNoDataLoss:
         old_soul.write_text("original soul content", encoding="utf-8")
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
-            # Force soul_file.write_text to raise after directory already exists
             with patch.object(Path, "write_text", side_effect=OSError("disk full")):
-                setup_agent.coroutine(
-                    soul="new soul",
-                    description="desc",
-                    runtime=_make_runtime(),
+                asyncio.run(
+                    setup_agent.coroutine(
+                        soul="new soul",
+                        description="desc",
+                        runtime=_make_runtime(),
+                    )
                 )
 
         # Directory must still exist
@@ -116,10 +117,12 @@ class TestSetupAgentNoDataLoss:
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
             with patch("yaml.dump", side_effect=OSError("write error")):
-                setup_agent.coroutine(
-                    soul="new soul",
-                    description="desc",
-                    runtime=_make_runtime(),
+                asyncio.run(
+                    setup_agent.coroutine(
+                        soul="new soul",
+                        description="desc",
+                        runtime=_make_runtime(),
+                    )
                 )
 
         # Newly created directory should be cleaned up
