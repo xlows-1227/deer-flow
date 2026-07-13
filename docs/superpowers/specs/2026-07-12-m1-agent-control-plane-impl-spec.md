@@ -624,3 +624,15 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮确认普通 unresolved Skills 已能在 ToolMessage 中列出、Import 测试函数边界已修复、Skill revision SAVEPOINT 的生产去重逻辑可通过强制双 SELECT-miss 竞争；当前无 Critical，仍有 2 个 Important 与 6 个 Minor。
 
 两个 Important 分别是：SQLite 失败 publish 会留下孤儿 Skill revision，且不同 Skill 内容版本的失败会持续累积；setup/update 在事件循环中以 fire-and-forget 启动数据库镜像，ToolMessage 在镜像完成前就报告成功，失败或取消仍不可见。其余问题主要是并发测试缺少确定性 barrier、生产 Import adapter 与真实 Draft CAS 仍未覆盖、SQLite schema 声明漂移、PostgreSQL 迁移门禁可跳过。
+
+---
+
+## 20. 第七轮代码复审修复（2026-07-13）
+
+第七轮复审文档：[2026-07-13-m1-agent-control-plane-code-seventh-review.md](./2026-07-13-m1-agent-control-plane-code-seventh-review.md)
+
+### Important-1：SQLite 失败 publish 不再留下孤儿 Skill revision
+`_get_or_create_in_session` 不再使用 SAVEPOINT。改用方言级 `INSERT ... ON CONFLICT DO NOTHING`（PostgreSQL）或 SQLite 等效语句，直接在共享事务内执行，从不抛出 IntegrityError，从不创建可能泄漏过外层回滚的嵌套事务。失败 publish 后 revision 数严格为 0。新增不同内容连续失败的回归测试。
+
+### Important-2：ToolMessage 等待镜像完成
+`_persist_draft_identity` / `_persist_draft_update` 不再 fire-and-forget。改为通过 `_run_mirror_sync`（专用线程+事件循环）同步执行，返回 `{succeeded, unresolved}`。工具在构建 ToolMessage 前等待镜像完成，消息如实反映草稿写入成功/失败和被排除的 Skill。
