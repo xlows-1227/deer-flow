@@ -33,75 +33,76 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 
-def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, Any]) -> dict | None:
-    """Mirror an agent edit into the published-agent draft store.
+def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, Any]) -> None:
+    """Schedule an async mirror of an agent edit into the DB draft store.
 
-    Returns ``{"succeeded": bool, "unresolved": list[str]}`` or ``None`` when
-    persistence is unavailable (seventh-review Important-2). The caller waits
-    for completion before building the ToolMessage.
+    The mirror runs on the same event loop that owns the global ``AsyncEngine``
+    (no cross-loop sharing — eighth-review Important-1). Failures are logged;
+    the tool message reflects the filesystem write and synchronously-determined
+    skill availability.
     """
     try:
         from deerflow.publishing.factory import build_draft_service
 
         service = build_draft_service()
         if service is None:
-            return None
+            return
+        import asyncio
+
+        async def _run() -> None:
+            try:
+                agents = await service.list_agents(owner_user_id)
+                agent = next((a for a in agents if a["slug"] == slug), None)
+                if agent is None:
+                    return
+                description = fields.get("description")
+                if description is not None:
+                    try:
+                        await service.update_agent_meta(agent["id"], owner_user_id=owner_user_id, description=description)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("[update_agent] Failed to sync description for '%s'", slug)
+                draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
+                if draft is None:
+                    return
+                try:
+                    await service.update_draft_bundle(
+                        agent["id"],
+                        owner_user_id=owner_user_id,
+                        revision=draft["revision"],
+                        soul_markdown=fields.get("soul"),
+                        model_name=fields.get("model"),
+                        tool_groups=fields.get("tool_groups"),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("[update_agent] Failed to mirror draft fields for '%s'", slug)
+                    return
+                skills_value = fields.get("skills")
+                if skills_value is not None:
+                    refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
+                    if refreshed is not None:
+                        selectable, unresolved = service.filter_selectable_skills(skills_value, owner_user_id=owner_user_id)
+                        if unresolved:
+                            logger.warning("[update_agent] Skills not selectable (dropped): %s", unresolved)
+                        skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
+                        try:
+                            await service.update_draft_bundle(
+                                agent["id"],
+                                owner_user_id=owner_user_id,
+                                revision=refreshed["revision"],
+                                skills=skill_entries,
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.warning("[update_agent] Failed to mirror skills for '%s'", slug)
+            except Exception:  # noqa: BLE001
+                logger.warning("[update_agent] Draft mirror failed for '%s'", slug)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_run())
+        except RuntimeError:
+            asyncio.run(_run())
     except Exception:
         logger.debug("draft persistence unavailable; filesystem write remains source of truth", exc_info=True)
-        return None
-
-    async def _run() -> dict:
-        unresolved: list[str] = []
-        succeeded = True
-        try:
-            agents = await service.list_agents(owner_user_id)
-            agent = next((a for a in agents if a["slug"] == slug), None)
-            if agent is None:
-                return {"succeeded": False, "unresolved": []}
-            description = fields.get("description")
-            if description is not None:
-                try:
-                    await service.update_agent_meta(agent["id"], owner_user_id=owner_user_id, description=description)
-                except Exception:  # noqa: BLE001
-                    succeeded = False
-            draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
-            if draft is None:
-                return {"succeeded": False, "unresolved": []}
-            try:
-                await service.update_draft_bundle(
-                    agent["id"],
-                    owner_user_id=owner_user_id,
-                    revision=draft["revision"],
-                    soul_markdown=fields.get("soul"),
-                    model_name=fields.get("model"),
-                    tool_groups=fields.get("tool_groups"),
-                )
-            except Exception:  # noqa: BLE001
-                succeeded = False
-            skills_value = fields.get("skills")
-            if skills_value is not None:
-                refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
-                if refreshed is not None:
-                    selectable, unresolved = service.filter_selectable_skills(skills_value, owner_user_id=owner_user_id)
-                    if unresolved:
-                        logger.warning("[update_agent] Skills not selectable (dropped): %s", unresolved)
-                    skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
-                    try:
-                        await service.update_draft_bundle(
-                            agent["id"],
-                            owner_user_id=owner_user_id,
-                            revision=refreshed["revision"],
-                            skills=skill_entries,
-                        )
-                    except Exception:  # noqa: BLE001
-                        succeeded = False
-        except Exception:  # noqa: BLE001
-            succeeded = False
-        return {"succeeded": succeeded, "unresolved": unresolved}
-
-    from deerflow.tools.builtins.setup_agent_tool import _run_mirror_sync
-
-    return _run_mirror_sync(_run)
 
 
 def _stage_temp(path: Path, text: str) -> Path:
@@ -304,19 +305,27 @@ def update_agent(
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})
 
     logger.info("[update_agent] Updated agent '%s' (user=%s) fields: %s", agent_name, user_id, updated_fields)
-    # Mirror the edit into the draft store (best-effort; see helper docstring).
-    mirror_result = _persist_draft_update(
+    # Schedule the DB mirror on the same event loop (no cross-loop engine
+    # sharing). The mirror is best-effort; failures are logged.
+    _persist_draft_update(
         owner_user_id=user_id,
         slug=agent_name,
         fields={"soul": soul, "model": model, "tool_groups": tool_groups, "skills": skills, "description": description},
     )
+    # The ToolMessage reflects the filesystem write (synchronous) and the
+    # synchronously-determined skill availability (eighth-review Important-1).
     success_msg = f"Agent '{agent_name}' updated successfully. Changed: {', '.join(updated_fields)}. The new configuration takes effect on the next user turn."
-    if mirror_result is not None:
-        if not mirror_result.get("succeeded", True):
-            success_msg += " Warning: some draft fields could not be mirrored to the database."
-        unresolved = mirror_result.get("unresolved", [])
-        if unresolved:
-            success_msg += f" Warning: skills not available and were excluded: {', '.join(unresolved)}."
+    if skills:
+        try:
+            from deerflow.publishing.factory import build_draft_service
+
+            svc = build_draft_service()
+            if svc is not None:
+                _sel, unresolved = svc.filter_selectable_skills(skills, owner_user_id=user_id)
+                if unresolved:
+                    success_msg += f" Warning: skills not available and were excluded from the draft: {', '.join(unresolved)}."
+        except Exception:
+            pass
     return Command(
         update={
             "messages": [

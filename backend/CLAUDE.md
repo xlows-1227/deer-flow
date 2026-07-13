@@ -260,7 +260,7 @@ The multi-tenant agent publishing platform adds a control plane that database-if
 |---------|--------|---------|
 | `persistence/published_agent/` | `published_agents`, `agent_drafts`, `agent_draft_skills`, `agent_draft_connector_grants` | Stable agent identity (owner+slug unique, `current_release_id` pointer) + 1:1 mutable draft with optimistic `revision`; skill/connector-grant sub-tables carry no secrets |
 | `persistence/agent_release/` | `agent_releases`, `agent_release_skills`, `agent_release_connector_grants` | Write-once publish snapshots (no `updated_at`, `(agent_id, release_no)` unique); the release repo exposes **no update mutators** — rollback repoints the pointer instead of mutating history |
-| `persistence/skill_revision/` | `skill_revisions` | Content-addressed skill snapshots; `(skill_name, owner_user_id, content_checksum)` unique so identical content reuses a revision |
+| `persistence/skill_revision/` | `skill_revisions` | Content-addressed skill snapshots; `(skill_name, owner_scope, content_checksum)` unique (owner_scope is non-NULL: 'public' or the owner id) so identical content reuses a revision including for public skills |
 
 All repositories are owner-scoped: every read/write takes `owner_user_id` and cross-owner access returns `None`/404 without leaking existence. JSON columns use the `_json` suffix and are renamed by the repository layer.
 
@@ -290,11 +290,11 @@ All repositories are owner-scoped: every read/write takes `owner_user_id` and cr
 | GET | `/import/candidates` | Legacy filesystem agents importable by caller |
 | POST | `/import` | Import one legacy agent as a draft |
 
-The conversational `setup_agent` / `update_agent` tools now best-effort mirror into the draft store via `build_draft_service()` so structured and conversational authoring share one source of truth; the legacy filesystem write path is retained read-compatible during the migration window.
+The conversational `setup_agent` / `update_agent` tools schedule an async DB draft mirror on the same event loop via `build_draft_service()` so structured and conversational authoring share one source of truth. The mirror is fire-and-forget (no cross-loop engine sharing); failures are logged. The ToolMessage reflects the filesystem write and synchronously-determined skill availability (unresolved skills are listed as warnings). The legacy filesystem write path is retained read-compatible during the migration window.
 
 **Migration CLI**: `PYTHONPATH=. python scripts/migrate_published_agents.py [--dry-run] --user-id USER_ID` lists candidates and imports each as a draft.
 
-Alembic head after M1: `2026_07_12_agent_releases` (chain: `... → 2026_07_09_umodel_caps → 2026_07_12_published_agents → 2026_07_12_agent_releases`).
+Alembic head after M1: `2026_07_12_widen_agent_ids` (chain: `... → 2026_07_09_umodel_caps → 2026_07_12_published_agents → 2026_07_12_agent_releases → 2026_07_12_widen_published_agent_ids (compat stub) → 2026_07_12_widen_agent_ids`).
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 

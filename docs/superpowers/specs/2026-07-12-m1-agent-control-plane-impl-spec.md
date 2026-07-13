@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第六轮修复已提交；第七轮复审仍有阻断项待修复
+**状态：** 已实现；第七轮修复已提交；第八轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -627,7 +627,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 20. 第七轮代码复审修复（2026-07-13）
+## 25. 第七轮代码复审修复（2026-07-13）
 
 第七轮复审文档：[2026-07-13-m1-agent-control-plane-code-seventh-review.md](./2026-07-13-m1-agent-control-plane-code-seventh-review.md)
 
@@ -636,3 +636,13 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ### Important-2：ToolMessage 等待镜像完成
 `_persist_draft_identity` / `_persist_draft_update` 不再 fire-and-forget。改为通过 `_run_mirror_sync`（专用线程+事件循环）同步执行，返回 `{succeeded, unresolved}`。工具在构建 ToolMessage 前等待镜像完成，消息如实反映草稿写入成功/失败和被排除的 Skill。
+
+---
+
+## 26. 第八轮代码复审（2026-07-13）
+
+第八轮复审文档：[2026-07-13-m1-agent-control-plane-code-eighth-review.md](./2026-07-13-m1-agent-control-plane-code-eighth-review.md)
+
+复审结论：**Ready to merge：No**。本轮通过两个不同 Skill 内容的失败发布专项验证，确认 ON CONFLICT 实现已关闭 SQLite 孤儿 revision 问题；强制双 SELECT-miss 并发也只产生一条 canonical revision。当前无 Critical，仍有 1 个 Important 与 8 个 Minor。
+
+唯一 Important 是同步 mirror 跨线程创建新事件循环并复用 Gateway 默认池 AsyncEngine，不符合 SQLAlchemy 多事件循环约束；线程/数据库/timeout 失败返回 `None` 后，setup/update 仍输出无警告成功，duplicate setup 的 metadata 写失败也会误报 `succeeded=True`。其余问题主要是双内容回归测试漏 `await`、并发/Import/CAS 测试仍未覆盖真实路径、SQLite schema 漂移、PostgreSQL 门禁可跳过，以及 README/CLAUDE 未同步。

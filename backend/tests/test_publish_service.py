@@ -331,10 +331,12 @@ async def test_failed_publish_different_content_no_accumulation(env):
     assert len(await skill_repo.list_by_skill("reporting")) == 0
 
     # Change the draft to reference a different skill with different content
-    # and fail again. The skills index already knows "public-tool".
+    # and fail again. Register "public-tool" in the skills index so it passes
+    # validation.
+    service._skills._caps["public-tool"] = ["database.query"]  # noqa: SLF001
     from deerflow.persistence.published_agent import AgentDraftRepository
 
-    AgentDraftRepository(sf).replace_skills(agent["id"], owner_user_id="user-a", skills=[{"skill_name": "public-tool", "source": "public"}])
+    await AgentDraftRepository(sf).replace_skills(agent["id"], owner_user_id="user-a", skills=[{"skill_name": "public-tool", "source": "public"}])
     with patch.object(release_repo, "create_and_point", _fail):
         with pytest.raises(IntegrityError):
             await service.publish(agent["id"], owner_user_id="user-a")
