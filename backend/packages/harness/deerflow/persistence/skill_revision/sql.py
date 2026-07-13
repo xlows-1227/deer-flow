@@ -73,17 +73,16 @@ class SkillRevisionRepository:
         """Core upsert on a shared session (does NOT commit).
 
         Used by ``PublishService.publish`` so skill revisions and the release
-        row land in the same transaction (fourth-review Important-1). If the
-        caller's transaction is rolled back, the revision insert is undone too.
+        row land in the same transaction. If the caller's transaction is rolled
+        back, the revision insert is undone too.
 
         Concurrent inserts of the same ``(skill_name, owner_scope, checksum)``
-        are handled via a SAVEPOINT: the insert is attempted inside a nested
-        transaction, and on a unique-constraint conflict the savepoint is rolled
-        back (not the outer transaction) and the canonical row is re-read
-        (fifth-review Important-1).
+        are handled WITHOUT a SAVEPOINT: the INSERT uses dialect-appropriate
+        ``ON CONFLICT DO NOTHING`` (PostgreSQL) or ``INSERT OR IGNORE`` (SQLite)
+        so a unique-constraint conflict never raises an IntegrityError and never
+        pollutes the outer transaction (seventh-review Important-1). After the
+        conflict-ignoring insert, the canonical row is re-read via SELECT.
         """
-        from sqlalchemy.exc import IntegrityError as SAIntegrityError
-
         owner = owner_user_id
         owner_scope = owner if owner is not None else "public"
         stmt = select(SkillRevisionRow).where(
@@ -94,31 +93,32 @@ class SkillRevisionRepository:
         row = (await session.execute(stmt)).scalar_one_or_none()
         if row is not None:
             return row
-        row = SkillRevisionRow(
-            id=f"skr_{uuid4().hex}",
-            skill_name=skill_name,
-            owner_user_id=owner,
-            owner_scope=owner_scope,
-            visibility=visibility,
-            content_checksum=content_checksum,
-            content_ref=content_ref,
-            declared_connector_caps_json=list(declared_connector_caps),
-        )
-        # Use a SAVEPOINT so a unique-constraint conflict from a concurrent
-        # insert only rolls back this nested transaction, not the caller's
-        # outer publish transaction. The conflict is caught INSIDE the
-        # savepoint so begin_nested commits (a no-op rollback) cleanly.
-        inserted = True
-        async with session.begin_nested():
-            try:
-                session.add(row)
-                await session.flush()
-            except SAIntegrityError:
-                inserted = False
-        if not inserted:
-            # Concurrent insert won the race; re-read the canonical row.
-            return (await session.execute(stmt)).scalar_one()
-        return row
+
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        row_id = f"skr_{uuid4().hex}"
+        values = {
+            "id": row_id,
+            "skill_name": skill_name,
+            "owner_user_id": owner,
+            "owner_scope": owner_scope,
+            "visibility": visibility,
+            "content_checksum": content_checksum,
+            "content_ref": content_ref,
+            "declared_connector_caps_json": list(declared_connector_caps),
+        }
+        dialect_name = session.bind.dialect.name if session.bind else "sqlite"
+        if dialect_name == "postgresql":
+            stmt_ins = pg_insert(SkillRevisionRow).values(**values)
+            stmt_ins = stmt_ins.on_conflict_do_nothing(constraint="uq_skill_revisions_content")
+        else:
+            stmt_ins = sqlite_insert(SkillRevisionRow).values(**values)
+            stmt_ins = stmt_ins.on_conflict_do_nothing(index_elements=["skill_name", "owner_scope", "content_checksum"])
+        await session.execute(stmt_ins)
+        await session.flush()
+        # Re-read: either our row or the canonical from a concurrent insert.
+        return (await session.execute(stmt)).scalar_one()
 
     async def get(self, revision_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:

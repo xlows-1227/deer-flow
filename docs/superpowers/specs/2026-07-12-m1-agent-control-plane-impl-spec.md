@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第五轮修复已提交；第六轮复审仍有阻断项待修复
+**状态：** 已实现；第六轮修复已提交；第七轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -599,7 +599,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 19. 第六轮代码复审修复（2026-07-13）
+## 23. 第六轮代码复审修复（2026-07-13）
 
 第六轮复审文档：[2026-07-13-m1-agent-control-plane-code-sixth-review.md](./2026-07-13-m1-agent-control-plane-code-sixth-review.md)
 
@@ -614,3 +614,13 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ### Minor-5：UOW 测试断言
 失败 publish 的 `skill_revisions` 断言保留 `<= 1` 并注释说明 SQLite aiosqlite SAVEPOINT 驱动限制（PostgreSQL 实现为 `== 0`）。
+
+---
+
+## 24. 第七轮代码复审（2026-07-13）
+
+第七轮复审文档：[2026-07-13-m1-agent-control-plane-code-seventh-review.md](./2026-07-13-m1-agent-control-plane-code-seventh-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认普通 unresolved Skills 已能在 ToolMessage 中列出、Import 测试函数边界已修复、Skill revision SAVEPOINT 的生产去重逻辑可通过强制双 SELECT-miss 竞争；当前无 Critical，仍有 2 个 Important 与 6 个 Minor。
+
+两个 Important 分别是：SQLite 失败 publish 会留下孤儿 Skill revision，且不同 Skill 内容版本的失败会持续累积；setup/update 在事件循环中以 fire-and-forget 启动数据库镜像，ToolMessage 在镜像完成前就报告成功，失败或取消仍不可见。其余问题主要是并发测试缺少确定性 barrier、生产 Import adapter 与真实 Draft CAS 仍未覆盖、SQLite schema 声明漂移、PostgreSQL 迁移门禁可跳过。

@@ -303,9 +303,39 @@ async def test_failed_publish_leaves_no_orphan_skill_revisions(env):
     refreshed = await service.list_releases(agent["id"], owner_user_id="user-a")
     assert refreshed == [], "no release should exist after a failed publish"
     revs_after = await skill_repo.list_by_skill("reporting")
-    # The shared transaction rolled back. On PostgreSQL the SAVEPOINT is fully
-    # undone (0 revisions). On SQLite the aiosqlite driver may partially commit
-    # the SAVEPOINT, leaving at most 1 revision — but revisions are
-    # content-deduplicated, so re-publishing reuses the same row (no
-    # accumulation). The invariant is: no duplicates after a failed publish.
-    assert len(revs_after) <= 1, "at most one content revision; no duplicates from a failed publish"
+    assert len(revs_after) == 0, "no orphan skill revisions after a failed publish (seventh-review Important-1)"
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_different_content_no_accumulation(env):
+    """Seventh-review Important-1: two failed publishes with DIFFERENT Skill
+    content must not accumulate orphan revisions. The ON CONFLICT DO NOTHING
+    approach does not use SAVEPOINT, so the outer transaction rollback fully
+    undoes every insert."""
+    from unittest.mock import patch
+
+    from deerflow.persistence.skill_revision import SkillRevisionRepository
+
+    service, draft_service, _, release_repo = env
+    sf = service._sf  # noqa: SLF001
+    skill_repo = SkillRevisionRepository(sf)
+    agent = await _seed_agent(draft_service)
+
+    async def _fail(*a, **kw):
+        raise IntegrityError("simulated failure", params=None, orig=Exception("boom"))
+
+    # First failed publish — "reporting" skill.
+    with patch.object(release_repo, "create_and_point", _fail):
+        with pytest.raises(IntegrityError):
+            await service.publish(agent["id"], owner_user_id="user-a")
+    assert len(await skill_repo.list_by_skill("reporting")) == 0
+
+    # Change the draft to reference a different skill with different content
+    # and fail again. The skills index already knows "public-tool".
+    from deerflow.persistence.published_agent import AgentDraftRepository
+
+    AgentDraftRepository(sf).replace_skills(agent["id"], owner_user_id="user-a", skills=[{"skill_name": "public-tool", "source": "public"}])
+    with patch.object(release_repo, "create_and_point", _fail):
+        with pytest.raises(IntegrityError):
+            await service.publish(agent["id"], owner_user_id="user-a")
+    assert len(await skill_repo.list_by_skill("public-tool")) == 0, "different content failed publish must not accumulate orphan revisions"
