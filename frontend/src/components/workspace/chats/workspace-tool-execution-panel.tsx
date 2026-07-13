@@ -14,6 +14,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
+import { getToolDisplayPolicy } from "@/core/tools/display-policy";
 import { explainToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -24,6 +25,7 @@ type ToolExecution = {
   name: string;
   args: Record<string, unknown>;
   result: string | null;
+  visibilityRedacted: boolean;
   isExecuting: boolean;
 };
 
@@ -38,12 +40,18 @@ function collectToolExecutions(
     if (message.type !== "ai" || !message.tool_calls?.length) continue;
     for (const toolCall of message.tool_calls) {
       if (toolCall.name === "task" || !toolCall.id) continue;
+      const resultMessage = messages.find(
+        (message) =>
+          message.type === "tool" && message.tool_call_id === toolCall.id,
+      );
       const result = findToolCallResult(toolCall.id, messages) ?? null;
       executions.push({
         id: toolCall.id,
         name: toolCall.name,
         args: (toolCall.args ?? {}) as Record<string, unknown>,
         result,
+        visibilityRedacted:
+          resultMessage?.additional_kwargs?.visibility === "redacted",
         isExecuting: false,
       });
       if (!result) {
@@ -76,6 +84,14 @@ function formatJson(value: unknown, maxLength = 20_000): string {
 function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
+  const displayPolicy = getToolDisplayPolicy(execution.name, execution.args, {
+    visibilityRedacted: execution.visibilityRedacted,
+  });
+  const resultSummary = {
+    skill: "已加载 Skill 指令，内容已隐藏",
+    file: "文件内容已隐藏",
+    hidden: "参数与结果已隐藏",
+  }[displayPolicy.resultKind];
   const label = explainToolCall(
     {
       name: execution.name,
@@ -139,20 +155,25 @@ function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
       </button>
       {expanded && (
         <div className="space-y-3 border-t border-amber-200/80 px-3 py-2">
-          <div>
-            <div className="mb-1 text-xs font-medium text-slate-500">参数</div>
-            <pre className="overflow-x-auto rounded border border-slate-200 bg-white p-2 text-xs text-slate-800">
-              <code>{formatJson(execution.args)}</code>
-            </pre>
-          </div>
-          {execution.result && (
+          {displayPolicy.safeArgs &&
+            Object.keys(displayPolicy.safeArgs).length > 0 && (
+              <div>
+                <div className="mb-1 text-xs font-medium text-slate-500">
+                  参数
+                </div>
+                <pre className="overflow-x-auto rounded border border-slate-200 bg-white p-2 text-xs text-slate-800">
+                  <code>{formatJson(displayPolicy.safeArgs)}</code>
+                </pre>
+              </div>
+            )}
+          {resultSummary && (
             <div>
               <div className="mb-1 text-xs font-medium text-slate-500">
                 结果
               </div>
-              <pre className="overflow-x-auto rounded border border-emerald-200 bg-emerald-50/60 p-2 text-xs whitespace-pre-wrap text-emerald-900">
-                <code>{formatJson(execution.result)}</code>
-              </pre>
+              <div className="rounded border border-emerald-200 bg-emerald-50/60 p-2 text-xs text-emerald-900">
+                {resultSummary}
+              </div>
             </div>
           )}
           {execution.isExecuting && (

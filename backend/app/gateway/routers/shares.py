@@ -9,15 +9,13 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
+from app.gateway.skill_redaction import redact_channel_values
 from app.gateway.utils import sanitize_log_param
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.thread_share.model import ThreadShareRow
-from deerflow.runtime import serialize_channel_values
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -97,12 +95,14 @@ def _format_messages(raw_messages: list[Any]) -> list[dict[str, Any]]:
                     texts.append(block.get("text", ""))
             content = "\n".join(texts)
 
-        result.append({
-            "type": msg_type,
-            "id": msg.get("id"),
-            "content": content,
-            "name": name,
-        })
+        result.append(
+            {
+                "type": msg_type,
+                "id": msg.get("id"),
+                "content": content,
+                "name": name,
+            }
+        )
     return result
 
 
@@ -199,7 +199,10 @@ async def get_shared_thread(token: str, request: Request) -> SharedThreadRespons
 
     title = channel_values.get("title")
     raw_messages = channel_values.get("messages", [])
-    messages = serialize_channel_values({"messages": raw_messages}).get("messages", [])
+    messages = redact_channel_values(
+        {"messages": raw_messages},
+        boundary_id=thread_id,
+    ).get("messages", [])
 
     return SharedThreadResponse(
         thread_id=thread_id,

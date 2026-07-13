@@ -246,6 +246,14 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 
+**Skill execution privacy boundary**:
+- Raw Skill bundle contents remain available only to the agent graph and internal checkpointer. `SkillContentRedactor` creates detached safe copies before RunJournal persistence, StreamBridge publication, and Gateway user-visible serialization.
+- Gateway messages, events, state/history, wait responses, and public shares retain `tool_call_id` and safe Skill metadata while replacing protected results with `Skill instructions loaded.`. Legacy RunEventStore rows are redacted at read time, including `read_file` calls/results split across pages; orphan `read_file/grep/glob/ls/bash` results fail closed.
+- Parent-visible `task` results are treated as a protected subagent boundary: prompt/result/provider metadata and follow-on trace/error details are hidden, while only a fixed success/failure summary is exposed.
+- `skill_projection_manifest` and `skill_grants` are server-authoritative. `build_run_config()` strips client-provided values from body/config context; an authorization resolver may place trusted values on `request.state` for `inject_server_skill_context()` to copy into the run context.
+- Redaction is fail-closed. Sensitive provider metadata, artifacts, trace/error text, and unsafe callbacks are not exported. New user-visible message/event endpoints must use `app.gateway.skill_redaction` rather than calling `serialize_channel_values()` directly.
+- See [`docs/design/2026-07-13-skill-execution-content-redaction-spec.md`](../docs/design/2026-07-13-skill-execution-content-redaction-spec.md) and its linked implementation record.
+
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
 **Auth invariant**: user-scoped APIs (e.g. Memory, Files) must not accept client-supplied `user_id` overrides; mismatches are rejected with 403.
@@ -322,6 +330,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Creation**: `POST /api/skills/custom` validates and writes a custom `SKILL.md`; `POST /api/skills/custom/ai-draft` calls the configured chat model to produce an editable draft only
 - **Installation**: `POST /api/skills/install` extracts thread artifact archives; `POST /api/skills/upload` accepts multipart `.zip` and `.skill` uploads; both install into `custom/` through the shared safe ZIP extraction, frontmatter validation, duplicate-name rejection, and security scan path
+- **Execution privacy**: `privacy.py` classifies Skill projection access using explicit run manifests/grants first and the normalized configured Skill root as a compatibility fallback. Correlation is isolated by `(run_id, namespace, tool_call_id)` and all user-boundary transformations return copies without mutating graph/checkpoint messages.
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
