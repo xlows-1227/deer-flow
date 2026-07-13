@@ -213,6 +213,47 @@ def test_run_events_redacts_legacy_skill_results_at_read_time():
     assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
 
 
+def test_run_events_redacts_trace_when_event_filter_omits_skill_call():
+    call_row = {
+        "seq": 10,
+        "run_id": "run-skill",
+        "event_type": "llm.ai.response",
+        "category": "message",
+        "content": {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "read_file",
+                    "args": {"path": "/mnt/skills/public/demo/SKILL.md"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        },
+        "metadata": {},
+    }
+    trace_row = {
+        "seq": 20,
+        "run_id": "run-skill",
+        "event_type": "llm.error",
+        "category": "trace",
+        "content": "provider echoed SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE",
+        "metadata": {"unsafe": "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE"},
+    }
+    event_store = _make_event_store([])
+    event_store.list_events = AsyncMock(return_value=[trace_row])
+    event_store.list_messages_by_run = AsyncMock(side_effect=[[call_row], []])
+    app = _make_app(event_store=event_store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-skill/events?event_types=llm.error")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+    assert response.json()[0]["content"] == "Sensitive execution details hidden."
+
+
 def test_thread_messages_redacts_skill_results_across_runs():
     rows = _make_raw_skill_rows()
     event_store = _make_event_store([])

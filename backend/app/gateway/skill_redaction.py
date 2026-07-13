@@ -14,6 +14,8 @@ from deerflow.skills.privacy import SkillContentRedactor, record_skill_redaction
 _LEGACY_CONTEXT_TOOL_NAMES = frozenset({"read_file", "bash", "grep", "glob", "ls"})
 _LEGACY_CONTEXT_PAGE_SIZE = 200
 _LEGACY_CONTEXT_MAX_PAGES = 1000
+_SAFE_GATEWAY_ABSOLUTE_ROOTS = ("/mnt/user-data", "/mnt/acp-workspace")
+_SENSITIVE_TRACE_CATEGORIES = frozenset({"trace", "error", "middleware"})
 
 
 def make_gateway_skill_redactor(app_config: Any | None = None) -> SkillContentRedactor:
@@ -30,12 +32,18 @@ def make_gateway_skill_redactor(app_config: Any | None = None) -> SkillContentRe
         return SkillContentRedactor(
             skills_root="/mnt/skills",
             redact_unknown_paths=True,
+            safe_absolute_roots=_SAFE_GATEWAY_ABSOLUTE_ROOTS,
             boundary="gateway",
         )
     skills = getattr(config, "skills", None)
     root = getattr(skills, "container_path", None)
     return SkillContentRedactor(
         skills_root=root if isinstance(root, str) and root else "/mnt/skills",
+        # Checkpoints retain raw agent messages but do not retain the trusted
+        # per-run projection manifest. Keep standard user/ACP mounts visible,
+        # while treating every other absolute path as a possible projection.
+        redact_unknown_paths=True,
+        safe_absolute_roots=_SAFE_GATEWAY_ABSOLUTE_ROOTS,
         boundary="gateway",
     )
 
@@ -117,6 +125,18 @@ def _inject_fail_closed_metadata(rows: list[dict[str, Any]], unresolved: set[str
     return safe_rows
 
 
+def _hide_unresolved_trace_details(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fail closed when a bounded legacy context scan cannot finish."""
+
+    safe_rows = copy.deepcopy(rows)
+    for row in safe_rows:
+        if row.get("category") not in _SENSITIVE_TRACE_CATEGORIES:
+            continue
+        row["content"] = "Sensitive execution details hidden."
+        row["metadata"] = {}
+    return safe_rows
+
+
 async def redact_run_event_rows(
     event_store: Any,
     rows: Iterable[Mapping[str, Any]],
@@ -130,6 +150,8 @@ async def redact_run_event_rows(
     materialized = [copy.deepcopy(dict(row)) for row in rows]
     redactor = make_gateway_skill_redactor(app_config)
     unresolved = _legacy_results_needing_context(materialized)
+    needs_trace_context = any(row.get("category") in _SENSITIVE_TRACE_CATEGORIES for row in materialized)
+    context_complete = not needs_trace_context
     record_skill_redaction_metric(
         "skill_redaction_legacy_fallback_total",
         boundary="gateway",
@@ -139,7 +161,7 @@ async def redact_run_event_rows(
     before_seq = min(cursor_candidates) if cursor_candidates else None
 
     for _ in range(_LEGACY_CONTEXT_MAX_PAGES):
-        if not unresolved or before_seq is None:
+        if before_seq is None or (not unresolved and (not needs_trace_context or redactor.has_sensitive_execution(run_id))):
             break
         older = await event_store.list_messages_by_run(
             thread_id,
@@ -149,6 +171,7 @@ async def redact_run_event_rows(
             after_seq=None,
         )
         if not older:
+            context_complete = True
             break
         redactor.redact_event_batch(older)
         unresolved.difference_update(_observed_tool_call_ids(older))
@@ -157,8 +180,12 @@ async def redact_run_event_rows(
         if next_before is None or next_before >= before_seq:
             break
         before_seq = next_before
+    else:
+        context_complete = False
 
     materialized = _inject_fail_closed_metadata(materialized, unresolved)
+    if needs_trace_context and not redactor.has_sensitive_execution(run_id) and not context_complete:
+        materialized = _hide_unresolved_trace_details(materialized)
     record_skill_redaction_metric(
         "skill_redaction_fail_closed_total",
         boundary="gateway",

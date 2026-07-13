@@ -496,7 +496,7 @@ def test_get_thread_state_redacts_skill_contents_from_checkpoint() -> None:
                     tool_calls=[
                         {
                             "name": "read_file",
-                            "args": {"path": "/mnt/skills/public/demo/SKILL.md"},
+                            "args": {"path": "/runtime-skills/private-projection/SKILL.md"},
                             "id": "call-1",
                             "type": "tool_call",
                         }

@@ -246,11 +246,13 @@ class SkillContentRedactor:
         skills_root: str = "/mnt/skills",
         projections: Iterable[SkillProjectionEntry] | None = None,
         redact_unknown_paths: bool = False,
+        safe_absolute_roots: Iterable[str] | None = None,
         boundary: str = "other",
     ) -> None:
         self.skills_root = skills_root
         self._projections = tuple(projections or ())
         self._redact_unknown_paths = redact_unknown_paths
+        self._safe_absolute_roots = tuple(root for root in (safe_absolute_roots or ()) if isinstance(root, str) and root.strip().startswith(("/", "\\")))
         self._boundary = boundary if boundary in _SAFE_METRIC_BOUNDARIES else "other"
         self._sensitive_calls: dict[tuple[str, str, str], SkillExecutionDescriptor] = {}
         self._subagent_calls: set[tuple[str, str, str]] = set()
@@ -273,6 +275,8 @@ class SkillContentRedactor:
 
         if not _is_under(path, self.skills_root):
             if self._redact_unknown_paths and _normalize_path(path).startswith("/"):
+                if any(_is_under(path, root) for root in self._safe_absolute_roots):
+                    return None
                 return SkillExecutionDescriptor()
             return None
 
@@ -289,6 +293,11 @@ class SkillContentRedactor:
             else:
                 skill_name = segments[0]
         return SkillExecutionDescriptor(skill_name=skill_name, category=category)
+
+    def has_sensitive_execution(self, run_id: str) -> bool:
+        """Whether this redactor has observed a protected call for *run_id*."""
+
+        return any(key[0] == run_id for key in self._sensitive_calls) or any(key[0] == run_id for key in self._subagent_calls)
 
     @staticmethod
     def _candidate_paths(value: str) -> list[str]:
@@ -618,7 +627,7 @@ class SkillContentRedactor:
             namespace=namespace,
         )
         redacted["content"] = safe_content
-        run_is_sensitive = any(key[0] == run_id for key in self._sensitive_calls) or any(key[0] == run_id for key in self._subagent_calls)
+        run_is_sensitive = self.has_sensitive_execution(run_id)
         category = event.get("category")
         if run_is_sensitive and category in {"trace", "error", "middleware"}:
             redacted["content"] = "Sensitive execution details hidden."
