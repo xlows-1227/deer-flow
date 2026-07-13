@@ -646,3 +646,18 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 复审结论：**Ready to merge：No**。本轮通过两个不同 Skill 内容的失败发布专项验证，确认 ON CONFLICT 实现已关闭 SQLite 孤儿 revision 问题；强制双 SELECT-miss 并发也只产生一条 canonical revision。当前无 Critical，仍有 1 个 Important 与 8 个 Minor。
 
 唯一 Important 是同步 mirror 跨线程创建新事件循环并复用 Gateway 默认池 AsyncEngine，不符合 SQLAlchemy 多事件循环约束；线程/数据库/timeout 失败返回 `None` 后，setup/update 仍输出无警告成功，duplicate setup 的 metadata 写失败也会误报 `succeeded=True`。其余问题主要是双内容回归测试漏 `await`、并发/Import/CAS 测试仍未覆盖真实路径、SQLite schema 漂移、PostgreSQL 门禁可跳过，以及 README/CLAUDE 未同步。
+
+---
+
+## 21. 第八轮代码复审修复（2026-07-13）
+
+第八轮复审文档：[2026-07-13-m1-agent-control-plane-code-eighth-review.md](./2026-07-13-m1-agent-control-plane-code-eighth-review.md)
+
+### Important-1：同 loop 镜像 + 如实 ToolMessage
+移除 `_run_mirror_sync`（跨线程新事件循环共享 AsyncEngine 违反 SQLAlchemy 单 loop 约束）。setup/update 恢复在主 loop 上 `loop.create_task` 调度镜像。ToolMessage 不再声称 DB 镜像成功——它报告文件系统写入（同步已完成）和同步确定的 Skill 可用性（unresolved 作为警告列出）。镜像失败全部记录日志。
+
+### Minor-1：修复不同内容失败测试
+补 `await replace_skills(...)` 并在 skills index 注册 `public-tool`，使第二个场景真正执行。
+
+### Minor-8：同步 CLAUDE.md
+更新 owner_scope 唯一键描述、镜像行为描述、Alembic head 为 `2026_07_12_widen_agent_ids`。
