@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -64,6 +64,41 @@ def _seed_agent(
     (agent_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     (agent_dir / "SOUL.md").write_text(soul, encoding="utf-8")
     return agent_dir
+
+
+def test_sync_update_rejects_live_persistence_without_starting_new_loop():
+    with patch("deerflow.persistence.engine.get_session_factory", return_value=object()):
+        result = update_agent.func(runtime=_runtime(), soul="new soul")
+    assert "synchronous embedded client" in result.update["messages"][0].content
+
+
+def test_persistent_update_reads_and_writes_database_only(tmp_path, stub_app_config):
+    service = MagicMock()
+    service.get_authoring_state = AsyncMock(
+        return_value={
+            "agent": {"id": "pa_1", "description": "old"},
+            "draft": {
+                "model_name": None,
+                "tool_groups": [],
+                "skills": [],
+                "soul_markdown": "old soul",
+                "revision": 1,
+            },
+        }
+    )
+    service.update_authoring_bundle = AsyncMock(return_value=({"agent": {"id": "pa_1"}, "draft": {"revision": 2}}, []))
+    with (
+        patch("deerflow.publishing.factory.build_draft_service", return_value=service),
+        patch("deerflow.tools.builtins.update_agent_tool.get_paths") as get_paths,
+        patch("deerflow.tools.builtins.update_agent_tool.load_agent_config") as load_files,
+    ):
+        result = asyncio.run(update_agent.coroutine(runtime=_runtime(), soul="new soul"))
+
+    assert "updated successfully" in result.update["messages"][0].content
+    service.update_authoring_bundle.assert_awaited_once()
+    get_paths.assert_not_called()
+    load_files.assert_not_called()
+    assert not (tmp_path / "users").exists()
 
 
 @pytest.fixture()
@@ -248,7 +283,7 @@ def test_update_agent_soul_failure_does_not_replace_config(tmp_path, patched_pat
             raise OSError("disk full while staging SOUL.md")
         return real_named_temp_file(*args, **kwargs)
 
-    with patch("deerflow.tools.builtins.update_agent_tool.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
+    with patch("deerflow.tools.builtins.agent_file_transaction.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
         result = asyncio.run(update_agent.coroutine(runtime=_runtime(), description="new-desc", soul="new soul"))
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())

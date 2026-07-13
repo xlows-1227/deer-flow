@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -48,6 +48,35 @@ def _call_setup_agent(tmp_path: Path, soul: str, description: str, agent_name: s
         )
 
 
+def test_sync_setup_rejects_live_persistence_without_starting_new_loop():
+    runtime = _make_runtime()
+    with patch("deerflow.persistence.engine.get_session_factory", return_value=object()):
+        result = setup_agent.func(soul="soul", description="desc", runtime=runtime)
+    assert "synchronous embedded client" in result.update["messages"][0].content
+
+
+def test_persistent_setup_writes_database_only(tmp_path):
+    service = MagicMock()
+    service.setup_authoring_bundle = AsyncMock(return_value=({"agent": {"id": "pa_1"}, "draft": {}}, []))
+    with (
+        patch("deerflow.publishing.factory.build_draft_service", return_value=service),
+        patch("deerflow.tools.builtins.setup_agent_tool.get_paths") as get_paths,
+    ):
+        result = asyncio.run(
+            setup_agent.coroutine(
+                soul="database soul",
+                description="database description",
+                runtime=_make_runtime(),
+                skills=[],
+            )
+        )
+
+    assert "created successfully" in result.update["messages"][0].content
+    service.setup_authoring_bundle.assert_awaited_once()
+    get_paths.assert_not_called()
+    assert not (tmp_path / "users").exists()
+
+
 # --- Agent name validation tests ---
 
 
@@ -84,7 +113,7 @@ def test_setup_agent_rejects_absolute_agent_name_before_writing(tmp_path, monkey
 
 
 class TestSetupAgentNoDataLoss:
-    """Ensure shutil.rmtree only removes directories created during the current call."""
+    """Ensure the no-database file transaction preserves prior agent data."""
 
     def test_existing_agent_dir_preserved_on_failure(self, tmp_path: Path):
         """If the agent directory already exists and setup fails,
@@ -93,10 +122,19 @@ class TestSetupAgentNoDataLoss:
         agent_dir.mkdir(parents=True)
         old_soul = agent_dir / "SOUL.md"
         old_soul.write_text("original soul content", encoding="utf-8")
+        old_config = agent_dir / "config.yaml"
+        old_config.write_text("name: test-agent\ndescription: original\n", encoding="utf-8")
+
+        real_replace = Path.replace
+
+        def _fail_soul_replace(self, target):
+            if str(target).endswith("SOUL.md"):
+                raise OSError("disk full")
+            return real_replace(self, target)
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
-            with patch.object(Path, "write_text", side_effect=OSError("disk full")):
-                asyncio.run(
+            with patch.object(Path, "replace", _fail_soul_replace):
+                result = asyncio.run(
                     setup_agent.coroutine(
                         soul="new soul",
                         description="desc",
@@ -104,10 +142,12 @@ class TestSetupAgentNoDataLoss:
                     )
                 )
 
-        # Directory must still exist
         assert agent_dir.exists(), "Pre-existing agent directory was deleted on failure"
-        # Original SOUL.md should still be on disk (not deleted by rmtree)
-        assert old_soul.exists(), "Pre-existing SOUL.md was deleted on failure"
+        assert result.update["messages"][0].content.startswith("Error:")
+        assert old_soul.read_text(encoding="utf-8") == "original soul content"
+        assert old_config.read_text(encoding="utf-8") == "name: test-agent\ndescription: original\n"
+        assert list(agent_dir.glob("*.tmp")) == []
+        assert list(agent_dir.glob("*.bak")) == []
 
     def test_new_agent_dir_cleaned_up_on_failure(self, tmp_path: Path):
         """If the agent directory is newly created and setup fails,

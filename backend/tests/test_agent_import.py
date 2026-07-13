@@ -26,7 +26,17 @@ class _MemAgents:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
 
-    async def create_agent(self, *, owner_user_id, slug, display_name, description=None, avatar_ref=None, agent_id=None):
+    async def create_agent(
+        self,
+        *,
+        owner_user_id,
+        slug,
+        display_name,
+        description=None,
+        avatar_ref=None,
+        agent_id=None,
+        skill_selection_mode="explicit",
+    ):
         if any(r["owner_user_id"] == owner_user_id and r["slug"] == slug for r in self.rows.values()):
             raise ValueError(f"Agent slug already exists for owner: {slug}")
         agent_id = agent_id or f"pa_{slug}"
@@ -101,8 +111,25 @@ def _service(base: Path, known_skills: set[str] | None = None):
     # Patch create_agent to seed the draft row (mirrors the real repo pair).
     real_create = agents.create_agent
 
-    async def create_and_seed(*, owner_user_id, slug, display_name, description=None, avatar_ref=None, agent_id=None):
-        agent = await real_create(owner_user_id=owner_user_id, slug=slug, display_name=display_name, description=description, avatar_ref=avatar_ref, agent_id=agent_id)
+    async def create_and_seed(
+        *,
+        owner_user_id,
+        slug,
+        display_name,
+        description=None,
+        avatar_ref=None,
+        agent_id=None,
+        skill_selection_mode="explicit",
+    ):
+        agent = await real_create(
+            owner_user_id=owner_user_id,
+            slug=slug,
+            display_name=display_name,
+            description=description,
+            avatar_ref=avatar_ref,
+            agent_id=agent_id,
+            skill_selection_mode=skill_selection_mode,
+        )
         drafts.drafts[agent["id"]] = {
             "agent_id": agent["id"],
             "agent_markdown": "",
@@ -110,6 +137,7 @@ def _service(base: Path, known_skills: set[str] | None = None):
             "model_name": None,
             "tool_groups": [],
             "quota_overrides": {},
+            "skill_selection_mode": skill_selection_mode,
             "revision": 1,
             "skills": [],
             "connector_grants": [],
@@ -132,6 +160,15 @@ def test_list_candidates_finds_legacy_agents(tmp_path):
     candidates = service.list_candidates("user-a")
     names = {c.name for c in candidates}
     assert names == {"bot-1", "bot-2"}
+
+
+def test_list_candidates_skips_noncanonical_slugs(tmp_path):
+    _write_legacy_agent(tmp_path, "user-a", "under_score")
+    _write_legacy_agent(tmp_path, "user-a", "MiXeD")
+
+    candidates = _service(tmp_path).list_candidates("user-a")
+
+    assert [candidate.name for candidate in candidates] == ["MiXeD"]
 
 
 def test_candidate_carries_soul_and_config(tmp_path):
@@ -175,6 +212,25 @@ async def test_import_reports_unresolved_skills_without_blocking(tmp_path):
     drafts = service._drafts.drafts  # noqa: SLF001
     draft = drafts[report["agent_id"]]
     assert [s["skill_name"] for s in draft["skills"]] == ["reporting"]
+
+
+@pytest.mark.anyio
+async def test_import_explicit_empty_skills_disables_all(tmp_path):
+    _write_legacy_agent(tmp_path, "user-a", "bot", skills=[])
+    service = _service(tmp_path)
+    report = await service.import_agent("user-a", "bot")
+    draft = service._drafts.drafts[report["agent_id"]]  # noqa: SLF001
+    assert draft["skills"] == []
+    assert draft["skill_selection_mode"] == "explicit"
+
+
+@pytest.mark.anyio
+async def test_import_omitted_skills_preserves_legacy_inherit_semantics(tmp_path):
+    _write_legacy_agent(tmp_path, "user-a", "bot", skills=None)
+    service = _service(tmp_path)
+    report = await service.import_agent("user-a", "bot")
+    draft = service._drafts.drafts[report["agent_id"]]  # noqa: SLF001
+    assert draft["skill_selection_mode"] == "inherit"
 
 
 @pytest.mark.anyio

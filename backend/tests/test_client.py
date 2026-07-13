@@ -902,6 +902,15 @@ class TestExtractText:
 
 
 class TestEnsureAgent:
+    def test_database_backed_custom_agent_requires_gateway(self, client):
+        client._agent_name = "custom-agent"
+
+        with (
+            patch("deerflow.persistence.engine.get_session_factory", return_value=object()),
+            pytest.raises(RuntimeError, match="require the async Gateway runtime"),
+        ):
+            client._ensure_agent(client._get_runnable_config("t1"))
+
     def test_creates_agent(self, client):
         """_ensure_agent creates an agent on first call."""
         mock_agent = MagicMock()

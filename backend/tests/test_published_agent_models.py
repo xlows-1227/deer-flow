@@ -140,4 +140,3 @@ def test_id_and_fk_columns_fit_generated_ids():
         for name in columns:
             length = table.columns[name].type.length
             assert length >= min_required, f"{tablename}.{name} width {length} < {min_required}"
-

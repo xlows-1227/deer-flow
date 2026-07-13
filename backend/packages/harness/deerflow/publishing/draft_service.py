@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
+from deerflow.config.agents_config import validate_agent_slug
 from deerflow.persistence.published_agent import (
     AgentDraftRepository,
     PublishedAgentRepository,
@@ -87,6 +88,61 @@ class DraftService:
         self._skills = skills_index
         self._connectors = connector_repo
 
+    async def setup_authoring_bundle(
+        self,
+        *,
+        owner_user_id: str,
+        slug: str,
+        display_name: str,
+        description: str | None,
+        soul_markdown: str,
+        skill_names: Sequence[str] | None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Atomically persist the complete conversational setup payload."""
+        slug = validate_agent_slug(slug)
+        skills, unresolved = self._resolve_selectable_skill_entries(skill_names, owner_user_id=owner_user_id)
+        result = await self._agents.setup_authoring_bundle(
+            owner_user_id=owner_user_id,
+            slug=slug,
+            display_name=display_name,
+            description=description,
+            soul_markdown=soul_markdown,
+            skills=[] if skills is None else skills,
+            skill_selection_mode="inherit" if skill_names is None else "explicit",
+        )
+        return result, unresolved
+
+    async def update_authoring_bundle(
+        self,
+        *,
+        owner_user_id: str,
+        slug: str,
+        description: str | None = None,
+        soul_markdown: str | None = None,
+        model_name: str | None = None,
+        tool_groups: Sequence[str] | None = None,
+        skill_names: Sequence[str] | None = None,
+    ) -> tuple[dict[str, Any] | None, list[str]]:
+        """Atomically persist metadata and every requested draft field."""
+        slug = validate_agent_slug(slug)
+        skills, unresolved = self._resolve_selectable_skill_entries(skill_names, owner_user_id=owner_user_id)
+        result = await self._agents.update_authoring_bundle(
+            owner_user_id=owner_user_id,
+            slug=slug,
+            description=description,
+            soul_markdown=soul_markdown,
+            model_name=model_name,
+            tool_groups=tool_groups,
+            skills=skills,
+        )
+        return result, unresolved
+
+    def _resolve_selectable_skill_entries(self, skill_names: Sequence[str] | None, *, owner_user_id: str) -> tuple[list[Mapping[str, str]] | None, list[str]]:
+        if skill_names is None:
+            return None, []
+        selectable, unresolved = self.filter_selectable_skills(skill_names, owner_user_id=owner_user_id)
+        return [{"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)} for name in selectable], unresolved
+
     # ------------------------------------------------------------------
     # agent identity + draft reads
     # ------------------------------------------------------------------
@@ -100,6 +156,7 @@ class DraftService:
         description: str | None = None,
         avatar_ref: str | None = None,
     ) -> dict[str, Any]:
+        slug = validate_agent_slug(slug)
         return await self._agents.create_agent(
             owner_user_id=owner_user_id,
             slug=slug,
@@ -116,6 +173,19 @@ class DraftService:
 
     async def get_draft(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         return await self._drafts.get(agent_id, owner_user_id=owner_user_id)
+
+    async def get_authoring_state(self, *, owner_user_id: str, slug: str) -> dict[str, Any] | None:
+        """Return the identity and mutable draft for one owner-scoped slug."""
+        get_state = getattr(self._agents, "get_authoring_state", None)
+        if get_state is not None:
+            return await get_state(owner_user_id=owner_user_id, slug=slug)
+        agent = next((item for item in await self.list_agents(owner_user_id) if item["slug"] == slug), None)
+        if agent is None:
+            return None
+        draft = await self.get_draft(agent["id"], owner_user_id=owner_user_id)
+        if draft is None:
+            return None
+        return {"agent": agent, "draft": draft}
 
     async def update_agent_meta(
         self,

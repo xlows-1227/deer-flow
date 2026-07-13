@@ -105,6 +105,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config.use == "langchain_deepseek:ChatDeepSeek":
         try:
             from langchain_deepseek import ChatDeepSeek
+
             from deerflow.models.patched_deepseek import PatchedChatDeepSeek
 
             if model_class is ChatDeepSeek:

@@ -206,11 +206,7 @@ def _build_connector_summary_xml(summary: dict[str, Any]) -> str:
 
 def _build_selected_connectors_section(connector_ids: tuple[str, ...], connector_summaries: list[dict[str, Any]] | None = None) -> str:
     if connector_ids:
-        connector_items = (
-            "\n".join(_build_connector_summary_xml(summary) for summary in connector_summaries)
-            if connector_summaries
-            else "\n".join(f"<connector_id>{escape(connector_id)}</connector_id>" for connector_id in connector_ids)
-        )
+        connector_items = "\n".join(_build_connector_summary_xml(summary) for summary in connector_summaries) if connector_summaries else "\n".join(f"<connector_id>{escape(connector_id)}</connector_id>" for connector_id in connector_ids)
         return "\n".join(
             [
                 "<selected_connectors>",

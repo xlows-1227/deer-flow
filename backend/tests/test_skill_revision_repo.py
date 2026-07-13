@@ -175,8 +175,21 @@ async def test_concurrent_get_or_create_in_session_dedupes(skill_repo, tmp_path)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sf = async_sessionmaker(engine, expire_on_commit=False)
+    both_missed = asyncio.Event()
+    miss_count = 0
+    miss_lock = asyncio.Lock()
 
-    async def _create_revision(session_id: str) -> str:
+    async def _barrier_after_select_miss() -> None:
+        nonlocal miss_count
+        async with miss_lock:
+            miss_count += 1
+            if miss_count == 2:
+                both_missed.set()
+        await both_missed.wait()
+
+    skill_repo._after_initial_miss = _barrier_after_select_miss  # noqa: SLF001
+
+    async def _create_revision() -> str:
         async with sf() as session:
             async with session.begin():
                 row = await skill_repo._get_or_create_in_session(  # noqa: SLF001
@@ -193,7 +206,8 @@ async def test_concurrent_get_or_create_in_session_dedupes(skill_repo, tmp_path)
     try:
         # Launch both concurrently — both SELECT miss, both INSERT, one wins
         # the unique constraint, the SAVEPOINT lets the loser recover.
-        id_a, id_b = await asyncio.gather(_create_revision("a"), _create_revision("b"))
+        id_a, id_b = await asyncio.gather(_create_revision(), _create_revision())
+        assert miss_count == 2, "both transactions must pass the initial SELECT-miss barrier"
         assert id_a == id_b, "concurrent get_or_create must dedupe to the same revision id"
     finally:
         await engine.dispose()

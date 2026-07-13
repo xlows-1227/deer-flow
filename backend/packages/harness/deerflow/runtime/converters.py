@@ -71,10 +71,7 @@ def langchain_to_openai_message(message: Any) -> dict:
     # For user messages with multimodal content, ensure at least one text block exists
     # to avoid "text content is empty" errors from OpenAI-compatible APIs
     if role == "user" and isinstance(content, list) and content:
-        has_text_block = any(
-            isinstance(block, dict) and block.get("type") == "text"
-            for block in content
-        )
+        has_text_block = any(isinstance(block, dict) and block.get("type") == "text" for block in content)
         if not has_text_block:
             # Prepend an empty text block before image_url blocks
             content = [{"type": "text", "text": ""}] + list(content)

@@ -594,9 +594,9 @@ def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_c
     return _get_cached_skills_prompt_section(skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
-def get_agent_soul(agent_name: str | None) -> str:
-    # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name)
+def get_agent_soul(agent_name: str | None, *, soul_override: str | None = None) -> str:
+    """Render DB-injected SOUL, falling back to legacy files when omitted."""
+    soul = soul_override if soul_override is not None else load_agent_soul(agent_name)
     if soul:
         return f"<soul>\n{soul}\n</soul>\n" if soul else ""
     return ""
@@ -607,11 +607,11 @@ def _build_self_update_section(agent_name: str | None) -> str:
     if not agent_name:
         return ""
     return f"""<self_update>
-You are running as the custom agent **{agent_name}** with a persisted SOUL.md and config.yaml.
+You are running as the custom agent **{agent_name}** with a persisted authoring draft.
 
 When the user asks you to update your own description, personality, behaviour, skill set, tool groups, or default model,
 you MUST persist the change with the `update_agent` tool. Do NOT use `bash`, `write_file`, or any sandbox tool to edit
-SOUL.md or config.yaml — those write into a temporary sandbox/tool workspace and the changes will be lost on the next turn.
+the agent definition — those write into a temporary sandbox/tool workspace and the changes will be lost on the next turn.
 
 Rules:
 - Always pass the FULL replacement text for `soul` (no patch semantics). Start from your current SOUL above and apply the user's edits.
@@ -710,6 +710,8 @@ def _apply_prompt_template_impl(
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
+    agent_soul: str | None = None,
+    agent_instructions: str | None = None,
 ) -> str:
     """Internal prompt builder — not cached; callers should use ``apply_prompt_template``."""
     # Include subagent section only if enabled (from runtime parameter)
@@ -734,6 +736,10 @@ def _apply_prompt_template_impl(
     acp_section = _build_acp_section(app_config=app_config)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
+    if agent_instructions is not None:
+        instruction_section = f"{agent_instructions}\n" if agent_instructions else ""
+    else:
+        instruction_section = get_agent_soul(agent_name) if agent_soul is None else (f"<soul>\n{agent_soul}\n</soul>\n" if agent_soul else "")
 
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware
@@ -741,7 +747,7 @@ def _apply_prompt_template_impl(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "Friday",
-        soul=get_agent_soul(agent_name),
+        soul=instruction_section,
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
@@ -758,6 +764,8 @@ def _cached_apply_prompt_template(
     max_concurrent_subagents: int,
     agent_name: str | None,
     available_skills: frozenset[str] | None,
+    agent_soul: str | None,
+    agent_instructions: str | None,
 ) -> str:
     """Cached variant that uses the global app_config singleton.
 
@@ -770,6 +778,8 @@ def _cached_apply_prompt_template(
         max_concurrent_subagents=max_concurrent_subagents,
         agent_name=agent_name,
         available_skills=set(available_skills) if available_skills is not None else None,
+        agent_soul=agent_soul,
+        agent_instructions=agent_instructions,
     )
 
 
@@ -780,6 +790,8 @@ def apply_prompt_template(
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
+    agent_soul: str | None = None,
+    agent_instructions: str | None = None,
 ) -> str:
     """Build the system prompt, caching the result for identical parameters.
 
@@ -794,6 +806,8 @@ def apply_prompt_template(
             agent_name=agent_name,
             available_skills=available_skills,
             app_config=app_config,
+            agent_soul=agent_soul,
+            agent_instructions=agent_instructions,
         )
 
     return _cached_apply_prompt_template(
@@ -801,4 +815,6 @@ def apply_prompt_template(
         max_concurrent_subagents=max_concurrent_subagents,
         agent_name=agent_name,
         available_skills=frozenset(available_skills) if available_skills is not None else None,
+        agent_soul=agent_soul,
+        agent_instructions=agent_instructions,
     )

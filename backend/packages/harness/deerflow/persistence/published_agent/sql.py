@@ -65,6 +65,43 @@ def _grant_to_dict(row: AgentDraftConnectorGrantRow) -> dict[str, str]:
     return {"connector_instance_id": row.connector_instance_id, "capability": row.capability}
 
 
+def _draft_from_joined_rows(rows: Sequence[Any]) -> dict[str, Any] | None:
+    """Assemble one draft bundle returned by a single joined SELECT."""
+    if not rows:
+        return None
+    _agent, draft, _skill, _grant = rows[0]
+    skills = {row_skill.skill_name: _skill_to_dict(row_skill) for _row_agent, _row_draft, row_skill, _row_grant in rows if row_skill is not None}
+    grants = {(row_grant.connector_instance_id, row_grant.capability): _grant_to_dict(row_grant) for _row_agent, _row_draft, _row_skill, row_grant in rows if row_grant is not None}
+    return _draft_to_dict(
+        draft,
+        skills=[skills[name] for name in sorted(skills)],
+        connector_grants=[grants[key] for key in sorted(grants)],
+    )
+
+
+async def _load_skill_dicts(session: AsyncSession, agent_id: str) -> list[dict[str, str]]:
+    rows = (await session.execute(select(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id).order_by(AgentDraftSkillRow.skill_name))).scalars().all()
+    return [_skill_to_dict(row) for row in rows]
+
+
+async def _load_grant_dicts(session: AsyncSession, agent_id: str) -> list[dict[str, str]]:
+    rows = (
+        (
+            await session.execute(
+                select(AgentDraftConnectorGrantRow)
+                .where(AgentDraftConnectorGrantRow.agent_id == agent_id)
+                .order_by(
+                    AgentDraftConnectorGrantRow.connector_instance_id,
+                    AgentDraftConnectorGrantRow.capability,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_grant_to_dict(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # PublishedAgentRepository
 # ---------------------------------------------------------------------------
@@ -75,6 +112,125 @@ class PublishedAgentRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+        self._after_authoring_draft_lock = None
+
+    async def setup_authoring_bundle(
+        self,
+        *,
+        owner_user_id: str,
+        slug: str,
+        display_name: str,
+        description: str | None,
+        soul_markdown: str,
+        skills: Sequence[Mapping[str, str]] | None,
+        skill_selection_mode: str = "explicit",
+    ) -> dict[str, Any]:
+        """Create-or-update identity, draft and skills in one transaction."""
+        async with self._sf() as session:
+            try:
+                agent = (await session.execute(select(PublishedAgentRow).where(PublishedAgentRow.owner_user_id == owner_user_id, PublishedAgentRow.slug == slug).with_for_update())).scalar_one_or_none()
+                if agent is None:
+                    agent = PublishedAgentRow(
+                        id=f"pa_{uuid4().hex}",
+                        owner_user_id=owner_user_id,
+                        slug=slug,
+                        display_name=display_name,
+                        description=description,
+                        status="draft",
+                    )
+                    session.add(agent)
+                    draft = AgentDraftRow(
+                        agent_id=agent.id,
+                        soul_markdown=soul_markdown,
+                        skill_selection_mode=skill_selection_mode,
+                        updated_by=owner_user_id,
+                    )
+                    session.add(draft)
+                    await session.flush()
+                else:
+                    agent.display_name = display_name
+                    agent.description = description
+                    agent.updated_at = _now()
+                    draft = await session.get(AgentDraftRow, agent.id, with_for_update=True)
+                    if draft is None:
+                        raise RuntimeError("draft not found")
+                    if self._after_authoring_draft_lock is not None:
+                        await self._after_authoring_draft_lock()
+                    draft.soul_markdown = soul_markdown
+                    draft.skill_selection_mode = skill_selection_mode
+                    draft.revision += 1
+                    draft.updated_by = owner_user_id
+                    draft.updated_at = _now()
+                if skills is not None:
+                    await session.execute(delete(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent.id))
+                    for entry in skills:
+                        session.add(AgentDraftSkillRow(agent_id=agent.id, skill_name=str(entry["skill_name"]), source=str(entry["source"])))
+                await session.flush()
+                saved = {
+                    "agent": _agent_to_dict(agent),
+                    "draft": _draft_to_dict(
+                        draft,
+                        skills=await _load_skill_dicts(session, agent.id),
+                        connector_grants=await _load_grant_dicts(session, agent.id),
+                    ),
+                }
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+            return saved
+
+    async def update_authoring_bundle(
+        self,
+        *,
+        owner_user_id: str,
+        slug: str,
+        description: str | None = None,
+        soul_markdown: str | None = None,
+        model_name: str | None = None,
+        tool_groups: Sequence[str] | None = None,
+        skills: Sequence[Mapping[str, str]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Update metadata, draft fields and skills with one commit/revision."""
+        async with self._sf() as session:
+            try:
+                agent = (await session.execute(select(PublishedAgentRow).where(PublishedAgentRow.owner_user_id == owner_user_id, PublishedAgentRow.slug == slug).with_for_update())).scalar_one_or_none()
+                if agent is None:
+                    return None
+                draft = await session.get(AgentDraftRow, agent.id, with_for_update=True)
+                if draft is None:
+                    return None
+                if description is not None:
+                    agent.description = description
+                    agent.updated_at = _now()
+                if soul_markdown is not None:
+                    draft.soul_markdown = soul_markdown
+                if model_name is not None:
+                    draft.model_name = model_name
+                if tool_groups is not None:
+                    draft.tool_groups_json = list(tool_groups)
+                if skills is not None:
+                    draft.skill_selection_mode = "explicit"
+                    await session.execute(delete(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent.id))
+                    for entry in skills:
+                        session.add(AgentDraftSkillRow(agent_id=agent.id, skill_name=str(entry["skill_name"]), source=str(entry["source"])))
+                draft.revision += 1
+                draft.updated_by = owner_user_id
+                draft.updated_at = _now()
+                await session.flush()
+                saved = {
+                    "agent": _agent_to_dict(agent),
+                    "draft": _draft_to_dict(
+                        draft,
+                        skills=await _load_skill_dicts(session, agent.id),
+                        connector_grants=await _load_grant_dicts(session, agent.id),
+                    ),
+                }
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+            return saved
 
     async def create_agent(
         self,
@@ -85,6 +241,7 @@ class PublishedAgentRepository:
         description: str | None = None,
         avatar_ref: str | None = None,
         agent_id: str | None = None,
+        skill_selection_mode: str = "explicit",
     ) -> dict[str, Any]:
         row = PublishedAgentRow(
             id=str(agent_id or f"pa_{uuid4().hex}"),
@@ -95,7 +252,11 @@ class PublishedAgentRepository:
             avatar_ref=avatar_ref,
             status="draft",
         )
-        draft = AgentDraftRow(agent_id=row.id, updated_by=str(owner_user_id))
+        draft = AgentDraftRow(
+            agent_id=row.id,
+            skill_selection_mode=skill_selection_mode,
+            updated_by=str(owner_user_id),
+        )
         async with self._sf() as session:
             session.add(row)
             session.add(draft)
@@ -118,6 +279,44 @@ class PublishedAgentRepository:
         async with self._sf() as session:
             row = (await session.execute(stmt)).scalar_one_or_none()
             return _agent_to_dict(row) if row else None
+
+    async def get_authoring_state(
+        self,
+        *,
+        owner_user_id: str,
+        slug: str,
+    ) -> dict[str, Any] | None:
+        """Load identity, draft, skills and grants from one SQL snapshot."""
+        stmt = (
+            select(
+                PublishedAgentRow,
+                AgentDraftRow,
+                AgentDraftSkillRow,
+                AgentDraftConnectorGrantRow,
+            )
+            .join(AgentDraftRow, AgentDraftRow.agent_id == PublishedAgentRow.id)
+            .outerjoin(
+                AgentDraftSkillRow,
+                AgentDraftSkillRow.agent_id == AgentDraftRow.agent_id,
+            )
+            .outerjoin(
+                AgentDraftConnectorGrantRow,
+                AgentDraftConnectorGrantRow.agent_id == AgentDraftRow.agent_id,
+            )
+            .where(
+                PublishedAgentRow.owner_user_id == owner_user_id,
+                PublishedAgentRow.slug == slug,
+            )
+        )
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).all()
+            if not rows:
+                return None
+            agent, _draft, _skill, _grant = rows[0]
+            return {
+                "agent": _agent_to_dict(agent),
+                "draft": _draft_from_joined_rows(rows),
+            }
 
     async def list_by_owner(self, owner_user_id: str) -> list[dict[str, Any]]:
         stmt = select(PublishedAgentRow).where(PublishedAgentRow.owner_user_id == owner_user_id).order_by(PublishedAgentRow.created_at.desc())
@@ -213,15 +412,69 @@ class AgentDraftRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+        self._before_cas = None
+        self._after_publish_snapshot = None
 
     async def get(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        return await self._get_snapshot(agent_id, owner_user_id=owner_user_id)
+
+    async def get_publish_snapshot(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Read the draft row, skills and grants with one SQL statement."""
+        snapshot = await self._get_snapshot(agent_id, owner_user_id=owner_user_id)
+        if snapshot is not None and self._after_publish_snapshot is not None:
+            await self._after_publish_snapshot(snapshot)
+        return snapshot
+
+    async def _get_snapshot(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        stmt = (
+            select(
+                PublishedAgentRow,
+                AgentDraftRow,
+                AgentDraftSkillRow,
+                AgentDraftConnectorGrantRow,
+            )
+            .join(AgentDraftRow, AgentDraftRow.agent_id == PublishedAgentRow.id)
+            .outerjoin(
+                AgentDraftSkillRow,
+                AgentDraftSkillRow.agent_id == AgentDraftRow.agent_id,
+            )
+            .outerjoin(
+                AgentDraftConnectorGrantRow,
+                AgentDraftConnectorGrantRow.agent_id == AgentDraftRow.agent_id,
+            )
+            .where(
+                PublishedAgentRow.id == agent_id,
+                PublishedAgentRow.owner_user_id == owner_user_id,
+            )
+        )
         async with self._sf() as session:
-            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
-            if draft is None:
-                return None
-            skills = await self._load_skills(session, agent_id)
-            grants = await self._load_grants(session, agent_id)
-            return _draft_to_dict(draft, skills=skills, connector_grants=grants)
+            rows = (await session.execute(stmt)).all()
+            return _draft_from_joined_rows(rows)
+
+    async def lock_revision_for_publish(
+        self,
+        session: AsyncSession,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        expected_revision: int,
+    ) -> bool | None:
+        """Lock the owner-scoped draft and compare its current revision.
+
+        ``None`` means missing/not owned, ``False`` means stale, and ``True``
+        keeps the row locked in the caller's transaction through pointer commit.
+        """
+        stmt = (
+            select(AgentDraftRow.revision)
+            .join(PublishedAgentRow, PublishedAgentRow.id == AgentDraftRow.agent_id)
+            .where(
+                AgentDraftRow.agent_id == agent_id,
+                PublishedAgentRow.owner_user_id == owner_user_id,
+            )
+            .with_for_update()
+        )
+        revision = (await session.execute(stmt)).scalar_one_or_none()
+        return None if revision is None else revision == expected_revision
 
     async def update_with_revision(
         self,
@@ -269,6 +522,8 @@ class AgentDraftRepository:
                 )
                 .values(**set_values)
             )
+            if self._before_cas is not None:
+                await self._before_cas()
             result = await session.execute(stmt)
             if result.rowcount != 1:
                 await session.rollback()
@@ -323,6 +578,8 @@ class AgentDraftRepository:
                 set_values["tool_groups_json"] = list(tool_groups)
             if quota_overrides is not None:
                 set_values["quota_overrides_json"] = dict(quota_overrides)
+            if skills is not None:
+                set_values["skill_selection_mode"] = "explicit"
 
             # Conditional UPDATE gated on both revision AND ownership (ownership
             # is enforced by joining published_agents inside the WHERE clause,
@@ -337,6 +594,8 @@ class AgentDraftRepository:
                 )
                 .values(**set_values)
             )
+            if self._before_cas is not None:
+                await self._before_cas()
             result = await session.execute(stmt)
             if result.rowcount != 1:
                 # Either the draft doesn't exist, isn't owned by the caller, or
@@ -382,10 +641,16 @@ class AgentDraftRepository:
         skills: Sequence[Mapping[str, str]],
     ) -> dict[str, Any] | None:
         async with self._sf() as session:
-            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
+            draft = await self._load(
+                session,
+                agent_id,
+                owner_user_id=owner_user_id,
+                for_update=True,
+            )
             if draft is None:
                 return None
             await session.execute(delete(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id))
+            draft.skill_selection_mode = "explicit"
             for entry in skills:
                 session.add(
                     AgentDraftSkillRow(
@@ -394,6 +659,9 @@ class AgentDraftRepository:
                         source=str(entry.get("source", "public")),
                     )
                 )
+            draft.revision += 1
+            draft.updated_by = owner_user_id
+            draft.updated_at = _now()
             await session.commit()
             skills_rows = await self._load_skills(session, agent_id)
             grants = await self._load_grants(session, agent_id)
@@ -407,7 +675,12 @@ class AgentDraftRepository:
         grants: Sequence[Mapping[str, str]],
     ) -> dict[str, Any] | None:
         async with self._sf() as session:
-            draft = await self._load(session, agent_id, owner_user_id=owner_user_id)
+            draft = await self._load(
+                session,
+                agent_id,
+                owner_user_id=owner_user_id,
+                for_update=True,
+            )
             if draft is None:
                 return None
             await session.execute(delete(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id))
@@ -419,12 +692,22 @@ class AgentDraftRepository:
                         capability=str(entry["capability"]),
                     )
                 )
+            draft.revision += 1
+            draft.updated_by = owner_user_id
+            draft.updated_at = _now()
             await session.commit()
             skills = await self._load_skills(session, agent_id)
             grants_rows = await self._load_grants(session, agent_id)
             return _draft_to_dict(draft, skills=skills, connector_grants=grants_rows)
 
-    async def _load(self, session: AsyncSession, agent_id: str, *, owner_user_id: str) -> AgentDraftRow | None:
+    async def _load(
+        self,
+        session: AsyncSession,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        for_update: bool = False,
+    ) -> AgentDraftRow | None:
         """Load a draft only if it belongs to ``owner_user_id``.
 
         Ownership is enforced by joining against ``published_agents`` (the draft
@@ -438,16 +721,12 @@ class AgentDraftRepository:
                 PublishedAgentRow.owner_user_id == owner_user_id,
             )
         )
+        if for_update:
+            stmt = stmt.with_for_update()
         return (await session.execute(stmt)).scalar_one_or_none()
 
     async def _load_skills(self, session: AsyncSession, agent_id: str) -> list[dict[str, str]]:
-        rows = (await session.execute(select(AgentDraftSkillRow).where(AgentDraftSkillRow.agent_id == agent_id).order_by(AgentDraftSkillRow.skill_name))).scalars().all()
-        return [_skill_to_dict(row) for row in rows]
+        return await _load_skill_dicts(session, agent_id)
 
     async def _load_grants(self, session: AsyncSession, agent_id: str) -> list[dict[str, str]]:
-        rows = (
-            (await session.execute(select(AgentDraftConnectorGrantRow).where(AgentDraftConnectorGrantRow.agent_id == agent_id).order_by(AgentDraftConnectorGrantRow.connector_instance_id, AgentDraftConnectorGrantRow.capability)))
-            .scalars()
-            .all()
-        )
-        return [_grant_to_dict(row) for row in rows]
+        return await _load_grant_dicts(session, agent_id)

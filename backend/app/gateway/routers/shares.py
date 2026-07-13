@@ -9,8 +9,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
@@ -97,12 +95,14 @@ def _format_messages(raw_messages: list[Any]) -> list[dict[str, Any]]:
                     texts.append(block.get("text", ""))
             content = "\n".join(texts)
 
-        result.append({
-            "type": msg_type,
-            "id": msg.get("id"),
-            "content": content,
-            "name": name,
-        })
+        result.append(
+            {
+                "type": msg_type,
+                "id": msg.get("id"),
+                "content": content,
+                "name": name,
+            }
+        )
     return result
 
 

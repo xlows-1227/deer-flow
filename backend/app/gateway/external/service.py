@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 from datetime import datetime
@@ -13,6 +14,8 @@ from app.gateway.external.config import ExternalAPIConfig, get_external_api_conf
 from app.gateway.external.models import validate_external_name
 from deerflow.persistence.api_key import APIKeyRepository
 from deerflow.persistence.external_conversation import ExternalConversationRepository
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXTERNAL_SCOPES = [
     "external:conversations:create",

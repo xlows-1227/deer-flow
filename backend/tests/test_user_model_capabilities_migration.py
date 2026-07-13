@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 from sqlalchemy import text
@@ -44,9 +45,25 @@ def test_user_model_capabilities_migration_on_sqlite(tmp_path):
     url = asyncio.run(_prepare_sqlite_db(tmp_path / "migration.db"))
     engine = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     cols, version = engine
-    assert version == "2026_07_12_widen_agent_ids"
+    assert version == "2026_07_13_draft_skill_mode"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
+
+
+def test_draft_skill_mode_migration_defaults_existing_rows_conservatively(tmp_path):
+    url = asyncio.run(_prepare_sqlite_db(tmp_path / "skill-mode.db"))
+    asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
+
+    async def _inspect_default() -> str | None:
+        engine = create_async_engine(url)
+        try:
+            async with engine.connect() as conn:
+                rows = (await conn.execute(text("PRAGMA table_info(agent_drafts)"))).fetchall()
+            return next(row[4] for row in rows if row[1] == "skill_selection_mode")
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(_inspect_default()) in {"'explicit'", '"explicit"'}
 
 
 async def _run_migration_and_inspect(url: str, *, backend: str) -> tuple[list[str], str]:
@@ -108,15 +125,17 @@ async def _prepare_postgres_db(url: str) -> None:
 
 
 def test_user_model_capabilities_migration_on_postgres_if_available():
-    url = "postgresql+asyncpg://deerflow:deerflow@localhost:5432/deerflow"
+    url = os.environ.get("TEST_POSTGRES_URL", "postgresql+asyncpg://deerflow:deerflow@localhost:5432/deerflow")
     try:
         asyncio.run(_postgres_ping(url))
     except Exception:
+        if os.environ.get("REQUIRE_POSTGRES_TESTS") == "1":
+            pytest.fail("PostgreSQL review gate is required but the test database is unavailable")
         pytest.skip("local postgres unavailable")
 
     asyncio.run(_prepare_postgres_db(url))
     cols, version = asyncio.run(_run_migration_and_inspect(url, backend="postgres"))
-    assert version == "2026_07_12_widen_agent_ids"
+    assert version == "2026_07_13_draft_skill_mode"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -164,7 +183,22 @@ def test_migrated_schema_accepts_full_length_ids(tmp_path):
     # migration) and inspect the resulting head.
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_12_widen_agent_ids"
+    assert version == "2026_07_13_draft_skill_mode"
+    import sqlalchemy as sa
+
+    engine_schema = create_async_engine(url)
+
+    async def _assert_reflected_widths() -> None:
+        def _columns(sync_conn):
+            return {column["name"]: column for column in sa.inspect(sync_conn).get_columns("published_agents")}
+
+        async with engine_schema.connect() as conn:
+            columns = await conn.run_sync(_columns)
+        assert columns["id"]["type"].length == 64
+        assert columns["current_release_id"]["type"].length == 64
+
+    asyncio.run(_assert_reflected_widths())
+    asyncio.run(engine_schema.dispose())
     # Insert a full-length id; under PostgreSQL a too-narrow column rejects this.
     long_id = "pa_" + "a" * 32
     engine_check = create_async_engine(url)
@@ -238,7 +272,7 @@ def test_widen_migration_collapses_duplicate_public_revisions(tmp_path):
     # Run the widen migration; it must collapse duplicates and reach the new head.
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_12_widen_agent_ids"
+    assert version == "2026_07_13_draft_skill_mode"
 
     engine_check = create_async_engine(url)
 
@@ -322,9 +356,7 @@ def test_old_long_revision_stamp_upgrades_to_current_head(tmp_path):
         async with engine_seed.begin() as conn:
             await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
             # Stamp at the OLD long-id revision (applied by third-round code).
-            await conn.execute(
-                text("INSERT INTO alembic_version VALUES ('2026_07_12_widen_published_agent_ids')")
-            )
+            await conn.execute(text("INSERT INTO alembic_version VALUES ('2026_07_12_widen_published_agent_ids')"))
             # Create skill_revisions with owner_scope already present (the old
             # revision would have added it). The short-id migration must be
             # idempotent and not fail on the already-migrated schema.
@@ -344,6 +376,4 @@ def test_old_long_revision_stamp_upgrades_to_current_head(tmp_path):
     asyncio.run(engine_seed.dispose())
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_12_widen_agent_ids", (
-        f"old stamp must upgrade to current head, got {version}"
-    )
+    assert version == "2026_07_13_draft_skill_mode", f"old stamp must upgrade to current head, got {version}"

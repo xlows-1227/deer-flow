@@ -8,11 +8,9 @@ from deerflow.connectors.schemas import ConnectorInstance, ConnectorMetadata, Co
 class ConnectorAdapter(Protocol):
     type: str
 
-    async def test(self, instance: ConnectorInstance, secrets: dict[str, Any]) -> ConnectorTestResult:
-        ...
+    async def test(self, instance: ConnectorInstance, secrets: dict[str, Any]) -> ConnectorTestResult: ...
 
-    async def introspect(self, instance: ConnectorInstance, secrets: dict[str, Any]) -> ConnectorMetadata:
-        ...
+    async def introspect(self, instance: ConnectorInstance, secrets: dict[str, Any]) -> ConnectorMetadata: ...
 
     async def execute(
         self,
@@ -23,8 +21,7 @@ class ConnectorAdapter(Protocol):
         context: ConnectorRuntimeContext,
         *,
         secrets: dict[str, Any] | None = None,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 class DatabaseConnectorAdapter(ConnectorAdapter, Protocol):
@@ -36,5 +33,4 @@ class DatabaseConnectorAdapter(ConnectorAdapter, Protocol):
         context: ConnectorRuntimeContext,
         *,
         secrets: dict[str, Any] | None = None,
-    ) -> QueryResult:
-        ...
+    ) -> QueryResult: ...

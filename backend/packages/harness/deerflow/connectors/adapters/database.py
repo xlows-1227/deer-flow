@@ -102,12 +102,7 @@ class BaseMySQLProtocolDatabaseAdapter:
 
     def introspection_sql(self, instance: ConnectorInstance) -> str:
         database = str(instance.config.get("database") or "").replace("'", "''")
-        return (
-            "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_comment "
-            "FROM information_schema.columns "
-            f"WHERE table_schema = '{database}' "
-            "ORDER BY table_schema, table_name, ordinal_position"
-        )
+        return f"SELECT table_schema, table_name, column_name, data_type, is_nullable, column_comment FROM information_schema.columns WHERE table_schema = '{database}' ORDER BY table_schema, table_name, ordinal_position"
 
     def normalize_type(self, value: Any) -> str | None:
         return str(value).lower() if value is not None else None

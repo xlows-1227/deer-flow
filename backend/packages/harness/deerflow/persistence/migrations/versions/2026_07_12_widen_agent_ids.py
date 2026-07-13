@@ -82,23 +82,21 @@ def upgrade() -> None:
     _backfill_not_null_columns(bind, existing)
 
     # 1. Widen ID/FK columns (excluding skill_revisions — handled in step 2).
-    # On PostgreSQL use batch_alter_table (preserves nullability per _WIDEN).
-    # On SQLite, VARCHAR length is not enforced, so the widening is a no-op for
-    # correctness — but we still run it for schema consistency. To avoid the
-    # batch-rebuild NOT NULL issues on SQLite, we skip the column-type widen on
-    # SQLite (it has no functional effect there) and only widen on PostgreSQL.
+    # Use batch_alter_table on both PostgreSQL and SQLite. SQLite does not
+    # enforce VARCHAR lengths, but rebuilding keeps reflected schema aligned
+    # with the ORM declarations and prevents schema-drift tooling from seeing
+    # stale VARCHAR(32) ID/FK columns (eleventh-review Minor-6).
     dialect = bind.dialect.name
-    if dialect != "sqlite":
-        for table, column, nullable in _WIDEN:
-            if table not in existing or column not in _column_names(table):
-                continue
-            with op.batch_alter_table(table) as batch_op:
-                batch_op.alter_column(
-                    column,
-                    existing_type=sa.String(),
-                    type_=sa.String(64),
-                    nullable=nullable,
-                )
+    for table, column, nullable in _WIDEN:
+        if table not in existing or column not in _column_names(table):
+            continue
+        with op.batch_alter_table(table) as batch_op:
+            batch_op.alter_column(
+                column,
+                existing_type=sa.String(),
+                type_=sa.String(64),
+                nullable=nullable,
+            )
 
     # 2. skill_revisions: add owner_scope, collapse duplicate public revisions,
     #    rebuild the unique constraint, and widen id — all via a manual table

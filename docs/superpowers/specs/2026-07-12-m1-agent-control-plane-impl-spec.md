@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第九轮修复已提交；第十轮复审仍有阻断项待修复
+**状态：** 已实现；第十四轮复审修复已完成，第十五轮复审待修复
 
 **日期：** 2026-07-12
 
@@ -46,7 +46,7 @@ M1 在不替换 LangGraph 运行时的前提下，为 DeerFlow 增加了一个**
 | HTTP 路由 | `app/gateway/routers/published_agents.py` | `/api/published-agents/*` |
 | 迁移脚本 | `scripts/migrate_published_agents.py` | `--dry-run` / `--user-id` |
 
-对话式工具 `setup_agent` / `update_agent`（harness）通过 `build_draft_service()` 尽力而为地镜像写入草稿库，使结构化编辑与对话式编写落到同一事实来源；文件系统旧路径在迁移窗口内保留只读兼容。
+对话式工具 `setup_agent` / `update_agent`（harness）在持久化模式下只通过 `build_draft_service()` 写入 owner-scoped 草稿库，使结构化编辑与对话式编写共用唯一事实来源；文件系统旧路径在迁移窗口内仅用于只读导入，无数据库的 CLI/embedded 模式继续以文件为事实来源。
 
 ---
 
@@ -80,6 +80,7 @@ M1 在不替换 LangGraph 运行时的前提下，为 DeerFlow 增加了一个**
 | `model_name` | String(128) | NULL | 模型覆盖 |
 | `tool_groups_json` | JSON | NOT NULL, default `[]` | 工具组白名单 |
 | `quota_overrides_json` | JSON | NOT NULL, default `{}` | owner 配额覆盖 |
+| `skill_selection_mode` | String(16) | NOT NULL, default `'explicit'` | `explicit` 使用子表显式集合（可为空）；仅对话式/旧导入省略 Skills 时以 `inherit` 继承全部 owner 当前可选 Skills |
 | `revision` | Integer | NOT NULL, default `1` | 乐观并发计数器 |
 | `updated_at` | DateTime(tz) | NOT NULL | UTC |
 | `updated_by` | String(36) | NOT NULL | 最后修改人 |
@@ -233,10 +234,11 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 ### 5.3 发布流程（`PublishService.publish`，单事务语义）
 
 1. owner 范围读草稿；不存在 → `PublishError(AGENT_NOT_FOUND)`。
-2. 运行校验器；有违规 → `PublishError(violations)`，状态完全不变。
-3. 对每个选中 skill：计算内容 checksum → `content_store.put()`（幂等）→ `skill_revision_repo.get_or_create()`（内容不变复用）。
-4. `next_release_no()` → 插入 `AgentReleaseRow` + skill 子表 + connector_grant 子表（含 `manifest_checksum`）。
-5. `set_current_release()` 原子置位指针；若原 `status=='draft'` 则同步置 `published`。
+2. 若 `skill_selection_mode == 'inherit'`，在 owner 权限下列出当前全部可选 Skills 并物化为本次发布集合；无法解析 → `PublishError(SKILL_INDEX_UNAVAILABLE)`。
+3. 运行校验器；有违规 → `PublishError(violations)`，状态完全不变。
+4. 对每个选中 skill：计算内容 checksum → `content_store.put()`（幂等）→ `skill_revision_repo.get_or_create()`（内容不变复用）。
+5. `next_release_no()` → 插入 `AgentReleaseRow` + skill 子表 + connector_grant 子表（含 `manifest_checksum`）。
+6. `set_current_release()` 原子置位指针；若原 `status=='draft'` 则同步置 `published`。
 
 **验收要点**：
 - 同一 Agent 连续发布 3 次得到 `release_no` = 1, 2, 3（不复用历史号）。
@@ -320,25 +322,33 @@ PYTHONPATH=. python scripts/migrate_published_agents.py --user-id <USER_ID>
 
 ---
 
-## 9. 对话式工具镜像（F1.4）
+## 9. 对话式工具持久化与运行时加载（F1.4）
 
-`setup_agent` / `update_agent`（harness，bootstrap/自定义 Agent 工具）在原有文件系统两阶段写入之外，**尽力而为**地通过 `build_draft_service()` 镜像写入草稿库：
+`setup_agent` / `update_agent`（harness，bootstrap/自定义 Agent 工具）根据持久化能力选择单一事实来源：
 
 - **保持工具对模型的 schema 不变**（签名、docstring、`Command` 返回值均不变）。
-- 镜像失败被吞掉并记 debug 日志——文件系统写入仍是迁移窗口内的事实来源。
-- 无 DB 引擎（如纯 CLI 运行）时 `build_draft_service()` 返回 None，直接跳过镜像。
-- 目的：对话式创建/编辑与结构化 Studio 编辑落到同一草稿事实来源，不存在"仅文件系统 Agent"（设计 §16.3）。
+- SQLite/PostgreSQL 模式只写 `DraftService`；setup 的 identity/draft/skills 与 update 的 metadata/draft/skills 分别在一个 SQLAlchemy session、一次 commit 中完成，不创建或更新兼容文件。
+- Gateway 入站配置只允许公开 context 字段，`__agent_*` 是服务端保留字段；worker 在 hydration 前再次移除请求侧伪造值。
+- Gateway worker 在同步 graph factory 运行前异步读取当前 owner + slug 的单快照草稿，将 config、按 AGENT.md → SOUL.md 顺序组合的指令、skill-selection mode 与 revision 注入 run config；同一轮运行固定该 revision，下一轮读取更新值。
+- 数据库明确返回 owner + slug 不存在时，可只读回退当前 owner 的旧 `config.yaml` / `SOUL.md`；数据库/查询错误继续失败，跨 owner 和共享旧目录不得回退。
+- Studio/结构化创建默认 `explicit + []`；对话式 setup 或旧导入省略 Skills 时才使用 `inherit`，发布时将 owner 当前全部可选 Skills 固化为不可变 revisions。
+- duplicate setup 同时锁定 identity 与 draft 行，和结构化 PATCH 共享 draft 并发边界，避免覆盖已成功的 CAS 更新。
+- 无 DB 引擎（如纯 CLI 运行）时 `build_draft_service()` 返回 None，文件成为唯一事实来源；工具用带普通异常补偿的多文件替换写入 per-user `config.yaml` / `SOUL.md`。
+- live DB 下同步 embedded custom-agent 运行被明确拒绝；默认 Agent 不受影响。
 
 ---
 
 ## 10. Alembic 迁移链
 
-M1 新增两个迁移，链式接在原 head 之后：
+M1 及其复审修复的当前迁移链如下：
 
 ```
 ... → 2026_07_09_umodel_caps (原 head)
-     → 2026_07_12_published_agents   (F1.1: 4 张表)
-     → 2026_07_12_agent_releases     (F1.2: 4 张表)   ← 新 head
+     → 2026_07_12_published_agents
+     → 2026_07_12_agent_releases
+     → 2026_07_12_widen_published_agent_ids  (兼容 stub)
+     → 2026_07_12_widen_agent_ids
+     → 2026_07_13_draft_skill_mode             ← 当前 head
 ```
 
 迁移特性：
@@ -411,7 +421,7 @@ M1 的 `current_release_id` 指针切换为 M2 的"草稿/发布分离"与"运�
 - ✅ F1.1 `published_agents` / `agent_drafts` 实体 + 仓储 + 迁移 + 测试
 - ✅ F1.2 `agent_releases` / `skill_revisions` + 子表 + 仓储 + 迁移 + 测试
 - ✅ F1.3 不可变内容存储抽象（`LocalContentStore`）
-- ✅ F1.4 `DraftService` + Gateway 草稿 CRUD API + setup/update 工具镜像
+- ✅ F1.4 `DraftService` + Gateway 草稿 CRUD API + setup/update 数据库单写与运行时草稿加载
 - ✅ F1.5 发布服务（校验 8 条 + 不可变 Release + 原子指针切换 + 回滚）
 - ✅ F1.6 指令拼接（AGENT.md + SOUL.md 标签区块）
 - ✅ F1.7 存量自定义 Agent 迁移导入（服务 + CLI + 路由）
@@ -696,7 +706,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 23. 第十轮代码复审修复（2026-07-13）
+## 31. 第十轮代码复审修复（2026-07-13）
 
 第十轮复审文档：[2026-07-13-m1-agent-control-plane-code-tenth-review.md](./2026-07-13-m1-agent-control-plane-code-tenth-review.md)
 
@@ -708,3 +718,156 @@ setup_agent 和 update_agent 改为 **先 DB 写入（DraftService，权威事�
 
 ### Minor-1：修复未 await 的 setup 测试
 两条数据保护测试的 `.coroutine()` 调用已正确用 `asyncio.run()` 包裹。
+
+---
+
+## 32. 第十一轮代码复审（2026-07-13）
+
+第十一轮复审文档：[2026-07-13-m1-agent-control-plane-code-eleventh-review.md](./2026-07-13-m1-agent-control-plane-code-eleventh-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认两条 setup 未 await 测试已真实执行、async Gateway 路径保持同 loop、同步 `.func` 已存在，setup 的 SOUL 与 Skills 也已合并为单次 draft bundle；当前无 Critical，仍有 2 个 Important 与 8 个 Minor。
+
+两个 Important 分别是：DB-first 只改变双写顺序，setup identity 与 draft bundle、update metadata 与两个 draft bundle 仍分别提交，且 DB 成功后的文件失败仍返回完整成功，因此 DB-only、部分 DB 与文件/DB 分叉状态均未关闭；同步 `_run_async` 假设 Embedded Client 必然没有 live engine，但 `build_draft_service()` 只检查全局 session factory，持久化已初始化时仍会通过 `asyncio.run()`/专用线程在新 loop 使用全局 AsyncEngine，重新引入跨 loop 风险。其余问题包括 DB 失败残留临时文件、缺少真实工具/同步入口测试、Skill barrier、生产 Import、并发 CAS、SQLite schema 与 PostgreSQL 必跑门禁。
+
+---
+
+## 33. 第十一轮代码复审修复（2026-07-13）
+
+第十一轮复审文档：[2026-07-13-m1-agent-control-plane-code-eleventh-review.md](./2026-07-13-m1-agent-control-plane-code-eleventh-review.md)
+
+### Important-1：单事务 authoring UOW 与可恢复兼容文件事务
+
+`DraftService.setup_authoring_bundle()` 将 identity、空草稿、SOUL 与 Skills 交给同一 SQLAlchemy session 一次提交；`update_authoring_bundle()` 将 metadata、SOUL/model/tool groups 与 Skills 一次提交并只递增一次 revision。兼容 `config.yaml` / `SOUL.md` 先 staging，在数据库 commit 前替换；任一文件替换或数据库提交失败时恢复备份并 rollback，成功后才删除备份。DB 失败路径统一清理 `.tmp` / `.bak`。
+
+### Important-2：同步入口显式隔离 live AsyncEngine
+
+同步 `.func` 仅在未初始化持久化时用 `asyncio.run()` 执行文件系统 fallback。检测到 live session factory 时立即返回明确错误，要求使用异步 Gateway；不再创建专用线程、新 event loop 或 timeout future，因此不会跨 loop 复用全局 AsyncEngine。异步 `.coroutine` 路径继续直接 await。
+
+### Minor 修复与门禁
+
+- 新增真实 SQLite setup/update UOW 回滚、单 revision、文件失败恢复与 `.func` live-persistence 拒绝测试。
+- Skill revision 与 Draft CAS 并发测试加入确定性 barrier；生产 `build_import_service()` owner-aware adapter 获得直接覆盖。
+- SQLite 迁移实际重建并反射 `VARCHAR(64)` ID/FK；PostgreSQL 16 加入 backend CI service，CI 设置 `REQUIRE_POSTGRES_TESTS=1`，不可再以 skip 绕过。
+
+---
+
+## 34. 第十二轮代码复审（2026-07-13）
+
+第十二轮复审文档：[2026-07-13-m1-agent-control-plane-code-twelfth-review.md](./2026-07-13-m1-agent-control-plane-code-twelfth-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认单 SQL commit、普通文件/DB 异常补偿、live persistence 同步入口隔离、Skill barrier、生产 Import、bundle CAS、SQLite schema 与 PostgreSQL CI migration gate 均有实质修复；当前无 Critical，仍有 2 个 Important 与 4 个 Minor。
+
+两个 Important 分别是：`AgentFileTransaction` 只有进程内 backup 映射，正式文件在 DB commit 前替换，进程中断后没有 journal/启动恢复，仍会留下文件新值、数据库旧值与孤立 `.bak`；duplicate setup 只锁 identity 行，draft 更新没有 row lock/CAS，可与结构化 PATCH 同时基于 revision=N 成功并覆盖 PATCH。其余问题包括 Ruff format 门禁失败、setup 故障测试已失效、partial-update CAS 测试仍串行，以及 authoring UOW 返回值错误省略既有 Connector grants。
+
+---
+
+## 35. 第十二轮代码复审修复（2026-07-13）
+
+第十二轮复审文档：[2026-07-13-m1-agent-control-plane-code-twelfth-review.md](./2026-07-13-m1-agent-control-plane-code-twelfth-review.md)
+
+### Important-1：持久化模式取消文件/数据库双写
+
+SQLite/PostgreSQL 模式的 `setup_agent` / `update_agent` 现在只提交数据库 authoring UOW，旧 `SOUL.md` / `config.yaml` 不再是第二写目标，因此进程中断不会产生跨介质分叉或孤立 `.bak`。Gateway worker 在异步上下文中用 `runtime_loader` 按 owner + slug 读取草稿，并在构建同步 LangGraph 前注入 AgentConfig、组合指令、skill-selection mode 与 draft revision。无数据库 CLI/embedded 仍保留 `AgentFileTransaction` 作为单一文件事实来源；live DB 下同步 embedded custom-agent 运行明确拒绝。
+
+新增 `agent_drafts.skill_selection_mode` 及迁移 `2026_07_13_draft_skill_mode`，完整区分 `skills=None`（继承全部可用 Skills）与 `skills=[]`（显式禁用全部 Skills）；由于历史无 skill rows 无法区分省略与显式空集合，迁移保守回填为 `explicit`，仅新的对话式/旧导入省略配置显式选择 `inherit`。
+
+### Important-2：duplicate setup 锁定 draft 并与 PATCH 串行化
+
+duplicate setup 在锁定 owner + slug identity 后继续用 `SELECT ... FOR UPDATE` 锁定 `agent_drafts` 行，再基于锁内最新 revision 更新。新增 PostgreSQL 双连接并发测试：setup 持锁暂停时 PATCH 到达 CAS，setup 提交后 PATCH 必须冲突，最终状态保留 setup 的完整 bundle，不出现 lost update。CI 通过 `REQUIRE_POSTGRES_TESTS=1` 使该测试在 PostgreSQL job 中必跑。
+
+### Minor 修复与门禁
+
+- Ruff format/check 已覆盖本轮全部 Python 改动。
+- setup 文件回滚测试改为真实写入原文件，并在替换 `SOUL.md` 时注入故障，验证原内容恢复且无 `.tmp` / `.bak`。
+- `update_with_revision` 测试改为 barrier + `asyncio.gather` 的真实竞争，只允许一个 revision=N 更新成功。
+- authoring UOW 返回值补齐既有 connector grants；数据库 flush 失败测试验证完整 rollback，不再依赖已移除的文件回调假对象。
+- 真实 HTTP bootstrap E2E 改为通过 owner-scoped control-plane API 验证数据库草稿，并断言持久化模式不创建兼容文件。
+
+---
+
+## 36. 第十三轮代码复审（2026-07-13）
+
+第十三轮复审文档：[2026-07-13-m1-agent-control-plane-code-thirteenth-review.md](./2026-07-13-m1-agent-control-plane-code-thirteenth-review.md)
+
+复审结论：**Ready to merge：No**。第十二轮提出的文件/数据库双写、duplicate setup lost update、Ruff 格式、失效故障测试、串行 partial CAS 与 Connector grants 返回值问题均已关闭；当前无 Critical，仍有 4 个 Important 与 3 个 Minor。
+
+四个 Important 分别是：数据库启用后，尚未导入的旧文件系统 Agent 会直接报 draft not found，违反迁移窗口兼容验收；请求 `config.context` 中的 `__agent_*` 字段会在运行时配置合并时覆盖服务端数据库 hydration；`skill_selection_mode='inherit'` 只影响草稿运行，发布服务仍按空技能子表创建零 Skill revision 的 Release；数据库草稿运行时只注入 SOUL.md，忽略 AGENT.md 与已有的组合指令函数。
+
+其余问题包括 authoring state 由两个 session 组成、无法保证单快照读取，完整仓库 `make lint` 仍有 9 个非本轮 M1 文件错误，以及新运行时测试尚未覆盖 worker/HTTP 的真实下一轮执行。M1 专项回归为 342 passed、3 skipped；真实 HTTP bootstrap 为 1 passed；27 个 M1 Python 改动文件的 Ruff check/format 均通过。
+
+---
+
+## 37. 第十三轮代码复审修复（2026-07-13）
+
+第十三轮复审文档：[2026-07-13-m1-agent-control-plane-code-thirteenth-review.md](./2026-07-13-m1-agent-control-plane-code-thirteenth-review.md)
+
+### Important-1：数据库 miss 的 owner 旧文件只读回退
+
+数据库明确返回 owner + slug 无草稿时，runtime loader 仅检查当前 owner 的旧 `config.yaml` 并标记为只读 filesystem 来源；数据库连接/查询/构建异常继续向上传播，其他 owner 与共享目录均不可回退。新增 DB miss、跨 owner 拒绝及真实 HTTP legacy 下一轮运行覆盖。
+
+### Important-2：`__agent_*` 服务端保留字段隔离
+
+Gateway 对嵌套 `config.context` 使用与顶层 context 相同的 allowlist，并从请求 `configurable` 清除 `__agent_*`；runtime hydration 在写入数据库可信值前再次清除两类容器。真实 HTTP 用伪造 config、instructions、tool groups 与 revision 发起下一轮运行，实际 prompt/tool policy 仍只使用数据库草稿。
+
+### Important-3：明确 Skill 默认值并固化继承发布集合
+
+模型、迁移和结构化创建默认改为 `explicit + []`；历史行保守迁移为 `explicit`，只有新的对话式 setup/旧导入省略 Skills 时写入 `inherit`。发布继承草稿前按 owner 枚举当前全部可选 Skills，再逐个固定内容寻址 revision；显式空集合继续发布零 Skills。
+
+### Important-4：数据库草稿使用完整组合指令
+
+Hydration 统一调用 `compose_agent_instructions(agent_markdown, soul_markdown)`，保留 `<agent_instructions>` 后 `<agent_soul>` 的顺序；full graph 与 flash direct 均直接消费该可信组合块，不再二次套 `<soul>`。only-AGENT、only-SOUL 与 both 路径由单元测试及真实 HTTP prompt 断言覆盖。
+
+### Minor 修复与门禁
+
+- Repository 新增 owner + slug 的单 SQL authoring snapshot，一次加载 identity、draft、skills 与 connector grants，`DraftService.get_authoring_state()` 直接委托。
+- 真实 HTTP E2E 从 bootstrap 继续发起 custom-agent 下一轮运行，覆盖数据库 prompt/tool policy、伪造字段隔离和 owner 旧文件回退。
+- 修复全 `backend/` Ruff 遗留错误，并以 `ruff check .` 与 `ruff format --check .` 作为完整仓库门禁。
+
+---
+
+## 38. 第十四轮代码复审（2026-07-14）
+
+第十四轮复审文档：[2026-07-14-m1-agent-control-plane-code-fourteenth-review.md](./2026-07-14-m1-agent-control-plane-code-fourteenth-review.md)
+
+复审结论：**Ready to merge：No**。第十三轮的 4 个 Important 与 3 个 Minor 均已关闭；当前无 Critical，新发现 2 个 Important 与 2 个 Minor。
+
+两个 Important 均位于发布快照一致性边界：`PublishService` 在发布事务外通过多条 SQL 读取 draft、Skills 与 Connector grants，且最终事务没有锁定或重检 draft revision，并发 PATCH 可生成从未作为单一 revision 存在过的混合 Release；生产 Skill adapter 又分别为枚举、可选性校验、文件读取和 visibility/caps 构建独立索引，校验后的禁用/删除/owner 变化可导致空内容或默认 public revision 被固化。
+
+两个 Minor 分别是 Alembic `fileConfig()` 在 Gateway 自动迁移时禁用已加载应用 logger、造成生产日志静默和测试顺序依赖，以及结构化创建的宽松 slug 契约与当前草稿运行时的字符校验/小写归一化不一致。完整 Ruff 门禁通过；第十三轮修复专项为 83 passed、1 skipped；扩展 M1 回归因 logger 顺序依赖为 1 failed、414 passed、3 skipped；本地 PostgreSQL 仍不可用。
+
+---
+
+## 39. 第十四轮代码复审修复（2026-07-14）
+
+第十四轮复审文档：[2026-07-14-m1-agent-control-plane-code-fourteenth-review.md](./2026-07-14-m1-agent-control-plane-code-fourteenth-review.md)
+
+### Important-1：发布草稿快照与 revision 一致性边界
+
+`AgentDraftRepository.get_publish_snapshot()` 使用单条 joined SQL 一次读取 draft、Skills 与 Connector grants，避免 PostgreSQL `READ COMMITTED` 下多条 SELECT 拼出混合状态。所有直接替换 Skill/grant 子表的 mutator 都在同一事务中锁定并递增 draft revision。发布完成校验后，在 Release 写事务内对 owner-scoped draft 行执行 `FOR UPDATE` 并复核已捕获 revision；不一致时返回 `DRAFT_REVISION_CONFLICT`，不写 Skill revision、Release 或 current pointer。新增 PostgreSQL 双连接回归，固定“发布快照后暂停 → 并发 PATCH 提交 → 发布恢复”的时序，并断言冲突且无 Release。
+
+### Important-2：单一、不可变、fail-closed 的 Skill 发布快照
+
+生产 Skill adapter 新增一次性 owner-scoped snapshot 解析：enabled/selectable、source、visibility、owner、declared connector capabilities 与全部文件 bytes 来自同一个索引视图，并封装为冻结对象。显式选择与 `inherit` 物化都只消费该对象；校验、checksum、content store 和 Skill revision 不再重新读取 live storage。元数据缺失、禁用、private owner 不匹配、目录缺失或缺少非空 `SKILL.md` 都返回不可发布结果，且不再默认回退为 `public`。新增内容变更后的旧 bytes 固化、缺失 `SKILL.md`、private owner 和可变 fake index 竞态覆盖。
+
+### Minor：日志与 slug 契约
+
+- Alembic `fileConfig()` 显式使用 `disable_existing_loggers=False`，Gateway lifespan 自动迁移后 `app.*` / `deerflow.*` logger 仍保持启用，并增加顺序回归测试。
+- Published-Agent slug 统一为保留大小写的 `[A-Za-z0-9-]{1,64}`：结构化创建、DraftService、旧文件导入、Gateway assistant 选择和数据库草稿运行时查询复用同一校验函数，不再小写或把下划线改为连字符。
+
+### 验证
+
+- 第十四轮聚焦测试：`123 passed, 2 skipped`；跳过项为本地无 PostgreSQL 的两条双连接用例，CI 通过 `REQUIRE_POSTGRES_TESTS=1` 强制执行。
+- 当前工作区全部 22 个改动测试文件回归：排除两个需要 Windows symlink 特权、在测试准备阶段以 `WinError 1314` 失败的 uploads 用例后，原始运行为 `438 passed, 4 skipped, 2 deselected`；随后新增的 mixed-case slug 路由回归单独通过，因此当前等价覆盖为 439 passed。未排除运行为 `438 passed, 4 skipped, 2 failed`，两个失败均未进入业务代码。
+- 全 backend Ruff：`ruff check .` 与 `ruff format --check .` 通过（652 files）。Alembic logger 顺序最小复现：`4 passed`。
+
+---
+
+## 40. 第十五轮代码复审（2026-07-14）
+
+第十五轮复审文档：[2026-07-14-m1-agent-control-plane-code-fifteenth-review.md](./2026-07-14-m1-agent-control-plane-code-fifteenth-review.md)
+
+复审结论：**Ready to merge：No**。第十四轮的单 SQL 草稿发布快照、最终 revision 重检、Alembic logger 与 slug 契约已实质关闭；Skill 快照已做到解析后不再重读和缺失 fail closed，但 `load_skills()` 解析出的 caps 与随后捕获的文件 bytes 仍可来自不同内容版本。当前无 Critical，仍有 3 个 Important 与 2 个 Minor。
+
+三个 Important 分别是：Skill 的 connector caps 没有从最终固化的 `SKILL.md` bytes 派生，同 checksum 可长期复用错误元数据；publish 与对话式 authoring 的 identity/draft 行锁顺序不统一，PostgreSQL 下存在 deadlock/事务中止风险；Connector grant 只校验实例 active/owner/type 存在，不校验该 type 是否支持被授予 capability，任意 owned Connector 可占位满足 Skill 要求。
+
+两个 Minor 分别是 PATCH draft 的 Skills/grants 仍使用无结构 dict，畸形/重复输入可能从客户端 422 变成服务端 500；旧 Agent 导入由三个独立提交组成，中途失败会留下无法直接重试的部分 Agent。全 backend Ruff 通过；第十四轮专项为 134 passed、3 skipped；当前改动测试等价覆盖为 439 passed、4 skipped、2 deselected；本地 PostgreSQL 不可用，全量 pytest 在 244 秒内未完成。

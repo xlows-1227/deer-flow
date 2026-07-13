@@ -14,8 +14,9 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from deerflow.config.agents_config import validate_agent_slug
 from deerflow.publishing.draft_service import (
     ConnectorNotGrantableError,
     DraftConflictError,
@@ -84,6 +85,11 @@ class CreateAgentRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
     avatar_ref: str | None = None
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value: str) -> str:
+        return validate_agent_slug(value)
 
 
 class PatchDraftRequest(BaseModel):
@@ -268,6 +274,14 @@ async def publish_agent(
         # (code-review Important-4).
         if exc.violations and exc.violations[0].code == "AGENT_NOT_FOUND":
             raise HTTPException(status_code=404, detail="Agent not found") from exc
+        if any(v.code == "DRAFT_REVISION_CONFLICT" for v in exc.violations):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "draft_revision_conflict",
+                    "message": "Draft changed while it was being published; retry.",
+                },
+            ) from exc
         raise HTTPException(
             status_code=422,
             detail={

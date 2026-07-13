@@ -13,10 +13,34 @@ metadata trustworthy (code-review Important-1).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from deerflow.skills.types import SkillCategory
+
+
+@dataclass(frozen=True)
+class SkillPublishSnapshot:
+    """Fail-closed metadata and file bytes captured for one publish attempt."""
+
+    skill_name: str
+    source: str
+    visibility: str
+    owner_user_id: str | None
+    declared_connector_caps: tuple[str, ...]
+    files: tuple[tuple[str, bytes], ...]
+
+    def file_map(self) -> dict[str, bytes]:
+        return dict(self.files)
+
+    def validation_info(self) -> dict[str, Any]:
+        return {
+            "visibility": self.visibility,
+            "owner": self.owner_user_id,
+            "caps": list(self.declared_connector_caps),
+        }
 
 
 class StorageSkillsIndex:
@@ -80,6 +104,78 @@ class StorageSkillsIndex:
         than any client-supplied ``source``.
         """
         return self._ensure_index().get(name)
+
+    def list_selectable_by(self, owner_user_id: str) -> list[dict[str, str]]:
+        """Return the owner's current enabled skill set in stable order."""
+        result: list[dict[str, str]] = []
+        for name in sorted(self._ensure_index()):
+            if not self.is_selectable_by(name, owner_user_id):
+                continue
+            info = self._ensure_index()[name]
+            result.append(
+                {
+                    "skill_name": name,
+                    "source": ("private" if info.get("visibility") == "private" else "public"),
+                }
+            )
+        return result
+
+    def resolve_publish_snapshots(
+        self,
+        skill_names: Sequence[str] | None,
+        owner_user_id: str,
+    ) -> dict[str, SkillPublishSnapshot | None]:
+        """Resolve metadata, authorization and files from one cached index.
+
+        ``skill_names=None`` means all currently selectable skills (inherit).
+        Every candidate remains present in the result even when file capture
+        fails so the publish validator can fail closed instead of silently
+        dropping it.
+        """
+        index = self._ensure_index()
+        names = [name for name in sorted(index) if self.is_selectable_by(name, owner_user_id)] if skill_names is None else list(dict.fromkeys(skill_names))
+        return {name: self._resolve_publish_snapshot(name, owner_user_id) for name in names}
+
+    def _resolve_publish_snapshot(
+        self,
+        name: str,
+        owner_user_id: str,
+    ) -> SkillPublishSnapshot | None:
+        info = self._ensure_index().get(name)
+        if info is None or not self.is_selectable_by(name, owner_user_id):
+            return None
+        visibility = info.get("visibility")
+        owner = info.get("owner")
+        if visibility not in {"public", "private"}:
+            return None
+        if visibility == "private" and (not isinstance(owner, str) or owner != owner_user_id):
+            return None
+        skill_dir_value = info.get("skill_dir")
+        if not skill_dir_value:
+            return None
+        skill_dir = Path(skill_dir_value)
+        if not skill_dir.is_dir():
+            return None
+        files: dict[str, bytes] = {}
+        try:
+            for path in skill_dir.rglob("*"):
+                relative = path.relative_to(skill_dir)
+                if path.is_file() and not any(part.startswith(".") for part in relative.parts):
+                    files[relative.as_posix()] = path.read_bytes()
+        except OSError:
+            # A concurrent delete/rename or unreadable file invalidates the
+            # whole resolution. Never publish a partial file snapshot.
+            return None
+        if not files.get("SKILL.md"):
+            return None
+        return SkillPublishSnapshot(
+            skill_name=name,
+            source=visibility,
+            visibility=visibility,
+            owner_user_id=owner if visibility == "private" else None,
+            declared_connector_caps=tuple(str(cap) for cap in info.get("caps") or []),
+            files=tuple(sorted(files.items())),
+        )
 
     def files_for(self, name: str) -> dict[str, bytes]:
         """Snapshot the skill's files (SKILL.md + siblings) for content addressing.

@@ -10,6 +10,7 @@ factories return ``None`` and callers fall back to the legacy filesystem path.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from deerflow.persistence.engine import get_session_factory
@@ -39,6 +40,21 @@ class _OwnerAwareSkillsIndex:
         # Declared connector capabilities are owner-independent (they come from
         # the skill's SKILL.md frontmatter), so resolve with a placeholder owner.
         return self._index("").get(name)
+
+    def list_selectable_by(self, owner_user_id: str) -> list[dict[str, str]]:
+        return self._index(owner_user_id).list_selectable_by(owner_user_id)
+
+    def resolve_publish_snapshots(
+        self,
+        skill_names: Sequence[str] | None,
+        owner_user_id: str,
+    ):
+        # One StorageSkillsIndex instance supplies metadata, authorization and
+        # file bytes for the whole publish attempt.
+        return self._index(owner_user_id).resolve_publish_snapshots(
+            skill_names,
+            owner_user_id,
+        )
 
     def files_for(self, name: str) -> dict[str, bytes]:
         return self._index("").files_for(name)

@@ -53,10 +53,7 @@ def _derive_internal_token() -> str:
     # Single-process development fallback.  This token changes on every process
     # restart, so it is NOT suitable for multi-worker deployments.
     logger.warning(
-        "AUTH_JWT_SECRET is not set and no persisted auth secret is available; "
-        "using a process-local internal auth token. Multi-worker Gateway "
-        "deployments require a shared JWT secret so all workers accept the "
-        "same internal token."
+        "AUTH_JWT_SECRET is not set and no persisted auth secret is available; using a process-local internal auth token. Multi-worker Gateway deployments require a shared JWT secret so all workers accept the same internal token."
     )
     return secrets.token_urlsafe(32)
 

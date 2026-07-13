@@ -69,6 +69,12 @@ class AgentDraftRow(Base):
     model_name: Mapped[str | None] = mapped_column(String(128))
     tool_groups_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     quota_overrides_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    skill_selection_mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="explicit",
+        server_default="explicit",
+    )
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
     updated_by: Mapped[str] = mapped_column(String(36), nullable=False)

@@ -120,10 +120,7 @@ def load_ldap_config_from_env() -> LdapConfig:
     # Downgrade to disabled if the URL/base are missing — LDAP cannot work
     # without them. We log loudly so operators notice the misconfiguration.
     if enabled and (not url or not base):
-        logger.warning(
-            "AUTH_LDAP_ENABLED=true but AUTH_LDAP_URL or AUTH_LDAP_BASE is empty; "
-            "LDAP login disabled. Set both or turn off AUTH_LDAP_ENABLED."
-        )
+        logger.warning("AUTH_LDAP_ENABLED=true but AUTH_LDAP_URL or AUTH_LDAP_BASE is empty; LDAP login disabled. Set both or turn off AUTH_LDAP_ENABLED.")
         enabled = False
 
     return LdapConfig(

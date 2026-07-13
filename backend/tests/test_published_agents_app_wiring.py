@@ -133,12 +133,17 @@ def test_lifespan_mounts_services_on_app_state(staged_env):
     The lifespan only runs when the ASGI app actually starts (TestClient context
     manager enters it). We assert the services are mounted while the app is live.
     """
+    import logging
+
     from starlette.testclient import TestClient
 
     from app.gateway.app import create_app
 
+    application_logger = logging.getLogger("app.gateway.services")
+    application_logger.disabled = False
     app = create_app()
     with TestClient(app):
+        assert application_logger.disabled is False
         assert hasattr(app.state, "draft_service"), "draft_service not mounted on app.state"
         assert hasattr(app.state, "publish_service"), "publish_service not mounted on app.state"
         assert hasattr(app.state, "import_service"), "import_service not mounted on app.state"

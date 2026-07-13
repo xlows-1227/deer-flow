@@ -19,17 +19,21 @@ during the migration window.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from deerflow.config.agents_config import validate_agent_slug
 from deerflow.persistence.published_agent import (
     AgentDraftRepository,
     PublishedAgentRepository,
 )
 from deerflow.publishing.draft_service import SkillsIndex
+
+logger = logging.getLogger(__name__)
 
 
 class ImportAlreadyExistsError(Exception):
@@ -47,6 +51,7 @@ class ImportCandidate:
     model_name: str | None
     tool_groups: list[str]
     skills: list[str]
+    skills_configured: bool
     source_dir: str
 
 
@@ -86,6 +91,11 @@ class AgentImportService:
         for entry in sorted(root.iterdir()):
             if not entry.is_dir():
                 continue
+            try:
+                slug = validate_agent_slug(entry.name)
+            except ValueError:
+                logger.warning("Skipping legacy agent directory with invalid slug: %s", entry.name)
+                continue
             cfg_path = entry / "config.yaml"
             soul_path = entry / "SOUL.md"
             if not cfg_path.exists() and not soul_path.exists():
@@ -94,13 +104,14 @@ class AgentImportService:
             soul = soul_path.read_text(encoding="utf-8") if soul_path.exists() else ""
             candidates.append(
                 ImportCandidate(
-                    name=entry.name,
-                    display_name=cfg.get("name") or entry.name,
+                    name=slug,
+                    display_name=cfg.get("name") or slug,
                     description=cfg.get("description") or "",
                     soul_markdown=soul,
                     model_name=cfg.get("model"),
                     tool_groups=list(cfg.get("tool_groups") or []),
                     skills=list(cfg.get("skills") or []),
+                    skills_configured="skills" in cfg,
                     source_dir=str(entry),
                 )
             )
@@ -133,6 +144,7 @@ class AgentImportService:
                 slug=candidate.name,
                 display_name=candidate.display_name,
                 description=candidate.description or None,
+                skill_selection_mode=("explicit" if candidate.skills_configured else "inherit"),
             )
         except ValueError as exc:
             raise ImportAlreadyExistsError(str(exc)) from exc
@@ -161,7 +173,7 @@ class AgentImportService:
                 selected.append({"skill_name": skill_name, "source": "private" if visibility == "private" else "public"})
             else:
                 unresolved.append(skill_name)
-        if selected:
+        if candidate.skills_configured:
             await self._drafts.replace_skills(agent["id"], owner_user_id=owner_user_id, skills=selected)
 
         return {

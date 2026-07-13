@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -20,6 +19,7 @@ from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.agents_config import validate_agent_slug
 from deerflow.config.app_config import get_app_config
 from deerflow.config.effective_config import effective_app_config_scope
 from deerflow.runtime import (
@@ -140,6 +140,23 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+_SERVER_RESERVED_CONFIG_PREFIXES: tuple[str, ...] = ("__agent_",)
+
+
+def _is_server_reserved_config_key(key: object) -> bool:
+    """Return whether an inbound runtime key belongs to the server."""
+    return isinstance(key, str) and key.startswith(_SERVER_RESERVED_CONFIG_PREFIXES)
+
+
+def _sanitize_client_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply the public run-context allowlist to nested ``config.context``."""
+    return {key: value for key, value in context.items() if key in _CONTEXT_CONFIGURABLE_KEYS and not _is_server_reserved_config_key(key)}
+
+
+def _sanitize_client_configurable(configurable: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve public LangGraph options while removing server-owned fields."""
+    return {key: value for key, value in configurable.items() if not _is_server_reserved_config_key(key)}
+
 
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, thread_id: str | None = None) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
@@ -208,9 +225,9 @@ def build_run_config(
     ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
     whichever runtime options container is active: ``context`` for
     LangGraph >= 0.6.0 requests, otherwise ``configurable``.
-    ``make_lead_agent`` reads this key to load the matching
-    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
-    silently runs as the default lead agent.
+    ``make_lead_agent`` reads this key to select the matching owner-scoped
+    database draft (or that owner's read-only legacy files during migration)
+    — without it the agent silently runs as the default lead agent.
 
     This mirrors the channel manager's ``_resolve_run_params`` logic so that
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
@@ -233,13 +250,20 @@ def build_run_config(
             if context_value is None:
                 context = {}
             elif isinstance(context_value, Mapping):
-                context = dict(context_value)
+                context = _sanitize_client_context(context_value)
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
+            if "thread_id" in context:
+                context["thread_id"] = thread_id
             config["context"] = context
         else:
-            configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable", {}))
+            configurable_value = request_config.get("configurable", {})
+            if configurable_value is None:
+                configurable_value = {}
+            if not isinstance(configurable_value, Mapping):
+                raise ValueError("request config 'configurable' must be a mapping or null.")
+            configurable = _sanitize_client_configurable(configurable_value)
+            configurable["thread_id"] = thread_id
             config["configurable"] = configurable
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
@@ -250,9 +274,7 @@ def build_run_config(
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit agent_name in the active runtime options container.
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
-        normalized = assistant_id.strip().lower().replace("_", "-")
-        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        agent_slug = validate_agent_slug(assistant_id)
         if "configurable" in config:
             target = config["configurable"]
         elif "context" in config:
@@ -260,8 +282,10 @@ def build_run_config(
         else:
             target = config.setdefault("configurable", {})
         if target is not None and "agent_name" not in target:
-            target["agent_name"] = normalized
-        config.setdefault("run_name", resolve_root_run_name(config, normalized))
+            target["agent_name"] = agent_slug
+        if target is not None and "agent_name" in target:
+            target["agent_name"] = validate_agent_slug(target["agent_name"])
+        config.setdefault("run_name", resolve_root_run_name(config, agent_slug))
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config

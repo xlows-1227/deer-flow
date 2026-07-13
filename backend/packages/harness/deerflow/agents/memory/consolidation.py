@@ -111,11 +111,5 @@ def _preserve_manual_items(profile: MemoryProfile, existing: MemoryProfile) -> N
     ):
         generated = getattr(profile, attr)
         generated_ids = {item.id for item in generated}
-        manual_items = [
-            item
-            for item in getattr(existing, attr)
-            if item.status == "active"
-            and any(ref.type == "manual" for ref in item.sourceRefs)
-            and item.id not in generated_ids
-        ]
+        manual_items = [item for item in getattr(existing, attr) if item.status == "active" and any(ref.type == "manual" for ref in item.sourceRefs) and item.id not in generated_ids]
         generated.extend(manual_items)

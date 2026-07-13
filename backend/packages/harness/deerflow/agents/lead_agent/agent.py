@@ -46,7 +46,12 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import SOUL_FILENAME, load_agent_config, resolve_agent_dir, validate_agent_name
+from deerflow.config.agents_config import (
+    SOUL_FILENAME,
+    load_agent_config,
+    resolve_agent_dir,
+    validate_agent_name,
+)
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
@@ -541,7 +546,20 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     agent_name = validate_agent_name(cfg.get("agent_name"))
     runtime_cache_key = cfg.get("__agent_graph_runtime_key")
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    from deerflow.publishing.runtime_loader import (
+        resolve_runtime_agent_config,
+        resolve_runtime_agent_instructions,
+    )
+
+    if cfg.get("__agent_config_source") in {"database", "filesystem"}:
+        agent_config = resolve_runtime_agent_config(
+            cfg,
+            agent_name=agent_name,
+            is_bootstrap=is_bootstrap,
+        )
+    else:
+        agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    agent_instructions = resolve_runtime_agent_instructions(cfg)
     forced_skill = cfg.get("skill_name")
     available_skills = _resolve_available_skill_names(
         agent_config,
@@ -619,7 +637,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         "lead_agent",
         _fingerprint_value(resolved_app_config),
         _fingerprint_value(agent_config) if agent_config is not None else None,
-        _agent_files_signature(agent_name, user_id=effective_user_id),
+        (
+            "database",
+            cfg.get("__agent_draft_revision"),
+        )
+        if cfg.get("__agent_config_source") == "database"
+        else _agent_files_signature(agent_name, user_id=effective_user_id),
         agent_name or "default",
         model_name,
         bool(thinking_enabled),
@@ -660,6 +683,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                     max_concurrent_subagents=max_concurrent_subagents,
                     available_skills=set(["bootstrap"]),
                     app_config=resolved_app_config,
+                    agent_instructions=agent_instructions,
                 ),
                 state_schema=ThreadState,
             ),
@@ -687,6 +711,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 agent_name=agent_name,
                 available_skills=available_skills,
                 app_config=resolved_app_config,
+                agent_instructions=agent_instructions,
             ),
             state_schema=ThreadState,
         ),

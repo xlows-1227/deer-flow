@@ -34,6 +34,7 @@ class SkillRevisionRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+        self._after_initial_miss = None
 
     async def get_or_create(
         self,
@@ -93,6 +94,8 @@ class SkillRevisionRepository:
         row = (await session.execute(stmt)).scalar_one_or_none()
         if row is not None:
             return row
+        if self._after_initial_miss is not None:
+            await self._after_initial_miss()
 
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert

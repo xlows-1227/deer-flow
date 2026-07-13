@@ -345,9 +345,7 @@ async def test_connector_service_encrypts_inline_credential_on_create(tmp_path):
         assert connector.credential.password in (None, "")
 
         # Round-trip via the multi store: ref decrypts back to {username, password}.
-        decrypted = MultiSecretStore().get_secret(
-            ConnectorCredentialRef(provider="inline", ref=connector.credential.ref)
-        )
+        decrypted = MultiSecretStore().get_secret(ConnectorCredentialRef(provider="inline", ref=connector.credential.ref))
         # ``decrypted.value`` is a JSON string per InlineSecretStore's contract.
         payload = json.loads(decrypted.value)
         assert payload == {"username": "readonly", "password": "s3cr3t"}
@@ -542,9 +540,7 @@ async def test_connector_service_partial_inline_credential_preserves_existing_se
         # Rotating only the username must not affect runtime behavior: the
         # stored ref still decrypts to the original password.
         await service.test_connector(connector.id, context=ConnectorRuntimeContext(user_id="u1"))
-        assert service._adapters["mysql"].received_secrets == [
-            {"username": "newuser", "password": "s3cr3t"}
-        ]
+        assert service._adapters["mysql"].received_secrets == [{"username": "newuser", "password": "s3cr3t"}]
 
         # A truly empty inline credential (provider but no username, no
         # ref, no password) carries no signal — the merge keeps the stored

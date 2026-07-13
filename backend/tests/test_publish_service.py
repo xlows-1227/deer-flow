@@ -9,6 +9,8 @@ without mutating history, and 404 semantics for unknown releases.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +30,7 @@ from deerflow.publishing.publish_service import (
     PublishService,
     ReleaseNotFoundError,
 )
+from deerflow.publishing.skills_index import SkillPublishSnapshot
 
 
 class _StaticSkillsIndex:
@@ -43,8 +46,29 @@ class _StaticSkillsIndex:
         caps = self._caps.get(name)
         return {"caps": caps} if caps is not None else None
 
+    def list_selectable_by(self, owner_user_id):  # noqa: ARG002
+        return [{"skill_name": name, "source": "public"} for name in sorted(self._caps)]
+
     def files_for(self, name):  # noqa: ARG002
         return {"SKILL.md": f"# {name}".encode()}
+
+    def resolve_publish_snapshots(self, skill_names, owner_user_id):  # noqa: ARG002
+        names = sorted(self._caps) if skill_names is None else list(skill_names)
+        return {
+            name: (
+                SkillPublishSnapshot(
+                    skill_name=name,
+                    source="public",
+                    visibility="public",
+                    owner_user_id=None,
+                    declared_connector_caps=tuple(self._caps[name]),
+                    files=(("SKILL.md", f"# {name}".encode()),),
+                )
+                if name in self._caps
+                else None
+            )
+            for name in names
+        }
 
 
 class _AsyncConnectorRepo:
@@ -186,6 +210,115 @@ async def test_skill_revision_pinning(env):
     r2 = await service.publish(agent["id"], owner_user_id="user-a")
     release2 = await release_repo.get(r2["release_id"], owner_user_id="user-a")
     assert release2["skills"][0]["skill_revision_id"] == pinned_revision
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_draft_changed_after_snapshot(env):
+    service, draft_service, _, _ = env
+    agent = await _seed_agent(draft_service)
+    snapshot_ready = asyncio.Event()
+    patch_done = asyncio.Event()
+
+    async def pause_after_snapshot(_snapshot):
+        snapshot_ready.set()
+        await patch_done.wait()
+
+    service._drafts._after_publish_snapshot = pause_after_snapshot  # noqa: SLF001
+    publish_task = asyncio.create_task(service.publish(agent["id"], owner_user_id="user-a"))
+    await snapshot_ready.wait()
+    draft = await draft_service.get_draft(agent["id"], owner_user_id="user-a")
+    await draft_service.update_draft(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=draft["revision"],
+        soul_markdown="# Concurrent edit",
+    )
+    patch_done.set()
+
+    with pytest.raises(PublishError) as exc:
+        await publish_task
+    assert [violation.code for violation in exc.value.violations] == ["DRAFT_REVISION_CONFLICT"]
+    assert await service.list_releases(agent["id"], owner_user_id="user-a") == []
+
+
+@pytest.mark.asyncio
+async def test_publish_uses_one_captured_skill_snapshot(env):
+    service, draft_service, _, release_repo = env
+    agent = await _seed_agent(draft_service)
+    original_resolver = service._skills.resolve_publish_snapshots  # noqa: SLF001
+
+    def resolve_then_mutate(skill_names, owner_user_id):
+        snapshots = original_resolver(skill_names, owner_user_id)
+        service._skills._caps.clear()  # noqa: SLF001
+        return snapshots
+
+    service._skills.resolve_publish_snapshots = resolve_then_mutate  # noqa: SLF001
+    result = await service.publish(agent["id"], owner_user_id="user-a")
+    release = await release_repo.get(result["release_id"], owner_user_id="user-a")
+    assert len(release["skills"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_fails_closed_when_selected_skill_cannot_be_snapshotted(env):
+    service, draft_service, _, _ = env
+    agent = await _seed_agent(draft_service)
+    service._skills._caps.clear()  # noqa: SLF001 - simulate delete/disable before capture
+
+    with pytest.raises(PublishError) as exc_info:
+        await service.publish(agent["id"], owner_user_id="user-a")
+
+    assert "SKILL_NOT_FOUND" in {violation.code for violation in exc_info.value.violations}
+    assert await service.list_releases(agent["id"], owner_user_id="user-a") == []
+
+
+@pytest.mark.asyncio
+async def test_inherited_skills_are_materialized_into_release(env):
+    service, draft_service, _, release_repo = env
+    saved, unresolved = await draft_service.setup_authoring_bundle(
+        owner_user_id="user-a",
+        slug="inherits",
+        display_name="Inherits",
+        description=None,
+        soul_markdown="# Soul",
+        skill_names=None,
+    )
+    assert unresolved == []
+    agent_id = saved["agent"]["id"]
+    assert saved["draft"]["skill_selection_mode"] == "inherit"
+    assert saved["draft"]["skills"] == []
+    await draft_service.set_connector_grants(
+        agent_id,
+        owner_user_id="user-a",
+        grants=[
+            {
+                "connector_instance_id": "conn_1",
+                "capability": "database.query",
+            }
+        ],
+    )
+
+    published = await service.publish(agent_id, owner_user_id="user-a")
+    release = await release_repo.get(
+        published["release_id"],
+        owner_user_id="user-a",
+    )
+    assert len(release["skills"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_skills_publish_empty_release(env):
+    service, draft_service, _, release_repo = env
+    agent = await _seed_agent(draft_service, slug="no-skills", skills=False)
+    draft = await draft_service.get_draft(agent["id"], owner_user_id="user-a")
+    assert draft["skill_selection_mode"] == "explicit"
+    assert draft["skills"] == []
+
+    published = await service.publish(agent["id"], owner_user_id="user-a")
+    release = await release_repo.get(
+        published["release_id"],
+        owner_user_id="user-a",
+    )
+    assert release["skills"] == []
 
 
 @pytest.mark.asyncio

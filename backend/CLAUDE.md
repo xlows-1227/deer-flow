@@ -268,13 +268,15 @@ All repositories are owner-scoped: every read/write takes `owner_user_id` and cr
 
 - `draft_service.py` — `DraftService`: create/edit agents, partial draft updates (revision-conflict → 409), skill selection (ownership-checked), connector grants (ownership-checked), lifecycle (suspend/resume/archive, never delete).
 - `validation.py` — `validate_draft_for_publish()`: pure function implementing the 8 publish rules (design §8.2); aggregates all violations rather than fail-fast.
-- `publish_service.py` — `PublishService.publish()` (validate → pin skill revisions via content store → insert immutable release → atomic pointer switch) and `rollback()` (repoint `current_release_id` only).
+- `publish_service.py` — `PublishService.publish()` captures draft + skill/grant children in one SQL snapshot, resolves every selected/inherited Skill once into a fail-closed immutable metadata/file snapshot, validates, then locks and rechecks the draft revision in the release transaction before pinning Skill revisions, inserting the immutable release, and switching the pointer. Concurrent authoring returns `DRAFT_REVISION_CONFLICT` (HTTP 409) without a release. `rollback()` repoints `current_release_id` only. Studio drafts default to `explicit + []`; only conversational/legacy inputs that omit skills use `inherit`.
 - `content_store.py` — `ImmutableContentStore` protocol + `LocalContentStore`; opaque `cs://<ns>/<checksum>` refs, atomic writes, idempotent puts.
 - `instructions.py` — `compose_agent_instructions()`: AGENT.md then SOUL.md into labelled prompt blocks.
 - `import_service.py` — `AgentImportService`: imports legacy `users/{uid}/agents/{name}/` filesystem agents as `status=draft` rows (never auto-publishes, never deletes source files).
 - `factory.py` — `build_draft_service()` / `build_publish_service()`: wire the services to live persistence + skill/connector subsystems; return `None` when no DB engine is configured (CLI fallback).
 
 **Gateway routes** (`/api/published-agents`, session-only auth + CSRF):
+
+Published-Agent slugs use one exact, case-preserving contract across the control plane and database-backed runtime: `[A-Za-z0-9-]{1,64}`. Creation and legacy import reject/skip noncanonical slugs, and Gateway assistant routing never lowercases or rewrites them.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -290,11 +292,11 @@ All repositories are owner-scoped: every read/write takes `owner_user_id` and cr
 | GET | `/import/candidates` | Legacy filesystem agents importable by caller |
 | POST | `/import` | Import one legacy agent as a draft |
 
-The conversational `setup_agent` / `update_agent` tools are **async LangChain tools** (`async def`) that directly `await` `DraftService` on the Gateway's event loop — no executor, no cross-loop `AsyncEngine` sharing. They also provide a sync `.func` entry (via `_run_async`) for `DeerFlowClient.stream()` compatibility. DB write is **first** (authoritative source), filesystem compat write is **second** — DB failure prevents filesystem mutation entirely (no DB-only, filesystem-only, or divergent state). When persistence is unavailable (CLI), filesystem IS the source of truth and filesystem errors propagate. Unresolved skills are listed in the ToolMessage.
+The conversational `setup_agent` / `update_agent` tools are **async LangChain tools** (`async def`) that directly `await` `DraftService` on the Gateway's event loop — no executor and no cross-loop `AsyncEngine` sharing. Setup (identity + draft + skills) and update (metadata + all draft fields + skills) each use one SQLAlchemy session and one commit. Persistence mode writes only the database: before the synchronous graph factory runs, the async Gateway worker removes caller-supplied `__agent_*` fields and hydrates the owner-scoped draft into the run config, including combined AGENT→SOUL instructions, skill-selection mode, and draft revision. A confirmed database miss may read only that owner's legacy `SOUL.md` / `config.yaml` during migration; database/query errors, another owner's files, and the shared legacy directory never trigger fallback. When persistence is unavailable (CLI), files are the sole source of truth and a best-effort multi-file transaction compensates normal write errors. Sync embedded custom-agent runs are rejected while a live async database engine exists; default-agent embedded flows remain supported. Unresolved skills are listed in the ToolMessage.
 
 **Migration CLI**: `PYTHONPATH=. python scripts/migrate_published_agents.py [--dry-run] --user-id USER_ID` lists candidates and imports each as a draft.
 
-Alembic head after M1: `2026_07_12_widen_agent_ids` (chain: `... → 2026_07_09_umodel_caps → 2026_07_12_published_agents → 2026_07_12_agent_releases → 2026_07_12_widen_published_agent_ids (compat stub) → 2026_07_12_widen_agent_ids`).
+Alembic head after M1: `2026_07_13_draft_skill_mode` (chain: `... → 2026_07_09_umodel_caps → 2026_07_12_published_agents → 2026_07_12_agent_releases → 2026_07_12_widen_published_agent_ids (compat stub) → 2026_07_12_widen_agent_ids → 2026_07_13_draft_skill_mode`).
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
@@ -334,8 +336,8 @@ Alembic head after M1: `2026_07_12_widen_agent_ids` (chain: `... → 2026_07_09_
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
-   - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
-   - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
+   - `setup_agent` - Bootstrap-only: persist a brand-new custom-agent authoring draft (legacy files only in no-DB mode). Bound only when `is_bootstrap=True`.
+   - `update_agent` - Custom-agent-only: persist partial self-updates to the current authoring draft atomically (legacy files only in no-DB mode). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
 
@@ -428,7 +430,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 **Per-User Isolation**:
 - Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
 - Per-agent per-user memory at `{base_dir}/users/{user_id}/agents/{agent_name}/memory.json`
-- Custom agent definitions (`SOUL.md` + `config.yaml`) are also per-user at `{base_dir}/users/{user_id}/agents/{agent_name}/`. The legacy shared layout `{base_dir}/agents/{agent_name}/` remains read-only fallback for unmigrated installations
+- Database-backed custom-agent definitions are owner-scoped rows in the publishing control plane. Per-user `SOUL.md` + `config.yaml` under `{base_dir}/users/{user_id}/agents/{agent_name}/` remain the no-DB runtime format and, after a confirmed owner-scoped database miss, a read-only migration-window runtime fallback. Database/query failures do not fall back, and neither another user's files nor the shared legacy layout `{base_dir}/agents/{agent_name}/` is eligible while the database is enabled; the shared layout remains a no-DB compatibility fallback only
 - `user_id` is resolved via `get_effective_user_id()` from `deerflow.runtime.user_context`
 - In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
 - Absolute `storage_path` in config opts out of per-user isolation
@@ -515,6 +517,7 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 - Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
 - Supports `checkpointer` parameter for state persistence across turns
 - `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
+- With a live database engine, custom-agent conversations require the async Gateway so their owner-scoped draft can be hydrated on the engine's event loop; the synchronous embedded client rejects them. The default agent remains available.
 - See [docs/STREAMING.md](docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
 
 **Gateway Equivalent Methods** (replaces Gateway API):

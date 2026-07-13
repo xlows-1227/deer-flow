@@ -24,15 +24,20 @@ SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
+def validate_agent_slug(slug: str) -> str:
+    """Validate the exact, case-preserving custom-agent runtime identifier."""
+    if not isinstance(slug, str):
+        raise ValueError("Invalid agent name. Expected a string.")
+    if not 1 <= len(slug) <= 64 or not AGENT_NAME_PATTERN.fullmatch(slug):
+        raise ValueError(f"Invalid agent name '{slug}'. Must be 1-64 characters and match pattern: {AGENT_NAME_PATTERN.pattern}")
+    return slug
+
+
 def validate_agent_name(name: str | None) -> str | None:
     """Validate a custom agent name before using it in filesystem paths."""
     if name is None:
         return None
-    if not isinstance(name, str):
-        raise ValueError("Invalid agent name. Expected a string or None.")
-    if not AGENT_NAME_PATTERN.fullmatch(name):
-        raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
-    return name
+    return validate_agent_slug(name)
 
 
 class AgentConfig(BaseModel):
@@ -49,7 +54,12 @@ class AgentConfig(BaseModel):
     skills: list[str] | None = None
 
 
-def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
+def resolve_agent_dir(
+    name: str,
+    *,
+    user_id: str | None = None,
+    allow_shared_legacy: bool = True,
+) -> Path:
     """Return the on-disk directory for an agent, preferring the per-user layout.
 
     Resolution order:
@@ -63,6 +73,8 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
         name: Validated agent name.
         user_id: Owner of the agent. Defaults to the effective user from the
             request context (or ``"default"`` in no-auth mode).
+        allow_shared_legacy: Whether the pre-isolation shared directory may be
+            used when the owner's directory does not exist.
     """
     paths = get_paths()
     effective_user = user_id or get_effective_user_id()
@@ -71,13 +83,18 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
         return user_path
 
     legacy_path = paths.agent_dir(name)
-    if legacy_path.exists():
+    if allow_shared_legacy and legacy_path.exists():
         return legacy_path
 
     return user_path
 
 
-def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentConfig | None:
+def load_agent_config(
+    name: str | None,
+    *,
+    user_id: str | None = None,
+    allow_shared_legacy: bool = True,
+) -> AgentConfig | None:
     """Load the custom or default agent's config from its directory.
 
     Reads from the per-user layout first; falls back to the legacy shared layout
@@ -87,6 +104,8 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
         name: The agent name.
         user_id: Owner of the agent. Defaults to the effective user from the
             current request context.
+        allow_shared_legacy: Whether the pre-isolation shared directory may be
+            used when the owner's directory does not exist.
 
     Returns:
         AgentConfig instance, or ``None`` if ``name`` is ``None``.
@@ -100,7 +119,11 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
         return None
 
     name = validate_agent_name(name)
-    agent_dir = resolve_agent_dir(name, user_id=user_id)
+    agent_dir = resolve_agent_dir(
+        name,
+        user_id=user_id,
+        allow_shared_legacy=allow_shared_legacy,
+    )
     config_file = agent_dir / "config.yaml"
 
     if not agent_dir.exists():
@@ -126,7 +149,12 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
     return AgentConfig(**data)
 
 
-def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str | None:
+def load_agent_soul(
+    agent_name: str | None,
+    *,
+    user_id: str | None = None,
+    allow_shared_legacy: bool = True,
+) -> str | None:
     """Read the SOUL.md file for a custom agent, if it exists.
 
     SOUL.md defines the agent's personality, values, and behavioral guardrails.
@@ -136,12 +164,18 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         agent_name: The name of the agent or None for the default agent.
         user_id: Owner of the agent. Defaults to the effective user from the
             current request context.
+        allow_shared_legacy: Whether the pre-isolation shared directory may be
+            used when the owner's directory does not exist.
 
     Returns:
         The SOUL.md content as a string, or None if the file does not exist.
     """
     if agent_name:
-        agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
+        agent_dir = resolve_agent_dir(
+            agent_name,
+            user_id=user_id,
+            allow_shared_legacy=allow_shared_legacy,
+        )
     else:
         agent_dir = get_paths().base_dir
     soul_path = agent_dir / SOUL_FILENAME

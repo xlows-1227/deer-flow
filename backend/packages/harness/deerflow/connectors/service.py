@@ -372,7 +372,17 @@ class ConnectorService:
             )
             return result
         except ConnectorError as exc:
-            await write_connector_audit(self.repository, connector_id=connector_id, connector_type=instance.type, context=context, capability=DATABASE_SCHEMA_INSPECT, operation="test", decision="error", error_code=exc.code, error_message=exc.message)
+            await write_connector_audit(
+                self.repository,
+                connector_id=connector_id,
+                connector_type=instance.type,
+                context=context,
+                capability=DATABASE_SCHEMA_INSPECT,
+                operation="test",
+                decision="error",
+                error_code=exc.code,
+                error_message=exc.message,
+            )
             raise
 
     async def introspect_connector(self, connector_id: str, *, context: ConnectorRuntimeContext) -> ConnectorMetadata:
@@ -405,7 +415,17 @@ class ConnectorService:
             )
             return metadata
         except ConnectorError as exc:
-            await write_connector_audit(self.repository, connector_id=connector_id, connector_type=instance.type, context=context, capability=DATABASE_SCHEMA_INSPECT, operation="introspect", decision="deny" if exc.status_code in (400, 403) else "error", error_code=exc.code, error_message=exc.message)
+            await write_connector_audit(
+                self.repository,
+                connector_id=connector_id,
+                connector_type=instance.type,
+                context=context,
+                capability=DATABASE_SCHEMA_INSPECT,
+                operation="introspect",
+                decision=("deny" if exc.status_code in (400, 403) else "error"),
+                error_code=exc.code,
+                error_message=exc.message,
+            )
             raise
 
     async def get_cached_schema(self, connector_id: str, *, owner_id: str | None | object = ...) -> dict[str, Any] | None:

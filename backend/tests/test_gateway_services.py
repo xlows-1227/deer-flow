@@ -205,6 +205,24 @@ def test_build_run_config_custom_agent_injects_agent_name():
     assert config["run_name"] == "finalis"
 
 
+def test_build_run_config_preserves_case_sensitive_agent_slug():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", None, None, assistant_id="MiXeD")
+    assert config["configurable"]["agent_name"] == "MiXeD"
+    assert config["run_name"] == "MiXeD"
+
+
+def test_build_run_config_rejects_noncanonical_agent_slug():
+    import pytest
+
+    from app.gateway.services import build_run_config
+
+    for slug in ("bad/name", "has space", "under_score"):
+        with pytest.raises(ValueError, match="Invalid agent name"):
+            build_run_config("thread-1", None, None, assistant_id=slug)
+
+
 def test_build_run_config_lead_agent_no_agent_name():
     """'lead_agent' assistant_id must NOT inject configurable['agent_name']."""
     from app.gateway.services import build_run_config
@@ -465,11 +483,11 @@ def test_build_run_config_with_context():
 
     config = build_run_config(
         "thread-1",
-        {"context": {"user_id": "u-42", "thread_id": "thread-1"}},
+        {"context": {"model_name": "model-a", "thread_id": "thread-1"}},
         None,
     )
     assert "context" in config
-    assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["model_name"] == "model-a"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
 
@@ -514,13 +532,13 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
         config = build_run_config(
             "thread-1",
             {
-                "context": {"user_id": "u-42"},
+                "context": {"model_name": "model-a"},
                 "configurable": {"model_name": "gpt-4"},
             },
             None,
         )
     assert "context" in config
-    assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["model_name"] == "model-a"
     assert "configurable" not in config
     assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
 
@@ -537,6 +555,42 @@ def test_build_run_config_context_passthrough_other_keys():
     assert config["context"]["thread_id"] == "thread-1"
     assert "configurable" not in config
     assert config["tags"] == ["prod"]
+
+
+def test_build_run_config_drops_server_reserved_agent_fields():
+    from app.gateway.services import build_run_config
+
+    context_config = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "model_name": "model-a",
+                "user_id": "caller-user",
+                "__agent_config_source": "database",
+                "__agent_config": {"tool_groups": ["caller-tools"]},
+                "__agent_instructions": "CALLER",
+                "__agent_draft_revision": 999,
+            }
+        },
+        None,
+    )
+    assert context_config["context"] == {"model_name": "model-a"}
+
+    configurable_config = build_run_config(
+        "thread-1",
+        {
+            "configurable": {
+                "model_name": "model-a",
+                "thread_id": "caller-thread",
+                "__agent_instructions": "CALLER",
+            }
+        },
+        None,
+    )
+    assert configurable_config["configurable"] == {
+        "model_name": "model-a",
+        "thread_id": "thread-1",
+    }
 
 
 def test_build_run_config_no_request_config():

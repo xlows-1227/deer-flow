@@ -31,6 +31,7 @@ from deerflow.persistence.published_agent import (
 )
 from deerflow.persistence.skill_revision import SkillRevisionRepository
 from deerflow.publishing.content_store import ImmutableContentStore
+from deerflow.publishing.skills_index import SkillPublishSnapshot
 from deerflow.publishing.validation import (
     PLATFORM_QUOTA_DEFAULTS,
     PublishViolation,
@@ -48,6 +49,20 @@ class PublishError(Exception):
 
 class ReleaseNotFoundError(Exception):
     """Raised when a rollback target release_no does not exist for the owner."""
+
+
+class _SnapshotSkillsIndex:
+    """Validator adapter backed only by captured publish snapshots."""
+
+    def __init__(self, snapshots: dict[str, SkillPublishSnapshot | None]) -> None:
+        self._snapshots = snapshots
+
+    def is_selectable_by(self, name: str, owner_user_id: str) -> bool:  # noqa: ARG002
+        return self._snapshots.get(name) is not None
+
+    def get(self, name: str) -> dict[str, Any] | None:
+        snapshot = self._snapshots.get(name)
+        return snapshot.validation_info() if snapshot is not None else None
 
 
 def _skill_checksum(skill_name: str, files: dict[str, bytes]) -> str:
@@ -144,10 +159,46 @@ class PublishService:
     # publish
     # ------------------------------------------------------------------
 
+    def _resolve_skill_snapshots(
+        self,
+        draft: dict[str, Any],
+        *,
+        owner_user_id: str,
+    ) -> tuple[dict[str, Any], dict[str, SkillPublishSnapshot | None]]:
+        """Capture the only Skill state validation and revision writes may use."""
+        resolver = getattr(self._skills, "resolve_publish_snapshots", None)
+        if resolver is None:
+            raise PublishError(
+                [
+                    PublishViolation(
+                        "SKILL_INDEX_UNAVAILABLE",
+                        "Cannot resolve immutable Skill snapshots for this draft.",
+                    )
+                ]
+            )
+        inherit = draft.get("skill_selection_mode", "explicit") == "inherit"
+        selected_names = None if inherit else [entry["skill_name"] for entry in draft.get("skills") or []]
+        snapshots = resolver(selected_names, owner_user_id)
+        effective = dict(draft)
+        if inherit:
+            effective["skills"] = [
+                {
+                    "skill_name": name,
+                    "source": snapshot.source if snapshot is not None else "unresolved",
+                }
+                for name, snapshot in snapshots.items()
+            ]
+        return effective, snapshots
+
     async def publish(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any]:
-        draft = await self._drafts.get(agent_id, owner_user_id=owner_user_id)
+        get_snapshot = getattr(self._drafts, "get_publish_snapshot", self._drafts.get)
+        draft = await get_snapshot(agent_id, owner_user_id=owner_user_id)
         if draft is None:
             raise PublishError([PublishViolation("AGENT_NOT_FOUND", "Agent not found.")])
+        draft, skill_snapshots = self._resolve_skill_snapshots(
+            draft,
+            owner_user_id=owner_user_id,
+        )
         # Pre-resolve async connector ownership into a sync adapter so the
         # pure validator stays synchronous and easily testable.
         sync_connector_repo = await self._build_sync_connector_repo(draft, owner_user_id)
@@ -161,7 +212,7 @@ class PublishService:
         violations = validate_draft_for_publish(
             draft,
             owner_user_id=owner_user_id,
-            skills_index=self._skills,
+            skills_index=_SnapshotSkillsIndex(skill_snapshots),
             connector_repo=sync_connector_repo,
             model_index=effective_models,
             tool_group_whitelist=self._tool_group_whitelist,
@@ -174,22 +225,20 @@ class PublishService:
         prepared_skills: list[dict[str, Any]] = []
         for entry in draft.get("skills") or []:
             name = entry["skill_name"]
-            files = self._skills.files_for(name) if hasattr(self._skills, "files_for") else {b"SKILL.md": b""}
+            snapshot = skill_snapshots.get(name)
+            if snapshot is None:
+                # The validator above always emits SKILL_NOT_FOUND first.
+                raise AssertionError(f"validated Skill snapshot missing: {name}")
+            files = snapshot.file_map()
             checksum = _skill_checksum(name, files)
-            storage_key = checksum.split(":", 1)[1] if ":" in checksum else checksum
-            content_ref = self._content.put(namespace="skills", checksum=storage_key, files=files)
-            info = self._skills.get(name) if hasattr(self._skills, "get") else None
-            declared_caps = (info or {}).get("caps", []) if isinstance(info, dict) else []
-            visibility = (info or {}).get("visibility", "public") if isinstance(info, dict) else "public"
-            rev_owner = owner_user_id if visibility == "private" else None
             prepared_skills.append(
                 {
                     "skill_name": name,
-                    "owner_user_id": rev_owner,
-                    "visibility": visibility,
+                    "owner_user_id": snapshot.owner_user_id,
+                    "visibility": snapshot.visibility,
                     "content_checksum": checksum,
-                    "content_ref": content_ref,
-                    "declared_connector_caps": declared_caps,
+                    "declared_connector_caps": list(snapshot.declared_connector_caps),
+                    "files": files,
                 }
             )
 
@@ -235,10 +284,23 @@ class PublishService:
         """
         if self._sf is None:
             # Fallback (tests without a shared factory): do it in two steps.
+            latest = await self._drafts.get(agent_id, owner_user_id=owner_user_id)
+            if latest is None:
+                raise PublishError([PublishViolation("AGENT_NOT_FOUND", "Agent not found.")])
+            if latest.get("revision") != draft.get("revision"):
+                raise PublishError(
+                    [
+                        PublishViolation(
+                            "DRAFT_REVISION_CONFLICT",
+                            "Draft changed while it was being published; retry with the latest revision.",
+                        )
+                    ]
+                )
             skill_revision_ids: list[str] = []
             skill_links: list[dict[str, str]] = []
             for ps in prepared_skills:
-                rev = await self._skill_revs.get_or_create(**ps)
+                revision_values = self._store_skill_snapshot(ps)
+                rev = await self._skill_revs.get_or_create(**revision_values)
                 skill_revision_ids.append(rev["id"])
                 skill_links.append({"skill_revision_id": rev["id"]})
             return await self._releases.create_and_point(
@@ -262,10 +324,28 @@ class PublishService:
 
         async with self._sf() as session:
             async with session.begin():
+                revision_matches = await self._drafts.lock_revision_for_publish(
+                    session,
+                    agent_id,
+                    owner_user_id=owner_user_id,
+                    expected_revision=int(draft["revision"]),
+                )
+                if revision_matches is None:
+                    raise PublishError([PublishViolation("AGENT_NOT_FOUND", "Agent not found.")])
+                if not revision_matches:
+                    raise PublishError(
+                        [
+                            PublishViolation(
+                                "DRAFT_REVISION_CONFLICT",
+                                "Draft changed while it was being published; retry with the latest revision.",
+                            )
+                        ]
+                    )
                 skill_revision_ids = []
                 skill_links = []
                 for ps in prepared_skills:
-                    row = await self._skill_revs._get_or_create_in_session(session, **ps)  # noqa: SLF001
+                    revision_values = self._store_skill_snapshot(ps)
+                    row = await self._skill_revs._get_or_create_in_session(session, **revision_values)  # noqa: SLF001
                     skill_revision_ids.append(row.id)
                     skill_links.append({"skill_revision_id": row.id})
                 release = await self._releases.create_and_point(
@@ -286,6 +366,19 @@ class PublishService:
                     session=session,
                 )
             return release
+
+    def _store_skill_snapshot(self, prepared: dict[str, Any]) -> dict[str, Any]:
+        """Persist captured bytes and return immutable revision column values."""
+        values = dict(prepared)
+        files = values.pop("files")
+        checksum = values["content_checksum"]
+        storage_key = checksum.split(":", 1)[1] if ":" in checksum else checksum
+        values["content_ref"] = self._content.put(
+            namespace="skills",
+            checksum=storage_key,
+            files=files,
+        )
+        return values
 
     # ------------------------------------------------------------------
     # rollback

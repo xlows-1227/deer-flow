@@ -58,11 +58,7 @@ def _format_user_evidence(messages: list[Any]) -> str:
             continue
 
         if isinstance(content, list):
-            content = " ".join(
-                part if isinstance(part, str) else str(part.get("text", ""))
-                for part in content
-                if isinstance(part, str) or isinstance(part, dict)
-            )
+            content = " ".join(part if isinstance(part, str) else str(part.get("text", "")) for part in content if isinstance(part, str) or isinstance(part, dict))
         cleaned = _INJECTED_CONTEXT_RE.sub("", str(content)).strip()
         if cleaned:
             lines.append(f"User: {cleaned[:1000]}")

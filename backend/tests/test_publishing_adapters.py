@@ -255,3 +255,94 @@ def test_storage_skills_index_reports_private_visibility():
     assert info is not None, "private skill metadata should resolve"
     assert info["visibility"] == "private"
     assert info["owner"] == "user-a"
+
+
+def test_storage_skill_publish_snapshot_is_fail_closed_and_immutable(tmp_path):
+    skill_dir = tmp_path / "reporting"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("# Captured", encoding="utf-8")
+    storage = _make_storage(
+        [
+            {
+                "name": "reporting",
+                "category": "public",
+                "enabled": True,
+                "skill_dir": skill_dir,
+            }
+        ]
+    )
+    index = StorageSkillsIndex(storage, owner_user_id="user-a")
+
+    snapshots = index.resolve_publish_snapshots(["reporting"], "user-a")
+    snapshot = snapshots["reporting"]
+    assert snapshot is not None
+    skill_file.write_text("# Changed later", encoding="utf-8")
+    assert snapshot.file_map()["SKILL.md"] == b"# Captured"
+
+
+def test_storage_skill_publish_snapshot_rejects_missing_skill_md(tmp_path):
+    skill_dir = tmp_path / "broken"
+    skill_dir.mkdir()
+    (skill_dir / "notes.txt").write_text("not a skill", encoding="utf-8")
+    storage = _make_storage(
+        [
+            {
+                "name": "broken",
+                "category": "public",
+                "enabled": True,
+                "skill_dir": skill_dir,
+            }
+        ]
+    )
+    index = StorageSkillsIndex(storage, owner_user_id="user-a")
+    assert index.resolve_publish_snapshots(["broken"], "user-a") == {"broken": None}
+
+
+def test_storage_private_skill_publish_snapshot_requires_exact_owner(tmp_path):
+    skill_dir = tmp_path / "private"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Private", encoding="utf-8")
+    storage = _make_storage(
+        [
+            {
+                "name": "private",
+                "category": "custom",
+                "enabled": True,
+                "skill_dir": skill_dir,
+            }
+        ],
+        owners={"private": "user-a"},
+    )
+    index = StorageSkillsIndex(storage, owner_user_id="user-a")
+    own = index.resolve_publish_snapshots(["private"], "user-a")["private"]
+    assert own is not None
+    assert own.visibility == "private"
+    assert own.owner_user_id == "user-a"
+    assert index.resolve_publish_snapshots(["private"], "user-b") == {"private": None}
+
+
+def test_build_import_service_uses_owner_aware_production_index(monkeypatch, tmp_path):
+    """Eleventh-review Minor-4: exercise the factory adapter, not only its delegate."""
+    import deerflow.config.paths as paths_module
+    import deerflow.publishing.factory as factory
+    import deerflow.skills.storage as storage_module
+
+    storage = _make_storage(
+        [
+            {"name": "public-skill", "category": "public", "enabled": True},
+            {"name": "private-skill", "category": "custom", "enabled": True, "skill_dir": "/private"},
+        ],
+        owners={"private-skill": "user-a"},
+    )
+    monkeypatch.setattr(factory, "get_session_factory", lambda: object())
+    monkeypatch.setattr(storage_module, "get_or_new_skill_storage", lambda: storage)
+    monkeypatch.setattr(paths_module, "get_paths", lambda: SimpleNamespace(base_dir=tmp_path))
+
+    service = factory.build_import_service()
+    assert service is not None
+    index = service._skills  # noqa: SLF001 - verifies the production factory wiring
+    assert index.is_selectable_by("public-skill", "user-b") is True
+    assert index.is_selectable_by("private-skill", "user-a") is True
+    assert index.is_selectable_by("private-skill", "user-b") is False
+    assert index.get("private-skill")["visibility"] == "private"

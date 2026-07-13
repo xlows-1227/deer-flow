@@ -69,6 +69,7 @@ class DailyPersonSummary(BaseModel):
     deletedAt: str | None = None
     updatedAt: str = ""
 
+
 class MemoryProfile(BaseModel):
     """Prompt-facing durable memory profile."""
 

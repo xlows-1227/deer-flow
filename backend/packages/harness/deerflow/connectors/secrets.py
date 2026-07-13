@@ -21,8 +21,7 @@ class SecretValue:
 
 
 class SecretStore(Protocol):
-    def get_secret(self, credential: ConnectorCredentialRef, context: ConnectorRuntimeContext | None = None) -> SecretValue:
-        ...
+    def get_secret(self, credential: ConnectorCredentialRef, context: ConnectorRuntimeContext | None = None) -> SecretValue: ...
 
 
 class EnvSecretStore:
@@ -50,10 +49,7 @@ class InlineSecretStore:
         key = os.getenv("DEERFLOW_CONNECTOR_KEY")
         if key:
             return Fernet(key.encode())
-        logger.warning(
-            "DEERFLOW_CONNECTOR_KEY is not set. Using a development-only fixed encryption key. "
-            "Set DEERFLOW_CONNECTOR_KEY to a Fernet key in production!"
-        )
+        logger.warning("DEERFLOW_CONNECTOR_KEY is not set. Using a development-only fixed encryption key. Set DEERFLOW_CONNECTOR_KEY to a Fernet key in production!")
         # A fixed 32-byte base64-encoded key for dev only.
         return Fernet(b"4V7-x8I_l1G6a9Zp3KQmR2T5NwUeY0DcHjBvFqOsEtg=")
 
@@ -69,9 +65,7 @@ class InlineSecretStore:
 
         # Fresh credential supplied directly (create / test flow).
         if credential.password:
-            return SecretValue(
-                value=json.dumps({"username": credential.username or "", "password": credential.password})
-            )
+            return SecretValue(value=json.dumps({"username": credential.username or "", "password": credential.password}))
 
         # Persisted credential: ref holds the encrypted token.
         if credential.ref:

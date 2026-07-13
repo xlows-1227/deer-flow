@@ -340,9 +340,7 @@ class TestUploadFileFromPath:
         """Exceptions from the client upload should propagate unchanged."""
         source = tmp_path / "source.bin"
         source.write_bytes(b"x")
-        sandbox._client.file.upload_file = MagicMock(
-            side_effect=RuntimeError("upload failed")
-        )
+        sandbox._client.file.upload_file = MagicMock(side_effect=RuntimeError("upload failed"))
 
         with pytest.raises(RuntimeError, match="upload failed"):
             sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
@@ -366,9 +364,7 @@ class TestUploadFileFromPath:
         """The local file handle must be closed even if upload fails."""
         source = tmp_path / "source.bin"
         source.write_bytes(b"x")
-        sandbox._client.file.upload_file = MagicMock(
-            side_effect=RuntimeError("upload failed")
-        )
+        sandbox._client.file.upload_file = MagicMock(side_effect=RuntimeError("upload failed"))
 
         with pytest.raises(RuntimeError):
             sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))

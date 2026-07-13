@@ -202,6 +202,13 @@ class _StubPublishService:
     def __init__(self) -> None:
         self.releases: dict[str, list[dict[str, Any]]] = {}
 
+    async def publish(self, agent_id, *, owner_user_id):  # noqa: ARG002
+        return {
+            "release_id": "rel-1",
+            "release_no": 1,
+            "published_at": "2026-07-14T00:00:00Z",
+        }
+
     async def list_releases(self, agent_id, *, owner_user_id):
         return list(self.releases.get(agent_id, []))
 
@@ -215,7 +222,9 @@ def _make_client(owner: str = None):
     publish_service = _StubPublishService()
     app.dependency_overrides[published_agents.get_draft_service] = lambda: service
     app.dependency_overrides[published_agents.get_publish_service] = lambda: publish_service
-    return TestClient(app), service, owner
+    client = TestClient(app)
+    client.app.state.test_publish_service = publish_service
+    return client, service, owner
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +242,52 @@ def test_create_and_get_agent():
     detail = client.get(f"/api/published-agents/{body['id']}")
     assert detail.status_code == 200
     assert "agent_markdown" in detail.json()["draft"]
+
+
+def test_create_agent_rejects_slug_that_runtime_cannot_resolve():
+    client, _, _ = _make_client()
+    for slug in ("bad/name", "has space", "under_score"):
+        response = client.post(
+            "/api/published-agents",
+            json={"slug": slug, "display_name": "Invalid"},
+        )
+        assert response.status_code == 422
+
+
+def test_create_agent_preserves_canonical_slug_case():
+    client, _, _ = _make_client()
+    response = client.post(
+        "/api/published-agents",
+        json={"slug": "MiXeD", "display_name": "Mixed"},
+    )
+    assert response.status_code == 201
+    assert response.json()["slug"] == "MiXeD"
+
+
+def test_publish_draft_revision_conflict_returns_409():
+    from unittest.mock import AsyncMock
+
+    from deerflow.publishing.publish_service import PublishError
+    from deerflow.publishing.validation import PublishViolation
+
+    client, _, _ = _make_client()
+    agent = client.post(
+        "/api/published-agents",
+        json={"slug": "bot", "display_name": "Bot"},
+    ).json()
+    client.app.state.test_publish_service.publish = AsyncMock(
+        side_effect=PublishError(
+            [
+                PublishViolation(
+                    "DRAFT_REVISION_CONFLICT",
+                    "Draft changed while publishing.",
+                )
+            ]
+        )
+    )
+    response = client.post(f"/api/published-agents/{agent['id']}/releases")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "draft_revision_conflict"
 
 
 def test_list_agents_only_returns_own():

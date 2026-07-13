@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
-from _router_auth_helpers import make_authed_test_app
 from app.gateway.app import create_app
 from app.gateway.routers import connectors
 

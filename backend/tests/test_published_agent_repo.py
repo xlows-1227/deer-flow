@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -59,6 +60,84 @@ async def test_create_agent_returns_identity_and_draft(agent_repo):
     assert draft["soul_markdown"] == ""
     assert draft["tool_groups"] == []
     assert draft["quota_overrides"] == {}
+    assert draft["skill_selection_mode"] == "explicit"
+
+
+@pytest.mark.asyncio
+async def test_get_authoring_state_loads_owner_bundle_from_one_repository_read(agent_repo):
+    pub, drafts = agent_repo
+    agent = await pub.create_agent(
+        owner_user_id="user-a",
+        slug="snapshot",
+        display_name="Snapshot",
+        description="identity",
+    )
+    await drafts.replace_skills(
+        agent["id"],
+        owner_user_id="user-a",
+        skills=[{"skill_name": "reporting", "source": "public"}],
+    )
+    await drafts.replace_connector_grants(
+        agent["id"],
+        owner_user_id="user-a",
+        grants=[
+            {
+                "connector_instance_id": "conn-1",
+                "capability": "database.query",
+            }
+        ],
+    )
+
+    state = await pub.get_authoring_state(
+        owner_user_id="user-a",
+        slug="snapshot",
+    )
+    assert state["agent"]["description"] == "identity"
+    assert state["draft"]["skills"] == [{"skill_name": "reporting", "source": "public"}]
+    assert state["draft"]["connector_grants"] == [
+        {
+            "connector_instance_id": "conn-1",
+            "capability": "database.query",
+        }
+    ]
+    assert await pub.get_authoring_state(owner_user_id="user-b", slug="snapshot") is None
+
+
+@pytest.mark.asyncio
+async def test_publish_snapshot_reads_draft_and_children_with_one_select(agent_repo):
+    pub, drafts = agent_repo
+    agent = await pub.create_agent(
+        owner_user_id="user-a",
+        slug="publish-snapshot",
+        display_name="Publish snapshot",
+    )
+    await drafts.update_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        skills=[{"skill_name": "reporting", "source": "public"}],
+        connector_grants=[{"connector_instance_id": "conn-1", "capability": "read"}],
+    )
+    engine = drafts._sf.kw["bind"]  # noqa: SLF001 - assert repository SQL boundary
+    statements: list[str] = []
+
+    def _record_select(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _record_select)
+    try:
+        snapshot = await drafts.get_publish_snapshot(
+            agent["id"],
+            owner_user_id="user-a",
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _record_select)
+
+    assert snapshot is not None
+    assert snapshot["skills"] == [{"skill_name": "reporting", "source": "public"}]
+    assert snapshot["connector_grants"] == [{"connector_instance_id": "conn-1", "capability": "read"}]
+    assert len(statements) == 1
 
 
 @pytest.mark.asyncio
@@ -132,6 +211,101 @@ async def test_set_status_and_set_current_release_owner_scoped(agent_repo):
     assert ok is True
     assert (await pub.get(created["id"], owner_user_id="user-a"))["current_release_id"] == "rel_1"
     assert await pub.set_current_release(created["id"], owner_user_id="user-b", release_id="rel_2") is False
+
+
+@pytest.mark.asyncio
+async def test_setup_authoring_bundle_rolls_back_identity_when_flush_fails(agent_repo):
+    pub, _drafts = agent_repo
+
+    with pytest.raises(IntegrityError):
+        await pub.setup_authoring_bundle(
+            owner_user_id="user-a",
+            slug="atomic-setup",
+            display_name="Atomic",
+            description="desc",
+            soul_markdown="# soul",
+            skills=[
+                {"skill_name": "duplicate", "source": "public"},
+                {"skill_name": "duplicate", "source": "public"},
+            ],
+        )
+
+    assert await pub.list_by_owner("user-a") == []
+
+
+@pytest.mark.asyncio
+async def test_update_authoring_bundle_is_one_revision_and_rolls_back_all_fields(agent_repo):
+    pub, drafts = agent_repo
+    created = await pub.setup_authoring_bundle(
+        owner_user_id="user-a",
+        slug="atomic-update",
+        display_name="Atomic",
+        description="old desc",
+        soul_markdown="old soul",
+        skills=[{"skill_name": "old-skill", "source": "public"}],
+    )
+    agent_id = created["agent"]["id"]
+
+    with pytest.raises(IntegrityError):
+        await pub.update_authoring_bundle(
+            owner_user_id="user-a",
+            slug="atomic-update",
+            description="new desc",
+            soul_markdown="new soul",
+            model_name="new-model",
+            tool_groups=["new-tools"],
+            skills=[
+                {"skill_name": "duplicate", "source": "public"},
+                {"skill_name": "duplicate", "source": "public"},
+            ],
+        )
+
+    agent = await pub.get(agent_id, owner_user_id="user-a")
+    draft = await drafts.get(agent_id, owner_user_id="user-a")
+    assert agent["description"] == "old desc"
+    assert draft["soul_markdown"] == "old soul"
+    assert draft["model_name"] is None
+    assert draft["tool_groups"] == []
+    assert draft["skills"] == [{"skill_name": "old-skill", "source": "public"}]
+    assert draft["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_update_authoring_bundle_commits_all_fields_once(agent_repo):
+    pub, drafts = agent_repo
+    created = await pub.setup_authoring_bundle(
+        owner_user_id="user-a",
+        slug="single-commit",
+        display_name="Single",
+        description="old",
+        soul_markdown="old",
+        skills=[],
+    )
+    agent_id = created["agent"]["id"]
+    await drafts.replace_connector_grants(
+        agent_id,
+        owner_user_id="user-a",
+        grants=[{"connector_instance_id": "conn-1", "capability": "read"}],
+    )
+    saved = await pub.update_authoring_bundle(
+        owner_user_id="user-a",
+        slug="single-commit",
+        description="new",
+        soul_markdown="new soul",
+        model_name="model-x",
+        tool_groups=["group-x"],
+        skills=[{"skill_name": "skill-x", "source": "private"}],
+    )
+    agent = await pub.get(agent_id, owner_user_id="user-a")
+    draft = await drafts.get(agent_id, owner_user_id="user-a")
+    assert agent["description"] == "new"
+    assert draft["soul_markdown"] == "new soul"
+    assert draft["model_name"] == "model-x"
+    assert draft["tool_groups"] == ["group-x"]
+    assert draft["skills"] == [{"skill_name": "skill-x", "source": "private"}]
+    assert saved["draft"]["connector_grants"] == [{"connector_instance_id": "conn-1", "capability": "read"}]
+    assert draft["connector_grants"] == saved["draft"]["connector_grants"]
+    assert draft["revision"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -210,17 +384,31 @@ async def test_concurrent_draft_update_only_one_wins(agent_repo):
     pub, drafts = agent_repo
     agent = await pub.create_agent(owner_user_id="user-a", slug="race", display_name="R")
 
-    # Both updates target the same revision (1) with the same stale view.
-    winner = await drafts.update_with_revision(
-        agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# winner"
-    )
-    loser = await drafts.update_with_revision(
-        agent["id"], owner_user_id="user-a", revision=1, soul_markdown="# loser"
-    )
-    assert winner is not None, "the first concurrent update should win"
-    assert loser is None, "the second concurrent update must lose the CAS race"
+    import asyncio
+
+    both_ready = asyncio.Event()
+    ready_count = 0
+    ready_lock = asyncio.Lock()
+
+    async def _barrier_before_cas() -> None:
+        nonlocal ready_count
+        async with ready_lock:
+            ready_count += 1
+            if ready_count == 2:
+                both_ready.set()
+        await both_ready.wait()
+
+    drafts._before_cas = _barrier_before_cas  # noqa: SLF001
+
+    async def _update(soul):
+        return await drafts.update_with_revision(agent["id"], owner_user_id="user-a", revision=1, soul_markdown=soul)
+
+    first, second = await asyncio.gather(_update("# first"), _update("# second"))
+    assert ready_count == 2
+    assert sum(result is not None for result in (first, second)) == 1
+    winner = first or second
     final = await drafts.get(agent["id"], owner_user_id="user-a")
-    assert final["soul_markdown"] == "# winner"
+    assert final["soul_markdown"] == winner["soul_markdown"]
     assert final["revision"] == 2
 
 
@@ -230,25 +418,38 @@ async def test_concurrent_draft_bundle_only_one_wins(agent_repo):
     pub, drafts = agent_repo
     agent = await pub.create_agent(owner_user_id="user-a", slug="race-bundle", display_name="RB")
 
-    winner = await drafts.update_bundle(
-        agent["id"],
-        owner_user_id="user-a",
-        revision=1,
-        soul_markdown="# winner",
-        skills=[{"skill_name": "s1", "source": "public"}],
-    )
-    loser = await drafts.update_bundle(
-        agent["id"],
-        owner_user_id="user-a",
-        revision=1,
-        soul_markdown="# loser",
-        skills=[{"skill_name": "s2", "source": "public"}],
-    )
-    assert winner is not None
-    assert loser is None
+    import asyncio
+
+    both_ready = asyncio.Event()
+    ready_count = 0
+    ready_lock = asyncio.Lock()
+
+    async def _barrier_before_cas() -> None:
+        nonlocal ready_count
+        async with ready_lock:
+            ready_count += 1
+            if ready_count == 2:
+                both_ready.set()
+        await both_ready.wait()
+
+    drafts._before_cas = _barrier_before_cas  # noqa: SLF001
+
+    async def _update(soul, skill):
+        return await drafts.update_bundle(
+            agent["id"],
+            owner_user_id="user-a",
+            revision=1,
+            soul_markdown=soul,
+            skills=[{"skill_name": skill, "source": "public"}],
+        )
+
+    first, second = await asyncio.gather(_update("# first", "s1"), _update("# second", "s2"))
+    assert ready_count == 2
+    assert sum(result is not None for result in (first, second)) == 1
+    winner = first or second
     final = await drafts.get(agent["id"], owner_user_id="user-a")
-    assert final["soul_markdown"] == "# winner"
-    assert [s["skill_name"] for s in final["skills"]] == ["s1"]
+    assert final["soul_markdown"] == winner["soul_markdown"]
+    assert final["skills"] == winner["skills"]
     assert final["revision"] == 2
 
 
@@ -257,22 +458,25 @@ async def test_replace_skills_and_connector_grants(agent_repo):
     pub, drafts = agent_repo
     agent = await pub.create_agent(owner_user_id="user-a", slug="skills", display_name="SK")
 
-    await drafts.replace_skills(
+    first = await drafts.replace_skills(
         agent["id"],
         owner_user_id="user-a",
         skills=[{"skill_name": "reporting", "source": "public"}, {"skill_name": "private-x", "source": "private"}],
     )
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert {s["skill_name"] for s in draft["skills"]} == {"reporting", "private-x"}
+    assert draft["skill_selection_mode"] == "explicit"
+    assert first["revision"] == draft["revision"] == 2
 
     # Replace with a smaller set; old rows are removed.
-    await drafts.replace_skills(
+    second = await drafts.replace_skills(
         agent["id"],
         owner_user_id="user-a",
         skills=[{"skill_name": "only-one", "source": "public"}],
     )
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert [s["skill_name"] for s in draft["skills"]] == ["only-one"]
+    assert second["revision"] == draft["revision"] == 3
 
     # Cross-owner replace rejected.
     assert await drafts.replace_skills(agent["id"], owner_user_id="user-b", skills=[{"skill_name": "evil", "source": "public"}]) is None
@@ -280,13 +484,14 @@ async def test_replace_skills_and_connector_grants(agent_repo):
     assert [s["skill_name"] for s in draft["skills"]] == ["only-one"]
 
     # Connector grants follow the same replace semantics.
-    await drafts.replace_connector_grants(
+    granted = await drafts.replace_connector_grants(
         agent["id"],
         owner_user_id="user-a",
         grants=[{"connector_instance_id": "conn_1", "capability": "database.query"}],
     )
     draft = await drafts.get(agent["id"], owner_user_id="user-a")
     assert draft["connector_grants"] == [{"connector_instance_id": "conn_1", "capability": "database.query"}]
+    assert granted["revision"] == draft["revision"] == 4
 
     assert await drafts.replace_connector_grants(agent["id"], owner_user_id="user-b", grants=[]) is None
     draft = await drafts.get(agent["id"], owner_user_id="user-a")

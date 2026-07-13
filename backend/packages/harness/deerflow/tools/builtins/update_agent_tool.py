@@ -1,22 +1,18 @@
-"""update_agent tool — let a custom agent persist updates to its own SOUL.md / config.
+"""update_agent tool — persist updates to the current custom-agent draft.
 
 Bound to the lead agent only when ``runtime.context['agent_name']`` is set
 (i.e. inside an existing custom agent's chat). The default agent does not see
 this tool, and the bootstrap flow continues to use ``setup_agent`` for the
 initial creation handshake.
 
-The tool writes back to ``{base_dir}/users/{user_id}/agents/{agent_name}/{config.yaml,SOUL.md}``
-so an agent created by one user is never visible to (or mutable by) another.
-Writes are staged into temp files first; both files are renamed into place only
-after both temp files are successfully written, so a partial failure cannot leave
-config.yaml updated while SOUL.md still holds stale content.
+With persistence enabled, DraftService is the only write target and the Gateway
+runtime reads the resulting draft directly. The per-user files remain a legacy
+fallback only for embedded/CLI processes without a database.
 """
 
 from __future__ import annotations
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -24,110 +20,13 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
-
-
-async def _persist_draft_update(*, owner_user_id: str, slug: str, fields: dict[str, Any]) -> dict:
-    """Write an agent edit to the DB draft store via DraftService.
-
-    Returns ``{"succeeded": bool, "unresolved": list[str], "error": str | None}``.
-    Called from an async LangChain tool so it runs on the same event loop as
-    the global AsyncEngine (ninth-review Important-1).
-    """
-    result: dict = {"succeeded": False, "unresolved": [], "error": None}
-    try:
-        from deerflow.publishing.factory import build_draft_service
-
-        service = build_draft_service()
-        if service is None:
-            result["succeeded"] = True
-            result["error"] = "unavailable"
-            return result
-    except Exception as exc:
-        result["error"] = str(exc)
-        return result
-
-    try:
-        agents = await service.list_agents(owner_user_id)
-        agent = next((a for a in agents if a["slug"] == slug), None)
-        if agent is None:
-            result["error"] = "agent not found"
-            return result
-        description = fields.get("description")
-        if description is not None:
-            await service.update_agent_meta(agent["id"], owner_user_id=owner_user_id, description=description)
-        draft = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
-        if draft is None:
-            result["error"] = "draft not found"
-            return result
-        await service.update_draft_bundle(
-            agent["id"],
-            owner_user_id=owner_user_id,
-            revision=draft["revision"],
-            soul_markdown=fields.get("soul"),
-            model_name=fields.get("model"),
-            tool_groups=fields.get("tool_groups"),
-        )
-        unresolved: list[str] = []
-        skills_value = fields.get("skills")
-        if skills_value is not None:
-            refreshed = await service.get_draft(agent["id"], owner_user_id=owner_user_id)
-            if refreshed is not None:
-                selectable, unresolved = service.filter_selectable_skills(skills_value, owner_user_id=owner_user_id)
-                if unresolved:
-                    logger.warning("[update_agent] Skills not selectable (dropped): %s", unresolved)
-                skill_entries = [{"skill_name": s, "source": "public"} for s in selectable]
-                await service.update_draft_bundle(
-                    agent["id"],
-                    owner_user_id=owner_user_id,
-                    revision=refreshed["revision"],
-                    skills=skill_entries,
-                )
-        result["succeeded"] = True
-        result["unresolved"] = unresolved
-    except Exception as exc:
-        result["error"] = str(exc)
-    return result
-
-
-def _stage_temp(path: Path, text: str) -> Path:
-    """Write ``text`` into a sibling temp file and return its path.
-
-    The caller is responsible for ``Path.replace``-ing the temp into the target
-    once every staged file is ready, or for unlinking it on failure.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = tempfile.NamedTemporaryFile(
-        mode="w",
-        dir=path.parent,
-        suffix=".tmp",
-        delete=False,
-        encoding="utf-8",
-    )
-    try:
-        fd.write(text)
-        fd.flush()
-        fd.close()
-        return Path(fd.name)
-    except BaseException:
-        fd.close()
-        Path(fd.name).unlink(missing_ok=True)
-        raise
-
-
-def _cleanup_temps(temps: list[Path]) -> None:
-    """Best-effort removal of staged temp files."""
-    for tmp in temps:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
 
 
 @tool(parse_docstring=True)
@@ -139,7 +38,7 @@ async def update_agent(
     tool_groups: list[str] | None = None,
     model: str | None = None,
 ) -> Command:
-    """Persist updates to the current custom agent's SOUL.md and config.yaml.
+    """Persist updates to the current custom agent's authoring draft.
 
     Use this when the user asks to refine the agent's identity, description,
     skill whitelist, tool-group whitelist, or default model. Only the fields
@@ -160,8 +59,8 @@ async def update_agent(
 
     Returns:
         Command with a ToolMessage describing the result. Changes take effect
-        on the next user turn (when the lead agent is rebuilt with the fresh
-        SOUL.md and config.yaml).
+        on the next user turn (when the lead agent is rebuilt from the fresh
+        database draft or the legacy no-database files).
     """
     tool_call_id = runtime.tool_call_id
     agent_name_raw: str | None = runtime.context.get("agent_name") if runtime.context else None
@@ -195,17 +94,38 @@ async def update_agent(
     if model is not None and get_app_config().get_model_config(model) is None:
         return _err(f"Unknown model '{model}'. Pass a model name that exists in config.yaml's models section.")
 
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, agent_name)
-    if not agent_dir.exists() and paths.agent_dir(agent_name).exists():
-        return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
-
     try:
-        existing_cfg = load_agent_config(agent_name, user_id=user_id)
+        from deerflow.persistence.engine import get_session_factory
+        from deerflow.publishing.factory import build_draft_service
+
+        service = build_draft_service()
+        if service is None and get_session_factory() is not None:
+            return _err("Database persistence is enabled but DraftService is unavailable.")
+        if service is not None:
+            state = await service.get_authoring_state(owner_user_id=user_id, slug=agent_name)
+            if state is None:
+                return _err(f"Agent '{agent_name}' does not exist for the current user. Use setup_agent to create a new agent first.")
+            agent = state["agent"]
+            draft = state["draft"]
+            existing_cfg = AgentConfig(
+                name=agent_name,
+                description=agent.get("description") or "",
+                model=draft.get("model_name"),
+                tool_groups=list(draft.get("tool_groups") or []),
+                skills=(None if draft.get("skill_selection_mode", "explicit") == "inherit" else [entry["skill_name"] for entry in draft.get("skills") or []]),
+            )
+        else:
+            paths = get_paths()
+            agent_dir = paths.user_agent_dir(user_id, agent_name)
+            if not agent_dir.exists() and paths.agent_dir(agent_name).exists():
+                return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
+            existing_cfg = load_agent_config(agent_name, user_id=user_id)
     except FileNotFoundError:
         return _err(f"Agent '{agent_name}' does not exist for the current user. Use setup_agent to create a new agent first.")
     except ValueError as e:
         return _err(f"Agent '{agent_name}' has an unreadable config: {e}")
+    except Exception as e:
+        return _err(f"Failed to load agent '{agent_name}': {e}")
 
     if existing_cfg is None:
         return _err(f"Agent '{agent_name}' could not be loaded.")
@@ -240,68 +160,51 @@ async def update_agent(
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
 
-    # Stage every file we intend to rewrite into a temp sibling. Files are
-    # committed to disk ONLY after the DB write succeeds (tenth-review
-    # Important-1: DB-first, no partial/divergent state).
-    pending: list[tuple[Path, Path]] = []
-    staged_temps: list[Path] = []
-
-    try:
-        if config_changed:
-            yaml_text = yaml.dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            config_target = agent_dir / "config.yaml"
-            config_tmp = _stage_temp(config_target, yaml_text)
-            staged_temps.append(config_tmp)
-            pending.append((config_tmp, config_target))
-
-        if soul is not None:
-            soul_target = agent_dir / "SOUL.md"
-            soul_tmp = _stage_temp(soul_target, soul)
-            staged_temps.append(soul_tmp)
-            pending.append((soul_tmp, soul_target))
-            updated_fields.append("soul")
-
-    except Exception as e:
-        _cleanup_temps(staged_temps)
-        logger.error("[update_agent] Failed to stage files for '%s': %s", agent_name, e, exc_info=True)
-        return _err(f"Failed to update agent '{agent_name}': {e}")
+    if soul is not None:
+        updated_fields.append("soul")
 
     if not updated_fields:
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})
 
-    logger.info("[update_agent] Updated agent '%s' (user=%s) fields: %s", agent_name, user_id, updated_fields)
-    # DB-first: write to DraftService (authoritative source), THEN filesystem.
-    # If DB fails and persistence IS configured, filesystem is NOT touched —
-    # no partial/divergent state (tenth-review Important-1).
-    mirror = await _persist_draft_update(
-        owner_user_id=user_id,
-        slug=agent_name,
-        fields={"soul": soul, "model": model, "tool_groups": tool_groups, "skills": skills, "description": description},
-    )
-    if not mirror["succeeded"] and mirror.get("error") != "unavailable":
-        err = mirror.get("error", "unknown")
-        logger.error("[update_agent] DB draft update failed for '%s': %s", agent_name, err)
-        return _err(f"Failed to update agent '{agent_name}' in the database: {err}.")
+    unresolved: list[str] = []
+    if service is not None:
+        try:
+            saved, unresolved = await service.update_authoring_bundle(
+                owner_user_id=user_id,
+                slug=agent_name,
+                description=description,
+                soul_markdown=soul,
+                model_name=model,
+                tool_groups=tool_groups,
+                skill_names=skills,
+            )
+            if saved is None:
+                return _err(f"Agent '{agent_name}' does not exist in the database.")
+        except Exception as e:
+            logger.error("[update_agent] DB draft update failed for '%s': %s", agent_name, e)
+            return _err(f"Failed to update agent '{agent_name}' in the database: {e}.")
+    else:
+        from deerflow.tools.builtins.agent_file_transaction import AgentFileTransaction
 
-    # Filesystem compat write — only after DB success or unavailable.
-    # When DB is unavailable (CLI), filesystem IS the source of truth — errors
-    # must propagate.
-    db_unavailable = mirror.get("error") == "unavailable"
-    try:
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        committed: list[Path] = []
-        for tmp, target in pending:
-            tmp.replace(target)
-            committed.append(target)
-    except Exception as e:
-        _cleanup_temps(staged_temps)
-        if db_unavailable:
+        files = AgentFileTransaction(agent_dir)
+        try:
+            if config_changed:
+                files.stage_text(
+                    agent_dir / "config.yaml",
+                    yaml.dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False),
+                )
+            if soul is not None:
+                files.stage_text(agent_dir / "SOUL.md", soul)
+            files.apply()
+            files.finish()
+        except Exception as e:
+            files.rollback()
             logger.error("[update_agent] Failed to update agent '%s': %s", agent_name, e, exc_info=True)
             return _err(f"Failed to update agent '{agent_name}': {e}")
-        logger.error("[update_agent] Filesystem write failed for '%s' (DB succeeded): %s", agent_name, e)
+
+    logger.info("[update_agent] Updated agent '%s' (user=%s) fields: %s", agent_name, user_id, updated_fields)
 
     success_msg = f"Agent '{agent_name}' updated successfully. Changed: {', '.join(updated_fields)}. The new configuration takes effect on the next user turn."
-    unresolved = mirror.get("unresolved", [])
     if unresolved:
         success_msg += f" Warning: skills not available and were excluded from the draft: {', '.join(unresolved)}."
     return Command(
@@ -318,8 +221,20 @@ async def update_agent(
 
 # Sync entry for StructuredTool._run() (DeerFlowClient.stream() path).
 def _update_agent_sync(runtime, soul=None, description=None, skills=None, tool_groups=None, model=None):
+    from deerflow.persistence.engine import get_session_factory
     from deerflow.tools.builtins.setup_agent_tool import _run_async
 
+    if get_session_factory() is not None:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: update_agent cannot run through the synchronous embedded client while database persistence is enabled. Use the async Gateway client.",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
     return _run_async(update_agent.coroutine(runtime=runtime, soul=soul, description=description, skills=skills, tool_groups=tool_groups, model=model))
 
 
