@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { encryptLoginPassword } from "@/core/auth/login-encryption";
 import { parseAuthError } from "@/core/auth/types";
 
 /**
@@ -105,8 +106,12 @@ export default function LoginPage() {
     try {
       const endpoint = isLogin ? "/api/v1/auth/login" : "/api/v1/auth/register";
 
+      const loginPassword = isLogin
+        ? await encryptLoginPassword(password)
+        : password;
+
       const body = isLogin
-        ? JSON.stringify({ username: identifier, password })
+        ? JSON.stringify({ username: identifier, password: loginPassword })
         : ldapEnabled
           ? JSON.stringify({
               email: inviteEmail,

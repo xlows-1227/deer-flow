@@ -19,6 +19,7 @@ from app.gateway.auth_middleware import AuthMiddleware, _is_public
         "/openapi.json",
         "/api/v1/auth/login",
         "/api/v1/auth/login/local",
+        "/api/v1/auth/login/public-key",
         "/api/v1/auth/register",
         "/api/v1/auth/logout",
         "/api/v1/auth/setup-status",
@@ -58,6 +59,7 @@ def test_protected_paths(path: str):
     [
         "/api/v1/auth/login/",
         "/api/v1/auth/login/local/",
+        "/api/v1/auth/login/public-key/",
         "/api/v1/auth/register/",
         "/api/v1/auth/logout/",
         "/api/v1/auth/setup-status/",
