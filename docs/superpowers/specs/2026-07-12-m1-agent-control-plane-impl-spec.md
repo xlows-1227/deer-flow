@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M1 实现规格（Agent 控制平面与 Release 管理）
 
-**状态：** 已实现；第七轮修复已提交；第八轮复审仍有阻断项待修复
+**状态：** 已实现；第八轮修复已提交；第九轮复审仍有阻断项待修复
 
 **日期：** 2026-07-12
 
@@ -649,7 +649,7 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ---
 
-## 21. 第八轮代码复审修复（2026-07-13）
+## 27. 第八轮代码复审修复（2026-07-13）
 
 第八轮复审文档：[2026-07-13-m1-agent-control-plane-code-eighth-review.md](./2026-07-13-m1-agent-control-plane-code-eighth-review.md)
 
@@ -661,3 +661,13 @@ M1 通过代码评审后，以下问题已修复（详见 [2026-07-12-m1-agent-c
 
 ### Minor-8：同步 CLAUDE.md
 更新 owner_scope 唯一键描述、镜像行为描述、Alembic head 为 `2026_07_12_widen_agent_ids`。
+
+---
+
+## 28. 第九轮代码复审（2026-07-13）
+
+第九轮复审文档：[2026-07-13-m1-agent-control-plane-code-ninth-review.md](./2026-07-13-m1-agent-control-plane-code-ninth-review.md)
+
+复审结论：**Ready to merge：No**。本轮确认不同内容失败 publish 测试已补 `await` 并注册第二个 Skill，ON CONFLICT UOW 与 CLAUDE 基础事实保持修复；当前无 Critical，仍有 2 个 Important 与 7 个 Minor。
+
+两个 Important 分别是：setup/update 仍是无 coroutine 的同步 LangChain tool，标准 `ainvoke()` 会经 `run_in_executor()` 执行，因此 helper 实际走 `asyncio.run()` 新 loop，未关闭默认池 AsyncEngine 跨 loop 风险；当前 best-effort 文件系统优先语义允许 DB mirror 失败时仍返回成功并留下“仅文件系统 Agent”，违反 F1.4 开发计划与设计 §16.3。其余问题主要是缺少真实工具镜像、Skill barrier、生产 Import、并发 CAS 与 PostgreSQL 门禁测试，以及 SQLite schema 漂移和规格编号问题。

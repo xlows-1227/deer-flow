@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -35,11 +36,15 @@ def _make_paths_mock(tmp_path: Path):
 
 def _call_setup_agent(tmp_path: Path, soul: str, description: str, agent_name: str = "test-agent"):
     """Call the underlying setup_agent function directly, bypassing langchain tool wrapper."""
+    import asyncio
+
     with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
-        return setup_agent.func(
-            soul=soul,
-            description=description,
-            runtime=_make_runtime(agent_name),
+        return asyncio.run(
+            setup_agent.coroutine(
+                soul=soul,
+                description=description,
+                runtime=_make_runtime(agent_name),
+            )
         )
 
 
@@ -52,7 +57,7 @@ def test_setup_agent_rejects_invalid_agent_name_before_writing(tmp_path, monkeyp
     traversal_agent = f"../../../{outside_dir.name}/evil"
     runtime = _DummyRuntime(context={"agent_name": traversal_agent}, tool_call_id="tool-1")
 
-    result = setup_agent.func(soul="test soul", description="desc", runtime=runtime)
+    result = asyncio.run(setup_agent.coroutine(soul="test soul", description="desc", runtime=runtime))
 
     messages = result.update["messages"]
     assert len(messages) == 1
@@ -66,7 +71,7 @@ def test_setup_agent_rejects_absolute_agent_name_before_writing(tmp_path, monkey
     absolute_agent = str(tmp_path / "outside-agent")
     runtime = _DummyRuntime(context={"agent_name": absolute_agent}, tool_call_id="tool-2")
 
-    result = setup_agent.func(soul="test soul", description="desc", runtime=runtime)
+    result = asyncio.run(setup_agent.coroutine(soul="test soul", description="desc", runtime=runtime))
 
     messages = result.update["messages"]
     assert len(messages) == 1
@@ -92,7 +97,7 @@ class TestSetupAgentNoDataLoss:
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
             # Force soul_file.write_text to raise after directory already exists
             with patch.object(Path, "write_text", side_effect=OSError("disk full")):
-                setup_agent.func(
+                setup_agent.coroutine(
                     soul="new soul",
                     description="desc",
                     runtime=_make_runtime(),
@@ -111,7 +116,7 @@ class TestSetupAgentNoDataLoss:
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
             with patch("yaml.dump", side_effect=OSError("write error")):
-                setup_agent.func(
+                setup_agent.coroutine(
                     soul="new soul",
                     description="desc",
                     runtime=_make_runtime(),
@@ -138,10 +143,12 @@ class TestSetupAgentNoDataLoss:
         )
 
         with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
-            setup_agent.func(
-                soul="# My Agent",
-                description="A test agent",
-                runtime=runtime,
+            asyncio.run(
+                setup_agent.coroutine(
+                    soul="# My Agent",
+                    description="A test agent",
+                    runtime=runtime,
+                )
             )
 
         expected_dir = tmp_path / "users" / "auth-user-42" / "agents" / "test-agent"
