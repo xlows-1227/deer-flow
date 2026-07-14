@@ -105,6 +105,28 @@ async def test_registered_user_receives_read_only_markdown_and_html_shares(tmp_p
         download = await client.get(by_name["page.html"]["download_url"])
         assert download.headers["content-disposition"].startswith("attachment;")
 
+    # A deleted source must not let its old recipient inherit access to a
+    # replacement file created at the same path.
+    (owner_library / "notes.md").unlink()
+    (owner_library / "notes.md").write_text("replacement", encoding="utf-8")
+    async with AsyncClient(transport=ASGITransport(app=recipient_app), base_url="http://test") as client:
+        assert (await client.get(by_name["notes.md"]["preview_url"])).status_code == 404
+        assert {item["name"] for item in (await client.get("/api/file-shares")).json()["items"]} == {"page.html"}
+
+    # The owner must explicitly share the replacement before it is visible.
+    async with AsyncClient(transport=ASGITransport(app=owner_app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/file-shares",
+            json={
+                "recipient_email": "recipient@example.com",
+                "source_type": "library",
+                "path": "notes.md",
+            },
+        )
+        assert response.status_code == 201
+    async with AsyncClient(transport=ASGITransport(app=recipient_app), base_url="http://test") as client:
+        assert (await client.get(by_name["notes.md"]["preview_url"])).text == "replacement"
+
     other_app = _app_for(_user(OTHER_ID, "other@example.com"))
     async with AsyncClient(transport=ASGITransport(app=other_app), base_url="http://test") as client:
         response = await client.get(by_name["notes.md"]["preview_url"])

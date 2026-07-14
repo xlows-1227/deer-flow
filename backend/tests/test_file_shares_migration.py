@@ -23,10 +23,7 @@ async def _migrate_and_inspect(url: str) -> tuple[set[str], str]:
     engine = create_async_engine(url)
     await _run_pending_alembic_revisions(engine, "sqlite")
     async with engine.connect() as connection:
-        columns = {
-            row[1]
-            for row in (await connection.execute(text("PRAGMA table_info(file_shares)"))).fetchall()
-        }
+        columns = {row[1] for row in (await connection.execute(text("PRAGMA table_info(file_shares)"))).fetchall()}
         version = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
     await engine.dispose()
     return columns, version
@@ -43,6 +40,7 @@ def test_file_shares_migration_on_sqlite(tmp_path):
         "recipient_user_id",
         "source_type",
         "source_path",
+        "source_identity",
         "thread_id",
         "created_at",
     }

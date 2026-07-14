@@ -59,10 +59,12 @@ export const SYSTEM_FOLDERS: readonly FileItem[] = [
   SHARED_SYSTEM_FOLDER,
 ];
 
-/** Prevent library folders from impersonating locked system views. */
+const SYSTEM_FOLDER_PATH_ROOTS = new Set(["@conversation", "@shared"]);
+
+/** Prevent writes to the synthetic paths used by locked system views. */
 export function isReservedSystemFolderPath(path: string): boolean {
   const rootName = path.trim().replace(/\\/g, "/").split("/")[0];
-  return Object.values(SYSTEM_FOLDER_NAMES).includes(rootName ?? "");
+  return SYSTEM_FOLDER_PATH_ROOTS.has(rootName ?? "");
 }
 
 /** @deprecated Use {@link isReservedSystemFolderPath}. */

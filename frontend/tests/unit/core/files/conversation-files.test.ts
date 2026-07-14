@@ -32,9 +32,9 @@ describe("conversation file collections", () => {
   });
 
   test("reserves the system folder roots as manual upload destinations", () => {
-    expect(isReservedSystemFolderPath("对话上传")).toBe(true);
-    expect(isReservedSystemFolderPath("对话生成/子目录")).toBe(true);
-    expect(isReservedSystemFolderPath("他人分享")).toBe(true);
+    expect(isReservedSystemFolderPath("@conversation/uploaded")).toBe(true);
+    expect(isReservedSystemFolderPath("@shared")).toBe(true);
+    expect(isReservedSystemFolderPath("对话上传")).toBe(false);
     expect(isReservedSystemFolderPath("项目/对话上传")).toBe(false);
   });
 

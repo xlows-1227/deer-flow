@@ -23,7 +23,10 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 METADATA_FILENAME = ".deerflow-files.json"
-RESERVED_SYSTEM_FOLDER_NAMES = frozenset({"对话上传", "对话生成", "他人分享"})
+# System collections are frontend-only synthetic roots. Reserve their virtual
+# paths, not their display names, so existing user folders with localized
+# labels remain accessible after upgrading.
+RESERVED_SYSTEM_FOLDER_ROOTS = frozenset({"@conversation", "@shared"})
 ACTIVE_CONTENT_MIME_TYPES = {
     "text/html",
     "application/xhtml+xml",
@@ -139,7 +142,7 @@ def _normalize_library_path(value: str | None) -> str:
 
 def _reject_reserved_system_path(value: str | None) -> None:
     relative = _normalize_library_path(value)
-    if relative and relative.split("/", 1)[0] in RESERVED_SYSTEM_FOLDER_NAMES:
+    if relative and relative.split("/", 1)[0] in RESERVED_SYSTEM_FOLDER_ROOTS:
         raise HTTPException(status_code=403, detail="System folders are read-only")
 
 

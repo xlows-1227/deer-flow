@@ -28,6 +28,10 @@ class FileShareRow(Base):
     )
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
     source_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    # A share is tied to the original filesystem object, rather than only its
+    # path. This prevents a recipient from inheriting access when the owner
+    # deletes the source and later creates a different file at the same path.
+    source_identity: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     # Empty string identifies library files. Keeping this non-null makes the
     # cross-database uniqueness constraint reliable (NULL values are otherwise
     # considered distinct by both SQLite and PostgreSQL).
