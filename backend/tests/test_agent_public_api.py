@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -517,6 +519,79 @@ def test_wait_run_returns_terminal_answer(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert response.json()["answer"] == "completed answer"
+
+
+@pytest.mark.anyio
+async def test_idempotent_wait_replay_still_waits_for_original_run(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    record = _run_record()
+    started = asyncio.Event()
+    replay_claimed = asyncio.Event()
+    finish = asyncio.Event()
+
+    class Idempotency:
+        def __init__(self):
+            self.claimed = None
+            self.response = None
+
+        async def claim(self, values):
+            if self.claimed is None:
+                self.claimed = dict(values)
+                return self.claimed, True
+            replay_claimed.set()
+            return {**self.claimed, "response_json": self.response}, False
+
+        async def complete(self, **values):
+            self.response = values["response_json"]
+
+        async def release(self, **values):
+            raise AssertionError(values)
+
+    async def start(*args, run_id=None, **kwargs):
+        del args, kwargs
+        record.run_id = run_id
+
+        async def complete():
+            started.set()
+            await finish.wait()
+            record.status = RunStatus.success
+            record.last_ai_message = "completed once"
+            record.updated_at = datetime.now(UTC)
+
+        record.task = asyncio.create_task(complete())
+        return record
+
+    idempotency = Idempotency()
+    start_mock = AsyncMock(side_effect=start)
+    monkeypatch.setattr(agent_public_api, "start_run", start_mock)
+    app = _router_app(
+        resolver=resolver,
+        conversations=conversations,
+        idempotency=idempotency,
+    )
+    app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=record))
+    transport = httpx.ASGITransport(app=app)
+    path = "/api/v1/agents/pa_1/conversations/conv_1/runs/wait"
+    headers = {"Idempotency-Key": "wait-once"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = asyncio.create_task(client.post(path, json={"message": "hello"}, headers=headers))
+        await started.wait()
+        second = asyncio.create_task(client.post(path, json={"message": "hello"}, headers=headers))
+        await replay_claimed.wait()
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        finish.set()
+        first_response, second_response = await asyncio.gather(first, second)
+
+    assert first_response.status_code == second_response.status_code == 200
+    assert first_response.json()["status"] == second_response.json()["status"] == "completed"
+    assert first_response.json()["answer"] == second_response.json()["answer"] == "completed once"
+    start_mock.assert_awaited_once()
 
 
 def test_stream_run_sanitizes_events_and_emits_end(monkeypatch):

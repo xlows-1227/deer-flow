@@ -1,12 +1,12 @@
 # 多租户 Agent 发布平台 — M2 代码复审
 
-**状态：** 6 项 Spec 问题与 4 项 Standards 问题/建议已完成修复并补回归测试；独立复审追加的 3 项边界问题也已关闭
+**状态：** 6 项 Spec 问题与 4 项 Standards 问题/建议已完成修复并补回归测试；独立复审追加的 4 项边界问题也已关闭
 
 **日期：** 2026-07-14
 
 **固定点：** `3bc06941d6bf187df8d4a4a13af07752d5afd91f`
 
-**复审对象：** `git diff 3bc06941...HEAD`，即固定点之后的 10 个 M2 功能与 Review Gate 修复提交。
+**复审对象：** `git diff 3bc06941...HEAD`，即固定点之后的 11 个 M2 功能与 Review Gate 修复提交。
 
 **关联规格：** [2026-07-14-m2-published-runtime-agent-api-impl-spec.md](./2026-07-14-m2-published-runtime-agent-api-impl-spec.md)
 
@@ -90,14 +90,15 @@ git diff --check：通过
 
 ### 6.1 最终独立复审追加项
 
-最终 Spec 轴复审又识别出 3 个边界并完成修复：
+最终 Spec 轴复审又识别出 4 个边界并完成修复：
 
 1. 幂等 claim 在启动前写入预分配 `run_id`，RunManager 使用该 id 创建 Run；即使响应序列化或 `idempotency.complete()` 失败，重试也通过 claim 上的 `run_id` 复用原 Run，不残留只能等待过期的 409 claim。
 2. Token middleware 在每次模型调用前计算当前 Run 已用 token 与本次输入 token，并把剩余额度写入模型支持的 output-token cap；无法执行 provider 级 cap 或无法预估输入的模型 fail closed，响应后的累计检查保留为防御性校验。
 3. Published audit 按 `owner_user_id + agent_id` 联合过滤；只提供公开 `agent_id` 的查询直接拒绝。
+4. `/runs/wait` 的幂等重放与首次请求一样等待原 Run 的本机 task 到终态，不再因 `replayed=True` 提前返回 `pending/running`。
 
-追加后的可执行 M2 回归集合为 `77 passed`，全仓 Ruff check、679 文件 format check 与 `git diff --check` 通过。Audit/Idempotency 的新增 owner/预绑定 Run 用例改用内存 SQLite 单独执行，不依赖受限的系统临时目录。
+追加后的可执行 M2 回归集合为 `78 passed`，全仓 Ruff check、679 文件 format check 与 `git diff --check` 通过。Audit/Idempotency 的新增 owner/预绑定 Run 用例改用内存 SQLite 单独执行，不依赖受限的系统临时目录。
 
 ---
 
-**汇总：** 原 Spec 轴 6 项、Standards 轴 4 项及最终独立复审追加的 3 项均已落地修复或收敛；Data Clumps 的 application service 拆分仍是非阻塞后续重构。当前代码侧 Review Gate 已关闭，完整 SQLite/PostgreSQL/全仓门禁仍由 CI 补跑。
+**汇总：** 原 Spec 轴 6 项、Standards 轴 4 项及最终独立复审追加的 4 项均已落地修复或收敛；Data Clumps 的 application service 拆分与 token budget middleware 职责拆分仍是非阻塞后续重构。当前代码侧 Review Gate 已关闭，完整 SQLite/PostgreSQL/全仓门禁仍由 CI 补跑。

@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M2 实现规格（已发布运行时与 Agent API）
 
-**状态：** 实现提交完成且 M2 focused regression 通过；2026-07-14 独立复审发现新的 Spec P0/P1 阻塞，M2 Review Gate 未通过；仓库全量测试仍待 CI 或干净基线确认
+**状态：** 实现与独立代码复审修复完成，代码侧 M2 Review Gate 已关闭；仓库全量测试、PostgreSQL 并发门禁与真实模型 smoke 仍待 CI/部署环境确认
 
 **日期：** 2026-07-14
 
@@ -305,7 +305,9 @@ Standards 轴同步完成：Agent Key 管理通过 `published_agents.owner_user_
 
 修复后可在当前权限运行的测试记录为：能力策略 focused `20 passed`；公共 API、Key、Resolver、Token 等集合 `59 passed`；Agent Key repository/router `16 passed`；Ruff check、Ruff format check 与 `git diff --check` 通过。依赖 `tmp_path` 的 quota/conversation/Connector integration 在当前 Windows 沙箱因 Temp ACL 于 setup 阶段失败，提权重跑又被平台用量限制拒绝，需由 CI/可写临时目录补跑；本节不把 setup error 记为断言通过，也不据此声明全仓测试全绿。
 
-最终独立复审追加的幂等 complete/serialization 窗口、单次模型调用越过 token cap、audit Agent 查询缺 owner 联合过滤也已关闭；追加后的可执行 M2 回归集合为 `77 passed`。新增 SQLite owner/idempotency 仓储用例使用内存数据库定向验证，不依赖受限的系统临时目录。
+最终独立复审追加的幂等 complete/serialization 窗口、单次模型调用越过 token cap、audit Agent 查询缺 owner 联合过滤也已关闭；追加后的可执行 M2 回归集合为 `78 passed`。新增 SQLite owner/idempotency 仓储用例使用内存数据库定向验证，不依赖受限的系统临时目录。
+
+同步 wait 的幂等重放也与首次请求统一：只要原 Run 的本机 task 仍存在，两次请求都等待同一 task 到终态；并发同键回归断言只启动一个 Run，且两次响应均为同一 completed 结果。
 
 ---
 

@@ -708,7 +708,7 @@ async def wait_agent_run(
 ) -> dict[str, Any]:
     """Start a run and wait for its terminal public representation."""
     idempotency_key = _validate_idempotency_key(idempotency_key)
-    record, replayed = await _start_public_run(
+    record, _replayed = await _start_public_run(
         agent_id=agent_id,
         conversation_id=conversation_id,
         body=body,
@@ -720,7 +720,7 @@ async def wait_agent_run(
         resolver=resolver,
         quota_ledger=quota_ledger,
     )
-    if not replayed and record.task is not None:
+    if record.task is not None:
         try:
             await record.task
         except asyncio.CancelledError:
