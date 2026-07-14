@@ -16,6 +16,7 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.agent_api_key.model import AgentAPIKeyRow
+from deerflow.persistence.agent_channel.model import AgentChannelRow
 from deerflow.persistence.agent_release.model import (
     AgentReleaseConnectorGrantRow,
     AgentReleaseRow,
@@ -56,6 +57,7 @@ __all__ = [
     "InviteCodeRow",
     "APIKeyRow",
     "AgentAPIKeyRow",
+    "AgentChannelRow",
     "AgentDraftConnectorGrantRow",
     "AgentDraftRow",
     "AgentDraftSkillRow",
