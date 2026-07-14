@@ -1,0 +1,7 @@
+# Base layer — required by default public skills
+duckdb
+openpyxl
+requests
+Pillow
+python-pptx
+PyYAML

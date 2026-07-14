@@ -626,8 +626,9 @@ uploads:
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
 
-  # 容器镜像（含 Python、常用数据/绘图依赖、bash 等）
-  # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  # 自定义镜像：基于官方 AIO sandbox 预装基础层 + 增强层 Python 包
+  # 构建：make build-sandbox
+  image: deer-flow-sandbox:enhanced
 
   # 本地容器端口起点（默认 8080）
   # port: 8080
