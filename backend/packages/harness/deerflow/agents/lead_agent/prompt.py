@@ -712,6 +712,7 @@ def _apply_prompt_template_impl(
     app_config: AppConfig | None = None,
     agent_soul: str | None = None,
     agent_instructions: str | None = None,
+    published: bool = False,
 ) -> str:
     """Internal prompt builder — not cached; callers should use ``apply_prompt_template``."""
     # Include subagent section only if enabled (from runtime parameter)
@@ -727,14 +728,14 @@ def _apply_prompt_template_impl(
     subagent_thinking = f"- **Decomposition check**: Can this split into 2+ parallel sub-tasks? If so and there are more than {n}, plan batches of <= {n} and launch only the first batch now.\n" if subagent_enabled else ""
 
     # Get skills section
-    skills_section = get_skills_prompt_section(available_skills, app_config=app_config)
+    skills_section = "" if published else get_skills_prompt_section(available_skills, app_config=app_config)
 
     # Get deferred tools section (tool_search)
-    deferred_tools_section = get_deferred_tools_prompt_section(app_config=app_config)
+    deferred_tools_section = "" if published else get_deferred_tools_prompt_section(app_config=app_config)
 
     # Build ACP agent section only if ACP agents are configured
-    acp_section = _build_acp_section(app_config=app_config)
-    custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
+    acp_section = "" if published else _build_acp_section(app_config=app_config)
+    custom_mounts_section = "" if published else _build_custom_mounts_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
     if agent_instructions is not None:
         instruction_section = f"{agent_instructions}\n" if agent_instructions else ""
@@ -766,6 +767,7 @@ def _cached_apply_prompt_template(
     available_skills: frozenset[str] | None,
     agent_soul: str | None,
     agent_instructions: str | None,
+    published: bool,
 ) -> str:
     """Cached variant that uses the global app_config singleton.
 
@@ -780,6 +782,7 @@ def _cached_apply_prompt_template(
         available_skills=set(available_skills) if available_skills is not None else None,
         agent_soul=agent_soul,
         agent_instructions=agent_instructions,
+        published=published,
     )
 
 
@@ -792,6 +795,7 @@ def apply_prompt_template(
     app_config: AppConfig | None = None,
     agent_soul: str | None = None,
     agent_instructions: str | None = None,
+    published: bool = False,
 ) -> str:
     """Build the system prompt, caching the result for identical parameters.
 
@@ -808,6 +812,7 @@ def apply_prompt_template(
             app_config=app_config,
             agent_soul=agent_soul,
             agent_instructions=agent_instructions,
+            published=published,
         )
 
     return _cached_apply_prompt_template(
@@ -817,4 +822,5 @@ def apply_prompt_template(
         available_skills=frozenset(available_skills) if available_skills is not None else None,
         agent_soul=agent_soul,
         agent_instructions=agent_instructions,
+        published=published,
     )
