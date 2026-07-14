@@ -25,7 +25,8 @@ help:
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
-	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
+	@echo "  make build-sandbox   - Build custom sandbox image with pre-installed Python packages"
+	@echo "  make setup-sandbox   - Pre-pull or build sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
 	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
 	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
@@ -83,9 +84,29 @@ install:
 	@echo "  Optional: Pre-pull Sandbox Image"
 	@echo "=========================================="
 	@echo ""
-	@echo "If you plan to use Docker/Container-based sandbox, you can pre-pull the image:"
+	@echo "If you plan to use Docker/Container-based sandbox with pre-installed packages:"
+	@echo "  make build-sandbox"
+	@echo "Or pull/build based on config.yaml sandbox.image:"
 	@echo "  make setup-sandbox"
 	@echo ""
+
+# Build custom sandbox image with pre-installed Python packages (base + enhanced)
+build-sandbox:
+	@echo "=========================================="
+	@echo "  Building Custom Sandbox Image"
+	@echo "=========================================="
+	@echo ""
+	@if ! command -v docker >/dev/null 2>&1; then \
+		echo "✗ Docker is required to build the sandbox image"; \
+		echo "  Please install Docker: https://docs.docker.com/get-docker/"; \
+		exit 1; \
+	fi
+	@echo "Building deer-flow-sandbox:enhanced from docker/sandbox ..."
+	@docker build -t deer-flow-sandbox:enhanced docker/sandbox
+	@echo ""
+	@echo "✓ Built deer-flow-sandbox:enhanced"
+	@echo "  Point config.yaml sandbox.image at deer-flow-sandbox:enhanced (already set if you followed the guide)"
+	@echo "  Restart Gateway so AioSandboxProvider picks up the image"
 
 # Pre-pull sandbox Docker image (optional but recommended)
 setup-sandbox:
@@ -93,7 +114,7 @@ setup-sandbox:
 	@echo "  Pre-pulling Sandbox Container Image"
 	@echo "=========================================="
 	@echo ""
-	@IMAGE=$$(grep -A 20 "# sandbox:" config.yaml 2>/dev/null | grep "image:" | awk '{print $$2}' | head -1); \
+	@IMAGE=$$(grep -A 30 "^sandbox:" config.yaml 2>/dev/null | grep -E "^[[:space:]]*image:" | awk '{print $$2}' | head -1); \
 	if [ -z "$$IMAGE" ]; then \
 		IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"; \
 		echo "Using default image: $$IMAGE"; \
@@ -101,6 +122,11 @@ setup-sandbox:
 		echo "Using configured image: $$IMAGE"; \
 	fi; \
 	echo ""; \
+	if echo "$$IMAGE" | grep -q '^deer-flow-sandbox:'; then \
+		echo "Local custom image detected. Building instead of pulling..."; \
+		$(MAKE) build-sandbox; \
+		exit 0; \
+	fi; \
 	if command -v container >/dev/null 2>&1 && [ "$$(uname)" = "Darwin" ]; then \
 		echo "Detected Apple Container on macOS, pulling image..."; \
 		container image pull "$$IMAGE" || echo "⚠ Apple Container pull failed, will try Docker"; \

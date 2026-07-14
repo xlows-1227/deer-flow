@@ -17,6 +17,12 @@ from app.gateway.auth import (
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.login_encryption import (
+    LoginEncryptionError,
+    decrypt_login_password,
+    get_login_public_key_pem,
+    login_encryption_required,
+)
 from app.gateway.auth.models import User
 from app.gateway.csrf_middleware import is_secure_request
 from app.gateway.deps import (
@@ -39,6 +45,15 @@ class LoginResponse(BaseModel):
 
     expires_in: int  # seconds
     needs_setup: bool = False
+
+
+class LoginPublicKeyResponse(BaseModel):
+    """Public configuration used by browser clients to encrypt passwords."""
+
+    enabled: bool
+    required: bool
+    algorithm: str | None = None
+    public_key: str | None = None
 
 
 class UnifiedLoginRequest(BaseModel):
@@ -196,6 +211,19 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
         samesite="lax",
         max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
     )
+
+
+def _resolve_request_password(value: str) -> str:
+    try:
+        return decrypt_login_password(value)
+    except LoginEncryptionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.INVALID_CREDENTIALS,
+                message=str(exc),
+            ).model_dump(),
+        ) from None
 
 
 # ── Provider dispatch ────────────────────────────────────────────────────
@@ -445,6 +473,19 @@ def _record_login_success(ip: str) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
 
+@router.get("/login/public-key", response_model=LoginPublicKeyResponse)
+async def login_public_key(response: Response):
+    """Return the configured RSA public key; never expose private material."""
+    public_key = get_login_public_key_pem()
+    response.headers["Cache-Control"] = "no-store"
+    return LoginPublicKeyResponse(
+        enabled=public_key is not None,
+        required=login_encryption_required(),
+        algorithm="RSA-OAEP-256" if public_key is not None else None,
+        public_key=public_key,
+    )
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(request: Request, response: Response, body: UnifiedLoginRequest):
     """Unified login endpoint (recommended for new clients).
@@ -454,11 +495,12 @@ async def login(request: Request, response: Response, body: UnifiedLoginRequest)
     LDAP is disabled go to the local provider; every other credential goes
     to LDAP in strict mode (no local fallback).
     """
+    password = _resolve_request_password(body.password)
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
     try:
-        user = await _resolve_login(body.username, body.password)
+        user = await _resolve_login(body.username, password)
     except _LoginNotRegistered as exc:
         _record_login_failure(client_ip)
         raise HTTPException(
@@ -499,11 +541,12 @@ async def login_local(
     to LDAP. The ``username`` field therefore accepts either a bare
     sAMAccountName or an email address.
     """
+    password = _resolve_request_password(form_data.password)
     client_ip = _get_client_ip(request)
     _check_rate_limit(client_ip)
 
     try:
-        user = await _resolve_login(form_data.username, form_data.password)
+        user = await _resolve_login(form_data.username, password)
     except _LoginNotRegistered as exc:
         _record_login_failure(client_ip)
         raise HTTPException(

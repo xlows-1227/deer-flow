@@ -1,0 +1,27 @@
+# Enhanced layer — Excel analysis, charting, UML/diagrams
+pandas
+numpy
+pyarrow
+polars
+scipy
+statsmodels
+scikit-learn
+xlsxwriter
+xlrd
+pyxlsb
+odfpy
+sqlalchemy
+matplotlib
+seaborn
+plotly
+kaleido
+lxml
+cairosvg
+svgwrite
+reportlab
+jinja2
+graphviz
+pydot
+networkx
+diagrams
+plantuml
