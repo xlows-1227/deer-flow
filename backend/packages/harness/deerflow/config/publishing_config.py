@@ -8,6 +8,8 @@ from deerflow.publishing.quota import PlatformQuota
 
 
 class PublishingConfig(BaseModel):
+    """Published-runtime configuration rooted at ``publishing``."""
+
     platform_quota: PlatformQuota = Field(default_factory=PlatformQuota)
 
 

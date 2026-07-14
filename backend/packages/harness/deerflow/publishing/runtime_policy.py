@@ -47,4 +47,3 @@ def build_published_run_config(
         "mode": "published",
     }
     return RunnableConfig(**config)
-

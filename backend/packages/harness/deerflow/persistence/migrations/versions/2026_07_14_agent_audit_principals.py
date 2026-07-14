@@ -20,14 +20,8 @@ def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if "external_api_audit_logs" not in inspector.get_table_names():
         return
-    columns = {
-        column["name"]
-        for column in inspector.get_columns("external_api_audit_logs")
-    }
-    indexes = {
-        index["name"]
-        for index in inspector.get_indexes("external_api_audit_logs")
-    }
+    columns = {column["name"] for column in inspector.get_columns("external_api_audit_logs")}
+    indexes = {index["name"] for index in inspector.get_indexes("external_api_audit_logs")}
     additions = (
         ("owner_user_id", sa.String(36), True),
         ("agent_id", sa.String(64), True),
@@ -53,10 +47,7 @@ def downgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if "external_api_audit_logs" not in inspector.get_table_names():
         return
-    columns = {
-        column["name"]
-        for column in inspector.get_columns("external_api_audit_logs")
-    }
+    columns = {column["name"] for column in inspector.get_columns("external_api_audit_logs")}
     with op.batch_alter_table("external_api_audit_logs") as batch:
         batch.drop_index("ix_external_audit_agent_created")
         for name in (

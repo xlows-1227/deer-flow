@@ -15,6 +15,8 @@ def _now() -> datetime:
 
 
 class AgentQuotaReservationRow(Base):
+    """Pre-run capacity reservation with one idempotent terminal transition."""
+
     __tablename__ = "agent_quota_reservations"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -38,6 +40,8 @@ class AgentQuotaReservationRow(Base):
 
 
 class AgentUsageRecordRow(Base):
+    """Exactly-once terminal usage record for one published-Agent run."""
+
     __tablename__ = "agent_usage_records"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

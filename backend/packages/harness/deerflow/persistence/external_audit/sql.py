@@ -11,10 +11,13 @@ from deerflow.persistence.external_audit.model import ExternalAuditRow
 
 
 class ExternalAuditRepository:
+    """Append and query metadata-only external API audit events."""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
     async def append(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Append one immutable audit event."""
         row = ExternalAuditRow(id=str(values.get("id") or f"audit_{uuid4().hex}"), **{k: v for k, v in values.items() if k != "id"})
         async with self._sf() as session:
             session.add(row)
@@ -30,6 +33,7 @@ class ExternalAuditRepository:
         agent_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        """List recent audit events within an optional principal scope."""
         stmt = select(ExternalAuditRow).order_by(ExternalAuditRow.created_at.desc()).limit(limit)
         if user_id is not None:
             stmt = stmt.where(ExternalAuditRow.user_id == user_id)

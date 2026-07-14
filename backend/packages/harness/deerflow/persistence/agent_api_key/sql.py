@@ -64,6 +64,7 @@ class AgentAPIKeyRepository:
 
     @staticmethod
     def parse(api_key: str) -> tuple[str, str] | None:
+        """Parse a plaintext credential into key id and secret components."""
         match = _KEY_RE.fullmatch(api_key)
         return (match.group(1), match.group(2)) if match else None
 
@@ -133,6 +134,7 @@ class AgentAPIKeyRepository:
         quota_overrides: Mapping[str, Any] | None = None,
         expires_at: datetime | None = None,
     ) -> dict[str, Any]:
+        """Create a named key and return its one-time plaintext value."""
         row, plaintext = self._new_row(
             agent_id=agent_id,
             name=name,
@@ -146,15 +148,10 @@ class AgentAPIKeyRepository:
             return {**_public_dict(row), "api_key": plaintext}
 
     async def list_by_agent(self, agent_id: str) -> list[dict[str, Any]]:
+        """List safe key metadata for one Agent, expiring stale rows first."""
         now = self._now()
         async with self._sf() as session:
-            rows = (
-                await session.execute(
-                    select(AgentAPIKeyRow)
-                    .where(AgentAPIKeyRow.agent_id == agent_id)
-                    .order_by(AgentAPIKeyRow.created_at.desc(), AgentAPIKeyRow.id)
-                )
-            ).scalars().all()
+            rows = (await session.execute(select(AgentAPIKeyRow).where(AgentAPIKeyRow.agent_id == agent_id).order_by(AgentAPIKeyRow.created_at.desc(), AgentAPIKeyRow.id))).scalars().all()
             changed = False
             for row in rows:
                 if row.status == "active" and row.expires_at is not None and _as_utc(row.expires_at) <= now:
@@ -165,6 +162,7 @@ class AgentAPIKeyRepository:
             return [_public_dict(row) for row in rows]
 
     async def get(self, agent_id: str, key_id: str) -> dict[str, Any] | None:
+        """Return safe key metadata within an Agent scope."""
         async with self._sf() as session:
             row = (
                 await session.execute(
@@ -177,6 +175,7 @@ class AgentAPIKeyRepository:
             return _public_dict(row) if row else None
 
     async def verify(self, api_key: str) -> dict[str, Any] | None:
+        """Verify an active plaintext key using its slow salted hash."""
         parsed = self.parse(api_key)
         if parsed is None:
             return None
@@ -201,6 +200,7 @@ class AgentAPIKeyRepository:
         *,
         overlap_seconds: int = 24 * 60 * 60,
     ) -> dict[str, Any] | None:
+        """Issue a successor key and bound the predecessor overlap period."""
         now = self._now()
         async with self._sf() as session:
             old = (
@@ -232,6 +232,7 @@ class AgentAPIKeyRepository:
             return {**_public_dict(row), "api_key": plaintext}
 
     async def revoke(self, agent_id: str, key_id: str) -> bool:
+        """Immediately revoke an Agent-scoped key idempotently."""
         async with self._sf() as session:
             row = (
                 await session.execute(
@@ -257,6 +258,7 @@ class AgentAPIKeyRepository:
         name: str | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        """Update safe metadata and quota overrides within an Agent scope."""
         async with self._sf() as session:
             row = (
                 await session.execute(
@@ -277,6 +279,7 @@ class AgentAPIKeyRepository:
             return _public_dict(row)
 
     async def touch_last_used(self, key_id: str, *, min_interval_seconds: int = 60) -> None:
+        """Throttle writes while recording recent successful authentication."""
         now = self._now()
         async with self._sf() as session:
             row = await session.get(AgentAPIKeyRow, key_id)
@@ -286,4 +289,3 @@ class AgentAPIKeyRepository:
                 return
             row.last_used_at = now
             await session.commit()
-

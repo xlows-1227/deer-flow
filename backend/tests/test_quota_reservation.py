@@ -37,10 +37,17 @@ def _context(
     *,
     agent_id: str = "pa_1",
     correlation_id: str = "req_1",
+    credential_id: str = "key_1",
     max_concurrent_runs: int = 2,
     daily_runs: int = 10,
+    agent_max_concurrent_runs: int | None = None,
+    agent_daily_runs: int | None = None,
 ) -> PublishedAgentContext:
     quota = EffectiveQuota(
+        agent_max_concurrent_runs=agent_max_concurrent_runs or max_concurrent_runs,
+        agent_daily_runs=agent_daily_runs or daily_runs,
+        agent_daily_tokens=10_000,
+        agent_inbound_rps=100,
         max_concurrent_runs=max_concurrent_runs,
         daily_runs=daily_runs,
         daily_tokens=10_000,
@@ -54,7 +61,7 @@ def _context(
         agent_id=agent_id,
         release_id="rel_1",
         source="api",
-        credential_id="key_1",
+        credential_id=credential_id,
         external_actor="actor",
         conversation_scope="conv_1",
         skill_revision_ids=(),
@@ -110,6 +117,56 @@ async def test_daily_limit_rejects_without_creating_reservation(quota_repo):
 
 
 @pytest.mark.asyncio
+async def test_key_daily_limits_are_isolated_but_agent_limit_still_caps_all_keys(quota_repo):
+    ledger = QuotaLedger(quota_repo)
+    first = await ledger.reserve(
+        _context(
+            agent_id="pa_keys",
+            credential_id="key_1",
+            daily_runs=1,
+            agent_daily_runs=2,
+        ),
+        request_key="key-1-first",
+    )
+    await ledger.settle(first.id, tokens_used=1, status="success", run_id="run-key-1")
+
+    second = await ledger.reserve(
+        _context(
+            agent_id="pa_keys",
+            credential_id="key_2",
+            daily_runs=1,
+            agent_daily_runs=2,
+        ),
+        request_key="key-2-first",
+    )
+    await ledger.settle(second.id, tokens_used=1, status="success", run_id="run-key-2")
+
+    with pytest.raises(QuotaExceededError) as credential_limit:
+        await ledger.reserve(
+            _context(
+                agent_id="pa_keys",
+                credential_id="key_1",
+                daily_runs=1,
+                agent_daily_runs=3,
+            ),
+            request_key="key-1-second",
+        )
+    assert credential_limit.value.code == "daily_runs_exceeded"
+
+    with pytest.raises(QuotaExceededError) as agent_limit:
+        await ledger.reserve(
+            _context(
+                agent_id="pa_keys",
+                credential_id="key_3",
+                daily_runs=1,
+                agent_daily_runs=2,
+            ),
+            request_key="key-3-first",
+        )
+    assert agent_limit.value.code == "daily_runs_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_request_key_reservation_is_idempotent(quota_repo):
     ledger = QuotaLedger(quota_repo)
     context = _context(agent_id="pa_idem")
@@ -141,10 +198,7 @@ async def test_all_terminal_states_settle_exactly_once(quota_repo, terminal):
     assert row["status"] == "settled"
     assert row["terminal_status"] == terminal
     assert row["tokens_used"] == 25
-    assert not any(
-        item["status"] == "pending"
-        for item in await quota_repo.list_reservations(agent_id=f"pa_{terminal}")
-    )
+    assert not any(item["status"] == "pending" for item in await quota_repo.list_reservations(agent_id=f"pa_{terminal}"))
 
 
 @pytest.mark.asyncio
@@ -181,9 +235,7 @@ async def test_run_completion_callback_maps_every_terminal_state(run_status, exp
         total_tokens=17,
     )
     ledger = AsyncMock()
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(run_manager=AsyncMock()))
-    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=AsyncMock())))
     context = _context(agent_id=f"pa-callback-{expected}")
     reservation = Reservation(
         id=f"qres-{expected}",

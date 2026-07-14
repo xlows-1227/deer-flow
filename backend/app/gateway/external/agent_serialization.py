@@ -40,6 +40,7 @@ def _finish(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def serialize_agent_metadata(agent: dict[str, Any]) -> dict[str, Any]:
+    """Serialize the public metadata allowlist for a published Agent."""
     return _finish(
         {
             "agent_id": str(agent["id"]),
@@ -51,6 +52,7 @@ def serialize_agent_metadata(agent: dict[str, Any]) -> dict[str, Any]:
 
 
 def serialize_agent_conversation(row: dict[str, Any]) -> dict[str, Any]:
+    """Serialize the public state of a credential-scoped conversation."""
     return _finish(
         {
             "conversation_id": str(row["conversation_id"]),
@@ -71,6 +73,7 @@ def _status(value: Any) -> str:
 
 
 def serialize_agent_run(row: Any, *, conversation_id: str) -> dict[str, Any]:
+    """Serialize one run without leaking internal runtime authority."""
     getter = (lambda key, default=None: getattr(row, key, default)) if not isinstance(row, dict) else row.get
     status = _status(getter("status"))
     payload = {
@@ -105,11 +108,7 @@ def sanitize_stream_payload(value: Any) -> Any:
         "messages",
         "delta",
     }
-    sanitized = {
-        str(key): sanitize_stream_payload(item)
-        for key, item in value.items()
-        if str(key) in allowed
-    }
+    sanitized = {str(key): sanitize_stream_payload(item) for key, item in value.items() if str(key) in allowed}
     assert_public_payload_safe(sanitized)
     return sanitized
 

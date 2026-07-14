@@ -243,7 +243,7 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None, mem
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if (resolved_app_config.memory.enabled if memory_enabled is None else memory_enabled):
+    if resolved_app_config.memory.enabled if memory_enabled is None else memory_enabled:
         hooks.append(memory_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is

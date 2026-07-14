@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,6 +43,7 @@ from deerflow.persistence.external_idempotency import (
     ExternalIdempotencyRepository,
     IdempotencyConflictError,
 )
+from deerflow.persistence.published_agent import PublishedAgentRepository
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.quota import QuotaExceededError, QuotaLedger, Reservation
 from deerflow.publishing.resolver import (
@@ -61,6 +63,8 @@ class _PublicModel(BaseModel):
 
 
 class AgentConversationCreateRequest(_PublicModel):
+    """Public fields accepted when creating a credential-scoped conversation."""
+
     external_conversation_id: str | None = Field(default=None, min_length=1, max_length=256)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -71,6 +75,8 @@ class AgentConversationCreateRequest(_PublicModel):
 
 
 class AgentRunCreateRequest(_PublicModel):
+    """Public fields accepted when starting a published-Agent run."""
+
     message: str = Field(min_length=1, max_length=200_000)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -109,6 +115,11 @@ def _credential_id(request: Request) -> str:
     return str(value)
 
 
+def _conversation_source(request: Request) -> str:
+    """Encode credential scope into the legacy conversation mapping key."""
+    return f"agent-api:{_credential_id(request)}"
+
+
 def _owner_user_id(request: Request) -> str:
     value = getattr(request.state, "owner_user_id", None)
     if not value:
@@ -127,9 +138,7 @@ def _validate_idempotency_key(value: str | None) -> str | None:
 
 def _request_hash(operation: str, body: AgentRunCreateRequest) -> str:
     payload = {"operation": operation, "body": body.model_dump(mode="json")}
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 async def _resolve_context(
@@ -143,7 +152,7 @@ async def _resolve_context(
     try:
         return await resolver.resolve(
             agent_id,
-            source=f"agent-api:{_credential_id(request)}",
+            source="api",
             credential_id=_credential_id(request),
             external_actor=f"agent-key:{_credential_id(request)}",
             conversation_scope=conversation_scope,
@@ -181,11 +190,7 @@ def _run_belongs_to_scope(
     conversation_id: str,
 ) -> bool:
     metadata = row.metadata if hasattr(row, "metadata") else (row.get("metadata") or {})
-    return (
-        metadata.get("published_agent_id") == agent_id
-        and metadata.get("published_credential_id") == credential_id
-        and metadata.get("published_conversation_id") == conversation_id
-    )
+    return metadata.get("published_agent_id") == agent_id and metadata.get("published_credential_id") == credential_id and metadata.get("published_conversation_id") == conversation_id
 
 
 async def _run_or_404(
@@ -342,9 +347,7 @@ def _schedule_quota_settlement(
             "agent_id": context.agent_id,
             "source": context.source,
             "credential_id": context.credential_id,
-            "external_actor_hash": hashlib.sha256(
-                context.external_actor.encode("utf-8")
-            ).hexdigest(),
+            "external_actor_hash": hashlib.sha256(context.external_actor.encode("utf-8")).hexdigest(),
             "conversation_id": context.conversation_scope,
             "run_id": record.run_id,
             "model": context.model_name,
@@ -512,7 +515,7 @@ async def _public_sse_consumer(
     request: Request,
     record: Any,
     conversation_id: str,
-):
+) -> AsyncIterator[str]:
     bridge = get_stream_bridge(request)
     manager = get_run_manager(request)
     last_event_id = request.headers.get("Last-Event-ID")
@@ -542,8 +545,9 @@ async def get_agent_metadata(
     agent_id: str,
     request: Request,
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
-    agents=Depends(get_published_agent_repo),
+    agents: PublishedAgentRepository = Depends(get_published_agent_repo),
 ) -> dict[str, Any]:
+    """Return explicitly whitelisted metadata for one runnable Agent."""
     await _resolve_context(
         resolver=resolver,
         agent_id=agent_id,
@@ -564,6 +568,7 @@ async def create_agent_conversation(
     repository: ExternalConversationRepository = Depends(get_external_conversation_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
 ) -> dict[str, Any]:
+    """Create a conversation isolated to the authenticated Agent credential."""
     await _resolve_context(
         resolver=resolver,
         agent_id=agent_id,
@@ -578,7 +583,7 @@ async def create_agent_conversation(
     try:
         row = await service.create(
             user_id=_owner_user_id(request),
-            source="api",
+            source=_conversation_source(request),
             external_conversation_id=body.external_conversation_id,
             agent_id=agent_id,
             default_skill_name=None,
@@ -602,6 +607,7 @@ async def get_agent_conversation(
     repository: ExternalConversationRepository = Depends(get_external_conversation_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
 ) -> dict[str, Any]:
+    """Return a conversation only within the authenticated credential scope."""
     await _resolve_context(
         resolver=resolver,
         agent_id=agent_id,
@@ -629,6 +635,7 @@ async def create_agent_run(
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
     quota_ledger: QuotaLedger = Depends(get_quota_ledger),
 ) -> dict[str, Any]:
+    """Start an asynchronous published-Agent run."""
     idempotency_key = _validate_idempotency_key(idempotency_key)
     record, _replayed = await _start_public_run(
         agent_id=agent_id,
@@ -657,6 +664,7 @@ async def wait_agent_run(
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
     quota_ledger: QuotaLedger = Depends(get_quota_ledger),
 ) -> dict[str, Any]:
+    """Start a run and wait for its terminal public representation."""
     idempotency_key = _validate_idempotency_key(idempotency_key)
     record, replayed = await _start_public_run(
         agent_id=agent_id,
@@ -690,6 +698,7 @@ async def stream_agent_run(
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
     quota_ledger: QuotaLedger = Depends(get_quota_ledger),
 ) -> StreamingResponse:
+    """Start a run and expose its sanitized event stream as SSE."""
     idempotency_key = _validate_idempotency_key(idempotency_key)
     record, _replayed = await _start_public_run(
         agent_id=agent_id,
@@ -714,9 +723,7 @@ async def stream_agent_run(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Content-Location": (
-                f"/api/v1/agents/{agent_id}/conversations/{conversation_id}/runs/{record.run_id}"
-            ),
+            "Content-Location": (f"/api/v1/agents/{agent_id}/conversations/{conversation_id}/runs/{record.run_id}"),
         },
     )
 
@@ -730,6 +737,7 @@ async def get_agent_run(
     conversations: ExternalConversationRepository = Depends(get_external_conversation_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
 ) -> dict[str, Any]:
+    """Return one run within its Agent, credential, and conversation scope."""
     await _resolve_context(
         resolver=resolver,
         agent_id=agent_id,
@@ -760,6 +768,7 @@ async def cancel_agent_run(
     conversations: ExternalConversationRepository = Depends(get_external_conversation_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
 ) -> dict[str, Any]:
+    """Cancel a scoped run and return its latest public state."""
     await _resolve_context(
         resolver=resolver,
         agent_id=agent_id,

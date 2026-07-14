@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Self
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -16,6 +16,8 @@ router = APIRouter(prefix="/api/published-agents/{agent_id}/keys", tags=["publis
 
 
 class AgentKeyCreateRequest(BaseModel):
+    """Owner request for a new named Agent credential."""
+
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
     quota_overrides: dict[str, int] = Field(default_factory=dict)
@@ -29,6 +31,8 @@ class AgentKeyCreateRequest(BaseModel):
 
 
 class AgentKeyUpdateRequest(BaseModel):
+    """Owner request to rename or tighten one Agent credential."""
+
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=128)
     quota_overrides: dict[str, int] | None = None
@@ -43,7 +47,7 @@ class AgentKeyUpdateRequest(BaseModel):
         return cleaned
 
     @model_validator(mode="after")
-    def _require_change(self):
+    def _require_change(self) -> Self:
         if self.name is None and self.quota_overrides is None:
             raise ValueError("at least one field must be supplied")
         return self
@@ -95,6 +99,7 @@ async def create_agent_key(
     repository: AgentAPIKeyRepository = Depends(get_agent_api_key_repo),
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
+    """Create an Agent credential and reveal its plaintext exactly once."""
     await _require_owned_agent(request, agent_id, service)
     created = await repository.create(agent_id=agent_id, name=body.name, quota_overrides=body.quota_overrides)
     return {
@@ -111,6 +116,7 @@ async def list_agent_keys(
     repository: AgentAPIKeyRepository = Depends(get_agent_api_key_repo),
     service: DraftService = Depends(get_draft_service),
 ) -> list[dict[str, Any]]:
+    """List safe metadata for the current owner's Agent credentials."""
     await _require_owned_agent(request, agent_id, service)
     return [_safe_key(item) for item in await repository.list_by_agent(agent_id)]
 
@@ -123,6 +129,7 @@ async def rotate_agent_key(
     repository: AgentAPIKeyRepository = Depends(get_agent_api_key_repo),
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
+    """Rotate a credential while preserving the configured overlap window."""
     await _require_owned_agent(request, agent_id, service)
     rotated = await repository.rotate(agent_id, key_id, overlap_seconds=_rotation_overlap_seconds())
     if rotated is None:
@@ -142,6 +149,7 @@ async def revoke_agent_key(
     repository: AgentAPIKeyRepository = Depends(get_agent_api_key_repo),
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, bool]:
+    """Immediately revoke one Agent credential."""
     await _require_owned_agent(request, agent_id, service)
     if not await repository.revoke(agent_id, key_id):
         raise HTTPException(status_code=404, detail="Key not found")
@@ -157,6 +165,7 @@ async def update_agent_key(
     repository: AgentAPIKeyRepository = Depends(get_agent_api_key_repo),
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
+    """Update a credential name or its stricter quota overrides."""
     await _require_owned_agent(request, agent_id, service)
     updated = await repository.update(
         agent_id,
@@ -167,4 +176,3 @@ async def update_agent_key(
     if updated is None:
         raise HTTPException(status_code=404, detail="Key not found")
     return _safe_key(updated)
-

@@ -179,6 +179,7 @@ async def create_agent(
     request: Request,
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
+    """Create one owner-scoped published-Agent identity and draft."""
     owner = _user_id(request)
     try:
         agent = await service.create_agent(
@@ -226,6 +227,7 @@ async def get_agent_usage(
     service: DraftService = Depends(get_draft_service),
     repository: AgentUsageRepository = Depends(get_agent_usage_repo),
 ) -> dict[str, Any]:
+    """Return owner-scoped daily usage aggregates for one Agent."""
     owner = _user_id(request)
     if await service.get_agent(agent_id, owner_user_id=owner) is None:
         raise HTTPException(status_code=404, detail="Agent not found")

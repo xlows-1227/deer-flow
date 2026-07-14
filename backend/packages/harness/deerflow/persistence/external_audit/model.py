@@ -13,6 +13,8 @@ def _now() -> datetime:
 
 
 class ExternalAuditRow(Base):
+    """Metadata-only audit event supporting user and Agent dual principals."""
+
     __tablename__ = "external_api_audit_logs"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

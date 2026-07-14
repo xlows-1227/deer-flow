@@ -13,6 +13,8 @@ def _now() -> datetime:
 
 
 class ExternalConversationRow(Base):
+    """Public conversation mapped to an internal thread and credential scope."""
+
     __tablename__ = "external_conversations"
 
     conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)

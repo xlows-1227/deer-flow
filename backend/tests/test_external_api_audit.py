@@ -139,9 +139,7 @@ def test_agent_audit_separates_owner_and_hashed_external_actor():
     assert row["agent_id"] == "pa_1"
     assert row["credential_id"] == "key_1"
     assert row["source"] == "api"
-    assert row["external_actor_hash"] == hashlib.sha256(
-        b"agent-key:key_1"
-    ).hexdigest()
+    assert row["external_actor_hash"] == hashlib.sha256(b"agent-key:key_1").hexdigest()
     assert "agent-key:key_1" not in repr(row)
     assert "dfa_aaaaaaaa_secret-value" not in row["user_agent"]
     assert "[redacted-api-key]" in row["user_agent"]

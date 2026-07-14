@@ -153,5 +153,9 @@ def test_lifespan_mounts_services_on_app_state(staged_env):
         assert app.state.publish_service is not None, "publish_service is None despite sqlite backend"
         assert app.state.import_service is not None, "import_service is None despite sqlite backend"
         assert app.state.agent_api_key_repo is not None, "agent_api_key_repo is None despite sqlite backend"
+        assert app.state.published_agent_resolver is not None, "resolver is None despite sqlite backend"
+        from deerflow.publishing.skills_index import ConnectorServiceRepo
+
+        assert isinstance(app.state.published_agent_resolver._connectors, ConnectorServiceRepo)
         paths = {route.path for route in app.routes}
         assert "/api/published-agents/{agent_id}/keys" in paths

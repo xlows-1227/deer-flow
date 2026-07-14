@@ -54,22 +54,22 @@ def _usage(run_id: str, *, owner: str = "owner-1", agent: str = "pa_1", status: 
 @pytest.mark.asyncio
 async def test_usage_is_inserted_once_per_run_and_actor_is_hashed(usage_repo):
     first, created = await usage_repo.record_usage(_usage("run-1"))
-    second, created_again = await usage_repo.record_usage(
-        {**_usage("run-1"), "total_tokens": 999}
-    )
+    second, created_again = await usage_repo.record_usage({**_usage("run-1"), "total_tokens": 999})
     assert created is True
     assert created_again is False
     assert first["id"] == second["id"]
     assert second["total_tokens"] == 25
-    assert second["external_actor_hash"] == hashlib.sha256(
-        b"agent-key:key_1"
-    ).hexdigest()
+    assert second["external_actor_hash"] == hashlib.sha256(b"agent-key:key_1").hexdigest()
     assert "agent-key:key_1" not in repr(second)
 
 
 @pytest.mark.asyncio
 async def test_usage_insert_and_reservation_settlement_are_one_idempotent_path(usage_repo):
     quota = EffectiveQuota(
+        agent_max_concurrent_runs=2,
+        agent_daily_runs=10,
+        agent_daily_tokens=10_000,
+        agent_inbound_rps=100,
         max_concurrent_runs=2,
         daily_runs=10,
         daily_tokens=10_000,
@@ -101,9 +101,7 @@ async def test_usage_insert_and_reservation_settlement_are_one_idempotent_path(u
         run_id="run-atomic",
         usage={**values, "total_tokens": 999},
     )
-    stored, created = await usage_repo.record_usage(
-        {**values, "total_tokens": 999}
-    )
+    stored, created = await usage_repo.record_usage({**values, "total_tokens": 999})
     assert created is False
     assert stored["total_tokens"] == 25
 
@@ -111,9 +109,7 @@ async def test_usage_insert_and_reservation_settlement_are_one_idempotent_path(u
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["success", "failed", "cancelled", "timeout"])
 async def test_daily_aggregate_includes_all_terminal_statuses(usage_repo, status):
-    await usage_repo.record_usage(
-        _usage(f"run-{status}", agent=f"pa-{status}", status=status)
-    )
+    await usage_repo.record_usage(_usage(f"run-{status}", agent=f"pa-{status}", status=status))
     result = await usage_repo.aggregate_daily(
         owner_user_id="owner-1",
         agent_id=f"pa-{status}",

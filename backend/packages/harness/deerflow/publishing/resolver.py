@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.instructions import compose_agent_instructions
@@ -17,20 +17,28 @@ class AgentSuspendedError(RuntimeError):
 
 
 class PublishedAgentRepoLike(Protocol):
+    """Owner-scoped stable-Agent lookup required by the resolver."""
+
     async def get_owner(self, agent_id: str) -> str | None: ...
 
     async def get(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None: ...
 
 
 class AgentReleaseRepoLike(Protocol):
+    """Immutable Release lookup required by the resolver."""
+
     async def get(self, release_id: str, *, owner_user_id: str) -> dict[str, Any] | None: ...
 
 
 class ConnectorRepoLike(Protocol):
+    """Authority-enriched active Connector lookup required by the resolver."""
+
     async def get_instance(self, connector_id: str, *, owner_id: str) -> dict[str, Any] | None: ...
 
 
 class QuotaResolverLike(Protocol):
+    """Credential-aware effective-quota lookup required by the resolver."""
+
     async def resolve(
         self,
         *,
@@ -60,13 +68,14 @@ class PublishedAgentResolver:
         self,
         agent_id: str,
         *,
-        source: str,
+        source: Literal["api", "feishu"],
         credential_id: str,
         external_actor: str,
         conversation_scope: str,
         correlation_id: str,
         idempotency_key: str | None = None,
     ) -> PublishedAgentContext:
+        """Resolve a stable Agent id into one frozen, least-privilege context."""
         if source not in {"api", "feishu"}:
             raise ValueError("published agent source must be api or feishu")
 
@@ -109,17 +118,11 @@ class PublishedAgentResolver:
             owner_user_id=owner_user_id,
             agent_id=agent_id,
             release_id=release_id,
-            source=source,  # type: ignore[arg-type]
+            source=source,
             credential_id=credential_id,
             external_actor=external_actor,
             conversation_scope=conversation_scope,
-            skill_revision_ids=tuple(
-                sorted(
-                    str(item["skill_revision_id"])
-                    for item in release.get("skills") or []
-                    if item.get("skill_revision_id")
-                )
-            ),
+            skill_revision_ids=tuple(sorted(str(item["skill_revision_id"]) for item in release.get("skills") or [] if item.get("skill_revision_id"))),
             connector_capabilities=connector_capabilities,
             tool_groups=tuple(str(group) for group in release.get("tool_groups") or []),
             model_name=model_name,
@@ -143,6 +146,8 @@ class PublishedAgentResolver:
                 continue
             instance = await self._connectors.get_instance(connector_id, owner_id=owner_user_id)
             if instance is None:
+                continue
+            if str(instance.get("status") or "").lower() != "active":
                 continue
             supported = instance.get("supported_capabilities")
             if not isinstance(supported, (list, tuple, set, frozenset)) or capability not in supported:

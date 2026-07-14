@@ -45,4 +45,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     if "agent_api_keys" in sa.inspect(op.get_bind()).get_table_names():
         op.drop_table("agent_api_keys")
-

@@ -119,10 +119,7 @@ async def test_resolve_published_agent_builds_trusted_frozen_context() -> None:
     assert context.connector_capabilities == (("conn-live", "mail.send"),)
     assert context.tool_groups == ("search", "database")
     assert context.model_name == "model-a"
-    assert context.instructions == (
-        "<agent_instructions>\nYou answer billing questions.\n</agent_instructions>\n\n"
-        "<agent_soul>\nBe concise.\n</agent_soul>"
-    )
+    assert context.instructions == ("<agent_instructions>\nYou answer billing questions.\n</agent_instructions>\n\n<agent_soul>\nBe concise.\n</agent_soul>")
     assert context.memory_enabled is False
     assert context.effective_quota == ("owner-a", {"daily_runs": 20}, "key_1")
     with pytest.raises(FrozenInstanceError):

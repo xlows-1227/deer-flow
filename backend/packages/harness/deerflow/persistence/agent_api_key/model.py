@@ -15,6 +15,8 @@ def _now() -> datetime:
 
 
 class AgentAPIKeyRow(Base):
+    """Slow-hashed, independently managed credential bound to one Agent."""
+
     __tablename__ = "agent_api_keys"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -32,4 +34,3 @@ class AgentAPIKeyRow(Base):
     rotation_of: Mapped[str | None] = mapped_column(String(32), index=True)
 
     __table_args__ = (Index("ix_agent_api_keys_agent_status", "agent_id", "status"),)
-

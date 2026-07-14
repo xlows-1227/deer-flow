@@ -40,6 +40,7 @@ class AgentAPIAuthMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
+        """Authenticate Agent API routes and establish trusted request state."""
         match = _AGENT_PATH_RE.match(request.url.path)
         if match is None:
             return await call_next(request)

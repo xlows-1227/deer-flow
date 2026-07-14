@@ -11,16 +11,21 @@ from deerflow.persistence.external_conversation.model import ExternalConversatio
 
 
 class ExternalConversationExistsError(ValueError):
+    """Raised when an external mapping already identifies a conversation."""
+
     def __init__(self, conversation_id: str) -> None:
         super().__init__("External conversation mapping already exists")
         self.conversation_id = conversation_id
 
 
 class ExternalConversationRepository:
+    """Persist legacy user and published-Agent conversation mappings."""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
     async def create(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """Create a mapping while preserving its legacy or credential scope."""
         user_id = str(values["user_id"])
         source = str(values.get("source") or "default")
         external_id = values.get("external_conversation_id")

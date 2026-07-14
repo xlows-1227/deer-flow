@@ -181,10 +181,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.external_audit_repo = ExternalAuditRepository(sf)
             app.state.invite_code_repo = InviteCodeRepository(sf)
 
+            from deerflow.connectors.service import make_connector_service
             from deerflow.persistence.agent_release import AgentReleaseRepository
-            from deerflow.persistence.connector import ConnectorRepository
             from deerflow.publishing.quota import PublishedQuotaResolver, QuotaLedger
             from deerflow.publishing.resolver import PublishedAgentResolver
+            from deerflow.publishing.skills_index import ConnectorServiceRepo
 
             quota_resolver = PublishedQuotaResolver(
                 startup_config.publishing.platform_quota,
@@ -195,7 +196,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.published_agent_resolver = PublishedAgentResolver(
                 agent_repo=app.state.published_agent_repo,
                 release_repo=AgentReleaseRepository(sf),
-                connector_repo=ConnectorRepository(sf),
+                connector_repo=ConnectorServiceRepo(make_connector_service()),
                 quota_resolver=quota_resolver,
             )
         else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -24,11 +25,15 @@ from deerflow.publishing.quota import (
     Reservation,
 )
 from deerflow.publishing.resolver import AgentNotAvailableError, AgentSuspendedError
-from deerflow.runtime import DisconnectMode, RunStatus
+from deerflow.runtime import END_SENTINEL, DisconnectMode, RunStatus, StreamEvent
 
 
 def _context(agent_id: str = "pa_1", credential_id: str = "key_1") -> PublishedAgentContext:
     quota = EffectiveQuota(
+        agent_max_concurrent_runs=4,
+        agent_daily_runs=100,
+        agent_daily_tokens=100_000,
+        agent_inbound_rps=20,
         max_concurrent_runs=4,
         daily_runs=100,
         daily_tokens=100_000,
@@ -140,7 +145,41 @@ def _router_app(
     app.dependency_overrides[get_published_agent_repo] = lambda: agents or AsyncMock()
     app.dependency_overrides[get_external_idempotency_repo] = lambda: idempotency or AsyncMock()
     app.dependency_overrides[get_quota_ledger] = lambda: quota_ledger or _AllowLedger()
+    app.state.thread_store = object()
+    app.state.checkpointer = object()
     return app
+
+
+def _conversation() -> dict:
+    now = datetime.now(UTC)
+    return {
+        "conversation_id": "conv_1",
+        "agent_id": "pa_1",
+        "credential_id": "key_1",
+        "thread_id": "thread_1",
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _run_record(*, status: RunStatus = RunStatus.pending, task=None):
+    now = datetime.now(UTC)
+    return SimpleNamespace(
+        run_id="run_1",
+        thread_id="thread_1",
+        status=status,
+        metadata={
+            "published_agent_id": "pa_1",
+            "published_credential_id": "key_1",
+            "published_conversation_id": "conv_1",
+        },
+        last_ai_message=None,
+        created_at=now,
+        updated_at=now,
+        task=task,
+        on_disconnect=DisconnectMode.continue_,
+    )
 
 
 def test_metadata_is_explicitly_whitelisted_and_lifecycle_is_fail_closed():
@@ -165,6 +204,7 @@ def test_metadata_is_explicitly_whitelisted_and_lifecycle_is_fail_closed():
         "avatar": "avatar.png",
     }
     assert_public_payload_safe(response.json())
+    assert resolver.resolve.await_args.kwargs["source"] == "api"
 
     resolver.resolve.side_effect = AgentSuspendedError("pa_1")
     assert TestClient(app).get("/api/v1/agents/pa_1").status_code == 410
@@ -201,6 +241,30 @@ def test_conversation_lookup_is_scoped_by_agent_and_credential():
     )
 
 
+def test_conversation_creation_encodes_credential_in_legacy_mapping_source(monkeypatch):
+    captured = {}
+
+    class ConversationService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def create(self, **values):
+            captured.update(values)
+            return _conversation()
+
+    monkeypatch.setattr(agent_public_api, "ExternalConversationService", ConversationService)
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    app = _router_app(resolver=resolver, conversations=AsyncMock())
+    response = TestClient(app).post(
+        "/api/v1/agents/pa_1/conversations",
+        json={"external_conversation_id": "shared-id"},
+    )
+    assert response.status_code == 201
+    assert captured["source"] == "agent-api:key_1"
+    assert captured["credential_id"] == "key_1"
+
+
 def test_public_run_body_cannot_select_model_release_skill_or_context():
     resolver = AsyncMock()
     resolver.resolve.return_value = _context()
@@ -218,35 +282,12 @@ def test_public_run_body_cannot_select_model_release_skill_or_context():
 
 
 def test_run_idempotency_replays_one_internal_run(monkeypatch):
-    now = datetime.now(UTC)
-    conversation = {
-        "conversation_id": "conv_1",
-        "agent_id": "pa_1",
-        "credential_id": "key_1",
-        "thread_id": "thread_1",
-        "status": "active",
-        "created_at": now,
-        "updated_at": now,
-    }
+    conversation = _conversation()
     conversations = AsyncMock()
     conversations.get_for_agent.return_value = conversation
     resolver = AsyncMock()
     resolver.resolve.return_value = _context()
-    record = SimpleNamespace(
-        run_id="run_1",
-        thread_id="thread_1",
-        status=RunStatus.pending,
-        metadata={
-            "published_agent_id": "pa_1",
-            "published_credential_id": "key_1",
-            "published_conversation_id": "conv_1",
-        },
-        last_ai_message=None,
-        created_at=now,
-        updated_at=now,
-        task=None,
-        on_disconnect=DisconnectMode.continue_,
-    )
+    record = _run_record()
     start = AsyncMock(return_value=record)
     monkeypatch.setattr(agent_public_api, "start_run", start)
 
@@ -284,17 +325,8 @@ def test_run_idempotency_replays_one_internal_run(monkeypatch):
 
 
 def test_quota_rejection_returns_429_retry_after_and_creates_no_run(monkeypatch):
-    now = datetime.now(UTC)
     conversations = AsyncMock()
-    conversations.get_for_agent.return_value = {
-        "conversation_id": "conv_1",
-        "agent_id": "pa_1",
-        "credential_id": "key_1",
-        "thread_id": "thread_1",
-        "status": "active",
-        "created_at": now,
-        "updated_at": now,
-    }
+    conversations.get_for_agent.return_value = _conversation()
     resolver = AsyncMock()
     resolver.resolve.return_value = _context()
     ledger = AsyncMock()
@@ -317,3 +349,103 @@ def test_quota_rejection_returns_429_retry_after_and_creates_no_run(monkeypatch)
     assert response.headers["Retry-After"] == "321"
     assert response.json()["detail"]["code"] == "daily_runs_exceeded"
     start.assert_not_awaited()
+
+
+def test_wait_run_returns_terminal_answer(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+
+    async def start(*args, **kwargs):
+        record = _run_record()
+
+        async def complete():
+            await asyncio.sleep(0)
+            record.status = RunStatus.success
+            record.last_ai_message = "completed answer"
+            record.updated_at = datetime.now(UTC)
+
+        record.task = asyncio.create_task(complete())
+        return record
+
+    monkeypatch.setattr(agent_public_api, "start_run", start)
+    app = _router_app(resolver=resolver, conversations=conversations)
+    response = TestClient(app).post(
+        "/api/v1/agents/pa_1/conversations/conv_1/runs/wait",
+        json={"message": "hello"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["answer"] == "completed answer"
+
+
+def test_stream_run_sanitizes_events_and_emits_end(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    record = _run_record(status=RunStatus.success)
+    monkeypatch.setattr(agent_public_api, "start_run", AsyncMock(return_value=record))
+
+    class Bridge:
+        async def subscribe(self, run_id, *, last_event_id=None):
+            assert run_id == "run_1"
+            assert last_event_id is None
+            yield StreamEvent(
+                id="1",
+                event="metadata",
+                data={"release_id": "rel_secret"},
+            )
+            yield StreamEvent(
+                id="2",
+                event="messages",
+                data={"content": "hello", "release_id": "rel_secret"},
+            )
+            yield END_SENTINEL
+
+    app = _router_app(resolver=resolver, conversations=conversations)
+    app.state.stream_bridge = Bridge()
+    app.state.run_manager = SimpleNamespace(cancel=AsyncMock())
+    response = TestClient(app).post(
+        "/api/v1/agents/pa_1/conversations/conv_1/runs/stream",
+        json={"message": "hello"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"conversation_id": "conv_1"' in response.text
+    assert '"content": "hello"' in response.text
+    assert "rel_secret" not in response.text
+    assert "event: end" in response.text
+
+
+def test_get_and_cancel_run_are_credential_scoped():
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    record = _run_record(status=RunStatus.running)
+
+    class RunManager:
+        async def get(self, run_id, *, user_id):
+            assert run_id == "run_1"
+            assert user_id == "owner-1"
+            return record
+
+        async def cancel(self, run_id):
+            assert run_id == "run_1"
+            record.status = RunStatus.interrupted
+            record.updated_at = datetime.now(UTC)
+            return True
+
+    app = _router_app(resolver=resolver, conversations=conversations)
+    app.state.run_manager = RunManager()
+    client = TestClient(app)
+    path = "/api/v1/agents/pa_1/conversations/conv_1/runs/run_1"
+    assert client.get(path).json()["status"] == "running"
+    cancelled = client.post(f"{path}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    hidden = client.get(path, headers={"X-Credential": "key_2"})
+    assert hidden.status_code == 404

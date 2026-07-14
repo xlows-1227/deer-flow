@@ -27,6 +27,12 @@ class PlatformQuota:
 
 @dataclass(frozen=True)
 class EffectiveQuota:
+    """Resolved Agent-wide limits plus credential-specific effective limits."""
+
+    agent_max_concurrent_runs: int
+    agent_daily_runs: int
+    agent_daily_tokens: int
+    agent_inbound_rps: int
     max_concurrent_runs: int
     daily_runs: int
     daily_tokens: int
@@ -38,6 +44,8 @@ class EffectiveQuota:
 
 @dataclass(frozen=True)
 class Reservation:
+    """One idempotent quota reservation returned to the run orchestrator."""
+
     id: str
     request_key: str
     agent_id: str
@@ -47,6 +55,8 @@ class Reservation:
 
 
 class QuotaExceededError(RuntimeError):
+    """Raised when a pre-run reservation would exceed an effective limit."""
+
     def __init__(self, code: str, *, retry_after: int) -> None:
         super().__init__(code)
         self.code = code
@@ -80,18 +90,27 @@ def resolve_effective_quota(
         "max_input_bytes": platform.max_input_bytes,
         "inbound_rps": platform.inbound_rps,
     }
-    resolved: dict[str, int] = {}
+    agent_limits: dict[str, int] = {}
     for name, hard_limit in hard_limits.items():
-        owner_limit = _positive_override(owner, name, hard_limit)
-        resolved[name] = _positive_override(key, name, owner_limit)
-    resolved["max_tokens_per_run"] = min(
-        resolved["max_tokens_per_run"],
-        resolved["daily_tokens"],
+        agent_limits[name] = _positive_override(owner, name, hard_limit)
+    resolved = {name: _positive_override(key, name, agent_limit) for name, agent_limit in agent_limits.items()}
+    agent_limits["max_tokens_per_run"] = min(
+        agent_limits["max_tokens_per_run"],
+        agent_limits["daily_tokens"],
     )
-    return EffectiveQuota(**resolved)
+    resolved["max_tokens_per_run"] = min(resolved["max_tokens_per_run"], resolved["daily_tokens"])
+    return EffectiveQuota(
+        agent_max_concurrent_runs=agent_limits["max_concurrent_runs"],
+        agent_daily_runs=agent_limits["daily_runs"],
+        agent_daily_tokens=agent_limits["daily_tokens"],
+        agent_inbound_rps=agent_limits["inbound_rps"],
+        **resolved,
+    )
 
 
 class AgentKeyRepoLike(Protocol):
+    """Minimal Agent-key repository contract used by quota resolution."""
+
     async def get(self, agent_id: str, key_id: str) -> dict[str, Any] | None: ...
 
 
@@ -109,6 +128,7 @@ class PublishedQuotaResolver:
         release: dict[str, Any],
         credential_id: str,
     ) -> EffectiveQuota:
+        """Resolve Agent-wide owner limits and credential-specific tightening."""
         del owner_user_id
         key = await self._keys.get(str(release["agent_id"]), credential_id)
         key_overrides = key.get("quota_overrides") if key is not None else {}
@@ -120,6 +140,8 @@ class PublishedQuotaResolver:
 
 
 class UsageRepoLike(Protocol):
+    """Atomic reservation repository contract used by ``QuotaLedger``."""
+
     async def reserve_quota(
         self,
         values: Mapping[str, Any],
@@ -147,6 +169,7 @@ class QuotaLedger:
         self._repository = repository
 
     async def reserve(self, context: Any, *, request_key: str) -> Reservation:
+        """Reserve quota for one trusted context and idempotency scope."""
         from deerflow.persistence.agent_usage.sql import QuotaReservationLimitError
 
         quota = context.effective_quota
@@ -184,6 +207,7 @@ class QuotaLedger:
         run_id: str | None = None,
         usage: Mapping[str, Any] | None = None,
     ) -> bool:
+        """Settle a reservation once and optionally persist terminal usage."""
         _row, changed = await self._repository.settle_reservation(
             reservation_id,
             tokens_used=max(0, int(tokens_used)),
@@ -194,6 +218,7 @@ class QuotaLedger:
         return changed
 
     async def release(self, reservation_id: str) -> bool:
+        """Release a reservation that never reached a running Run."""
         return await self._repository.release_reservation(reservation_id)
 
 

@@ -21,6 +21,7 @@ _MAX_REQUEST_BYTES = 256 * 1024
 
 
 def resolve_request_id(request: Request) -> str:
+    """Accept a bounded caller request id or generate a trusted replacement."""
     supplied = request.headers.get("X-Request-ID", "")
     if _REQUEST_ID_RE.fullmatch(supplied):
         return supplied
@@ -38,15 +39,14 @@ def _safe_user_agent(request: Request) -> str | None:
 
 
 class ExternalAuditMiddleware(BaseHTTPMiddleware):
+    """Attach request metadata and persist sanitized dual-principal audits."""
+
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        managed_path = (
-            request.url.path.startswith("/api/v1/external/")
-            or request.url.path.startswith("/api/v1/api-keys/")
-            or request.url.path.startswith("/api/v1/agents/")
-        )
+        """Audit managed external routes without recording request contents."""
+        managed_path = request.url.path.startswith("/api/v1/external/") or request.url.path.startswith("/api/v1/api-keys/") or request.url.path.startswith("/api/v1/agents/")
         if not managed_path:
             return await call_next(request)
 
@@ -88,38 +88,16 @@ class ExternalAuditMiddleware(BaseHTTPMiddleware):
             try:
                 user = getattr(request.state, "user", None)
                 route = request.scope.get("route")
-                agent_authenticated = (
-                    getattr(request.state, "auth_method", None) == "agent_api_key"
-                )
-                credential_id = (
-                    str(getattr(request.state, "agent_key_id", "")) or None
-                    if agent_authenticated
-                    else None
-                )
-                external_actor_hash = (
-                    hashlib.sha256(f"agent-key:{credential_id}".encode()).hexdigest()
-                    if credential_id is not None
-                    else None
-                )
+                agent_authenticated = getattr(request.state, "auth_method", None) == "agent_api_key"
+                credential_id = str(getattr(request.state, "agent_key_id", "")) or None if agent_authenticated else None
+                external_actor_hash = hashlib.sha256(f"agent-key:{credential_id}".encode()).hexdigest() if credential_id is not None else None
                 await repository.append(
                     {
                         "request_id": request_id,
-                        "user_id": (
-                            str(user.id)
-                            if user is not None and not agent_authenticated
-                            else None
-                        ),
+                        "user_id": (str(user.id) if user is not None and not agent_authenticated else None),
                         "api_key_id": getattr(request.state, "api_key_id", None),
-                        "owner_user_id": (
-                            str(getattr(request.state, "owner_user_id", "")) or None
-                            if agent_authenticated
-                            else None
-                        ),
-                        "agent_id": (
-                            str(getattr(request.state, "agent_id", "")) or None
-                            if agent_authenticated
-                            else None
-                        ),
+                        "owner_user_id": (str(getattr(request.state, "owner_user_id", "")) or None if agent_authenticated else None),
+                        "agent_id": (str(getattr(request.state, "agent_id", "")) or None if agent_authenticated else None),
                         "credential_id": credential_id,
                         "external_actor_hash": external_actor_hash,
                         "source": "api" if agent_authenticated else None,

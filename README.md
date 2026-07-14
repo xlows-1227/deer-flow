@@ -703,6 +703,25 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
+## Published Agent API
+
+Published Agents can be served to external systems through a stable,
+Agent-specific API. Owners create multiple named `dfa_...` Keys, rotate or
+revoke each Key independently, and optionally apply stricter per-Key quotas.
+External callers can create isolated conversations and run the published Agent
+asynchronously, synchronously, or over SSE under
+`/api/v1/agents/{agent_id}`.
+
+Published runs are deliberately memory-free and use the immutable Release that
+was current when the Run started. Request bodies cannot override the model,
+Release, Skills, Connector grants, owner, or runtime policy. Public responses
+use explicit field allowlists and do not expose internal Release or instruction
+data. Platform, owner, and Key quotas are reserved before Run creation and are
+settled exactly once for success, failure, cancellation, or timeout.
+
+See [the backend API reference](backend/docs/API.md#published-agent-api-m2) and
+[configuration guide](backend/docs/CONFIGURATION.md#published-agent-runtime-quotas).
+
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:

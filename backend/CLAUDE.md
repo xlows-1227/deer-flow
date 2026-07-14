@@ -298,6 +298,63 @@ The conversational `setup_agent` / `update_agent` tools are **async LangChain to
 
 Alembic head after M1: `2026_07_13_draft_skill_mode` (chain: `... → 2026_07_09_umodel_caps → 2026_07_12_published_agents → 2026_07_12_agent_releases → 2026_07_12_widen_published_agent_ids (compat stub) → 2026_07_12_widen_agent_ids → 2026_07_13_draft_skill_mode`).
 
+#### Published-Agent Runtime and Agent API (M2)
+
+M2 exposes each published Agent through stable routes under
+`/api/v1/agents/{agent_id}`. Authentication uses Agent-scoped `dfa_...` Bearer
+keys; it is separate from user-level External API `dfk_...` keys and browser
+sessions. `AgentAPIAuthMiddleware` establishes the owner, Agent, and credential
+principals from persistence. A Key used against another Agent returns 404.
+
+`PublishedAgentResolver` loads the stable Agent, freezes its current immutable
+Release for the new Run, intersects Release Connector grants with the current
+active authoritative Connector type capabilities, composes AGENT→SOUL
+instructions, and resolves Agent-wide plus Key-specific quotas. Only
+`source="api"|"feishu"` enters `PublishedAgentContext`; internal Conversation
+mapping keys use `agent-api:<credential_id>` and must never be passed as runtime
+source values.
+
+`build_published_run_config()` is fail-closed: published runs do not install
+`MemoryMiddleware`, do not inject/read/write owner memory, disable subagents and
+plan mode, and filter management tools. Caller request bodies cannot select the
+owner, model, Release, Skills, connectors, tool policy, or runtime config.
+
+M2 persistence packages:
+
+| Package | Tables / responsibility |
+|---|---|
+| `persistence/agent_api_key/` | Slow-salted hashes, one-time plaintext creation, multiple active named Keys, rotate/revoke/expiry and Key overrides |
+| `persistence/agent_usage/` | `agent_quota_reservations` and exactly-once `agent_usage_records` |
+| `persistence/external_conversation/` | Published conversations scoped by Agent + credential while retaining External API V1 mappings |
+| `persistence/external_audit/` | Metadata-only owner/external-actor dual-principal audit events |
+
+Quota reservation is serialized per Agent (SQLite `BEGIN IMMEDIATE`, PostgreSQL
+advisory transaction lock). Platform/owner limits are checked over all Agent
+Keys, while Key overrides are checked only over that credential; all Keys remain
+subject to Agent hard caps. The request key is unique, and settlement plus the
+usage insert occurs in one transaction. Success, failure, cancellation, and
+timeout are idempotent terminal states.
+
+Public JSON/SSE responses are constructed by explicit allowlist serializers.
+Never expose owner ids, Release ids/numbers, instruction source, model policy,
+Skill revisions, Connector metadata, credentials/hashes, internal thread ids,
+or paths. Owner-only Key management and usage aggregation remain under
+`/api/published-agents/{agent_id}` with session auth + CSRF.
+
+Alembic head after M2: `2026_07_14_agent_audit_principals` (M2 chain:
+`2026_07_14_agent_api_keys → 2026_07_14_agent_conversation_scope →
+2026_07_14_agent_usage_quota → 2026_07_14_agent_audit_principals`).
+
+M2 focused regression:
+
+```bash
+pytest tests/test_published_agent_resolver.py tests/test_memoryless_runtime_policy.py \
+  tests/test_agent_api_key_repo.py tests/test_published_agent_keys_router.py \
+  tests/test_agent_public_api.py tests/test_quota_inheritance.py \
+  tests/test_quota_reservation.py tests/test_agent_usage_accounting.py \
+  tests/test_external_api_audit.py -q
+```
+
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`
