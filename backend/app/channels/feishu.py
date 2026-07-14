@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import re
 import threading
-from typing import Any, Literal
+import time
+from collections.abc import Callable
+from typing import Any, Literal, Protocol
 
 from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
@@ -17,6 +20,63 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
+
+
+class FeishuEventDeduplicator(Protocol):
+    """Atomic event-claim seam used before dispatching inbound work."""
+
+    async def claim(self, binding_id: str, event_id: str) -> bool: ...
+
+
+class FeishuEventVerifier:
+    """Validate the authenticated SDK event header and replay window.
+
+    The lark-oapi dispatcher performs the encrypted-envelope signature and
+    verification-token checks before invoking ``_on_message``. This verifier
+    keeps that boundary injectable for tests and additionally requires a
+    stable event ID plus a fresh timestamp at the application ingress.
+    """
+
+    def __init__(
+        self,
+        *,
+        verification_token: str = "",
+        max_age_seconds: int = 300,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive")
+        self._verification_token = verification_token
+        self._max_age_seconds = max_age_seconds
+        self._clock = clock
+
+    @staticmethod
+    def _timestamp(event: Any) -> float | None:
+        header = getattr(event, "header", None)
+        raw_timestamp = getattr(header, "create_time", None)
+        try:
+            timestamp = float(raw_timestamp)
+        except (TypeError, ValueError):
+            return None
+        if timestamp >= 1_000_000_000_000:
+            timestamp /= 1000
+        return timestamp
+
+    def __call__(self, event: Any) -> bool:
+        header = getattr(event, "header", None)
+        event_id = getattr(header, "event_id", None)
+        if not isinstance(event_id, str) or not event_id.strip():
+            return False
+
+        timestamp = self._timestamp(event)
+        if timestamp is None or abs(self._clock() - timestamp) > self._max_age_seconds:
+            return False
+
+        if self._verification_token:
+            token = getattr(header, "token", None)
+            if not isinstance(token, str) or not hmac.compare_digest(token, self._verification_token):
+                return False
+        return True
 
 
 def _is_feishu_command(text: str) -> bool:
@@ -52,6 +112,8 @@ class FeishuChannel(Channel):
         app_secret: str | None = None,
         binding_id: str | None = None,
         agent_id: str | None = None,
+        event_deduplicator: FeishuEventDeduplicator | None = None,
+        event_verifier: Callable[[Any], bool] | None = None,
     ) -> None:
         resolved_config = dict(config or {})
         if app_id is not None:
@@ -62,6 +124,8 @@ class FeishuChannel(Channel):
         super().__init__(name=channel_name, bus=bus, config=resolved_config)
         self.binding_id = binding_id
         self.agent_id = agent_id
+        self._event_deduplicator = event_deduplicator
+        self._event_verifier = event_verifier or (FeishuEventVerifier() if binding_id else None)
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._api_client = None
@@ -599,8 +663,21 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
-    async def _prepare_inbound(self, msg_id: str, inbound) -> None:
+    async def _prepare_inbound(self, msg_id: str, inbound, event_id: str | None = None) -> None:
         """Kick off Feishu side effects without delaying inbound dispatch."""
+        if self.binding_id:
+            if not event_id or self._event_deduplicator is None:
+                logger.error(
+                    "[Feishu] rejecting binding event without durable deduplication",
+                    extra={"binding_id": self.binding_id},
+                )
+                return
+            if not await self._event_deduplicator.claim(self.binding_id, event_id):
+                logger.info(
+                    "[Feishu] duplicate event dropped",
+                    extra={"binding_id": self.binding_id, "event_id": event_id},
+                )
+                return
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
@@ -610,6 +687,15 @@ class FeishuChannel(Channel):
         """Called by lark-oapi when a message is received (runs in lark thread)."""
         try:
             logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
+            if self.binding_id and (self._event_verifier is None or not self._event_verifier(event)):
+                logger.warning(
+                    "[Feishu] rejected unauthenticated or stale event",
+                    extra={"binding_id": self.binding_id},
+                )
+                return
+
+            event_header = getattr(event, "header", None)
+            event_id = getattr(event_header, "event_id", None)
             message = event.event.message
             chat_id = message.chat_id
             msg_id = message.message_id
@@ -618,6 +704,9 @@ class FeishuChannel(Channel):
             # root_id is set when the message is a reply within a Feishu thread.
             # Use it as topic_id so all replies share the same DeerFlow thread.
             root_id = getattr(message, "root_id", None) or None
+            thread_id = getattr(message, "thread_id", None) or None
+            raw_chat_type = getattr(message, "chat_type", None)
+            chat_type = raw_chat_type if raw_chat_type in ("p2p", "group") else "p2p"
 
             # Parse message content
             content = json.loads(message.content)
@@ -697,8 +786,9 @@ class FeishuChannel(Channel):
             else:
                 msg_type = InboundMessageType.CHAT
 
-            # topic_id: use root_id for replies (same topic), msg_id for new messages (new topic)
-            topic_id = root_id or msg_id
+            # DB-driven bindings keep direct chats stable per user and groups
+            # stable per chat/topic. Legacy channels preserve per-message topics.
+            topic_id = (root_id or thread_id or None) if self.binding_id else (root_id or msg_id)
 
             inbound = self._make_inbound(
                 chat_id=chat_id,
@@ -710,6 +800,8 @@ class FeishuChannel(Channel):
                 metadata={
                     "message_id": msg_id,
                     "root_id": root_id,
+                    "chat_type": chat_type,
+                    **({"event_id": event_id} if isinstance(event_id, str) else {}),
                     **({"binding_id": self.binding_id, "agent_id": self.agent_id} if self.binding_id else {}),
                 },
             )
@@ -718,7 +810,10 @@ class FeishuChannel(Channel):
             # Schedule on the async event loop
             if self._main_loop and self._main_loop.is_running():
                 logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
-                fut = asyncio.run_coroutine_threadsafe(self._prepare_inbound(msg_id, inbound), self._main_loop)
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._prepare_inbound(msg_id, inbound, event_id if isinstance(event_id, str) else None),
+                    self._main_loop,
+                )
                 fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "prepare_inbound", mid))
             else:
                 logger.warning("[Feishu] main loop not running, cannot publish inbound message")

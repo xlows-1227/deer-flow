@@ -8,7 +8,12 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from deerflow.persistence.channel_mapping import ChannelConversationMappingRow
 
 logger = logging.getLogger(__name__)
 
@@ -168,3 +173,39 @@ class ChannelStore:
                     item["topic_id"] = topic
                 results.append(item)
             return results
+
+
+class DbMappingStore:
+    """Persistent mapping store for DB-driven Published-Agent channels.
+
+    Unlike the legacy JSON store, the full binding and actor scope is part of
+    the unique key. The repository's atomic insert-or-read operation makes the
+    result stable across workers and service replicas.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        from deerflow.persistence.channel_mapping import ChannelMappingRepository
+
+        self._repository = ChannelMappingRepository(session_factory)
+
+    async def get_or_create_thread(
+        self,
+        *,
+        binding_id: str,
+        agent_id: str,
+        chat_id: str,
+        feishu_user_id: str,
+        chat_type: Literal["p2p", "group"],
+        topic_id: str | None = None,
+    ) -> str:
+        return await self._repository.get_or_create_thread(
+            binding_id=binding_id,
+            agent_id=agent_id,
+            chat_id=chat_id,
+            feishu_user_id=feishu_user_id,
+            chat_type=chat_type,
+            topic_id=topic_id,
+        )
+
+    async def list_mappings(self, *, binding_id: str | None = None) -> list[ChannelConversationMappingRow]:
+        return await self._repository.list_mappings(binding_id=binding_id)

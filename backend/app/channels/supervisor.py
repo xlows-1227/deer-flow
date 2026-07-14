@@ -58,6 +58,7 @@ def _default_channel_factory(
     app_secret: str,
     binding_id: str,
     agent_id: str,
+    event_deduplicator: Any | None = None,
 ) -> Channel:
     from app.channels.feishu import FeishuChannel
 
@@ -67,6 +68,7 @@ def _default_channel_factory(
         app_secret=app_secret,
         binding_id=binding_id,
         agent_id=agent_id,
+        event_deduplicator=event_deduplicator,
     )
 
 
@@ -96,6 +98,7 @@ class FeishuSupervisor:
         channel_factory: ChannelFactory | None = None,
         connection_tester: ConnectionTester | None = None,
         channel_registry: DynamicChannelRegistry | None = None,
+        event_deduplicator: Any | None = None,
     ) -> None:
         self._repository = repository
         self._secret_store = secret_store
@@ -103,6 +106,7 @@ class FeishuSupervisor:
         self._channel_factory = channel_factory or _default_channel_factory
         self._connection_tester = connection_tester or _default_connection_tester
         self._channel_registry = channel_registry
+        self._event_deduplicator = event_deduplicator
         self._running: dict[str, _RunningChannel] = {}
         self._health: dict[str, BindingHealth] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -158,13 +162,15 @@ class FeishuSupervisor:
         channel: Channel | None = None
         try:
             app_secret = await self._secret_store.get(str(row["secret_ref"]))
-            channel = self._channel_factory(
-                self._bus,
-                app_id=str(row["app_id"]),
-                app_secret=app_secret,
-                binding_id=binding_id,
-                agent_id=str(row["agent_id"]),
-            )
+            channel_kwargs = {
+                "app_id": str(row["app_id"]),
+                "app_secret": app_secret,
+                "binding_id": binding_id,
+                "agent_id": str(row["agent_id"]),
+            }
+            if self._event_deduplicator is not None:
+                channel_kwargs["event_deduplicator"] = self._event_deduplicator
+            channel = self._channel_factory(self._bus, **channel_kwargs)
             await channel.start()
             if not channel.is_running:
                 raise RuntimeError("channel did not enter running state")

@@ -281,6 +281,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     app.state.agent_channel_secret_store,
                     channel_service.bus,
                     channel_registry=channel_service,
+                    event_deduplicator=app.state.channel_event_repo,
                 )
                 app.state.feishu_supervisor = feishu_supervisor
                 await feishu_supervisor.load_active_bindings()

@@ -151,10 +151,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
+            from app.channels.store import DbMappingStore
             from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
             from deerflow.persistence.agent_channel import AgentChannelRepository
             from deerflow.persistence.agent_usage import AgentUsageRepository
             from deerflow.persistence.api_key import APIKeyRepository
+            from deerflow.persistence.channel_mapping import ChannelEventRepository
             from deerflow.persistence.external_audit import ExternalAuditRepository
             from deerflow.persistence.external_conversation import ExternalConversationRepository
             from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
@@ -178,6 +180,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 pepper=get_external_api_config().api_key_pepper,
             )
             app.state.agent_channel_repo = AgentChannelRepository(sf)
+            app.state.channel_mapping_store = DbMappingStore(sf)
+            app.state.channel_event_repo = ChannelEventRepository(sf)
             app.state.published_agent_repo = PublishedAgentRepository(sf)
             app.state.agent_usage_repo = AgentUsageRepository(sf)
             app.state.external_conversation_repo = ExternalConversationRepository(sf)
@@ -219,6 +223,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.api_key_repo = None
             app.state.agent_api_key_repo = None
             app.state.agent_channel_repo = None
+            app.state.channel_mapping_store = None
+            app.state.channel_event_repo = None
             app.state.published_agent_repo = None
             app.state.published_agent_resolver = None
             app.state.agent_usage_repo = None

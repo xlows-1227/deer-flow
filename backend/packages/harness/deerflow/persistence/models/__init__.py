@@ -24,6 +24,7 @@ from deerflow.persistence.agent_release.model import (
 )
 from deerflow.persistence.agent_usage.model import AgentQuotaReservationRow, AgentUsageRecordRow
 from deerflow.persistence.api_key.model import APIKeyRow
+from deerflow.persistence.channel_mapping.model import ChannelConversationMappingRow, ChannelEventDedupRow
 from deerflow.persistence.connector.model import ConnectorAuditLogRow, ConnectorGrantRow, ConnectorInstanceRow, ConnectorMetadataCacheRow
 from deerflow.persistence.external_audit.model import ExternalAuditRow
 from deerflow.persistence.external_conversation.model import ExternalConversationRow
@@ -66,6 +67,8 @@ __all__ = [
     "AgentReleaseSkillRow",
     "AgentQuotaReservationRow",
     "AgentUsageRecordRow",
+    "ChannelConversationMappingRow",
+    "ChannelEventDedupRow",
     "ConnectorAuditLogRow",
     "ConnectorGrantRow",
     "ConnectorInstanceRow",
