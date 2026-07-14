@@ -9,7 +9,7 @@ from typing import Any, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.todo import Todo
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -276,8 +276,15 @@ class TokenUsageMiddleware(AgentMiddleware):
 
     @staticmethod
     def _cumulative_tokens(messages: list[Any]) -> int:
+        # Agent state includes the whole Conversation. A per-Run limit starts
+        # at the current input HumanMessage, not at the beginning of history.
+        current_turn_start = 0
+        for index in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[index], HumanMessage):
+                current_turn_start = index + 1
+                break
         total = 0
-        for message in messages:
+        for message in messages[current_turn_start:]:
             if not isinstance(message, AIMessage):
                 continue
             usage = getattr(message, "usage_metadata", None) or {}

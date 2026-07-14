@@ -5,7 +5,7 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
@@ -41,6 +41,19 @@ class TestTokenUsageMiddleware:
 
         with pytest.raises(PublishedRunTokenLimitError):
             middleware.after_model({"messages": [message]}, _make_runtime())
+
+    def test_published_run_limit_ignores_previous_conversation_turns(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        messages = [
+            HumanMessage(content="previous"),
+            AIMessage(content="old answer", usage_metadata={"input_tokens": 50, "output_tokens": 50, "total_tokens": 100}),
+            HumanMessage(content="current"),
+            AIMessage(content="new answer", usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}),
+        ]
+
+        result = middleware.after_model({"messages": messages}, _make_runtime())
+
+        assert result is not None
 
     def test_logs_cache_token_details(self, caplog):
         middleware = TokenUsageMiddleware()
