@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -31,6 +31,21 @@ log_level: info
 # and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: true
+
+# ============================================================================
+# Published Agent Runtime Quotas
+# ============================================================================
+# These values are platform hard caps. Release(owner) and Agent Key overrides
+# may only reduce them; omitted override fields inherit the previous layer.
+publishing:
+  platform_quota:
+    max_concurrent_runs_per_agent: 8
+    max_input_bytes: 262144
+    max_run_seconds: 600
+    max_tokens_per_run: 200000
+    inbound_rps: 20
+    daily_runs_default: 1000
+    daily_tokens_default: 2000000
 
 # ============================================================================
 # Models Configuration

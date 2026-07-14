@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
+    from deerflow.persistence.agent_usage import AgentUsageRepository
     from deerflow.persistence.api_key import APIKeyRepository
     from deerflow.persistence.external_audit import ExternalAuditRepository
     from deerflow.persistence.external_conversation import ExternalConversationRepository
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from deerflow.persistence.invite_code import InviteCodeRepository
     from deerflow.persistence.published_agent import PublishedAgentRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
+    from deerflow.publishing.quota import QuotaLedger
     from deerflow.publishing.resolver import PublishedAgentResolver
     from deerflow.runtime import RunRecord
 
@@ -148,6 +150,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
+            from deerflow.persistence.agent_usage import AgentUsageRepository
             from deerflow.persistence.api_key import APIKeyRepository
             from deerflow.persistence.external_audit import ExternalAuditRepository
             from deerflow.persistence.external_conversation import ExternalConversationRepository
@@ -172,6 +175,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 pepper=get_external_api_config().api_key_pepper,
             )
             app.state.published_agent_repo = PublishedAgentRepository(sf)
+            app.state.agent_usage_repo = AgentUsageRepository(sf)
             app.state.external_conversation_repo = ExternalConversationRepository(sf)
             app.state.external_idempotency_repo = ExternalIdempotencyRepository(sf)
             app.state.external_audit_repo = ExternalAuditRepository(sf)
@@ -179,18 +183,20 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             from deerflow.persistence.agent_release import AgentReleaseRepository
             from deerflow.persistence.connector import ConnectorRepository
+            from deerflow.publishing.quota import PublishedQuotaResolver, QuotaLedger
             from deerflow.publishing.resolver import PublishedAgentResolver
 
-            class _ReleaseQuotaResolver:
-                async def resolve(self, *, owner_user_id, release, credential_id):
-                    del owner_user_id, credential_id
-                    return dict(release.get("quota_overrides") or {})
+            quota_resolver = PublishedQuotaResolver(
+                startup_config.publishing.platform_quota,
+                app.state.agent_api_key_repo,
+            )
+            app.state.quota_ledger = QuotaLedger(app.state.agent_usage_repo)
 
             app.state.published_agent_resolver = PublishedAgentResolver(
                 agent_repo=app.state.published_agent_repo,
                 release_repo=AgentReleaseRepository(sf),
                 connector_repo=ConnectorRepository(sf),
-                quota_resolver=_ReleaseQuotaResolver(),
+                quota_resolver=quota_resolver,
             )
         else:
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
@@ -205,6 +211,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.agent_api_key_repo = None
             app.state.published_agent_repo = None
             app.state.published_agent_resolver = None
+            app.state.agent_usage_repo = None
+            app.state.quota_ledger = None
             app.state.external_conversation_repo = None
             app.state.external_idempotency_repo = None
             app.state.external_audit_repo = None
@@ -291,6 +299,8 @@ get_api_key_repo: Callable[[Request], APIKeyRepository] = _require("api_key_repo
 get_agent_api_key_repo: Callable[[Request], AgentAPIKeyRepository] = _require("agent_api_key_repo", "Agent API Key persistence")
 get_published_agent_repo: Callable[[Request], PublishedAgentRepository] = _require("published_agent_repo", "Published Agent persistence")
 get_published_agent_resolver: Callable[[Request], PublishedAgentResolver] = _require("published_agent_resolver", "Published Agent resolver")
+get_agent_usage_repo: Callable[[Request], AgentUsageRepository] = _require("agent_usage_repo", "Agent usage persistence")
+get_quota_ledger: Callable[[Request], QuotaLedger] = _require("quota_ledger", "Published Agent quota ledger")
 get_external_conversation_repo: Callable[[Request], ExternalConversationRepository] = _require("external_conversation_repo", "External API persistence")
 get_external_idempotency_repo: Callable[[Request], ExternalIdempotencyRepository] = _require("external_idempotency_repo", "External API persistence")
 get_external_audit_repo: Callable[[Request], ExternalAuditRepository] = _require("external_audit_repo", "External API persistence")

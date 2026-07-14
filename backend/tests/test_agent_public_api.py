@@ -12,16 +12,31 @@ from app.gateway.deps import (
     get_external_idempotency_repo,
     get_published_agent_repo,
     get_published_agent_resolver,
+    get_quota_ledger,
 )
 from app.gateway.external.agent_auth import AgentAPIAuthMiddleware
 from app.gateway.external.agent_serialization import assert_public_payload_safe
 from app.gateway.routers import agent_public_api
 from deerflow.publishing.context import PublishedAgentContext
+from deerflow.publishing.quota import (
+    EffectiveQuota,
+    QuotaExceededError,
+    Reservation,
+)
 from deerflow.publishing.resolver import AgentNotAvailableError, AgentSuspendedError
 from deerflow.runtime import DisconnectMode, RunStatus
 
 
 def _context(agent_id: str = "pa_1", credential_id: str = "key_1") -> PublishedAgentContext:
+    quota = EffectiveQuota(
+        max_concurrent_runs=4,
+        daily_runs=100,
+        daily_tokens=100_000,
+        max_run_seconds=60,
+        max_tokens_per_run=1_000,
+        max_input_bytes=32_000,
+        inbound_rps=20,
+    )
     return PublishedAgentContext(
         owner_user_id="owner-1",
         agent_id=agent_id,
@@ -35,7 +50,7 @@ def _context(agent_id: str = "pa_1", credential_id: str = "key_1") -> PublishedA
         tool_groups=(),
         model_name="test-model",
         instructions="trusted",
-        effective_quota={},
+        effective_quota=quota,
         correlation_id="req_12345678",
         idempotency_key=None,
     )
@@ -84,7 +99,32 @@ def test_agent_key_auth_rejects_cross_agent_as_not_found_and_touches_valid_key()
     assert app.state.agent_api_key_repo.touched == ["key_1"]
 
 
-def _router_app(*, resolver, conversations, agents=None, idempotency=None) -> FastAPI:
+class _AllowLedger:
+    async def reserve(self, context, *, request_key):
+        return Reservation(
+            id=f"qres_{request_key[:8]}",
+            request_key=request_key,
+            agent_id=context.agent_id,
+            credential_id=context.credential_id,
+            reserved_tokens=context.effective_quota.max_tokens_per_run,
+            status="pending",
+        )
+
+    async def settle(self, *args, **kwargs):
+        return True
+
+    async def release(self, *args, **kwargs):
+        return True
+
+
+def _router_app(
+    *,
+    resolver,
+    conversations,
+    agents=None,
+    idempotency=None,
+    quota_ledger=None,
+) -> FastAPI:
     app = FastAPI()
 
     @app.middleware("http")
@@ -99,6 +139,7 @@ def _router_app(*, resolver, conversations, agents=None, idempotency=None) -> Fa
     app.dependency_overrides[get_external_conversation_repo] = lambda: conversations
     app.dependency_overrides[get_published_agent_repo] = lambda: agents or AsyncMock()
     app.dependency_overrides[get_external_idempotency_repo] = lambda: idempotency or AsyncMock()
+    app.dependency_overrides[get_quota_ledger] = lambda: quota_ledger or _AllowLedger()
     return app
 
 
@@ -240,3 +281,39 @@ def test_run_idempotency_replays_one_internal_run(monkeypatch):
     assert second.status_code == 202
     assert first.json()["run_id"] == second.json()["run_id"] == "run_1"
     start.assert_awaited_once()
+
+
+def test_quota_rejection_returns_429_retry_after_and_creates_no_run(monkeypatch):
+    now = datetime.now(UTC)
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = {
+        "conversation_id": "conv_1",
+        "agent_id": "pa_1",
+        "credential_id": "key_1",
+        "thread_id": "thread_1",
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    ledger = AsyncMock()
+    ledger.reserve.side_effect = QuotaExceededError(
+        "daily_runs_exceeded",
+        retry_after=321,
+    )
+    start = AsyncMock()
+    monkeypatch.setattr(agent_public_api, "start_run", start)
+    app = _router_app(
+        resolver=resolver,
+        conversations=conversations,
+        quota_ledger=ledger,
+    )
+    response = TestClient(app).post(
+        "/api/v1/agents/pa_1/conversations/conv_1/runs",
+        json={"message": "hello"},
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "321"
+    assert response.json()["detail"]["code"] == "daily_runs_exceeded"
+    start.assert_not_awaited()

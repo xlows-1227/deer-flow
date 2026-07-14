@@ -18,6 +18,7 @@ from app.gateway.deps import (
     get_external_idempotency_repo,
     get_published_agent_repo,
     get_published_agent_resolver,
+    get_quota_ledger,
     get_run_manager,
     get_stream_bridge,
     get_thread_store,
@@ -40,6 +41,7 @@ from deerflow.persistence.external_idempotency import (
     IdempotencyConflictError,
 )
 from deerflow.publishing.context import PublishedAgentContext
+from deerflow.publishing.quota import QuotaExceededError, QuotaLedger, Reservation
 from deerflow.publishing.resolver import (
     AgentNotAvailableError,
     AgentSuspendedError,
@@ -206,6 +208,7 @@ def _internal_run_request(
     *,
     context: PublishedAgentContext,
     conversation_id: str,
+    reservation_id: str,
 ) -> RunCreateRequest:
     metadata = {
         "published_agent": True,
@@ -215,6 +218,7 @@ def _internal_run_request(
         "published_release_id": context.release_id,
         "published_correlation_id": context.correlation_id,
         "published_idempotency_key": context.idempotency_key,
+        "published_quota_reservation_id": reservation_id,
         "external_source": "api",
         "client_metadata": body.metadata,
     }
@@ -252,6 +256,94 @@ async def _claim_run(
         raise HTTPException(status_code=409, detail={"code": "idempotency_conflict"}) from exc
 
 
+def _quota_request_key(
+    *,
+    context: PublishedAgentContext,
+    operation: str,
+) -> str:
+    identity = context.idempotency_key or context.correlation_id
+    payload = f"{context.agent_id}:{context.credential_id}:{operation}:{identity}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def _reserve_quota(
+    *,
+    ledger: QuotaLedger,
+    context: PublishedAgentContext,
+    body: AgentRunCreateRequest,
+    operation: str,
+) -> Reservation:
+    quota = context.effective_quota
+    if len(body.message.encode("utf-8")) > quota.max_input_bytes:
+        raise HTTPException(status_code=413, detail={"code": "input_too_large"})
+    try:
+        return await ledger.reserve(
+            context,
+            request_key=_quota_request_key(context=context, operation=operation),
+        )
+    except QuotaExceededError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": exc.code},
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+
+
+def _schedule_quota_settlement(
+    *,
+    request: Request,
+    record: Any,
+    reservation: Reservation,
+    context: PublishedAgentContext,
+    ledger: QuotaLedger,
+) -> None:
+    if record.task is None:
+        return
+
+    async def finalize() -> None:
+        timed_out = False
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(record.task),
+                timeout=context.effective_quota.max_run_seconds,
+            )
+        except TimeoutError:
+            timed_out = True
+            await get_run_manager(request).cancel(record.run_id)
+        except asyncio.CancelledError:
+            # Gateway shutdown leaves the reservation pending; expiry cleanup
+            # releases it on the next reserve rather than mis-accounting it.
+            if record.status != RunStatus.interrupted:
+                return
+        except Exception:
+            pass
+
+        if timed_out:
+            terminal = "timeout"
+        elif record.status == RunStatus.timeout:
+            terminal = "timeout"
+        elif record.status == RunStatus.success:
+            terminal = "success"
+        elif record.status == RunStatus.interrupted:
+            terminal = "cancelled"
+        else:
+            terminal = "failed"
+        await ledger.settle(
+            reservation.id,
+            tokens_used=int(getattr(record, "total_tokens", 0) or 0),
+            status=terminal,
+            run_id=record.run_id,
+        )
+
+    task = asyncio.create_task(finalize())
+    tasks = getattr(request.app.state, "agent_quota_tasks", None)
+    if tasks is None:
+        tasks = set()
+        request.app.state.agent_quota_tasks = tasks
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
 async def _start_public_run(
     *,
     agent_id: str,
@@ -263,6 +355,7 @@ async def _start_public_run(
     conversations: ExternalConversationRepository,
     idempotency: ExternalIdempotencyRepository,
     resolver: PublishedAgentResolver,
+    quota_ledger: QuotaLedger,
 ) -> tuple[Any, bool]:
     conversation = await _conversation_or_404(
         conversations,
@@ -298,7 +391,26 @@ async def _start_public_run(
         conversation_scope=conversation_id,
         idempotency_key=idempotency_key,
     )
-    internal = _internal_run_request(body, context=context, conversation_id=conversation_id)
+    try:
+        reservation = await _reserve_quota(
+            ledger=quota_ledger,
+            context=context,
+            body=body,
+            operation=operation,
+        )
+    except HTTPException:
+        if claimed and idempotency_key is not None:
+            await idempotency.release(
+                api_key_id=_credential_id(request),
+                idempotency_key=idempotency_key,
+            )
+        raise
+    internal = _internal_run_request(
+        body,
+        context=context,
+        conversation_id=conversation_id,
+        reservation_id=reservation.id,
+    )
     try:
         record = await start_run(
             internal,
@@ -307,6 +419,7 @@ async def _start_public_run(
             published_context=context,
         )
     except HTTPException as exc:
+        await quota_ledger.release(reservation.id)
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),
@@ -316,6 +429,7 @@ async def _start_public_run(
             raise HTTPException(status_code=409, detail={"code": "conversation_busy"}) from exc
         raise
     except Exception:
+        await quota_ledger.release(reservation.id)
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),
@@ -332,6 +446,13 @@ async def _start_public_run(
             response_status=202,
             response_json=response,
         )
+    _schedule_quota_settlement(
+        request=request,
+        record=record,
+        reservation=reservation,
+        context=context,
+        ledger=quota_ledger,
+    )
     return record, False
 
 
@@ -455,6 +576,7 @@ async def create_agent_run(
     conversations: ExternalConversationRepository = Depends(get_external_conversation_repo),
     idempotency: ExternalIdempotencyRepository = Depends(get_external_idempotency_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
+    quota_ledger: QuotaLedger = Depends(get_quota_ledger),
 ) -> dict[str, Any]:
     idempotency_key = _validate_idempotency_key(idempotency_key)
     record, _replayed = await _start_public_run(
@@ -467,6 +589,7 @@ async def create_agent_run(
         conversations=conversations,
         idempotency=idempotency,
         resolver=resolver,
+        quota_ledger=quota_ledger,
     )
     return serialize_agent_run(record, conversation_id=conversation_id)
 
@@ -481,6 +604,7 @@ async def wait_agent_run(
     conversations: ExternalConversationRepository = Depends(get_external_conversation_repo),
     idempotency: ExternalIdempotencyRepository = Depends(get_external_idempotency_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
+    quota_ledger: QuotaLedger = Depends(get_quota_ledger),
 ) -> dict[str, Any]:
     idempotency_key = _validate_idempotency_key(idempotency_key)
     record, replayed = await _start_public_run(
@@ -493,6 +617,7 @@ async def wait_agent_run(
         conversations=conversations,
         idempotency=idempotency,
         resolver=resolver,
+        quota_ledger=quota_ledger,
     )
     if not replayed and record.task is not None:
         try:
@@ -512,6 +637,7 @@ async def stream_agent_run(
     conversations: ExternalConversationRepository = Depends(get_external_conversation_repo),
     idempotency: ExternalIdempotencyRepository = Depends(get_external_idempotency_repo),
     resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
+    quota_ledger: QuotaLedger = Depends(get_quota_ledger),
 ) -> StreamingResponse:
     idempotency_key = _validate_idempotency_key(idempotency_key)
     record, _replayed = await _start_public_run(
@@ -524,6 +650,7 @@ async def stream_agent_run(
         conversations=conversations,
         idempotency=idempotency,
         resolver=resolver,
+        quota_ledger=quota_ledger,
     )
     return StreamingResponse(
         _public_sse_consumer(
