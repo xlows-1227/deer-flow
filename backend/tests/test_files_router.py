@@ -103,34 +103,29 @@ def test_user_files_list_folders_and_keep_them_in_uploaded_filter(tmp_path, monk
         assert folders.json()["folders"] == ["Reports", "Reports/2026"]
 
 
-def test_conversation_system_folders_reject_manual_creation_and_upload(tmp_path, monkeypatch):
+def test_conversation_system_paths_do_not_reserve_legacy_user_folder_names(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
-    library_root = paths_module.get_paths().user_documents_dir(str(_USER_ID))
-    locked_folder = library_root / "对话上传"
-    locked_folder.mkdir(parents=True)
 
     with TestClient(app) as client:
         created = client.post(
             "/api/files/folders",
             json={"name": "对话生成", "parent_path": ""},
         )
-        assert created.status_code == 403
+        assert created.status_code == 201
 
         uploaded = client.post(
             "/api/files/upload",
-            data={"folder_path": "对话上传"},
-            files={"files": ("manual.txt", b"not allowed", "text/plain")},
+            data={"folder_path": "对话生成"},
+            files={"files": ("legacy.txt", b"allowed", "text/plain")},
         )
-        assert uploaded.status_code == 403
+        assert uploaded.status_code == 201
 
-        shared = client.post(
+        synthetic = client.post(
             "/api/files/upload",
-            data={"folder_path": "他人分享"},
+            data={"folder_path": "@conversation/uploaded"},
             files={"files": ("shared.txt", b"not allowed", "text/plain")},
         )
-        assert shared.status_code == 403
-
-    assert list(locked_folder.iterdir()) == []
+        assert synthetic.status_code == 403
 
 
 def test_user_files_upload_limit_is_described_and_partial_file_removed(tmp_path, monkeypatch):

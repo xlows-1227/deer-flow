@@ -17,7 +17,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    if "file_shares" in sa.inspect(op.get_bind()).get_table_names():
+    inspector = sa.inspect(op.get_bind())
+    if "file_shares" in inspector.get_table_names():
+        column_names = {column["name"] for column in inspector.get_columns("file_shares")}
+        if "source_identity" not in column_names:
+            op.add_column(
+                "file_shares",
+                sa.Column("source_identity", sa.String(length=128), nullable=False, server_default=""),
+            )
         return
 
     op.create_table(
@@ -27,6 +34,7 @@ def upgrade() -> None:
         sa.Column("recipient_user_id", sa.String(length=36), nullable=False),
         sa.Column("source_type", sa.String(length=32), nullable=False),
         sa.Column("source_path", sa.String(length=2048), nullable=False),
+        sa.Column("source_identity", sa.String(length=128), nullable=False),
         sa.Column("thread_id", sa.String(length=64), nullable=False, server_default=""),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["owner_user_id"], ["users.id"], ondelete="CASCADE"),

@@ -181,6 +181,13 @@ def _normalize_conversation_share_path(source_type: FileShareSourceType, value: 
     return raw
 
 
+def _file_identity(target: Path) -> str:
+    """Return a stable identity for the currently shared filesystem object."""
+
+    stat_result = target.stat()
+    return f"{stat_result.st_dev}:{stat_result.st_ino}"
+
+
 async def _resolve_owned_share_source(
     request: Request,
     owner_user_id: str,
@@ -243,6 +250,8 @@ def _resolve_shared_file(row: FileShareRow) -> Path:
         except ValueError:
             raise HTTPException(status_code=404, detail="Shared file not found") from None
     if not target.is_file():
+        raise HTTPException(status_code=404, detail="Shared file not found")
+    if row.source_identity != _file_identity(target):
         raise HTTPException(status_code=404, detail="Shared file not found")
     return target
 
@@ -342,11 +351,10 @@ async def create_file_share(
         body.path,
         body.thread_id,
     )
+    source_identity = _file_identity(target)
 
     async with sf() as session:
-        recipient = (
-            await session.execute(select(UserRow).where(func.lower(UserRow.email) == recipient_email))
-        ).scalar_one_or_none()
+        recipient = (await session.execute(select(UserRow).where(func.lower(UserRow.email) == recipient_email))).scalar_one_or_none()
         if recipient is None:
             raise HTTPException(status_code=404, detail="No registered user uses that email address")
 
@@ -362,6 +370,14 @@ async def create_file_share(
             )
         ).scalar_one_or_none()
         if existing is not None:
+            if existing.source_identity != source_identity:
+                # The original object was removed and a different one now
+                # occupies the same path. An explicit new share request is
+                # required before the recipient can access that replacement.
+                existing.source_identity = source_identity
+                existing.created_at = datetime.now(UTC)
+                await session.commit()
+                await session.refresh(existing)
             return _shared_file_response(existing, target, owner_email)
 
         row = FileShareRow(
@@ -370,6 +386,7 @@ async def create_file_share(
             recipient_user_id=recipient.id,
             source_type=body.source_type,
             source_path=source_path,
+            source_identity=source_identity,
             thread_id=thread_id,
         )
         session.add(row)
@@ -391,14 +408,7 @@ async def list_received_file_shares(request: Request) -> SharedFileListResponse:
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with sf() as session:
-        records = (
-            await session.execute(
-                select(FileShareRow, UserRow.email)
-                .join(UserRow, UserRow.id == FileShareRow.owner_user_id)
-                .where(FileShareRow.recipient_user_id == recipient_user_id)
-                .order_by(FileShareRow.created_at.desc())
-            )
-        ).all()
+        records = (await session.execute(select(FileShareRow, UserRow.email).join(UserRow, UserRow.id == FileShareRow.owner_user_id).where(FileShareRow.recipient_user_id == recipient_user_id).order_by(FileShareRow.created_at.desc()))).all()
 
     items: list[SharedFileResponse] = []
     for row, owner_email in records:
