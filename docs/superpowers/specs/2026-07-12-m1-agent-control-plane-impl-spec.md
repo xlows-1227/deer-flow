@@ -226,6 +226,7 @@ JSON 列在仓储层 `_to_dict()` 中重命名为 `tool_groups` / `quota_overrid
 | 4 | `SKILL_NOT_FOUND` | 每个选中 skill 存在、enabled、public 或 owner 私有 |
 | 5 | `CONNECTOR_NOT_GRANTED` | skill 声明的 connector 能力 ⊆ 草稿 connector_grants |
 | 6 | `CONNECTOR_NOT_OWNED` | 每个 connector_instance 仍属于 owner 且有效 |
+| 6b | `CONNECTOR_CAPABILITY_UNSUPPORTED` | 每条 grant 的 capability 必须属于当前权威 Connector type 的 capabilities |
 | 7 | `TOOL_GROUP_UNKNOWN` | 每个 tool_group 在平台白名单内 |
 | 8 | `QUOTA_EXCEEDS_PLATFORM` | 每个 quota_override ≤ 平台硬上限 |
 
@@ -871,3 +872,29 @@ Hydration 统一调用 `compose_agent_instructions(agent_markdown, soul_markdown
 三个 Important 分别是：Skill 的 connector caps 没有从最终固化的 `SKILL.md` bytes 派生，同 checksum 可长期复用错误元数据；publish 与对话式 authoring 的 identity/draft 行锁顺序不统一，PostgreSQL 下存在 deadlock/事务中止风险；Connector grant 只校验实例 active/owner/type 存在，不校验该 type 是否支持被授予 capability，任意 owned Connector 可占位满足 Skill 要求。
 
 两个 Minor 分别是 PATCH draft 的 Skills/grants 仍使用无结构 dict，畸形/重复输入可能从客户端 422 变成服务端 500；旧 Agent 导入由三个独立提交组成，中途失败会留下无法直接重试的部分 Agent。全 backend Ruff 通过；第十四轮专项为 134 passed、3 skipped；当前改动测试等价覆盖为 439 passed、4 skipped、2 deselected；本地 PostgreSQL 不可用，全量 pytest 在 244 秒内未完成。
+
+### 40.1 第十五轮修复结果
+
+- Skill 发布先后两次捕获完整文件树，并以前/中/后三次权威 metadata 读取复核 enabled、visibility、owner 与目录指纹；任一变化即将该 Skill 解析为不可发布。`declared_connector_caps` 直接从冻结的 `SKILL.md` bytes 解析，同 checksum 命中时强制校验 owner、visibility、caps 与 content_ref 不变量。
+- publish 最终事务与 duplicate setup/update 统一使用 `published_agents → agent_drafts` 行锁顺序，两个 `FOR UPDATE` 均显式限定目标表；新增 PostgreSQL 双连接交叉用例，CI 继续通过 `REQUIRE_POSTGRES_TESTS=1` 强制执行。
+- `ConnectorServiceRepo` 保留权威 Connector type 的不可变 `supported_capabilities`；Draft 保存与 publish 聚合校验都要求授权 capability 属于该集合，保存后 type 能力撤销会阻止发布。
+- PATCH draft 的 Skill selection 与 Connector grant 改为 `extra="forbid"` 的嵌套模型，约束非空与数据库列长度，并在模型层、服务层拒绝重复项，畸形输入返回 422 且不进入仓储。
+- 旧 Agent 导入改为专用单事务 UOW，一次写入 identity、draft 与 Skills；draft/skills flush 失败和重复 skill 都整体回滚，源文件保持不变，重复导入只在已有完整 slug 时返回冲突。
+
+### 40.2 验证
+
+- 第十五轮改动专项与复审基线以来的非 uploads 回归：`469 passed, 5 skipped`；其中 3 条 PostgreSQL 双连接用例因本机无 `TEST_POSTGRES_URL` 跳过，CI 通过 `REQUIRE_POSTGRES_TESTS=1` 强制执行。真实 HTTP 用例受本机 `.env` 的 LDAP 开关影响，测试期显式设为关闭后单独复跑通过。
+- uploads 路由排除两个需要 Windows symlink 特权的环境用例：`30 passed, 2 deselected`。当前等价覆盖合计：`499 passed, 5 skipped, 2 deselected`。
+- `uv run ruff check .`、`uv run ruff format --check .` 与 `git diff --check` 均通过；Ruff 覆盖 652 个文件。
+
+---
+
+## 41. 第十六轮代码复审（2026-07-14）
+
+第十六轮复审文档：[2026-07-14-m1-agent-control-plane-code-sixteenth-review.md](./2026-07-14-m1-agent-control-plane-code-sixteenth-review.md)
+
+复审结论：**Ready to merge：Yes（需以 PostgreSQL CI 门禁通过为准）**。第十五轮的 3 个 Important 与 2 个 Minor 均已实质关闭；Spec 轴未发现缺失需求、scope creep 或明确行为回归。本轮新增 0 个 Critical、0 个 Important、3 组非阻塞 Minor。
+
+三个 Minor 分别是：新增公开 PATCH 嵌套请求模型缺少 docstring、模型校验器缺少返回类型标注；Connector capability 支持判定在 Draft 保存与 publish 校验路径重复实现；批量 Skill 快照与原子导入重构后遗留无调用的单项转发方法和未使用的 draft repository 依赖。
+
+本轮独立验证 8 个直接受影响测试文件为 `146 passed`；PostgreSQL 并发文件 3 条用例因本机未配置 `TEST_POSTGRES_URL` 跳过，须由 CI 的 `REQUIRE_POSTGRES_TESTS=1` 门禁确认。17 个相关 Python 文件的 Ruff lint/format 与 `git diff --check` 均通过；未重新执行全 backend 测试。

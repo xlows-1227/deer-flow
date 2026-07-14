@@ -112,7 +112,10 @@ class PublishedAgentRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+        self._after_authoring_identity_lock = None
         self._after_authoring_draft_lock = None
+        self._after_import_draft_flush = None
+        self._after_import_skills_flush = None
 
     async def setup_authoring_bundle(
         self,
@@ -151,6 +154,8 @@ class PublishedAgentRepository:
                     agent.display_name = display_name
                     agent.description = description
                     agent.updated_at = _now()
+                    if self._after_authoring_identity_lock is not None:
+                        await self._after_authoring_identity_lock()
                     draft = await session.get(AgentDraftRow, agent.id, with_for_update=True)
                     if draft is None:
                         raise RuntimeError("draft not found")
@@ -180,6 +185,74 @@ class PublishedAgentRepository:
                 raise
             return saved
 
+    async def import_authoring_bundle(
+        self,
+        *,
+        owner_user_id: str,
+        slug: str,
+        display_name: str,
+        description: str | None,
+        soul_markdown: str,
+        model_name: str | None,
+        tool_groups: Sequence[str],
+        skills: Sequence[Mapping[str, str]],
+        skill_selection_mode: str,
+    ) -> dict[str, Any]:
+        """Create one legacy-import identity, draft and Skills atomically."""
+        agent = PublishedAgentRow(
+            id=f"pa_{uuid4().hex}",
+            owner_user_id=owner_user_id,
+            slug=slug,
+            display_name=display_name,
+            description=description,
+            status="draft",
+        )
+        draft = AgentDraftRow(
+            agent_id=agent.id,
+            soul_markdown=soul_markdown,
+            model_name=model_name,
+            tool_groups_json=list(tool_groups),
+            skill_selection_mode=skill_selection_mode,
+            updated_by=owner_user_id,
+        )
+        async with self._sf() as session:
+            try:
+                session.add(agent)
+                session.add(draft)
+                await session.flush()
+                if self._after_import_draft_flush is not None:
+                    await self._after_import_draft_flush()
+                for entry in skills:
+                    session.add(
+                        AgentDraftSkillRow(
+                            agent_id=agent.id,
+                            skill_name=str(entry["skill_name"]),
+                            source=str(entry["source"]),
+                        )
+                    )
+                await session.flush()
+                if self._after_import_skills_flush is not None:
+                    await self._after_import_skills_flush()
+                saved = {
+                    "agent": _agent_to_dict(agent),
+                    "draft": _draft_to_dict(
+                        draft,
+                        skills=await _load_skill_dicts(session, agent.id),
+                        connector_grants=[],
+                    ),
+                }
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                message = str(getattr(exc, "orig", "") or exc).lower()
+                if "uq_published_agents_owner_slug" in message or ("published_agents.owner_user_id" in message and "published_agents.slug" in message):
+                    raise ValueError(f"Agent slug already exists for owner: {slug}") from exc
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+        return saved
+
     async def update_authoring_bundle(
         self,
         *,
@@ -197,6 +270,8 @@ class PublishedAgentRepository:
                 agent = (await session.execute(select(PublishedAgentRow).where(PublishedAgentRow.owner_user_id == owner_user_id, PublishedAgentRow.slug == slug).with_for_update())).scalar_one_or_none()
                 if agent is None:
                     return None
+                if self._after_authoring_identity_lock is not None:
+                    await self._after_authoring_identity_lock()
                 draft = await session.get(AgentDraftRow, agent.id, with_for_update=True)
                 if draft is None:
                     return None
@@ -414,6 +489,7 @@ class AgentDraftRepository:
         self._sf = session_factory
         self._before_cas = None
         self._after_publish_snapshot = None
+        self._before_publish_identity_lock = None
 
     async def get(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         return await self._get_snapshot(agent_id, owner_user_id=owner_user_id)
@@ -464,16 +540,25 @@ class AgentDraftRepository:
         ``None`` means missing/not owned, ``False`` means stale, and ``True``
         keeps the row locked in the caller's transaction through pointer commit.
         """
-        stmt = (
-            select(AgentDraftRow.revision)
-            .join(PublishedAgentRow, PublishedAgentRow.id == AgentDraftRow.agent_id)
+        # Use the same global row-lock order as conversational authoring:
+        # published_agents identity first, then agent_drafts. Loading the full
+        # identity row also places it in this session's identity map, so the
+        # later release pointer update reuses the already-locked object.
+        identity_stmt = (
+            select(PublishedAgentRow)
             .where(
-                AgentDraftRow.agent_id == agent_id,
+                PublishedAgentRow.id == agent_id,
                 PublishedAgentRow.owner_user_id == owner_user_id,
             )
-            .with_for_update()
+            .with_for_update(of=PublishedAgentRow)
         )
-        revision = (await session.execute(stmt)).scalar_one_or_none()
+        if self._before_publish_identity_lock is not None:
+            await self._before_publish_identity_lock()
+        identity = (await session.execute(identity_stmt)).scalar_one_or_none()
+        if identity is None:
+            return None
+        draft_stmt = select(AgentDraftRow.revision).where(AgentDraftRow.agent_id == agent_id).with_for_update(of=AgentDraftRow)
+        revision = (await session.execute(draft_stmt)).scalar_one_or_none()
         return None if revision is None else revision == expected_revision
 
     async def update_with_revision(

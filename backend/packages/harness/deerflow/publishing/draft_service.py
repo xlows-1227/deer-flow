@@ -9,7 +9,8 @@ tools. It composes three collaborators:
   selected skill is either public or owned by the agent owner, without the
   harness depending on any specific skill loader implementation
 - a connector repository (duck-typed ``get_instance``), used to confirm a
-  granted connector instance still belongs to the owner
+  granted connector instance still belongs to the owner and that its current
+  Connector type supports the granted capability
 
 All methods are owner-scoped: a cross-owner call returns ``None`` / raises a
 conflict rather than leaking another tenant's data. Saving a draft never
@@ -143,6 +144,30 @@ class DraftService:
         selectable, unresolved = self.filter_selectable_skills(skill_names, owner_user_id=owner_user_id)
         return [{"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)} for name in selectable], unresolved
 
+    def _resolve_skill_entries(
+        self,
+        skills: Sequence[Mapping[str, str]],
+        *,
+        owner_user_id: str,
+    ) -> list[Mapping[str, str]]:
+        resolved: list[Mapping[str, str]] = []
+        seen: set[str] = set()
+        for entry in skills:
+            try:
+                raw_name = entry["skill_name"]
+            except (KeyError, TypeError) as exc:
+                raise SkillNotSelectableError("skill selection requires skill_name") from exc
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise SkillNotSelectableError("skill_name must be non-empty")
+            name = raw_name.strip()
+            if name in seen:
+                raise SkillNotSelectableError(f"duplicate skill selection: {name}")
+            seen.add(name)
+            if not self._skills.is_selectable_by(name, owner_user_id):
+                raise SkillNotSelectableError(f"skill not selectable: {name}")
+            resolved.append({"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)})
+        return resolved
+
     # ------------------------------------------------------------------
     # agent identity + draft reads
     # ------------------------------------------------------------------
@@ -272,18 +297,10 @@ class DraftService:
         # from the client-supplied value (code-review Important-1).
         resolved_skills: list[Mapping[str, str]] | None = None
         if skills is not None:
-            resolved_skills = []
-            for entry in skills:
-                name = str(entry["skill_name"])
-                if not self._skills.is_selectable_by(name, owner_user_id):
-                    raise SkillNotSelectableError(f"skill not selectable: {name}")
-                resolved_skills.append({"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)})
+            resolved_skills = self._resolve_skill_entries(skills, owner_user_id=owner_user_id)
+        resolved_grants = None
         if connector_grants is not None:
-            for entry in connector_grants:
-                instance_id = str(entry["connector_instance_id"])
-                instance = await self._connectors.get_instance(instance_id, owner_id=owner_user_id)
-                if instance is None:
-                    raise ConnectorNotGrantableError(f"connector not grantable: {instance_id}")
+            resolved_grants = await self._resolve_connector_grants(connector_grants, owner_user_id=owner_user_id)
         updated = await self._drafts.update_bundle(
             agent_id,
             owner_user_id=owner_user_id,
@@ -294,7 +311,7 @@ class DraftService:
             tool_groups=tool_groups,
             quota_overrides=quota_overrides,
             skills=resolved_skills,
-            connector_grants=connector_grants,
+            connector_grants=resolved_grants,
         )
         if updated is None:
             raise DraftConflictError("draft revision conflict or not found")
@@ -307,12 +324,7 @@ class DraftService:
         owner_user_id: str,
         skills: Sequence[Mapping[str, str]],
     ) -> dict[str, Any]:
-        resolved: list[Mapping[str, str]] = []
-        for entry in skills:
-            name = str(entry["skill_name"])
-            if not self._skills.is_selectable_by(name, owner_user_id):
-                raise SkillNotSelectableError(f"skill not selectable: {name}")
-            resolved.append({"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)})
+        resolved = self._resolve_skill_entries(skills, owner_user_id=owner_user_id)
         result = await self._drafts.replace_skills(agent_id, owner_user_id=owner_user_id, skills=resolved)
         if result is None:
             raise DraftConflictError("draft not found")
@@ -328,7 +340,12 @@ class DraftService:
         """
         selectable: list[str] = []
         unresolved: list[str] = []
-        for name in skill_names:
+        seen: set[str] = set()
+        for raw_name in skill_names:
+            name = str(raw_name).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
             if self._skills.is_selectable_by(name, owner_user_id):
                 selectable.append(name)
             else:
@@ -342,15 +359,41 @@ class DraftService:
         owner_user_id: str,
         grants: Sequence[Mapping[str, str]],
     ) -> dict[str, Any]:
-        for entry in grants:
-            instance_id = str(entry["connector_instance_id"])
-            instance = await self._connectors.get_instance(instance_id, owner_id=owner_user_id)
-            if instance is None:
-                raise ConnectorNotGrantableError(f"connector not grantable: {instance_id}")
-        result = await self._drafts.replace_connector_grants(agent_id, owner_user_id=owner_user_id, grants=grants)
+        resolved_grants = await self._resolve_connector_grants(grants, owner_user_id=owner_user_id)
+        result = await self._drafts.replace_connector_grants(agent_id, owner_user_id=owner_user_id, grants=resolved_grants)
         if result is None:
             raise DraftConflictError("draft not found")
         return result
+
+    async def _resolve_connector_grants(
+        self,
+        grants: Sequence[Mapping[str, str]],
+        *,
+        owner_user_id: str,
+    ) -> list[Mapping[str, str]]:
+        """Validate and normalize grants against authoritative type abilities."""
+        resolved: list[Mapping[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in grants:
+            try:
+                instance_id = str(entry["connector_instance_id"]).strip()
+                capability = str(entry["capability"]).strip()
+            except (KeyError, TypeError) as exc:
+                raise ConnectorNotGrantableError("connector grant requires connector_instance_id and capability") from exc
+            if not instance_id or not capability:
+                raise ConnectorNotGrantableError("connector_instance_id and capability must be non-empty")
+            key = (instance_id, capability)
+            if key in seen:
+                raise ConnectorNotGrantableError(f"duplicate connector grant: {instance_id}/{capability}")
+            seen.add(key)
+            instance = await self._connectors.get_instance(instance_id, owner_id=owner_user_id)
+            if instance is None:
+                raise ConnectorNotGrantableError(f"connector not grantable: {instance_id}")
+            supported = instance.get("supported_capabilities") if isinstance(instance, Mapping) else None
+            if not isinstance(supported, (list, tuple, set, frozenset)) or capability not in supported:
+                raise ConnectorNotGrantableError(f"capability not supported by connector type: {instance_id}/{capability}")
+            resolved.append({"connector_instance_id": instance_id, "capability": capability})
+        return resolved
 
     # ------------------------------------------------------------------
     # lifecycle (suspend / resume / archive) — never delete data

@@ -180,3 +180,95 @@ async def test_publish_rejects_snapshot_when_concurrent_patch_commits(tmp_path):
         async with admin.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publish_and_duplicate_setup_share_identity_then_draft_lock_order(tmp_path):
+    """A publish waiting behind authoring's identity lock must not deadlock.
+
+    The duplicate setup commits revision 2; publish then acquires identity and
+    draft in the same order and reports the stale revision as a retryable
+    domain conflict.
+    """
+    url = os.environ.get("TEST_POSTGRES_URL")
+    if not url:
+        if os.environ.get("REQUIRE_POSTGRES_TESTS") == "1":
+            pytest.fail("PostgreSQL authoring concurrency gate is required but TEST_POSTGRES_URL is unset")
+        pytest.skip("local PostgreSQL unavailable")
+
+    schema = f"publish_authoring_{uuid4().hex}"
+    admin = create_async_engine(url)
+    scoped = None
+    try:
+        async with admin.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        scoped = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
+        async with scoped.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        sf = async_sessionmaker(scoped, expire_on_commit=False)
+        agents = PublishedAgentRepository(sf)
+        drafts = AgentDraftRepository(sf)
+        releases = AgentReleaseRepository(sf)
+        service = PublishService(
+            published_agent_repo=agents,
+            draft_repo=drafts,
+            release_repo=releases,
+            skill_revision_repo=SkillRevisionRepository(sf),
+            content_store=LocalContentStore(tmp_path),
+            skills_index=_NoSkillsIndex(),
+            connector_repo=_NoConnectors(),
+            model_index=set(),
+            tool_group_whitelist=set(),
+        )
+        created = await agents.setup_authoring_bundle(
+            owner_user_id="user-a",
+            slug="lock-order",
+            display_name="Lock order",
+            soul_markdown="revision one",
+            skills=[],
+        )
+        agent_id = created["agent"]["id"]
+
+        authoring_has_identity = asyncio.Event()
+        release_authoring = asyncio.Event()
+        publish_reached_identity_lock = asyncio.Event()
+
+        async def _hold_after_authoring_identity_lock() -> None:
+            authoring_has_identity.set()
+            await release_authoring.wait()
+
+        async def _mark_publish_identity_lock() -> None:
+            publish_reached_identity_lock.set()
+
+        agents._after_authoring_identity_lock = _hold_after_authoring_identity_lock  # noqa: SLF001
+        drafts._before_publish_identity_lock = _mark_publish_identity_lock  # noqa: SLF001
+
+        authoring_task = asyncio.create_task(
+            agents.setup_authoring_bundle(
+                owner_user_id="user-a",
+                slug="lock-order",
+                display_name="Lock order",
+                description=None,
+                soul_markdown="revision two",
+                skills=[],
+            )
+        )
+        await asyncio.wait_for(authoring_has_identity.wait(), timeout=5)
+        publish_task = asyncio.create_task(service.publish(agent_id, owner_user_id="user-a"))
+        await asyncio.wait_for(publish_reached_identity_lock.wait(), timeout=5)
+        await asyncio.sleep(0.1)
+        assert not publish_task.done(), "publish should wait on the identity lock, not acquire draft first"
+
+        release_authoring.set()
+        authoring_result = await asyncio.wait_for(authoring_task, timeout=10)
+        assert authoring_result["draft"]["revision"] == 2
+        with pytest.raises(PublishError) as exc_info:
+            await asyncio.wait_for(publish_task, timeout=10)
+        assert [violation.code for violation in exc_info.value.violations] == ["DRAFT_REVISION_CONFLICT"]
+        assert await releases.list_by_agent(agent_id, owner_user_id="user-a") == []
+    finally:
+        if scoped is not None:
+            await scoped.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin.dispose()

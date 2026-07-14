@@ -16,6 +16,13 @@ from deerflow.publishing.skills_index import ConnectorServiceRepo, StorageSkills
 from deerflow.skills.types import SkillCategory
 
 
+def _skill_md(name: str, capability: str | None = None) -> str:
+    requires = ""
+    if capability is not None:
+        requires = f"requires:\n  connectors:\n    - capability: {capability}\n"
+    return f"---\nname: {name}\ndescription: Test skill\n{requires}---\n# {name}\n"
+
+
 def _make_storage(skills: list[dict[str, Any]], owners: dict[str, str] | None = None):
     """Build a fake SkillStorage exposing load_skills + _read_custom_skill_owner."""
     owners = owners or {}
@@ -121,13 +128,14 @@ async def test_active_connector_is_grantable(monkeypatch):
 
         async def get_connector_type(self, type_name):
             if type_name == "mysql":
-                return {"type": "mysql"}
+                return {"type": "mysql", "capabilities": ["database.query", "database.schema.inspect"]}
             raise KeyError(f"unknown type: {type_name}")
 
     repo = ConnectorServiceRepo(_FakeService())
     result = await repo.get_instance("conn_1", owner_id="user-a")
     assert result is not None
     assert result["status"] == "active"
+    assert result["supported_capabilities"] == ("database.query", "database.schema.inspect")
 
 
 @pytest.mark.anyio
@@ -261,7 +269,9 @@ def test_storage_skill_publish_snapshot_is_fail_closed_and_immutable(tmp_path):
     skill_dir = tmp_path / "reporting"
     skill_dir.mkdir()
     skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text("# Captured", encoding="utf-8")
+    captured = _skill_md("reporting", "database.query")
+    skill_file.write_text(captured, encoding="utf-8")
+    captured_bytes = skill_file.read_bytes()
     storage = _make_storage(
         [
             {
@@ -277,8 +287,79 @@ def test_storage_skill_publish_snapshot_is_fail_closed_and_immutable(tmp_path):
     snapshots = index.resolve_publish_snapshots(["reporting"], "user-a")
     snapshot = snapshots["reporting"]
     assert snapshot is not None
-    skill_file.write_text("# Changed later", encoding="utf-8")
-    assert snapshot.file_map()["SKILL.md"] == b"# Captured"
+    skill_file.write_text(_skill_md("reporting", "database.write"), encoding="utf-8")
+    assert snapshot.file_map()["SKILL.md"] == captured_bytes
+    assert snapshot.declared_connector_caps == ("database.query",)
+
+
+def test_storage_skill_publish_snapshot_derives_caps_from_captured_bytes(tmp_path):
+    """The parsed Skill object may be stale when load_skills returns.
+
+    The publish snapshot must derive capabilities from the exact SKILL.md bytes
+    it freezes, never from that stale object.
+    """
+    skill_dir = tmp_path / "reporting"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(_skill_md("reporting", "old.read"), encoding="utf-8")
+
+    class _MutatingStorage:
+        calls = 0
+
+        def load_skills(self, *, enabled_only=False):  # noqa: ARG002
+            self.calls += 1
+            capability = "old.read"
+            if self.calls == 1:
+                # Simulate a concurrent edit after parsing but before the
+                # already-parsed Skill object is returned to the index.
+                skill_file.write_text(_skill_md("reporting", "new.write"), encoding="utf-8")
+            else:
+                capability = "new.write"
+            return [
+                SimpleNamespace(
+                    name="reporting",
+                    category=SkillCategory.PUBLIC,
+                    enabled=True,
+                    skill_dir=skill_dir,
+                    connector_requirements=[SimpleNamespace(capability=capability)],
+                )
+            ]
+
+    snapshot = StorageSkillsIndex(_MutatingStorage(), owner_user_id="user-a").resolve_publish_snapshots(["reporting"], "user-a")["reporting"]
+
+    assert snapshot is not None
+    assert snapshot.declared_connector_caps == ("new.write",)
+    assert b"capability: new.write" in snapshot.file_map()["SKILL.md"]
+
+
+def test_storage_skill_publish_snapshot_rejects_file_tree_changed_during_capture(tmp_path):
+    skill_dir = tmp_path / "reporting"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(_skill_md("reporting", "old.read"), encoding="utf-8")
+
+    class _ChangingStorage:
+        calls = 0
+
+        def load_skills(self, *, enabled_only=False):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 2:
+                # A second authoritative metadata read happens between the two
+                # full file captures. The adapter must reject the mixed tree.
+                skill_file.write_text(_skill_md("reporting", "new.write"), encoding="utf-8")
+            return [
+                SimpleNamespace(
+                    name="reporting",
+                    category=SkillCategory.PUBLIC,
+                    enabled=True,
+                    skill_dir=skill_dir,
+                    connector_requirements=[],
+                )
+            ]
+
+    snapshots = StorageSkillsIndex(_ChangingStorage(), owner_user_id="user-a").resolve_publish_snapshots(["reporting"], "user-a")
+
+    assert snapshots == {"reporting": None}
 
 
 def test_storage_skill_publish_snapshot_rejects_missing_skill_md(tmp_path):
@@ -302,7 +383,7 @@ def test_storage_skill_publish_snapshot_rejects_missing_skill_md(tmp_path):
 def test_storage_private_skill_publish_snapshot_requires_exact_owner(tmp_path):
     skill_dir = tmp_path / "private"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Private", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(_skill_md("private"), encoding="utf-8")
     storage = _make_storage(
         [
             {

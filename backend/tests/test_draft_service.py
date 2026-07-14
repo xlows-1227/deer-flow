@@ -177,9 +177,10 @@ class FakeSkillsIndex:
 
 
 class FakeConnectorRepo:
-    def __init__(self, owners: dict[str, str] | None = None) -> None:
+    def __init__(self, owners: dict[str, str] | None = None, capabilities: dict[str, set[str]] | None = None) -> None:
         # connector_instance_id -> owner_user_id
         self.owners = owners or {}
+        self.capabilities = capabilities or {connector_id: {"database.query"} for connector_id in self.owners}
 
     async def get_instance(self, connector_id, *, owner_id=...):
         owner = self.owners.get(connector_id)
@@ -187,7 +188,12 @@ class FakeConnectorRepo:
             return None
         if owner_id is not ... and owner != owner_id:
             return None
-        return {"id": connector_id, "owner_id": owner, "status": "active"}
+        return {
+            "id": connector_id,
+            "owner_id": owner,
+            "status": "active",
+            "supported_capabilities": tuple(sorted(self.capabilities.get(connector_id, set()))),
+        }
 
 
 @pytest.fixture()
@@ -314,6 +320,50 @@ async def test_replace_connector_grants_accepts_own_connector(service):
     )
     draft = await service.get_draft(agent["id"], owner_user_id="user-a")
     assert draft["connector_grants"] == [{"connector_instance_id": "conn_1", "capability": "database.query"}]
+
+
+@pytest.mark.anyio
+async def test_replace_connector_grants_rejects_capability_not_supported_by_type(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    with pytest.raises(ConnectorNotGrantableError, match="capability not supported"):
+        await service.set_connector_grants(
+            agent["id"],
+            owner_user_id="user-a",
+            grants=[{"connector_instance_id": "conn_1", "capability": "mail.send"}],
+        )
+    draft = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert draft["connector_grants"] == []
+
+
+@pytest.mark.anyio
+async def test_update_bundle_rejects_duplicate_skills_before_repository_write(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    with pytest.raises(SkillNotSelectableError, match="duplicate skill"):
+        await service.update_draft_bundle(
+            agent["id"],
+            owner_user_id="user-a",
+            revision=1,
+            skills=[{"skill_name": "reporting"}, {"skill_name": "reporting"}],
+        )
+    draft = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert draft["revision"] == 1
+    assert draft["skills"] == []
+
+
+@pytest.mark.anyio
+async def test_update_bundle_rejects_duplicate_connector_grants_before_repository_write(service):
+    agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    grant = {"connector_instance_id": "conn_1", "capability": "database.query"}
+    with pytest.raises(ConnectorNotGrantableError, match="duplicate connector grant"):
+        await service.update_draft_bundle(
+            agent["id"],
+            owner_user_id="user-a",
+            revision=1,
+            connector_grants=[grant, grant],
+        )
+    draft = await service.get_draft(agent["id"], owner_user_id="user-a")
+    assert draft["revision"] == 1
+    assert draft["connector_grants"] == []
 
 
 @pytest.mark.anyio

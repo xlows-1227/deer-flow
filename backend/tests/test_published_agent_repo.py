@@ -234,6 +234,79 @@ async def test_setup_authoring_bundle_rolls_back_identity_when_flush_fails(agent
 
 
 @pytest.mark.asyncio
+async def test_import_authoring_bundle_commits_identity_draft_and_skills_once(agent_repo):
+    pub, drafts = agent_repo
+
+    saved = await pub.import_authoring_bundle(
+        owner_user_id="user-a",
+        slug="legacy",
+        display_name="Legacy",
+        description="imported",
+        soul_markdown="# legacy soul",
+        model_name="model-x",
+        tool_groups=["web"],
+        skills=[{"skill_name": "reporting", "source": "public"}],
+        skill_selection_mode="explicit",
+    )
+
+    agent_id = saved["agent"]["id"]
+    draft = await drafts.get(agent_id, owner_user_id="user-a")
+    assert saved["agent"]["status"] == "draft"
+    assert saved["agent"]["current_release_id"] is None
+    assert draft["revision"] == 1
+    assert draft["soul_markdown"] == "# legacy soul"
+    assert draft["model_name"] == "model-x"
+    assert draft["tool_groups"] == ["web"]
+    assert draft["skills"] == [{"skill_name": "reporting", "source": "public"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hook_name", ["_after_import_draft_flush", "_after_import_skills_flush"])
+async def test_import_authoring_bundle_rolls_back_every_phase_failure(agent_repo, hook_name):
+    pub, _drafts = agent_repo
+
+    async def _fail() -> None:
+        raise RuntimeError("injected import failure")
+
+    setattr(pub, hook_name, _fail)
+    with pytest.raises(RuntimeError, match="injected import failure"):
+        await pub.import_authoring_bundle(
+            owner_user_id="user-a",
+            slug="atomic-import",
+            display_name="Atomic import",
+            description=None,
+            soul_markdown="# soul",
+            model_name=None,
+            tool_groups=[],
+            skills=[{"skill_name": "reporting", "source": "public"}],
+            skill_selection_mode="explicit",
+        )
+
+    assert await pub.list_by_owner("user-a") == []
+
+
+@pytest.mark.asyncio
+async def test_import_authoring_bundle_duplicate_skill_rolls_back_identity(agent_repo):
+    pub, _drafts = agent_repo
+    duplicate = {"skill_name": "reporting", "source": "public"}
+
+    with pytest.raises(IntegrityError):
+        await pub.import_authoring_bundle(
+            owner_user_id="user-a",
+            slug="duplicate-import",
+            display_name="Duplicate import",
+            description=None,
+            soul_markdown="# soul",
+            model_name=None,
+            tool_groups=[],
+            skills=[duplicate, duplicate],
+            skill_selection_mode="explicit",
+        )
+
+    assert await pub.list_by_owner("user-a") == []
+
+
+@pytest.mark.asyncio
 async def test_update_authoring_bundle_is_one_revision_and_rolls_back_all_fields(agent_repo):
     pub, drafts = agent_repo
     created = await pub.setup_authoring_bundle(

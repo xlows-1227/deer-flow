@@ -49,17 +49,25 @@ def _skills_index(skills):
     return _Idx(skills)
 
 
-def _connector_repo(owners):
+def _connector_repo(owners, capabilities=None):
+    capabilities = capabilities or {connector_id: {"database.query"} for connector_id in owners}
+
     class _Repo:
-        def __init__(self, owners):
+        def __init__(self, owners, capabilities):
             self.owners = owners
+            self.capabilities = capabilities
 
         def get_instance(self, connector_id, *, owner_id=...):
             if connector_id in self.owners and (owner_id is ... or self.owners[connector_id] == owner_id):
-                return {"id": connector_id, "owner_id": self.owners[connector_id], "status": "active"}
+                return {
+                    "id": connector_id,
+                    "owner_id": self.owners[connector_id],
+                    "status": "active",
+                    "supported_capabilities": tuple(sorted(self.capabilities.get(connector_id, set()))),
+                }
             return None
 
-    return _Repo(owners)
+    return _Repo(owners, capabilities)
 
 
 @pytest.fixture()
@@ -171,6 +179,13 @@ def test_rule6_connector_not_owned(collaborators):
 def test_rule6_connector_owned_ok(collaborators):
     violations = validate_draft_for_publish(_draft(), **collaborators)
     assert "CONNECTOR_NOT_OWNED" not in codes(violations)
+
+
+def test_rule6_connector_type_must_support_granted_capability(collaborators):
+    collaborators["connector_repo"] = _connector_repo({"conn_1": "user-a"}, {"conn_1": {"mail.send"}})
+    violations = validate_draft_for_publish(_draft(), **collaborators)
+    assert "CONNECTOR_CAPABILITY_UNSUPPORTED" in codes(violations)
+    assert "CONNECTOR_NOT_GRANTED" in codes(violations)
 
 
 # ---------------------------------------------------------------------------

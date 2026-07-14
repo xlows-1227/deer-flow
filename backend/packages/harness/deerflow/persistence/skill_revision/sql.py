@@ -36,6 +36,28 @@ class SkillRevisionRepository:
         self._sf = session_factory
         self._after_initial_miss = None
 
+    @staticmethod
+    def _assert_content_invariants(
+        row: SkillRevisionRow,
+        *,
+        owner_user_id: str | None,
+        visibility: str,
+        content_ref: str,
+        declared_connector_caps: Sequence[Mapping[str, Any] | str],
+    ) -> None:
+        expected_caps = list(declared_connector_caps)
+        mismatches: list[str] = []
+        if row.owner_user_id != owner_user_id:
+            mismatches.append("owner_user_id")
+        if row.visibility != visibility:
+            mismatches.append("visibility")
+        if row.content_ref != content_ref:
+            mismatches.append("content_ref")
+        if list(row.declared_connector_caps_json or []) != expected_caps:
+            mismatches.append("declared_connector_caps")
+        if mismatches:
+            raise RuntimeError(f"Skill revision metadata mismatch for identical content checksum: {', '.join(mismatches)}")
+
     async def get_or_create(
         self,
         *,
@@ -93,6 +115,13 @@ class SkillRevisionRepository:
         )
         row = (await session.execute(stmt)).scalar_one_or_none()
         if row is not None:
+            self._assert_content_invariants(
+                row,
+                owner_user_id=owner,
+                visibility=visibility,
+                content_ref=content_ref,
+                declared_connector_caps=declared_connector_caps,
+            )
             return row
         if self._after_initial_miss is not None:
             await self._after_initial_miss()
@@ -121,7 +150,15 @@ class SkillRevisionRepository:
         await session.execute(stmt_ins)
         await session.flush()
         # Re-read: either our row or the canonical from a concurrent insert.
-        return (await session.execute(stmt)).scalar_one()
+        row = (await session.execute(stmt)).scalar_one()
+        self._assert_content_invariants(
+            row,
+            owner_user_id=owner,
+            visibility=visibility,
+            content_ref=content_ref,
+            declared_connector_caps=declared_connector_caps,
+        )
+        return row
 
     async def get(self, revision_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:

@@ -13,11 +13,15 @@ metadata trustworthy (code-review Important-1).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from deerflow.skills.parser import parse_allowed_tools, parse_connector_requirements
 from deerflow.skills.types import SkillCategory
 
 
@@ -57,44 +61,42 @@ class StorageSkillsIndex:
         self._owner_user_id = owner_user_id
         self._index: dict[str, dict[str, Any]] | None = None
 
+    def _load_index(self) -> dict[str, dict[str, Any]]:
+        # Load all skills (including disabled) so ``get`` can still report
+        # metadata, but record the enabled flag so ``is_selectable_by`` rejects
+        # disabled skills (rereview Important-3).
+        skills = self._storage.load_skills(enabled_only=False)
+        index: dict[str, dict[str, Any]] = {}
+        for skill in skills:
+            owner: str | None = None
+            if skill.category == SkillCategory.CUSTOM:
+                owner = self._storage._read_custom_skill_owner(skill.skill_dir)  # noqa: SLF001
+            caps = [req.capability for req in skill.connector_requirements or []]
+            index[skill.name] = {
+                "visibility": "public" if skill.category == SkillCategory.PUBLIC else "private",
+                "owner": owner,
+                "caps": caps,
+                "skill_dir": skill.skill_dir,
+                "enabled": bool(skill.enabled),
+            }
+        return index
+
     def _ensure_index(self) -> dict[str, dict[str, Any]]:
         if self._index is None:
-            # Load all skills (including disabled) so ``get`` can still report
-            # metadata, but record the enabled flag so ``is_selectable_by``
-            # rejects disabled skills (rereview Important-3).
-            skills = self._storage.load_skills(enabled_only=False)
-            index: dict[str, dict[str, Any]] = {}
-            for skill in skills:
-                owner: str | None = None
-                if skill.category == SkillCategory.CUSTOM:
-                    owner = self._storage._read_custom_skill_owner(skill.skill_dir)  # noqa: SLF001
-                caps: list[str] = []
-                for req in skill.connector_requirements or []:
-                    caps.append(req.capability)
-                index[skill.name] = {
-                    "visibility": "public" if skill.category == SkillCategory.PUBLIC else "private",
-                    "owner": owner,
-                    "caps": caps,
-                    "skill_dir": skill.skill_dir,
-                    "enabled": bool(skill.enabled),
-                }
-            self._index = index
+            self._index = self._load_index()
         return self._index
+
+    @staticmethod
+    def _is_info_selectable(info: dict[str, Any] | None, owner_user_id: str) -> bool:
+        if info is None or not info.get("enabled", True):
+            return False
+        if info.get("visibility") == "public":
+            return True
+        return bool(info.get("owner")) and info.get("owner") == owner_user_id
 
     def is_selectable_by(self, name: str, owner_user_id: str) -> bool:
         info = self._ensure_index().get(name)
-        if info is None:
-            return False
-        # A disabled skill is never selectable, even for its owner (rereview
-        # Important-3): publishing an agent against a disabled skill would pin a
-        # revision the platform has turned off.
-        if not info.get("enabled", True):
-            return False
-        if info["visibility"] == "public":
-            return True
-        # Private skill: only selectable by its owner. Skills with no recorded
-        # owner are legacy/global and treated as non-selectable for isolation.
-        return bool(info["owner"]) and info["owner"] == owner_user_id
+        return self._is_info_selectable(info, owner_user_id)
 
     def get(self, name: str) -> dict[str, Any] | None:
         """Return authoritative metadata for ``name`` or ``None`` if unknown.
@@ -132,28 +134,50 @@ class StorageSkillsIndex:
         fails so the publish validator can fail closed instead of silently
         dropping it.
         """
-        index = self._ensure_index()
-        names = [name for name in sorted(index) if self.is_selectable_by(name, owner_user_id)] if skill_names is None else list(dict.fromkeys(skill_names))
-        return {name: self._resolve_publish_snapshot(name, owner_user_id) for name in names}
+        initial_index = self._ensure_index()
+        names = [name for name in sorted(initial_index) if self._is_info_selectable(initial_index.get(name), owner_user_id)] if skill_names is None else list(dict.fromkeys(skill_names))
 
-    def _resolve_publish_snapshot(
-        self,
-        name: str,
-        owner_user_id: str,
-    ) -> SkillPublishSnapshot | None:
-        info = self._ensure_index().get(name)
-        if info is None or not self.is_selectable_by(name, owner_user_id):
+        # The storage does not expose one atomic metadata+tree snapshot. Use a
+        # fail-closed bracketing protocol instead: capture every file tree twice
+        # and bracket those reads with fresh authoritative metadata reads. A
+        # concurrent edit to the tree, enabled state, visibility, owner or path
+        # rejects that Skill for this publish attempt.
+        first_files = {name: self._capture_files(initial_index.get(name)) for name in names}
+        middle_index = self._load_index()
+        second_files = {name: self._capture_files(middle_index.get(name)) for name in names}
+        final_index = self._load_index()
+        self._index = final_index
+
+        return {
+            name: self._snapshot_from_consistent_capture(
+                name,
+                owner_user_id=owner_user_id,
+                initial_info=initial_index.get(name),
+                middle_info=middle_index.get(name),
+                final_info=final_index.get(name),
+                first_files=first_files[name],
+                second_files=second_files[name],
+            )
+            for name in names
+        }
+
+    @staticmethod
+    def _metadata_fingerprint(info: dict[str, Any] | None) -> tuple[Any, ...] | None:
+        if info is None:
             return None
-        visibility = info.get("visibility")
-        owner = info.get("owner")
-        if visibility not in {"public", "private"}:
+        skill_dir = info.get("skill_dir")
+        return (
+            info.get("visibility"),
+            info.get("owner"),
+            bool(info.get("enabled", True)),
+            str(Path(skill_dir).resolve()) if skill_dir else None,
+        )
+
+    @staticmethod
+    def _capture_files(info: dict[str, Any] | None) -> dict[str, bytes] | None:
+        if info is None or not info.get("skill_dir"):
             return None
-        if visibility == "private" and (not isinstance(owner, str) or owner != owner_user_id):
-            return None
-        skill_dir_value = info.get("skill_dir")
-        if not skill_dir_value:
-            return None
-        skill_dir = Path(skill_dir_value)
+        skill_dir = Path(info["skill_dir"])
         if not skill_dir.is_dir():
             return None
         files: dict[str, bytes] = {}
@@ -163,19 +187,78 @@ class StorageSkillsIndex:
                 if path.is_file() and not any(part.startswith(".") for part in relative.parts):
                     files[relative.as_posix()] = path.read_bytes()
         except OSError:
-            # A concurrent delete/rename or unreadable file invalidates the
-            # whole resolution. Never publish a partial file snapshot.
             return None
-        if not files.get("SKILL.md"):
+        return files if files.get("SKILL.md") else None
+
+    @staticmethod
+    def _caps_from_captured_skill_md(skill_name: str, content: bytes) -> tuple[str, ...] | None:
+        """Parse connector requirements from the exact bytes being pinned."""
+        skill_file = Path(skill_name) / "SKILL.md"
+        try:
+            text = content.decode("utf-8")
+            match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", text, re.DOTALL)
+            if match is None:
+                return None
+            metadata = yaml.safe_load(match.group(1))
+            if not isinstance(metadata, dict):
+                return None
+            parsed_name = metadata.get("name")
+            description = metadata.get("description")
+            if not isinstance(parsed_name, str) or parsed_name.strip() != skill_name:
+                return None
+            if not isinstance(description, str) or not description.strip():
+                return None
+            # Validate the same structured fields as the normal Skill parser so
+            # a concurrently written malformed SKILL.md cannot be published.
+            parse_allowed_tools(metadata.get("allowed-tools"), skill_file)
+            requirements = parse_connector_requirements(metadata.get("requires"), skill_file) or []
+        except (UnicodeDecodeError, ValueError, yaml.YAMLError):
+            return None
+        return tuple(requirement.capability for requirement in requirements)
+
+    def _snapshot_from_consistent_capture(
+        self,
+        name: str,
+        *,
+        owner_user_id: str,
+        initial_info: dict[str, Any] | None,
+        middle_info: dict[str, Any] | None,
+        final_info: dict[str, Any] | None,
+        first_files: dict[str, bytes] | None,
+        second_files: dict[str, bytes] | None,
+    ) -> SkillPublishSnapshot | None:
+        fingerprint = self._metadata_fingerprint(initial_info)
+        if fingerprint is None or fingerprint != self._metadata_fingerprint(middle_info) or fingerprint != self._metadata_fingerprint(final_info):
+            return None
+        if first_files is None or first_files != second_files:
+            return None
+        if not self._is_info_selectable(final_info, owner_user_id):
+            return None
+        assert final_info is not None
+        visibility = final_info.get("visibility")
+        owner = final_info.get("owner")
+        if visibility not in {"public", "private"}:
+            return None
+        if visibility == "private" and (not isinstance(owner, str) or owner != owner_user_id):
+            return None
+        caps = self._caps_from_captured_skill_md(name, first_files["SKILL.md"])
+        if caps is None:
             return None
         return SkillPublishSnapshot(
             skill_name=name,
             source=visibility,
             visibility=visibility,
             owner_user_id=owner if visibility == "private" else None,
-            declared_connector_caps=tuple(str(cap) for cap in info.get("caps") or []),
-            files=tuple(sorted(files.items())),
+            declared_connector_caps=caps,
+            files=tuple(sorted(first_files.items())),
         )
+
+    def _resolve_publish_snapshot(
+        self,
+        name: str,
+        owner_user_id: str,
+    ) -> SkillPublishSnapshot | None:
+        return self.resolve_publish_snapshots([name], owner_user_id).get(name)
 
     def files_for(self, name: str) -> dict[str, bytes]:
         """Snapshot the skill's files (SKILL.md + siblings) for content addressing.
@@ -200,9 +283,9 @@ class StorageSkillsIndex:
 class ConnectorServiceRepo:
     """Adapter exposing ``ConnectorService.get_connector`` as ``get_instance``.
 
-    ``DraftService`` only needs to know whether a connector instance belongs to
-    the agent owner; this adapter returns a plain dict (or ``None``) to match
-    the ``ConnectorRepoLike`` protocol.
+    The returned plain dict includes the immutable, authority-derived
+    ``supported_capabilities`` tuple from the current Connector type. Unknown,
+    disabled or malformed instances/types return ``None``.
     """
 
     def __init__(self, connector_service: Any) -> None:
@@ -239,8 +322,19 @@ class ConnectorServiceRepo:
                 return None  # type not in the platform whitelist
             # Authoritative registry check: get_connector_type raises on unknown
             # or disabled types.
-            await self._service.get_connector_type(connector_type)
+            type_definition = await self._service.get_connector_type(connector_type)
         except Exception:
             # Config / registry / unknown-type failure — fail closed (do NOT grant).
             return None
+        type_data = type_definition.model_dump() if hasattr(type_definition, "model_dump") else dict(type_definition)
+        raw_capabilities = type_data.get("capabilities")
+        if not isinstance(raw_capabilities, (list, tuple, set, frozenset)):
+            return None
+        capabilities: list[str] = []
+        for capability in raw_capabilities:
+            if not isinstance(capability, str) or not capability.strip():
+                return None
+            capabilities.append(capability.strip())
+        # Tuple makes the authority-derived capability set immutable to callers.
+        data["supported_capabilities"] = tuple(dict.fromkeys(capabilities))
         return data

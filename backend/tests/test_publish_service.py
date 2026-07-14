@@ -74,6 +74,7 @@ class _StaticSkillsIndex:
 class _AsyncConnectorRepo:
     def __init__(self, owners: dict[str, str]) -> None:
         self.owners = owners
+        self.capabilities = {connector_id: {"database.query"} for connector_id in owners}
 
     async def get_instance(self, connector_id, *, owner_id=...):
         owner = self.owners.get(connector_id)
@@ -81,7 +82,12 @@ class _AsyncConnectorRepo:
             return None
         if owner_id is not ... and owner != owner_id:
             return None
-        return {"id": connector_id, "owner_id": owner, "status": "active"}
+        return {
+            "id": connector_id,
+            "owner_id": owner,
+            "status": "active",
+            "supported_capabilities": tuple(sorted(self.capabilities.get(connector_id, set()))),
+        }
 
 
 @pytest_asyncio.fixture()
@@ -159,6 +165,24 @@ async def test_publish_rejects_invalid_draft_without_changes(env):
     # State unchanged.
     refreshed = await agent_repo.get(agent["id"], owner_user_id="user-a")
     assert refreshed["status"] == "draft"
+    assert refreshed["current_release_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_publish_rechecks_connector_type_capabilities_after_draft_save(env):
+    service, draft_service, agent_repo, release_repo = env
+    agent = await _seed_agent(draft_service)
+    # Simulate the authoritative type losing/disablement of this capability
+    # after the draft grant was accepted but before publish validation.
+    service._connectors.capabilities["conn_1"].clear()  # noqa: SLF001
+
+    with pytest.raises(PublishError) as exc_info:
+        await service.publish(agent["id"], owner_user_id="user-a")
+
+    codes = {violation.code for violation in exc_info.value.violations}
+    assert {"CONNECTOR_NOT_GRANTED", "CONNECTOR_CAPABILITY_UNSUPPORTED"} <= codes
+    assert await release_repo.list_by_agent(agent["id"], owner_user_id="user-a") == []
+    refreshed = await agent_repo.get(agent["id"], owner_user_id="user-a")
     assert refreshed["current_release_id"] is None
 
 

@@ -135,11 +135,11 @@ class PublishService:
         self._model_resolver = model_resolver
 
     async def _build_sync_connector_repo(self, draft: dict[str, Any], owner_user_id: str) -> Any:
-        """Resolve connector ownership synchronously for the validator.
+        """Resolve connector availability and type capabilities for validation.
 
         The validator is a pure function and cannot ``await``; this helper
-        eagerly asks the (possibly async) connector repo which of the draft's
-        granted instances the owner actually controls, then returns a tiny sync
+        eagerly asks the async connector repo for owner-active instances plus
+        their authoritative type capability sets, then returns a tiny sync
         adapter answering from that pre-resolved map. Connectors not referenced
         by the draft are never queried.
         """

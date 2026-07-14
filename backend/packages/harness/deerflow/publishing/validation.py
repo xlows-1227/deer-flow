@@ -11,8 +11,9 @@ The eight rules mirror the design doc one-to-one:
 2. instruction size within limit
 3. model available to the owner
 4. every selected skill exists, is enabled, and is public or owner-private
-5. every skill-declared connector capability is covered by the draft grants
-6. every granted connector instance still belongs to the owner
+5. every skill-declared connector capability is covered by a supported grant
+6. every granted connector instance still belongs to the owner and its current
+   type supports the granted capability
 7. every tool group is in the platform whitelist
 8. every owner quota override is within the platform hard limit
 """
@@ -73,9 +74,9 @@ def validate_draft_for_publish(
     ``connector_repo`` whose ``get_instance`` is awaitable. To keep this entry
     point synchronous, connector ownership is resolved eagerly by the caller
     when wiring the validator (the publish service does that before calling).
-    Here we treat ``connector_repo`` as already-validated and only check the
-    *declared* capabilities against the grants; the publish service performs
-    the async owner check separately.
+    Here ``connector_repo`` is the pre-resolved sync adapter, so both ownership
+    and authoritative Connector-type capabilities are checked without adding
+    side effects to this function.
     """
     violations: list[PublishViolation] = []
 
@@ -114,8 +115,22 @@ def validate_draft_for_publish(
             )
         )
 
+    # Resolve grants once. Only an owner-valid instance whose authoritative
+    # Connector type actually supports the named capability may cover a Skill
+    # requirement.
+    grant_instances: dict[str, dict[str, Any] | None] = {}
+    granted_caps: set[tuple[str, str]] = set()
+    for grant in draft.get("connector_grants") or []:
+        connector_id = grant["connector_instance_id"]
+        instance = grant_instances.get(connector_id)
+        if connector_id not in grant_instances:
+            instance = connector_repo.get_instance(connector_id, owner_id=owner_user_id)
+            grant_instances[connector_id] = instance
+        supported = instance.get("supported_capabilities") if isinstance(instance, dict) else None
+        if isinstance(supported, (list, tuple, set, frozenset)) and grant["capability"] in supported:
+            granted_caps.add((connector_id, grant["capability"]))
+
     # Rules 4 & 5 — skills
-    granted_caps = {(g["connector_instance_id"], g["capability"]) for g in draft.get("connector_grants") or []}
     for entry in draft.get("skills") or []:
         name = entry["skill_name"]
         if not skills_index.is_selectable_by(name, owner_user_id):
@@ -147,12 +162,22 @@ def validate_draft_for_publish(
     # ``connector_repo.get_instance`` is synchronous here (the publish service
     # pre-resolves async connector lookups into a sync adapter before calling).
     for grant in draft.get("connector_grants") or []:
-        instance = connector_repo.get_instance(grant["connector_instance_id"], owner_id=owner_user_id)
+        instance = grant_instances.get(grant["connector_instance_id"])
         if instance is None:
             violations.append(
                 PublishViolation(
                     code="CONNECTOR_NOT_OWNED",
                     message=f"Connector instance '{grant['connector_instance_id']}' is not available to this owner.",
+                    field="connector_grants",
+                )
+            )
+            continue
+        supported = instance.get("supported_capabilities") if isinstance(instance, dict) else None
+        if not isinstance(supported, (list, tuple, set, frozenset)) or grant["capability"] not in supported:
+            violations.append(
+                PublishViolation(
+                    code="CONNECTOR_CAPABILITY_UNSUPPORTED",
+                    message=f"Connector instance '{grant['connector_instance_id']}' does not support capability '{grant['capability']}'.",
                     field="connector_grants",
                 )
             )

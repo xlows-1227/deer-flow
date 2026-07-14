@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import pytest
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.testclient import TestClient
@@ -165,7 +166,12 @@ class _MemSkillsIndex:
 class _MemConnectorRepo:
     async def get_instance(self, connector_id, *, owner_id=...):
         if connector_id == "conn_own":
-            return {"id": connector_id, "owner_id": owner_id, "status": "active"}
+            return {
+                "id": connector_id,
+                "owner_id": owner_id,
+                "status": "active",
+                "supported_capabilities": ("database.query",),
+            }
         return None
 
 
@@ -341,6 +347,41 @@ def test_patch_draft_other_owners_connector_returns_422():
         json={"revision": 1, "connector_grants": [{"connector_instance_id": "conn_other", "capability": "database.query"}]},
     )
     assert res.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"skills": [{}]},
+        {"skills": [{"skill_name": ""}]},
+        {"skills": [{"skill_name": "reporting", "unexpected": "x"}]},
+        {"skills": [{"skill_name": "reporting"}, {"skill_name": "reporting"}]},
+        {"connector_grants": [{}]},
+        {"connector_grants": [{"connector_instance_id": "", "capability": "database.query"}]},
+        {"connector_grants": [{"connector_instance_id": "conn_own", "capability": ""}]},
+        {"connector_grants": [{"connector_instance_id": "conn_own", "capability": "database.query", "unexpected": "x"}]},
+        {
+            "connector_grants": [
+                {"connector_instance_id": "conn_own", "capability": "database.query"},
+                {"connector_instance_id": "conn_own", "capability": "database.query"},
+            ]
+        },
+    ],
+)
+def test_patch_draft_rejects_malformed_or_duplicate_nested_entries(invalid_fields):
+    client, _, _ = _make_client()
+    agent = client.post("/api/published-agents", json={"slug": "bot", "display_name": "Bot"}).json()
+
+    response = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={"revision": 1, **invalid_fields},
+    )
+
+    assert response.status_code == 422
+    draft = client.get(f"/api/published-agents/{agent['id']}").json()["draft"]
+    assert draft["revision"] == 1
+    assert draft["skills"] == []
+    assert draft["connector_grants"] == []
 
 
 def test_archive_suspend_resume():

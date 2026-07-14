@@ -25,6 +25,7 @@ from deerflow.publishing.import_service import (
 class _MemAgents:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
+        self.drafts: _MemDrafts | None = None
 
     async def create_agent(
         self,
@@ -51,6 +52,42 @@ class _MemAgents:
             "current_release_id": None,
         }
         return dict(self.rows[agent_id])
+
+    async def import_authoring_bundle(
+        self,
+        *,
+        owner_user_id,
+        slug,
+        display_name,
+        description,
+        soul_markdown,
+        model_name,
+        tool_groups,
+        skills,
+        skill_selection_mode,
+    ):
+        agent = await self.create_agent(
+            owner_user_id=owner_user_id,
+            slug=slug,
+            display_name=display_name,
+            description=description,
+            skill_selection_mode=skill_selection_mode,
+        )
+        assert self.drafts is not None
+        draft = {
+            "agent_id": agent["id"],
+            "agent_markdown": "",
+            "soul_markdown": soul_markdown,
+            "model_name": model_name,
+            "tool_groups": list(tool_groups),
+            "quota_overrides": {},
+            "skill_selection_mode": skill_selection_mode,
+            "revision": 1,
+            "skills": list(skills),
+            "connector_grants": [],
+        }
+        self.drafts.drafts[agent["id"]] = draft
+        return {"agent": agent, "draft": dict(draft)}
 
 
 class _MemDrafts:
@@ -107,44 +144,7 @@ def _write_legacy_agent(base: Path, user_id: str, name: str, *, soul="# I am " +
 def _service(base: Path, known_skills: set[str] | None = None):
     agents = _MemAgents()
     drafts = _MemDrafts(agents)
-
-    # Patch create_agent to seed the draft row (mirrors the real repo pair).
-    real_create = agents.create_agent
-
-    async def create_and_seed(
-        *,
-        owner_user_id,
-        slug,
-        display_name,
-        description=None,
-        avatar_ref=None,
-        agent_id=None,
-        skill_selection_mode="explicit",
-    ):
-        agent = await real_create(
-            owner_user_id=owner_user_id,
-            slug=slug,
-            display_name=display_name,
-            description=description,
-            avatar_ref=avatar_ref,
-            agent_id=agent_id,
-            skill_selection_mode=skill_selection_mode,
-        )
-        drafts.drafts[agent["id"]] = {
-            "agent_id": agent["id"],
-            "agent_markdown": "",
-            "soul_markdown": "",
-            "model_name": None,
-            "tool_groups": [],
-            "quota_overrides": {},
-            "skill_selection_mode": skill_selection_mode,
-            "revision": 1,
-            "skills": [],
-            "connector_grants": [],
-        }
-        return agent
-
-    agents.create_agent = create_and_seed  # type: ignore[assignment]
+    agents.drafts = drafts
     return AgentImportService(
         published_agent_repo=agents,
         draft_repo=drafts,
@@ -212,6 +212,17 @@ async def test_import_reports_unresolved_skills_without_blocking(tmp_path):
     drafts = service._drafts.drafts  # noqa: SLF001
     draft = drafts[report["agent_id"]]
     assert [s["skill_name"] for s in draft["skills"]] == ["reporting"]
+
+
+@pytest.mark.anyio
+async def test_import_deduplicates_repeated_legacy_skills(tmp_path):
+    _write_legacy_agent(tmp_path, "user-a", "bot", skills=["reporting", "reporting"])
+    service = _service(tmp_path, known_skills={"reporting"})
+
+    report = await service.import_agent("user-a", "bot")
+
+    draft = service._drafts.drafts[report["agent_id"]]  # noqa: SLF001
+    assert draft["skills"] == [{"skill_name": "reporting", "source": "public"}]
 
 
 @pytest.mark.anyio

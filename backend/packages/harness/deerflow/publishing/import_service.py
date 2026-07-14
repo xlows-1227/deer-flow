@@ -138,43 +138,41 @@ class AgentImportService:
         if candidate is None:
             raise FileNotFoundError(f"No legacy agent named '{name}' for user {owner_user_id}")
 
-        try:
-            agent = await self._agents.create_agent(
-                owner_user_id=owner_user_id,
-                slug=candidate.name,
-                display_name=candidate.display_name,
-                description=candidate.description or None,
-                skill_selection_mode=("explicit" if candidate.skills_configured else "inherit"),
-            )
-        except ValueError as exc:
-            raise ImportAlreadyExistsError(str(exc)) from exc
-
-        draft = await self._drafts.get(agent["id"], owner_user_id=owner_user_id)
-        if draft is not None:
-            # Map the legacy fields onto the freshly-seeded draft.
-            await self._drafts.update_with_revision(
-                agent["id"],
-                owner_user_id=owner_user_id,
-                revision=draft["revision"],
-                soul_markdown=candidate.soul_markdown,
-                model_name=candidate.model_name,
-                tool_groups=candidate.tool_groups,
-            )
-
         # Resolve skill names against the index; unresolvable ones are reported.
         # The source/visibility classification is derived authoritatively from
         # the index (code-review Important-1), never assumed public.
         unresolved: list[str] = []
         selected: list[dict[str, str]] = []
+        seen: set[str] = set()
         for skill_name in candidate.skills:
+            if skill_name in seen:
+                continue
+            seen.add(skill_name)
             if self._skills.is_selectable_by(skill_name, owner_user_id):
                 info = self._skills.get(skill_name) if hasattr(self._skills, "get") else None
                 visibility = (info or {}).get("visibility", "public") if isinstance(info, dict) else "public"
                 selected.append({"skill_name": skill_name, "source": "private" if visibility == "private" else "public"})
             else:
                 unresolved.append(skill_name)
-        if candidate.skills_configured:
-            await self._drafts.replace_skills(agent["id"], owner_user_id=owner_user_id, skills=selected)
+
+        # One repository UOW owns identity + draft + Skill rows. Any flush or
+        # commit failure rolls the entire import back, so retrying the same
+        # legacy slug remains safe.
+        try:
+            saved = await self._agents.import_authoring_bundle(
+                owner_user_id=owner_user_id,
+                slug=candidate.name,
+                display_name=candidate.display_name,
+                description=candidate.description or None,
+                soul_markdown=candidate.soul_markdown,
+                model_name=candidate.model_name,
+                tool_groups=candidate.tool_groups,
+                skills=selected if candidate.skills_configured else [],
+                skill_selection_mode=("explicit" if candidate.skills_configured else "inherit"),
+            )
+        except ValueError as exc:
+            raise ImportAlreadyExistsError(str(exc)) from exc
+        agent = saved["agent"]
 
         return {
             "agent_id": agent["id"],

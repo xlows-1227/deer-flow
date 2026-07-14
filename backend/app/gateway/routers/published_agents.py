@@ -11,10 +11,10 @@ Publish / rollback / release-history endpoints are added in F1.5.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.agents_config import validate_agent_slug
 from deerflow.publishing.draft_service import (
@@ -92,6 +92,36 @@ class CreateAgentRequest(BaseModel):
         return validate_agent_slug(value)
 
 
+class SkillSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    skill_name: str = Field(..., min_length=1, max_length=128)
+    # Accepted for API compatibility but ignored by DraftService, which always
+    # derives the authoritative source from the Skill index.
+    source: Literal["public", "private"] | None = None
+
+    @field_validator("skill_name")
+    @classmethod
+    def validate_skill_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("skill_name must be non-empty")
+        return value
+
+
+class ConnectorGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    connector_instance_id: str = Field(..., min_length=1, max_length=64)
+    capability: str = Field(..., min_length=1, max_length=80)
+
+    @field_validator("connector_instance_id", "capability")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must be non-empty")
+        return value
+
+
 class PatchDraftRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: int = Field(..., ge=1)
@@ -100,8 +130,20 @@ class PatchDraftRequest(BaseModel):
     model_name: str | None = None
     tool_groups: list[str] | None = None
     quota_overrides: dict[str, Any] | None = None
-    skills: list[dict[str, str]] | None = None
-    connector_grants: list[dict[str, str]] | None = None
+    skills: list[SkillSelectionRequest] | None = None
+    connector_grants: list[ConnectorGrantRequest] | None = None
+
+    @model_validator(mode="after")
+    def reject_duplicate_nested_entries(self):
+        if self.skills is not None:
+            names = [entry.skill_name for entry in self.skills]
+            if len(names) != len(set(names)):
+                raise ValueError("skills must not contain duplicate skill_name values")
+        if self.connector_grants is not None:
+            grants = [(entry.connector_instance_id, entry.capability) for entry in self.connector_grants]
+            if len(grants) != len(set(grants)):
+                raise ValueError("connector_grants must not contain duplicate instance/capability pairs")
+        return self
 
 
 class RollbackRequest(BaseModel):
@@ -198,8 +240,8 @@ async def patch_draft(
             model_name=payload.model_name,
             tool_groups=payload.tool_groups,
             quota_overrides=payload.quota_overrides,
-            skills=payload.skills,
-            connector_grants=payload.connector_grants,
+            skills=([entry.model_dump(exclude_none=True) for entry in payload.skills] if payload.skills is not None else None),
+            connector_grants=([entry.model_dump() for entry in payload.connector_grants] if payload.connector_grants is not None else None),
         )
     except SkillNotSelectableError as exc:
         raise HTTPException(status_code=422, detail={"code": "skill_not_selectable", "message": str(exc)}) from exc

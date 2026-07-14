@@ -48,6 +48,31 @@ async def test_get_or_create_reuses_same_checksum(skill_repo):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "value"),
+    [
+        ("visibility", "private"),
+        ("content_ref", "cs://reporting/different"),
+        ("declared_connector_caps", ["database.write"]),
+    ],
+)
+async def test_get_or_create_rejects_metadata_mismatch_for_same_checksum(skill_repo, override, value):
+    values = {
+        "skill_name": "reporting",
+        "owner_user_id": None,
+        "visibility": "public",
+        "content_checksum": "sha256:invariant",
+        "content_ref": "cs://reporting/invariant",
+        "declared_connector_caps": ["database.query"],
+    }
+    await skill_repo.get_or_create(**values)
+    values[override] = value
+
+    with pytest.raises(RuntimeError, match="metadata mismatch"):
+        await skill_repo.get_or_create(**values)
+
+
+@pytest.mark.asyncio
 async def test_changed_checksum_creates_new_revision(skill_repo):
     first = await skill_repo.get_or_create(
         skill_name="reporting",
