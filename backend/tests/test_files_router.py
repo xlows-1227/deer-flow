@@ -103,6 +103,31 @@ def test_user_files_list_folders_and_keep_them_in_uploaded_filter(tmp_path, monk
         assert folders.json()["folders"] == ["Reports", "Reports/2026"]
 
 
+def test_conversation_system_paths_do_not_reserve_legacy_user_folder_names(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/files/folders",
+            json={"name": "对话生成", "parent_path": ""},
+        )
+        assert created.status_code == 201
+
+        uploaded = client.post(
+            "/api/files/upload",
+            data={"folder_path": "对话生成"},
+            files={"files": ("legacy.txt", b"allowed", "text/plain")},
+        )
+        assert uploaded.status_code == 201
+
+        synthetic = client.post(
+            "/api/files/upload",
+            data={"folder_path": "@conversation/uploaded"},
+            files={"files": ("shared.txt", b"not allowed", "text/plain")},
+        )
+        assert synthetic.status_code == 403
+
+
 def test_user_files_upload_limit_is_described_and_partial_file_removed(tmp_path, monkeypatch):
     monkeypatch.setattr(files, "MAX_UPLOAD_BYTES", 4)
     app = _make_app(tmp_path, monkeypatch)

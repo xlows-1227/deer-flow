@@ -12,15 +12,18 @@ import {
   Grid2X2Icon,
   ListIcon,
   LoaderCircleIcon,
+  LockIcon,
   MessageSquareIcon,
   MoreHorizontalIcon,
   SearchIcon,
+  Share2Icon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { Streamdown } from "streamdown";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -46,16 +49,28 @@ import {
 } from "@/components/ui/select";
 import { getBackendBaseURL } from "@/core/config";
 import {
+  SYSTEM_FOLDERS,
+  SYSTEM_FOLDER_NAMES,
   createUserFolder,
   deleteUserFile,
+  isReservedSystemFolderPath,
+  loadSharedFileText,
+  shareFileWithUser,
   threadUploadDownloadUrl,
+  threadGeneratedFileUrl,
   uploadUserFiles,
   useAllUserFiles,
+  useSharedFiles,
   useUserFileUploadConfig,
   useUserFolders,
   userFileUrl,
 } from "@/core/files";
-import type { UserFileItem, UserFileTypeFilter } from "@/core/files";
+import type {
+  SystemFileFolder,
+  UserFileItem,
+  UserFileTypeFilter,
+} from "@/core/files";
+import { streamdownPlugins } from "@/core/streamdown";
 import { deleteUploadedFile } from "@/core/uploads/api";
 import { cn } from "@/lib/utils";
 
@@ -68,20 +83,6 @@ const sourceLabels: Record<SourceFilter, string> = {
   all: "所有来源",
   uploaded: "已上传",
   generated: "已生成",
-};
-
-/**
- * Filter for the new "位置" dropdown. Splits items between the user's
- * document library (`/api/files`) and per-thread chat uploads
- * (`/api/threads/{id}/uploads`). The two stores are stitched together
- * by {@link useAllUserFiles} so the page can render a unified list.
- */
-type SourceKindFilter = "all" | "library" | "thread";
-
-const sourceKindLabels: Record<SourceKindFilter, string> = {
-  all: "全部位置",
-  library: "资料库",
-  thread: "聊天对话",
 };
 
 const typeLabels: Record<UserFileTypeFilter, string> = {
@@ -186,6 +187,16 @@ function FileGlyph({ item }: { item: UserFileItem }) {
   const type = fileType(item);
   const iconClass = "size-5";
   const imageSrc = previewImageSrc(item);
+  if (item.system_folder) {
+    return (
+      <div className="relative flex size-10 items-center justify-center rounded-md bg-amber-50 text-amber-600">
+        <FolderIcon className={iconClass} />
+        <span className="absolute right-0.5 bottom-0.5 flex size-4 items-center justify-center rounded-full bg-white shadow-sm">
+          <LockIcon className="size-2.5" />
+        </span>
+      </div>
+    );
+  }
   if (imageSrc) {
     return (
       <img src={imageSrc} alt="" className="size-10 rounded-md object-cover" />
@@ -215,9 +226,11 @@ function FileGlyph({ item }: { item: UserFileItem }) {
 
 function FolderBreadcrumb({
   folderPath,
+  systemFolder,
   onOpen,
 }: {
   folderPath: string;
+  systemFolder: SystemFileFolder | null;
   onOpen: (path: string) => void;
 }) {
   const parts = folderPath ? folderPath.split("/") : [];
@@ -225,11 +238,20 @@ function FolderBreadcrumb({
     <div className="flex min-h-6 flex-wrap items-center gap-1 text-sm text-gray-500">
       <button
         type="button"
-        className={cn(!folderPath && "font-medium text-gray-950")}
+        className={cn(
+          !folderPath && !systemFolder && "font-medium text-gray-950",
+        )}
         onClick={() => onOpen("")}
       >
         全部文件
       </button>
+      {systemFolder && (
+        <span className="flex items-center gap-1 font-medium text-gray-950">
+          <ChevronRightIcon className="size-3.5" />
+          <LockIcon className="size-3.5 text-gray-400" />
+          {SYSTEM_FOLDER_NAMES[systemFolder]}
+        </span>
+      )}
       {parts.map((part, index) => {
         const path = parts.slice(0, index + 1).join("/");
         return (
@@ -253,8 +275,10 @@ function FolderBreadcrumb({
 
 export default function WorkspaceFilesPage() {
   const [folderPath, setFolderPath] = useState("");
+  const [systemFolder, setSystemFolder] = useState<SystemFileFolder | null>(
+    null,
+  );
   const [source, setSource] = useState<SourceFilter>("all");
-  const [sourceKind, setSourceKind] = useState<SourceKindFilter>("all");
   const [type, setType] = useState<UserFileTypeFilter>("all");
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
@@ -265,41 +289,53 @@ export default function WorkspaceFilesPage() {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
   const [uploadFolderPath, setUploadFolderPath] = useState("");
+  const [shareItem, setShareItem] = useState<UserFileItem | null>(null);
+  const [shareEmail, setShareEmail] = useState("");
+  const [sharing, setSharing] = useState(false);
+  const [previewItem, setPreviewItem] = useState<UserFileItem | null>(null);
+  const [previewContent, setPreviewContent] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const { folders, refetch: refetchFolders } = useUserFolders();
+  const { folders: allFolders, refetch: refetchFolders } = useUserFolders();
   const { config: uploadConfig } = useUserFileUploadConfig();
+  const folders = useMemo(
+    () => allFolders.filter((path) => !isReservedSystemFolderPath(path)),
+    [allFolders],
+  );
 
   // Library filters (folder/source/q) drive the backend request for
   // the library half. The `type` switch is library-only and we apply
   // it client-side on the merged list below; thread uploads are filtered
   // client-side too because they live across many threads and we'd
   // rather avoid per-thread re-requests when the user toggles a filter.
-  const {
-    files: rawItems,
-    isLoading,
-    refetch,
-  } = useAllUserFiles({
-    folder_path: folderPath,
-    source: source === "all" ? "all" : source,
-    q: query,
-  });
+  const conversationFolder = systemFolder === "shared" ? null : systemFolder;
+  const ownFiles = useAllUserFiles(
+    {
+      folder_path: folderPath,
+      source: source === "all" ? "all" : source,
+      q: query,
+    },
+    {
+      enabled: systemFolder !== "shared",
+      conversationSource: conversationFolder,
+    },
+  );
+  const sharedFiles = useSharedFiles({ enabled: systemFolder === "shared" });
+  const rawItems =
+    systemFolder === "shared" ? sharedFiles.files : ownFiles.files;
+  const isLoading =
+    systemFolder === "shared" ? sharedFiles.isLoading : ownFiles.isLoading;
+  const refetch =
+    systemFolder === "shared" ? sharedFiles.refetch : ownFiles.refetch;
 
-  // Apply the `sourceKind` switch, the `type` filter, and the
-  // case-insensitive `q` search to the merged list. The library
-  // backend already filters by `q` and `source`, but the thread half
-  // is matched client-side, so we re-apply `q` to both for a uniform
-  // experience. `type` and `sourceKind` are applied purely on the
-  // client because the hook only forwards library-shape filters to
-  // the backend.
+  // Conversation files are collected client-side across recent threads, so
+  // re-apply all filters after they have been normalized. At the library root
+  // the locked system folders are prepended instead of exposing thread
+  // files as loose rows.
   const items = useMemo<UserFileItem[]>(() => {
     const q = query.trim().toLowerCase();
-    return rawItems.filter((item) => {
-      if (sourceKind === "library" && item.source_thread_id) {
-        return false;
-      }
-      if (sourceKind === "thread" && !item.source_thread_id) {
-        return false;
-      }
+    const matchesFilters = (item: UserFileItem) => {
       if (q && !item.name.toLowerCase().includes(q)) {
         return false;
       }
@@ -310,15 +346,29 @@ export default function WorkspaceFilesPage() {
         return false;
       }
       return true;
-    });
-  }, [rawItems, query, source, sourceKind, type]);
+    };
+
+    const filteredItems = rawItems
+      .filter(
+        (item) =>
+          systemFolder !== null ||
+          folderPath !== "" ||
+          item.kind !== "folder" ||
+          !isReservedSystemFolderPath(item.path),
+      )
+      .filter(matchesFilters);
+    if (!systemFolder && !folderPath) {
+      return [...SYSTEM_FOLDERS.filter(matchesFilters), ...filteredItems];
+    }
+    return filteredItems;
+  }, [folderPath, rawItems, query, source, systemFolder, type]);
 
   const stats = useMemo(() => {
     const files = items.filter((item) => item.kind === "file").length;
     const folders = items.length - files;
-    const fromThreads = rawItems.filter((item) => item.source_thread_id).length;
+    const fromThreads = items.filter((item) => item.source_thread_id).length;
     return { files, folders, fromThreads };
-  }, [items, rawItems]);
+  }, [items]);
 
   const handleFileSelection = (fileList: FileList | null) => {
     const files = Array.from(fileList ?? []);
@@ -347,8 +397,8 @@ export default function WorkspaceFilesPage() {
       toast.success(`已上传 ${pendingUploadFiles.length} 个文件`);
       setUploadDialogOpen(false);
       setPendingUploadFiles([]);
+      setSystemFolder(null);
       setFolderPath(uploadFolderPath);
-      setSourceKind("library");
       setSource("uploaded");
       setType("all");
       setQuery("");
@@ -361,7 +411,15 @@ export default function WorkspaceFilesPage() {
   };
 
   const handleCreateFolder = async () => {
-    if (!folderName.trim()) return;
+    if (!folderName.trim() || systemFolder) return;
+    const requestedPath = `${folderPath}/${folderName.trim()}`.replace(
+      /^\/+|\/+$/g,
+      "",
+    );
+    if (isReservedSystemFolderPath(requestedPath)) {
+      toast.error("“对话上传”“对话生成”和“他人分享”是锁定的系统文件夹");
+      return;
+    }
     setSavingFolder(true);
     try {
       await createUserFolder(folderName.trim(), folderPath);
@@ -378,6 +436,12 @@ export default function WorkspaceFilesPage() {
   };
 
   const handleDelete = async (item: UserFileItem) => {
+    if (
+      item.system_folder ||
+      item.shared_file_id ||
+      item.conversation_source === "generated"
+    )
+      return;
     const label = item.source_thread_id
       ? `对话「${item.source_thread_title ?? item.source_thread_id.slice(0, 8)}」中的「${item.name}」`
       : `「${item.name}」`;
@@ -395,10 +459,63 @@ export default function WorkspaceFilesPage() {
     }
   };
 
+  const handleShare = async () => {
+    if (!shareItem || !shareEmail.trim()) return;
+    setSharing(true);
+    try {
+      await shareFileWithUser(shareItem, shareEmail);
+      toast.success(`已分享给 ${shareEmail.trim()}`);
+      setShareItem(null);
+      setShareEmail("");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "分享文件失败");
+    } finally {
+      setSharing(false);
+    }
+  };
+
+  const openSharedItem = async (item: UserFileItem) => {
+    if (!item.shared_file_id) return;
+    const extension = normalizeExtension(item.extension);
+    if (![".md", ".markdown", ".html", ".htm"].includes(extension)) {
+      const url = item.preview_url ?? item.download_url;
+      if (url) {
+        window.open(resolveBackendUrl(url), "_blank", "noopener,noreferrer");
+      }
+      return;
+    }
+
+    setPreviewItem(item);
+    setPreviewContent("");
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      setPreviewContent(await loadSharedFileText(item.shared_file_id));
+    } catch (error) {
+      setPreviewError(
+        error instanceof Error ? error.message : "加载分享文件失败",
+      );
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const openItem = (item: UserFileItem) => {
+    if (item.system_folder) {
+      setSystemFolder(item.system_folder);
+      setFolderPath("");
+      setSource(item.system_folder === "shared" ? "all" : item.system_folder);
+      setType("all");
+      setQuery("");
+      return;
+    }
     if (item.kind === "folder") {
+      setSystemFolder(null);
       setFolderPath(item.path);
-      setSourceKind("library");
+      return;
+    }
+    if (item.shared_file_id) {
+      void openSharedItem(item);
       return;
     }
     // For thread uploads, jump to the source chat so the file is seen
@@ -416,54 +533,120 @@ export default function WorkspaceFilesPage() {
     window.open(userFileUrl(item.path), "_blank", "noopener,noreferrer");
   };
 
-  const renderActions = (item: UserFileItem) => (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="size-8 rounded-full">
-          <MoreHorizontalIcon className="size-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {item.kind === "file" && !item.source_thread_id && (
-          <DropdownMenuItem asChild>
-            <a href={userFileUrl(item.path, true)}>
-              <DownloadIcon className="size-4" />
-              下载
-            </a>
-          </DropdownMenuItem>
-        )}
-        {item.kind === "file" && item.source_thread_id && (
-          <DropdownMenuItem asChild>
-            <a
-              href={threadUploadDownloadUrl(item.source_thread_id, item.path)}
-              target="_blank"
-              rel="noopener noreferrer"
+  const renderActions = (item: UserFileItem) => {
+    if (item.system_folder) return null;
+
+    if (item.shared_file_id) {
+      return (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="size-8 rounded-full">
+              <MoreHorizontalIcon className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {item.download_url && (
+              <DropdownMenuItem asChild>
+                <a href={resolveBackendUrl(item.download_url)}>
+                  <DownloadIcon className="size-4" />
+                  下载
+                </a>
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      );
+    }
+
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="size-8 rounded-full">
+            <MoreHorizontalIcon className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {item.kind === "file" && !item.source_thread_id && (
+            <DropdownMenuItem asChild>
+              <a href={userFileUrl(item.path, true)}>
+                <DownloadIcon className="size-4" />
+                下载
+              </a>
+            </DropdownMenuItem>
+          )}
+          {item.kind === "file" && item.source_thread_id && (
+            <DropdownMenuItem asChild>
+              <a
+                href={
+                  item.conversation_source === "generated"
+                    ? threadGeneratedFileUrl(
+                        item.source_thread_id,
+                        item.path,
+                        true,
+                      )
+                    : threadUploadDownloadUrl(item.source_thread_id, item.path)
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <DownloadIcon className="size-4" />
+                下载
+              </a>
+            </DropdownMenuItem>
+          )}
+          {item.kind === "file" && (
+            <DropdownMenuItem
+              onClick={() => {
+                setShareEmail("");
+                setShareItem(item);
+              }}
             >
-              <DownloadIcon className="size-4" />
-              下载
-            </a>
-          </DropdownMenuItem>
-        )}
-        {item.kind === "file" && item.source_thread_id && (
-          <DropdownMenuItem asChild>
-            <Link href={`/workspace/chats/${item.source_thread_id}`}>
-              <MessageSquareIcon className="size-4" />
-              在对话中查看
-            </Link>
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem
-          className="text-red-600 focus:text-red-600"
-          onClick={() => void handleDelete(item)}
-        >
-          <Trash2Icon className="size-4" />
-          删除
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
+              <Share2Icon className="size-4" />
+              分享
+            </DropdownMenuItem>
+          )}
+          {item.kind === "file" && item.source_thread_id && (
+            <DropdownMenuItem asChild>
+              <Link href={`/workspace/chats/${item.source_thread_id}`}>
+                <MessageSquareIcon className="size-4" />
+                在对话中查看
+              </Link>
+            </DropdownMenuItem>
+          )}
+          {item.conversation_source !== "generated" && (
+            <DropdownMenuItem
+              className="text-red-600 focus:text-red-600"
+              onClick={() => void handleDelete(item)}
+            >
+              <Trash2Icon className="size-4" />
+              删除
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  };
 
   const renderSourceLabel = (item: UserFileItem) => {
+    if (item.system_folder) {
+      return (
+        <span className="inline-flex items-center gap-1 text-gray-500">
+          <LockIcon className="size-3" />
+          系统文件夹
+        </span>
+      );
+    }
+    if (item.shared_file_id) {
+      return (
+        <span
+          className="text-muted-foreground inline-flex max-w-40 items-center gap-1 truncate text-xs"
+          title={`由 ${item.shared_by_email ?? "其他用户"} 分享`}
+        >
+          <Share2Icon className="size-3 shrink-0" />
+          <span className="truncate">{item.shared_by_email}</span>
+        </span>
+      );
+    }
     if (item.source_thread_id) {
       const title =
         item.source_thread_title ?? item.source_thread_id.slice(0, 8);
@@ -492,34 +675,9 @@ export default function WorkspaceFilesPage() {
             </h1>
             <div className="mt-5 flex flex-wrap items-center gap-2">
               <Select
-                value={sourceKind}
-                onValueChange={(value) => {
-                  const next = value as SourceKindFilter;
-                  setSourceKind(next);
-                  if (next === "thread") {
-                    setFolderPath("");
-                  }
-                }}
-              >
-                <SelectTrigger className="h-8 w-36 rounded-lg border-gray-200 bg-white">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(
-                    Object.entries(sourceKindLabels) as [
-                      SourceKindFilter,
-                      string,
-                    ][]
-                  ).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select
                 value={source}
                 onValueChange={(value) => setSource(value as SourceFilter)}
+                disabled={systemFolder !== null}
               >
                 <SelectTrigger className="h-8 w-36 rounded-lg border-gray-200 bg-white">
                   <SelectValue />
@@ -566,6 +724,12 @@ export default function WorkspaceFilesPage() {
                 type="button"
                 variant="ghost"
                 className="h-9 px-2 text-gray-900 hover:bg-gray-100"
+                disabled={systemFolder !== null}
+                title={
+                  systemFolder
+                    ? "系统文件夹已锁定，不能在其中新建文件夹"
+                    : undefined
+                }
                 onClick={() => setFolderDialogOpen(true)}
               >
                 <FolderPlusIcon className="size-4" />
@@ -574,7 +738,12 @@ export default function WorkspaceFilesPage() {
               <Button
                 type="button"
                 className="h-9 rounded-lg bg-black px-4 text-white hover:bg-black/90"
-                disabled={uploading}
+                disabled={uploading || systemFolder !== null}
+                title={
+                  systemFolder
+                    ? "系统文件夹已锁定，不能人工上传文件"
+                    : undefined
+                }
                 onClick={() => {
                   setUploadFolderPath(folderPath);
                   fileInputRef.current?.click();
@@ -626,9 +795,11 @@ export default function WorkspaceFilesPage() {
         <div className="mt-4">
           <FolderBreadcrumb
             folderPath={folderPath}
+            systemFolder={systemFolder}
             onOpen={(path) => {
+              setSystemFolder(null);
               setFolderPath(path);
-              if (path) setSourceKind("library");
+              if (!path) setSource("all");
             }}
           />
         </div>
@@ -644,12 +815,12 @@ export default function WorkspaceFilesPage() {
           <div className="flex h-80 flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-white text-center">
             <FolderIcon className="size-12 text-gray-300" />
             <p className="mt-4 text-sm font-medium text-gray-950">
-              {query.trim() || sourceKind !== "all"
+              {query.trim() || source !== "all" || type !== "all"
                 ? "没有匹配的文件"
                 : "当前文件夹为空"}
             </p>
             <p className="mt-2 text-sm text-gray-500">
-              {query.trim() || sourceKind !== "all"
+              {query.trim() || source !== "all" || type !== "all"
                 ? "试试调整搜索关键字或筛选条件。"
                 : "上传文件、新建文件夹，或在聊天中上传文件后，会显示在这里。"}
             </p>
@@ -682,7 +853,7 @@ export default function WorkspaceFilesPage() {
                   </span>
                 </button>
                 <div className="text-gray-500">
-                  {formatDate(item.modified_at)}
+                  {item.system_folder ? "-" : formatDate(item.modified_at)}
                 </div>
                 <div className="text-gray-500">{formatSize(item.size)}</div>
                 <div>{renderSourceLabel(item)}</div>
@@ -865,6 +1036,103 @@ export default function WorkspaceFilesPage() {
               创建
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={shareItem !== null}
+        onOpenChange={(open) => {
+          if (sharing) return;
+          if (!open) {
+            setShareItem(null);
+            setShareEmail("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>分享文件</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-600">
+              将「{shareItem?.name}
+              」分享给已注册用户。对方会在“他人分享”中只读查看。
+            </p>
+            <Input
+              type="email"
+              value={shareEmail}
+              autoFocus
+              placeholder="请输入对方的账号邮箱"
+              onChange={(event) => setShareEmail(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void handleShare();
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={sharing}
+              onClick={() => {
+                setShareItem(null);
+                setShareEmail("");
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={sharing || !shareEmail.trim()}
+              onClick={() => void handleShare()}
+            >
+              {sharing && <LoaderCircleIcon className="size-4 animate-spin" />}
+              确认分享
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={previewItem !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPreviewItem(null);
+            setPreviewContent("");
+            setPreviewError(null);
+          }
+        }}
+      >
+        <DialogContent className="flex h-[80vh] max-w-5xl flex-col sm:max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>{previewItem?.name}</DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-gray-200 bg-white">
+            {previewLoading ? (
+              <div className="flex size-full items-center justify-center text-sm text-gray-500">
+                <LoaderCircleIcon className="mr-2 size-5 animate-spin" />
+                正在加载文件
+              </div>
+            ) : previewError ? (
+              <div className="flex size-full items-center justify-center p-8 text-sm text-red-600">
+                {previewError}
+              </div>
+            ) : [".html", ".htm"].includes(
+                normalizeExtension(previewItem?.extension ?? ""),
+              ) ? (
+              <iframe
+                className="size-full border-0"
+                title={previewItem?.name ?? "HTML 文件预览"}
+                sandbox=""
+                referrerPolicy="no-referrer"
+                srcDoc={previewContent}
+              />
+            ) : (
+              <Streamdown className="p-6" {...streamdownPlugins}>
+                {previewContent}
+              </Streamdown>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

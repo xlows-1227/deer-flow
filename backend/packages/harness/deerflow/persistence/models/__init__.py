@@ -21,6 +21,7 @@ from deerflow.persistence.external_audit.model import ExternalAuditRow
 from deerflow.persistence.external_conversation.model import ExternalConversationRow
 from deerflow.persistence.external_idempotency.model import ExternalIdempotencyRow
 from deerflow.persistence.feedback.model import FeedbackRow
+from deerflow.persistence.file_share.model import FileShareRow
 from deerflow.persistence.invite_code.model import InviteCodeRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
@@ -39,6 +40,7 @@ from deerflow.persistence.user_model.model import UserModelRow
 
 __all__ = [
     "FeedbackRow",
+    "FileShareRow",
     "InviteCodeRow",
     "APIKeyRow",
     "ConnectorAuditLogRow",

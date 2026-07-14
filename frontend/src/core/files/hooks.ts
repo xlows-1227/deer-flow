@@ -13,10 +13,31 @@ import {
   threadUploadToFileItem,
   type ListFilesParams,
 } from "./api";
-import type { FileItem } from "./type";
+import { threadArtifactToFileItem } from "./conversation";
+import { listReceivedFileShares } from "./sharing";
+import type { ConversationFileSource, FileItem } from "./type";
 
 interface FilesQueryOptions {
   enabled?: boolean;
+}
+
+interface AllUserFilesOptions extends FilesQueryOptions {
+  conversationSource?: ConversationFileSource | null;
+}
+
+export function useSharedFiles({ enabled = true }: FilesQueryOptions = {}) {
+  const query = useQuery<FileItem[]>({
+    queryKey: ["files", "shared-with-me"],
+    queryFn: listReceivedFileShares,
+    enabled,
+  });
+  return {
+    files: query.data ?? [],
+    isLoading: enabled ? query.isLoading : false,
+    isFetching: enabled && query.isFetching,
+    error: query.error,
+    refetch: query.refetch,
+  };
 }
 
 /**
@@ -95,58 +116,52 @@ const threadUploadsQueryKey = (threadId: string) =>
   ["uploads", "list", threadId] as const;
 
 /**
- * Unified file list for the file-management page: library files + chat
- * thread uploads, normalized to the same {@link FileItem} shape.
+ * Data source for the file-management page. The normal view returns library
+ * files only. Selecting a locked conversation folder switches the hook to
+ * either per-thread uploads or generated artifacts, both normalized to the
+ * shared {@link FileItem} shape.
  *
- * The two storage locations historically have separate UIs:
- *
- * - Library files live in the user document store (`/api/files`) and
- *   are uploaded via this page.
- * - Thread uploads are dropped into the per-thread sandbox uploads
- *   directory when the user attaches a file to a chat turn.
- *
- * From the user's point of view they're all "my files", so this hook
- * glues them together in one query so the management page can render
- * a single list. Each merged record carries `source_thread_id` when
- * the record came from a thread; the page uses that field to render
- * the source label and to route open/delete calls to the right
- * endpoint.
- *
- * The hook intentionally stays client-side: we fan out N small
- * `listUploadedFiles` calls in parallel via `useQueries`, which is
- * cheap for the typical "few recent threads" case. If a user routinely
- * has hundreds of active threads, swap this for a real backend
- * "list-all-files" endpoint.
+ * Upload discovery intentionally stays client-side: it fans out N small
+ * `listUploadedFiles` calls via `useQueries`. Generated artifacts already live
+ * in thread state and do not need extra requests.
  */
 export function useAllUserFiles(
   params: ListFilesParams = {},
-  { enabled = true }: FilesQueryOptions = {},
+  { enabled = true, conversationSource = null }: AllUserFilesOptions = {},
 ) {
   const queryClient = useQueryClient();
-  const library = useFiles(params, { enabled });
-  const inLibraryFolder = !!params.folder_path;
+  const showingConversationFiles = conversationSource !== null;
+  const library = useFiles(params, {
+    enabled: enabled && !showingConversationFiles,
+  });
   const threads = useThreads(
     {
       limit: MAX_THREADS_TO_SCAN,
       sortBy: "updated_at",
       sortOrder: "desc",
+      select: ["thread_id", "updated_at", "values", "metadata"],
     },
-    { enabled: enabled && !inLibraryFolder },
+    { enabled: enabled && showingConversationFiles },
   );
 
   const threadUploads = useQueries({
-    queries: (threads.data ?? []).map((thread) => ({
-      queryKey: threadUploadsQueryKey(thread.thread_id),
-      queryFn: () => listUploadedFiles(thread.thread_id),
-      // Only fire after the thread list arrives. Errors are non-fatal —
-      // a single thread's uploads failing shouldn't break the whole
-      // page; we filter them out of the merged result.
-      enabled: enabled && !!threads.data && !inLibraryFolder,
-      retry: false,
-    })),
+    queries:
+      conversationSource === "uploaded"
+        ? (threads.data ?? []).map((thread) => ({
+            queryKey: threadUploadsQueryKey(thread.thread_id),
+            queryFn: () => listUploadedFiles(thread.thread_id),
+            // A single inaccessible thread must not hide the remaining files.
+            enabled: enabled && !!threads.data,
+            retry: false,
+          }))
+        : [],
   });
 
   const files = useMemo<FileItem[]>(() => {
+    if (!showingConversationFiles) {
+      return library.files;
+    }
+
     const threadTitleById = new Map<string, string | undefined>();
     for (const thread of threads.data ?? []) {
       // Thread titles live in `values.title` (set by TitleMiddleware).
@@ -154,8 +169,22 @@ export function useAllUserFiles(
       threadTitleById.set(thread.thread_id, title);
     }
 
-    if (inLibraryFolder) {
-      return library.files;
+    if (conversationSource === "generated") {
+      const generatedItems: FileItem[] = [];
+      for (const thread of threads.data ?? []) {
+        const title = threadTitleById.get(thread.thread_id);
+        for (const artifact of thread.values?.artifacts ?? []) {
+          generatedItems.push(
+            threadArtifactToFileItem(
+              artifact,
+              thread.thread_id,
+              title,
+              thread.updated_at,
+            ),
+          );
+        }
+      }
+      return generatedItems;
     }
 
     const threadItems: FileItem[] = [];
@@ -170,31 +199,48 @@ export function useAllUserFiles(
       }
     });
 
-    return [...library.files, ...threadItems];
-  }, [inLibraryFolder, library.files, threads.data, threadUploads]);
+    return threadItems;
+  }, [
+    conversationSource,
+    library.files,
+    showingConversationFiles,
+    threads.data,
+    threadUploads,
+  ]);
+
+  const threadUploadsLoading =
+    conversationSource === "uploaded" &&
+    threadUploads.some((query) => query.isLoading);
 
   return {
     files,
-    isLoading:
-      enabled && (library.isLoading || (!inLibraryFolder && threads.isLoading)),
+    isLoading: enabled
+      ? showingConversationFiles
+        ? threads.isLoading || threadUploadsLoading
+        : library.isLoading
+      : false,
     isFetching:
       enabled &&
-      (library.isFetching || (!inLibraryFolder && threads.isFetching)),
-    error: library.error,
+      (showingConversationFiles
+        ? threads.isFetching || threadUploads.some((query) => query.isFetching)
+        : library.isFetching),
+    error: showingConversationFiles ? threads.error : library.error,
     /**
-     * Manual refetch — useful after explicit user actions (delete, upload, or
-     * refresh). The merged list includes per-thread upload queries, so those
-     * caches must be invalidated too; otherwise deleted chat uploads linger
-     * until a full page reload.
+     * Manual refetch after explicit user actions. Conversation uploads have
+     * their own per-thread cache entries, which must be invalidated together.
      */
     refetch: async () => {
-      await Promise.all([
-        library.refetch(),
-        threads.refetch(),
-        inLibraryFolder
-          ? Promise.resolve()
-          : queryClient.invalidateQueries({ queryKey: ["uploads", "list"] }),
-      ]);
+      if (!showingConversationFiles) {
+        await library.refetch();
+        return;
+      }
+
+      await threads.refetch();
+      if (conversationSource === "uploaded") {
+        await queryClient.invalidateQueries({
+          queryKey: ["uploads", "list"],
+        });
+      }
     },
   };
 }
