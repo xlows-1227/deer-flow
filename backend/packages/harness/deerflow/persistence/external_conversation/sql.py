@@ -24,8 +24,22 @@ class ExternalConversationRepository:
         user_id = str(values["user_id"])
         source = str(values.get("source") or "default")
         external_id = values.get("external_conversation_id")
+        credential_id = values.get("credential_id")
         async with self._sf() as session:
-            if external_id is not None:
+            if external_id is not None and credential_id is not None:
+                existing = (
+                    await session.execute(
+                        select(ExternalConversationRow).where(
+                            ExternalConversationRow.agent_id == str(values["agent_id"]),
+                            ExternalConversationRow.credential_id == str(credential_id),
+                            ExternalConversationRow.source == source,
+                            ExternalConversationRow.external_conversation_id == str(external_id),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing:
+                    raise ExternalConversationExistsError(existing.conversation_id)
+            elif external_id is not None:
                 existing = (
                     await session.execute(
                         select(ExternalConversationRow).where(
@@ -40,6 +54,7 @@ class ExternalConversationRepository:
             row = ExternalConversationRow(
                 conversation_id=str(values["conversation_id"]),
                 user_id=user_id,
+                credential_id=str(credential_id) if credential_id is not None else None,
                 source=source,
                 external_conversation_id=str(external_id) if external_id is not None else None,
                 thread_id=str(values["thread_id"]),
@@ -54,15 +69,20 @@ class ExternalConversationRepository:
                 await session.rollback()
                 if external_id is None:
                     raise
-                existing = (
-                    await session.execute(
-                        select(ExternalConversationRow).where(
-                            ExternalConversationRow.user_id == user_id,
-                            ExternalConversationRow.source == source,
-                            ExternalConversationRow.external_conversation_id == str(external_id),
-                        )
+                if credential_id is not None:
+                    stmt = select(ExternalConversationRow).where(
+                        ExternalConversationRow.agent_id == str(values["agent_id"]),
+                        ExternalConversationRow.credential_id == str(credential_id),
+                        ExternalConversationRow.source == source,
+                        ExternalConversationRow.external_conversation_id == str(external_id),
                     )
-                ).scalar_one_or_none()
+                else:
+                    stmt = select(ExternalConversationRow).where(
+                        ExternalConversationRow.user_id == user_id,
+                        ExternalConversationRow.source == source,
+                        ExternalConversationRow.external_conversation_id == str(external_id),
+                    )
+                existing = (await session.execute(stmt)).scalar_one_or_none()
                 if existing is None:
                     raise
                 raise ExternalConversationExistsError(existing.conversation_id) from None
@@ -76,6 +96,26 @@ class ExternalConversationRepository:
                     select(ExternalConversationRow).where(
                         ExternalConversationRow.conversation_id == conversation_id,
                         ExternalConversationRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return row.to_dict() if row else None
+
+    async def get_for_agent(
+        self,
+        conversation_id: str,
+        *,
+        agent_id: str,
+        credential_id: str,
+    ) -> dict[str, Any] | None:
+        """Return a public-API conversation only within its credential scope."""
+        async with self._sf() as session:
+            row = (
+                await session.execute(
+                    select(ExternalConversationRow).where(
+                        ExternalConversationRow.conversation_id == conversation_id,
+                        ExternalConversationRow.agent_id == agent_id,
+                        ExternalConversationRow.credential_id == credential_id,
                     )
                 )
             ).scalar_one_or_none()

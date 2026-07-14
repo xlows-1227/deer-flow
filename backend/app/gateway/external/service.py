@@ -108,6 +108,8 @@ class ExternalConversationService:
         agent_id: str,
         default_skill_name: str | None,
         metadata: dict[str, Any],
+        credential_id: str | None = None,
+        runtime_assistant_id: str | None = None,
     ) -> dict[str, Any]:
         from uuid import uuid4
 
@@ -120,12 +122,15 @@ class ExternalConversationService:
             "external_user_id": user_id,
             "external_conversation_id": conversation_id,
             "external_source": source,
+            "published_agent": credential_id is not None,
+            "published_agent_id": agent_id if credential_id is not None else None,
+            "published_credential_id": credential_id,
             "client_metadata": metadata,
         }
         await create_empty_thread(
             thread_store=self._thread_store,
             checkpointer=self._checkpointer,
-            assistant_id=agent_id,
+            assistant_id=runtime_assistant_id or agent_id,
             metadata=thread_metadata,
             thread_id=thread_id,
         )
@@ -134,6 +139,7 @@ class ExternalConversationService:
                 {
                     "conversation_id": conversation_id,
                     "user_id": user_id,
+                    "credential_id": credential_id,
                     "source": source,
                     "external_conversation_id": external_conversation_id,
                     "thread_id": thread_id,

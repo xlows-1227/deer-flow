@@ -42,7 +42,11 @@ class ExternalAuditMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        managed_path = request.url.path.startswith("/api/v1/external/") or request.url.path.startswith("/api/v1/api-keys/")
+        managed_path = (
+            request.url.path.startswith("/api/v1/external/")
+            or request.url.path.startswith("/api/v1/api-keys/")
+            or request.url.path.startswith("/api/v1/agents/")
+        )
         if not managed_path:
             return await call_next(request)
 

@@ -17,6 +17,7 @@ class ExternalConversationRow(Base):
 
     conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    credential_id: Mapped[str | None] = mapped_column(String(32), index=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
     external_conversation_id: Mapped[str | None] = mapped_column(String(256))
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
@@ -30,5 +31,13 @@ class ExternalConversationRow(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "source", "external_conversation_id", name="uq_external_conversation_mapping"),
+        UniqueConstraint(
+            "agent_id",
+            "credential_id",
+            "source",
+            "external_conversation_id",
+            name="uq_agent_credential_conversation_mapping",
+        ),
         Index("ix_external_conversations_mapping", "user_id", "source", "external_conversation_id"),
+        Index("ix_external_conversations_agent_credential", "agent_id", "credential_id"),
     )

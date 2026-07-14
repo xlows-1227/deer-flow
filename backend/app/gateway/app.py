@@ -15,8 +15,10 @@ from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
 from app.gateway.effective_config_middleware import EffectiveConfigMiddleware
+from app.gateway.external.agent_auth import AgentAPIAuthMiddleware
 from app.gateway.external.audit import ExternalAuditMiddleware
 from app.gateway.routers import (
+    agent_public_api,
     agents,
     api_keys,
     artifacts,
@@ -469,6 +471,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # External API Key auth must execute before CSRF and browser-session auth.
     app.add_middleware(ExternalAPIAuthMiddleware)
+    app.add_middleware(AgentAPIAuthMiddleware)
     app.add_middleware(ExternalAuditMiddleware)
 
     # CORS: the unified nginx endpoint is same-origin by default. Split-origin
@@ -537,6 +540,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Published-agent control plane (draft CRUD). Mounted at /api/published-agents.
     app.include_router(published_agents.router)
     app.include_router(published_agent_keys.router)
+    app.include_router(agent_public_api.router)
 
     # Assistants compatibility API (LangGraph Platform stub)
     app.include_router(assistants_compat.router)

@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
@@ -35,6 +35,9 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+
+if TYPE_CHECKING:
+    from deerflow.publishing.context import PublishedAgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +303,8 @@ async def start_run(
     body: Any,
     thread_id: str,
     request: Request,
+    *,
+    published_context: PublishedAgentContext | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -320,7 +325,7 @@ async def start_run(
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
     body_context = getattr(body, "context", None) or {}
-    model_name = body_context.get("model_name")
+    model_name = published_context.model_name if published_context is not None else body_context.get("model_name")
 
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
@@ -369,19 +374,32 @@ async def start_run(
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    if published_context is not None:
+        from deerflow.publishing.runtime_policy import build_published_run_config
 
-    # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-    # The ``context`` field is a custom extension for the langgraph-compat layer
-    # that carries agent configuration (model_name, thinking_enabled, etc.).
-    # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
-    merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
-    inject_authenticated_user_context(config, request)
+        config = dict(
+            build_published_run_config(
+                published_context,
+                base_config={"metadata": dict(body.metadata or {})},
+            )
+        )
+        configurable = config.setdefault("configurable", {})
+        configurable["thread_id"] = thread_id
+        configurable["user_id"] = published_context.owner_user_id
+    else:
+        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+
+        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
+        # The ``context`` field is a custom extension for the langgraph-compat layer
+        # that carries agent configuration (model_name, thinking_enabled, etc.).
+        # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
+        merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
+        inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
     runtime_context = config.get("context", {})
-    user_id = runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
+    user_id = published_context.owner_user_id if published_context is not None else runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
 
     async def _run_with_effective_config() -> None:
         async with effective_app_config_scope(str(user_id) if user_id else None):
