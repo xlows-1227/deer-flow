@@ -202,9 +202,14 @@ async def test_run_completion_callback_maps_every_terminal_state(run_status, exp
     )
     tasks = list(request.app.state.agent_quota_tasks)
     await asyncio.gather(*tasks)
-    ledger.settle.assert_awaited_once_with(
-        reservation.id,
-        tokens_used=17,
-        status=expected,
-        run_id=record.run_id,
-    )
+    ledger.settle.assert_awaited_once()
+    call = ledger.settle.await_args
+    assert call.args == (reservation.id,)
+    assert call.kwargs["tokens_used"] == 17
+    assert call.kwargs["status"] == expected
+    assert call.kwargs["run_id"] == record.run_id
+    usage = call.kwargs["usage"]
+    assert usage["agent_id"] == context.agent_id
+    assert usage["external_actor_hash"] != context.external_actor
+    assert context.external_actor not in usage.values()
+    assert usage["status"] == expected

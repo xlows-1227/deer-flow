@@ -22,11 +22,20 @@ class ExternalAuditRepository:
             await session.refresh(row)
             return row.to_dict()
 
-    async def list(self, *, user_id: str | None = None, api_key_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list(
+        self,
+        *,
+        user_id: str | None = None,
+        api_key_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         stmt = select(ExternalAuditRow).order_by(ExternalAuditRow.created_at.desc()).limit(limit)
         if user_id is not None:
             stmt = stmt.where(ExternalAuditRow.user_id == user_id)
         if api_key_id is not None:
             stmt = stmt.where(ExternalAuditRow.api_key_id == api_key_id)
+        if agent_id is not None:
+            stmt = stmt.where(ExternalAuditRow.agent_id == agent_id)
         async with self._sf() as session:
             return [row.to_dict() for row in (await session.execute(stmt)).scalars().all()]

@@ -75,6 +75,8 @@ class AgentAPIAuthMiddleware(BaseHTTPMiddleware):
         request.state.agent_key_id = key["id"]
         request.state.agent_key = key
         request.state.owner_user_id = str(owner_user_id)
+        request.state.external_audit_resource_type = "agent"
+        request.state.external_audit_resource_id = requested_agent_id
         token = set_current_user(principal)
         try:
             return await call_next(request)

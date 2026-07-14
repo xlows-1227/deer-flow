@@ -134,6 +134,7 @@ class UsageRepoLike(Protocol):
         tokens_used: int,
         status: str,
         run_id: str | None,
+        usage: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]: ...
 
     async def release_reservation(self, reservation_id: str) -> bool: ...
@@ -181,12 +182,14 @@ class QuotaLedger:
         tokens_used: int,
         status: str,
         run_id: str | None = None,
+        usage: Mapping[str, Any] | None = None,
     ) -> bool:
         _row, changed = await self._repository.settle_reservation(
             reservation_id,
             tokens_used=max(0, int(tokens_used)),
             status=status,
             run_id=run_id,
+            usage=usage,
         )
         return changed
 

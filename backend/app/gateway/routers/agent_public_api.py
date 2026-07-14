@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -51,6 +53,7 @@ from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, DisconnectMode, R
 
 router = APIRouter(prefix="/api/v1/agents/{agent_id}", tags=["published-agent-api"])
 _MAX_METADATA_BYTES = 32 * 1024
+logger = logging.getLogger(__name__)
 
 
 class _PublicModel(BaseModel):
@@ -299,6 +302,7 @@ def _schedule_quota_settlement(
 ) -> None:
     if record.task is None:
         return
+    started_at = time.perf_counter()
 
     async def finalize() -> None:
         timed_out = False
@@ -328,11 +332,47 @@ def _schedule_quota_settlement(
             terminal = "cancelled"
         else:
             terminal = "failed"
+        error_class = {
+            "cancelled": "CancelledError",
+            "timeout": "TimeoutError",
+            "failed": "RunError",
+        }.get(terminal)
+        usage = {
+            "owner_user_id": context.owner_user_id,
+            "agent_id": context.agent_id,
+            "source": context.source,
+            "credential_id": context.credential_id,
+            "external_actor_hash": hashlib.sha256(
+                context.external_actor.encode("utf-8")
+            ).hexdigest(),
+            "conversation_id": context.conversation_scope,
+            "run_id": record.run_id,
+            "model": context.model_name,
+            "input_tokens": int(getattr(record, "total_input_tokens", 0) or 0),
+            "output_tokens": int(getattr(record, "total_output_tokens", 0) or 0),
+            "total_tokens": int(getattr(record, "total_tokens", 0) or 0),
+            "latency_ms": max(0, int((time.perf_counter() - started_at) * 1000)),
+            "status": terminal,
+            "error_class": error_class,
+            "idempotency_key": context.idempotency_key,
+            "correlation_id": context.correlation_id,
+        }
         await ledger.settle(
             reservation.id,
-            tokens_used=int(getattr(record, "total_tokens", 0) or 0),
+            tokens_used=usage["total_tokens"],
             status=terminal,
             run_id=record.run_id,
+            usage=usage,
+        )
+        logger.info(
+            "Published Agent run completed",
+            extra={
+                "agent_id": context.agent_id,
+                "correlation_id": context.correlation_id,
+                "release_id": context.release_id,
+                "run_id": record.run_id,
+                "run_status": terminal,
+            },
         )
 
     task = asyncio.create_task(finalize())
@@ -452,6 +492,17 @@ async def _start_public_run(
         reservation=reservation,
         context=context,
         ledger=quota_ledger,
+    )
+    request.state.external_audit_resource_type = "run"
+    request.state.external_audit_resource_id = record.run_id
+    logger.info(
+        "Published Agent run started",
+        extra={
+            "agent_id": context.agent_id,
+            "correlation_id": context.correlation_id,
+            "release_id": context.release_id,
+            "run_id": record.run_id,
+        },
     )
     return record, False
 

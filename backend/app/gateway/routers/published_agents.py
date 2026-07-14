@@ -11,12 +11,15 @@ Publish / rollback / release-history endpoints are added in F1.5.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.gateway.deps import get_agent_usage_repo
 from deerflow.config.agents_config import validate_agent_slug
+from deerflow.persistence.agent_usage import AgentUsageRepository
 from deerflow.publishing.draft_service import (
     ConnectorNotGrantableError,
     DraftConflictError,
@@ -213,6 +216,26 @@ async def get_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
     draft = await service.get_draft(agent_id, owner_user_id=owner)
     return {**_agent_summary(agent), "draft": draft}
+
+
+@router.get("/{agent_id}/usage")
+async def get_agent_usage(
+    agent_id: str,
+    request: Request,
+    days: int = Query(default=30, ge=1, le=365),
+    service: DraftService = Depends(get_draft_service),
+    repository: AgentUsageRepository = Depends(get_agent_usage_repo),
+) -> dict[str, Any]:
+    owner = _user_id(request)
+    if await service.get_agent(agent_id, owner_user_id=owner) is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    since = datetime.now(UTC) - timedelta(days=days - 1)
+    since = since.replace(hour=0, minute=0, second=0, microsecond=0)
+    return await repository.aggregate_daily(
+        owner_user_id=owner,
+        agent_id=agent_id,
+        since=since,
+    )
 
 
 @router.patch("/{agent_id}/draft")

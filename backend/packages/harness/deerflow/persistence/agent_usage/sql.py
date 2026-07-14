@@ -12,7 +12,10 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.agent_usage.model import AgentQuotaReservationRow
+from deerflow.persistence.agent_usage.model import (
+    AgentQuotaReservationRow,
+    AgentUsageRecordRow,
+)
 
 
 class EffectiveQuotaLike(Protocol):
@@ -40,6 +43,10 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _row_dict(row: AgentQuotaReservationRow) -> dict[str, Any]:
+    return row.to_dict()
+
+
+def _usage_dict(row: AgentUsageRecordRow) -> dict[str, Any]:
     return row.to_dict()
 
 
@@ -180,6 +187,7 @@ class AgentUsageRepository:
         tokens_used: int,
         status: str,
         run_id: str | None,
+        usage: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         if status not in {"success", "cancelled", "timeout", "failed"}:
             raise ValueError(f"unsupported quota terminal status: {status}")
@@ -198,9 +206,119 @@ class AgentUsageRepository:
                     settled_at=self._now(),
                 )
             )
+            if result.rowcount == 1 and usage is not None:
+                await self._insert_usage_ignore(session, usage)
             await session.commit()
             row = await session.get(AgentQuotaReservationRow, reservation_id)
             return (_row_dict(row) if row else None), result.rowcount == 1
+
+    async def _insert_usage_ignore(
+        self,
+        session: AsyncSession,
+        values: Mapping[str, Any],
+    ) -> bool:
+        payload = {
+            "id": str(values.get("id") or f"usage_{uuid4().hex}"),
+            **{key: value for key, value in values.items() if key != "id"},
+        }
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+
+            statement = insert(AgentUsageRecordRow).values(**payload)
+            result = await session.execute(
+                statement.on_conflict_do_nothing(index_elements=["run_id"])
+            )
+            return result.rowcount == 1
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+
+            statement = insert(AgentUsageRecordRow).values(**payload)
+            result = await session.execute(
+                statement.on_conflict_do_nothing(index_elements=["run_id"])
+            )
+            return result.rowcount == 1
+        existing = (
+            await session.execute(
+                select(AgentUsageRecordRow).where(
+                    AgentUsageRecordRow.run_id == str(values["run_id"])
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return False
+        session.add(AgentUsageRecordRow(**payload))
+        await session.flush()
+        return True
+
+    async def record_usage(
+        self,
+        values: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        async with self._sf() as session:
+            created = await self._insert_usage_ignore(session, values)
+            await session.commit()
+            row = (
+                await session.execute(
+                    select(AgentUsageRecordRow).where(
+                        AgentUsageRecordRow.run_id == str(values["run_id"])
+                    )
+                )
+            ).scalar_one()
+            return _usage_dict(row), created
+
+    async def aggregate_daily(
+        self,
+        *,
+        owner_user_id: str,
+        agent_id: str,
+        since: datetime,
+    ) -> dict[str, Any]:
+        async with self._sf() as session:
+            rows = (
+                await session.execute(
+                    select(AgentUsageRecordRow).where(
+                        AgentUsageRecordRow.owner_user_id == owner_user_id,
+                        AgentUsageRecordRow.agent_id == agent_id,
+                        AgentUsageRecordRow.created_at >= since,
+                    )
+                )
+            ).scalars().all()
+
+        daily: dict[str, dict[str, Any]] = {}
+        totals = {
+            "runs": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        for row in rows:
+            day = _as_utc(row.created_at).date().isoformat()
+            bucket = daily.setdefault(
+                day,
+                {
+                    "date": day,
+                    "runs": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "statuses": {},
+                },
+            )
+            bucket["runs"] += 1
+            bucket["input_tokens"] += row.input_tokens
+            bucket["output_tokens"] += row.output_tokens
+            bucket["total_tokens"] += row.total_tokens
+            bucket["statuses"][row.status] = bucket["statuses"].get(row.status, 0) + 1
+            totals["runs"] += 1
+            totals["input_tokens"] += row.input_tokens
+            totals["output_tokens"] += row.output_tokens
+            totals["total_tokens"] += row.total_tokens
+        return {
+            "agent_id": agent_id,
+            "days": [daily[key] for key in sorted(daily)],
+            "totals": totals,
+        }
 
     async def release_reservation(self, reservation_id: str) -> bool:
         async with self._sf() as session:

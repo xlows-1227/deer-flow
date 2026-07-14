@@ -16,7 +16,7 @@ from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_API_KEY_RE = re.compile(r"dfk_[A-Za-z0-9_-]+")
+_API_KEY_RE = re.compile(r"df[ak]_[A-Za-z0-9_-]+")
 _MAX_REQUEST_BYTES = 256 * 1024
 
 
@@ -88,11 +88,41 @@ class ExternalAuditMiddleware(BaseHTTPMiddleware):
             try:
                 user = getattr(request.state, "user", None)
                 route = request.scope.get("route")
+                agent_authenticated = (
+                    getattr(request.state, "auth_method", None) == "agent_api_key"
+                )
+                credential_id = (
+                    str(getattr(request.state, "agent_key_id", "")) or None
+                    if agent_authenticated
+                    else None
+                )
+                external_actor_hash = (
+                    hashlib.sha256(f"agent-key:{credential_id}".encode()).hexdigest()
+                    if credential_id is not None
+                    else None
+                )
                 await repository.append(
                     {
                         "request_id": request_id,
-                        "user_id": str(user.id) if user is not None else None,
+                        "user_id": (
+                            str(user.id)
+                            if user is not None and not agent_authenticated
+                            else None
+                        ),
                         "api_key_id": getattr(request.state, "api_key_id", None),
+                        "owner_user_id": (
+                            str(getattr(request.state, "owner_user_id", "")) or None
+                            if agent_authenticated
+                            else None
+                        ),
+                        "agent_id": (
+                            str(getattr(request.state, "agent_id", "")) or None
+                            if agent_authenticated
+                            else None
+                        ),
+                        "credential_id": credential_id,
+                        "external_actor_hash": external_actor_hash,
+                        "source": "api" if agent_authenticated else None,
                         "action": f"{request.method.lower()}:{getattr(route, 'name', 'unknown')}",
                         "resource_type": getattr(request.state, "external_audit_resource_type", None),
                         "resource_id": getattr(request.state, "external_audit_resource_id", None),
