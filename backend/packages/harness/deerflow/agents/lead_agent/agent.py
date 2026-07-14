@@ -421,13 +421,12 @@ def _build_middlewares(
     else:
         middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
-    # Add summarization middleware if enabled
-    if is_published:
-        summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config, memory_enabled=False)
-    else:
+    # Published Runs cannot invoke auxiliary/global models: the immutable
+    # Release model and one Run token budget govern every model call.
+    if not is_published:
         summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
-    if summarization_middleware is not None:
-        middlewares.append(summarization_middleware)
+        if summarization_middleware is not None:
+            middlewares.append(summarization_middleware)
 
     # Add TodoList middleware if plan mode is enabled
     is_plan_mode = False if is_published else cfg.get("is_plan_mode", False)
@@ -435,14 +434,15 @@ def _build_middlewares(
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
-    # Published runs enforce their quota even when optional global token
-    # attribution/logging is disabled.
+    token_usage_middleware = None
     if resolved_app_config.token_usage.enabled or is_published:
         max_tokens_per_run = int(published_context.effective_quota.max_tokens_per_run) if is_published else None
-        middlewares.append(TokenUsageMiddleware(max_tokens_per_run=max_tokens_per_run))
+        token_usage_middleware = TokenUsageMiddleware(max_tokens_per_run=max_tokens_per_run)
 
-    # Add TitleMiddleware
-    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
+    # Title generation is another model call and therefore disabled for
+    # published Runs; public Conversation titles remain caller metadata.
+    if not is_published:
+        middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
     if not is_published:
@@ -483,6 +483,12 @@ def _build_middlewares(
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
+    # Keep token accounting/capping inside every request-rewriting middleware
+    # (loop warnings, images, deferred tools, and custom middleware) so the
+    # provider cap is derived from the final outbound request.
+    if token_usage_middleware is not None:
+        middlewares.append(token_usage_middleware)
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())

@@ -10,6 +10,9 @@ publish validation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from html import escape
+
 
 def compose_agent_instructions(agent_markdown: str, soul_markdown: str) -> str:
     """Concatenate AGENT.md then SOUL.md into labelled prompt blocks.
@@ -26,4 +29,23 @@ def compose_agent_instructions(agent_markdown: str, soul_markdown: str) -> str:
         blocks.append(f"<agent_soul>\n{soul_body}\n</agent_soul>")
     if not blocks:
         raise ValueError("at least one of AGENT.md / SOUL.md must be non-empty")
+    return "\n\n".join(blocks)
+
+
+def compose_published_agent_instructions(
+    agent_markdown: str,
+    soul_markdown: str,
+    frozen_skills: Sequence[tuple[str, str]],
+) -> str:
+    """Compose Agent instructions with pinned Skill snapshot contents.
+
+    Published Runs receive the exact immutable ``SKILL.md`` bytes captured by
+    their Release. Live Skill files are deliberately not consulted.
+    """
+    blocks = [compose_agent_instructions(agent_markdown, soul_markdown)]
+    for skill_name, skill_markdown in sorted(frozen_skills):
+        body = skill_markdown.strip()
+        if not body:
+            raise ValueError(f"frozen Skill {skill_name!r} is empty")
+        blocks.append(f'<published_skill name="{escape(skill_name, quote=True)}">\n{body}\n</published_skill>')
     return "\n\n".join(blocks)

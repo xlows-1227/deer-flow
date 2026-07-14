@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.routers import agent_public_api
 from deerflow.persistence.agent_usage import AgentUsageRepository
+from deerflow.persistence.agent_usage.model import AgentQuotaReservationRow
+from deerflow.persistence.agent_usage.sql import SYSTEM_SETTLEMENT_RECOVERY_SCOPE
 from deerflow.persistence.base import Base
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.quota import (
@@ -20,6 +27,11 @@ from deerflow.publishing.quota import (
     Reservation,
 )
 from deerflow.runtime import RunStatus
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import _should_track_run_tokens
 
 
 @pytest_asyncio.fixture()
@@ -235,6 +247,22 @@ async def test_reservation_mutations_and_reads_are_owner_scoped(quota_repo):
 
 
 @pytest.mark.asyncio
+async def test_bound_pending_reservation_is_a_durable_settlement_outbox(quota_repo):
+    ledger = QuotaLedger(quota_repo)
+    context = _context(agent_id="pa-outbox")
+    reservation = await ledger.reserve(
+        context,
+        request_key="outbox-request",
+        run_id="run-outbox",
+    )
+
+    pending = await quota_repo.list_pending_settlements(
+        recovery_scope=SYSTEM_SETTLEMENT_RECOVERY_SCOPE,
+    )
+    assert [(row["id"], row["owner_user_id"], row["run_id"]) for row in pending] == [(reservation.id, context.owner_user_id, "run-outbox")]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("run_status", "expected"),
     [
@@ -287,6 +315,243 @@ async def test_run_completion_callback_maps_every_terminal_state(run_status, exp
     assert usage["external_actor_hash"] != context.external_actor
     assert context.external_actor not in usage.values()
     assert usage["status"] == expected
+
+
+@pytest.mark.asyncio
+async def test_settlement_retries_one_transient_failure():
+    async def complete():
+        return None
+
+    record = SimpleNamespace(
+        task=asyncio.create_task(complete()),
+        run_id="run-retry",
+        status=RunStatus.success,
+        total_input_tokens=2,
+        total_output_tokens=3,
+        total_tokens=5,
+    )
+    ledger = AsyncMock()
+    ledger.settle.side_effect = [OSError("database is locked"), True]
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=AsyncMock())))
+    context = _context(agent_id="pa-retry")
+    reservation = Reservation(
+        id="qres-retry",
+        request_key="request-retry",
+        agent_id=context.agent_id,
+        credential_id=context.credential_id,
+        reserved_tokens=100,
+        status="pending",
+    )
+
+    agent_public_api._schedule_quota_settlement(
+        request=request,
+        record=record,
+        reservation=reservation,
+        context=context,
+        ledger=ledger,
+    )
+    await asyncio.gather(*request.app.state.agent_quota_tasks)
+
+    assert ledger.settle.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_restart_recovers_bound_terminal_settlement_exactly_once(quota_repo):
+    context = _context(agent_id="pa-recovery")
+    ledger = QuotaLedger(quota_repo)
+    reservation = await ledger.reserve(
+        context,
+        request_key="recovery-request",
+        run_id="run-recovery",
+    )
+    metadata = agent_public_api._settlement_metadata(context)
+    metadata.update(
+        {
+            "published_agent": True,
+            "published_agent_id": context.agent_id,
+            "published_credential_id": context.credential_id,
+            "published_conversation_id": context.conversation_scope,
+        }
+    )
+    run_store = MemoryRunStore()
+    await run_store.put(
+        "run-recovery",
+        thread_id="thread-recovery",
+        user_id=context.owner_user_id,
+        status="error",
+        metadata=metadata,
+    )
+    await run_store.update_run_completion(
+        "run-recovery",
+        status="error",
+        total_input_tokens=7,
+        total_output_tokens=11,
+        total_tokens=18,
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            agent_usage_repo=quota_repo,
+            quota_ledger=ledger,
+            run_manager=RunManager(store=run_store),
+        )
+    )
+
+    recovered = await agent_public_api.recover_pending_quota_settlements(app)
+    recovered_again = await agent_public_api.recover_pending_quota_settlements(app)
+
+    assert recovered == 1
+    assert recovered_again == 0
+    stored_reservation = await quota_repo.get_reservation(
+        reservation.id,
+        owner_user_id=context.owner_user_id,
+    )
+    assert stored_reservation["status"] == "settled"
+    assert stored_reservation["terminal_status"] == "failed"
+    aggregate = await quota_repo.aggregate_daily(
+        owner_user_id=context.owner_user_id,
+        agent_id=context.agent_id,
+        since=datetime.now(UTC) - timedelta(days=1),
+    )
+    assert aggregate["totals"]["runs"] == 1
+    assert aggregate["totals"]["total_tokens"] == 18
+
+
+@pytest.mark.asyncio
+async def test_expired_active_outbox_recovers_as_timeout_for_shared_database():
+    context = _context(agent_id="pa-expired-recovery")
+    record = SimpleNamespace(
+        run_id="run-expired",
+        status=RunStatus.running,
+        metadata=agent_public_api._settlement_metadata(context),
+        total_input_tokens=3,
+        total_output_tokens=5,
+        total_tokens=8,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+    repository = AsyncMock()
+    repository.list_pending_settlements.return_value = [
+        {
+            "id": "qres-expired",
+            "owner_user_id": context.owner_user_id,
+            "run_id": record.run_id,
+            "expires_at": datetime.now(UTC) - timedelta(seconds=1),
+        }
+    ]
+    manager = AsyncMock()
+    manager.get.return_value = record
+    ledger = AsyncMock()
+    ledger.settle.return_value = True
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            agent_usage_repo=repository,
+            quota_ledger=ledger,
+            run_manager=manager,
+        )
+    )
+
+    assert await agent_public_api.recover_pending_quota_settlements(app) == 1
+    assert ledger.settle.await_args.kwargs["status"] == "timeout"
+    assert ledger.settle.await_args.kwargs["tokens_used"] == 8
+
+
+@pytest.mark.asyncio
+async def test_expired_prebound_reservation_without_run_is_released(quota_repo):
+    context = _context(agent_id="pa-prebound-crash")
+    ledger = QuotaLedger(quota_repo)
+    reservation = await ledger.reserve(
+        context,
+        request_key="prebound-crash",
+        run_id="run-never-persisted",
+    )
+    async with quota_repo._sf() as session:  # noqa: SLF001 - force crash-deadline fixture state
+        await session.execute(update(AgentQuotaReservationRow).where(AgentQuotaReservationRow.id == reservation.id).values(expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+        await session.commit()
+    idempotency = AsyncMock()
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            agent_usage_repo=quota_repo,
+            quota_ledger=ledger,
+            run_manager=RunManager(store=MemoryRunStore()),
+            external_idempotency_repo=idempotency,
+        )
+    )
+
+    assert await agent_public_api.recover_pending_quota_settlements(app) == 1
+    stored = await quota_repo.get_reservation(
+        reservation.id,
+        owner_user_id=context.owner_user_id,
+    )
+    assert stored["status"] == "released"
+    idempotency.release_incomplete_by_run_id.assert_awaited_once_with(
+        run_id="run-never-persisted",
+        user_id=context.owner_user_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_global_tracking_off_still_flows_published_tokens_to_usage(quota_repo):
+    context = _context(agent_id="pa-mandatory-accounting")
+    ledger = QuotaLedger(quota_repo)
+    manager = RunManager()
+    record = await manager.create_or_reject(
+        "thread-accounting",
+        "lead_agent",
+        run_id="run-accounting",
+        metadata={
+            "published_agent": True,
+            **agent_public_api._settlement_metadata(context),
+        },
+    )
+    reservation = await ledger.reserve(
+        context,
+        request_key="mandatory-accounting",
+        run_id=record.run_id,
+    )
+    await manager.set_status(record.run_id, RunStatus.running)
+    journal = RunJournal(
+        record.run_id,
+        record.thread_id,
+        MemoryRunEventStore(),
+        track_token_usage=_should_track_run_tokens(
+            record,
+            SimpleNamespace(track_token_usage=False),
+        ),
+        progress_reporter=lambda snapshot: manager.update_run_progress(
+            record.run_id,
+            **snapshot,
+        ),
+    )
+    message = AIMessage(
+        content="done",
+        usage_metadata={"input_tokens": 6, "output_tokens": 9, "total_tokens": 15},
+    )
+    journal.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]]),
+        run_id=uuid4(),
+        tags=["lead_agent"],
+    )
+    await journal.flush()
+    await manager.set_status(record.run_id, RunStatus.success)
+    record.task = asyncio.create_task(asyncio.sleep(0))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=manager)))
+
+    agent_public_api._schedule_quota_settlement(
+        request=request,
+        record=record,
+        reservation=reservation,
+        context=context,
+        ledger=ledger,
+    )
+    await asyncio.gather(*request.app.state.agent_quota_tasks)
+
+    assert record.total_tokens == 15
+    aggregate = await quota_repo.aggregate_daily(
+        owner_user_id=context.owner_user_id,
+        agent_id=context.agent_id,
+        since=datetime.now(UTC) - timedelta(days=1),
+    )
+    assert aggregate["totals"]["runs"] == 1
+    assert aggregate["totals"]["total_tokens"] == 15
 
 
 @pytest.mark.asyncio

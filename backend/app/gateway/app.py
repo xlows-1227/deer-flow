@@ -311,6 +311,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to stop daily memory rollup loop")
 
+        quota_tasks = set(getattr(app.state, "agent_quota_tasks", ()) or ())
+        if quota_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*quota_tasks, return_exceptions=True),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # Every executing published Run is durably bound to a pending
+                # reservation, so startup recovery can safely resume any task
+                # that does not finish within the bounded shutdown window.
+                logger.warning(
+                    "Published-Agent quota settlement drain exceeded %.1fs; deferring to startup recovery.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+
     logger.info("Shutting down API Gateway")
 
 

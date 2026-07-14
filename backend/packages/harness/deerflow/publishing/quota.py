@@ -168,7 +168,13 @@ class QuotaLedger:
     def __init__(self, repository: UsageRepoLike) -> None:
         self._repository = repository
 
-    async def reserve(self, context: Any, *, request_key: str) -> Reservation:
+    async def reserve(
+        self,
+        context: Any,
+        *,
+        request_key: str,
+        run_id: str | None = None,
+    ) -> Reservation:
         """Reserve quota for one trusted context and idempotency scope."""
         from deerflow.persistence.agent_usage.sql import QuotaReservationLimitError
 
@@ -182,6 +188,7 @@ class QuotaLedger:
                     "agent_id": context.agent_id,
                     "credential_id": context.credential_id,
                     "request_key": request_key,
+                    "run_id": run_id,
                     "reserved_tokens": quota.max_tokens_per_run,
                     "max_run_seconds": quota.max_run_seconds,
                 },

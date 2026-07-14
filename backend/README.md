@@ -83,6 +83,8 @@ curl -X POST 'http://localhost:8001/api/v1/external/conversations/<conversation_
 
 Published Agent 公共运行时会从不可变 Skill revision 的 `SKILL.md` 派生 `allowed-tools`，并在 Connector 服务层按 `(connector_id, capability)` 执行 Release 授权，即使运行身份是 owner 也不能绕过。无 `Idempotency-Key` 的 Run 使用服务端唯一 quota attempt id；超时会等待 worker 刷新 token 后再结算，published middleware 同时强制 `max_tokens_per_run`。Agent Key quota override 在写入时仅接受已知字段的正整数。Agent Key、quota reservation、published conversation 与 audit 查询均在仓储层携带 owner scope。
 
+冻结 Skill 的完整 `SKILL.md` 正文也会直接组合进 Published Run 的可信指令；正文与 `allowed-tools` 都来自同一个不可变 revision，跨 owner 的 private revision 会 fail closed。Published 模式禁用 Title/Summarization 辅助模型，并让 token 预算在 loop warning 等请求改写之后执行；计费用量即使在全局 `run_events.track_token_usage=false` 时也强制采集。Quota reserve 事务会在 Run 持久化之前预绑定服务端 `run_id`，随后挂接带有界重试的结算任务；Gateway shutdown 会限时排空，重启与周期恢复会从 pending 绑定记录幂等补写 usage，超过 max-run deadline 的共享数据库 orphan 按 timeout 收敛。如果预绑定后进程在 Run 落库前退出，恢复任务会在 deadline 后确认 Run 不存在，再释放 reservation 与 owner-scoped 未完成幂等 claim。启动阶段取消会删除尚未绑定 worker 的 pending Run，并释放相同资源。
+
 ---
 
 ## Core Components

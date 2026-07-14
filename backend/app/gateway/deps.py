@@ -17,9 +17,10 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
@@ -248,6 +249,33 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
+        quota_recovery_task: asyncio.Task | None = None
+        if app.state.agent_usage_repo is not None:
+            try:
+                from app.gateway.routers.agent_public_api import (
+                    recover_pending_quota_settlements,
+                    run_quota_settlement_recovery_loop,
+                )
+            except Exception:
+                logger.exception("Failed to initialize published-Agent quota recovery")
+            else:
+                try:
+                    recovered_settlements = await recover_pending_quota_settlements(app)
+                    if recovered_settlements:
+                        logger.info(
+                            "Recovered %d published-Agent quota settlement(s)",
+                            recovered_settlements,
+                        )
+                except Exception:
+                    # The periodic task below keeps the durable outbox pending
+                    # and retries after a transient startup failure.
+                    logger.exception("Failed to recover published-Agent quota settlements")
+                quota_recovery_task = asyncio.create_task(
+                    run_quota_settlement_recovery_loop(app),
+                    name="published-quota-settlement-recovery",
+                )
+                app.state.agent_quota_recovery_task = quota_recovery_task
+
         # Published-agent control plane services (M1). Built best-effort: when
         # persistence or a subsystem is unavailable the factory returns None and
         # the routers answer 503 rather than failing the whole startup. The
@@ -272,6 +300,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             yield
         finally:
+            if quota_recovery_task is not None:
+                quota_recovery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await quota_recovery_task
             await close_engine()
 
 

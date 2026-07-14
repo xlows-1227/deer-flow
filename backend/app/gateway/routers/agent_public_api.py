@@ -58,6 +58,8 @@ from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, DisconnectMode, R
 router = APIRouter(prefix="/api/v1/agents/{agent_id}", tags=["published-agent-api"])
 _MAX_METADATA_BYTES = 32 * 1024
 logger = logging.getLogger(__name__)
+_SETTLEMENT_MAX_ATTEMPTS = 3
+_SETTLEMENT_RETRY_DELAY_SECONDS = 0.05
 
 
 class _PublicModel(BaseModel):
@@ -242,6 +244,7 @@ def _internal_run_request(
         "published_quota_reservation_id": reservation_id,
         "external_source": "api",
         "client_metadata": body.metadata,
+        **_settlement_metadata(context),
     }
     return RunCreateRequest(
         assistant_id="lead_agent",
@@ -251,6 +254,243 @@ def _internal_run_request(
         on_disconnect="continue",
         multitask_strategy="reject",
     )
+
+
+def _settlement_metadata(context: PublishedAgentContext) -> dict[str, Any]:
+    """Persist immutable, non-secret usage fields with the durable Run."""
+    return {
+        "published_agent_id": context.agent_id,
+        "published_credential_id": context.credential_id,
+        "published_conversation_id": context.conversation_scope,
+        "published_correlation_id": context.correlation_id,
+        "published_idempotency_key": context.idempotency_key,
+        "published_source": context.source,
+        "published_external_actor_hash": hashlib.sha256(context.external_actor.encode("utf-8")).hexdigest(),
+        "published_model_name": context.model_name,
+        "published_settlement_started_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _terminal_status(record: Any) -> str | None:
+    if record.status == RunStatus.timeout:
+        return "timeout"
+    if record.status == RunStatus.success:
+        return "success"
+    if record.status == RunStatus.interrupted:
+        return "cancelled"
+    if record.status == RunStatus.error:
+        return "failed"
+    return None
+
+
+def _usage_from_record(
+    record: Any,
+    *,
+    owner_user_id: str,
+    terminal: str,
+    latency_ms: int,
+    context: PublishedAgentContext | None = None,
+) -> dict[str, Any]:
+    metadata = getattr(record, "metadata", {}) or {}
+    if context is None:
+        agent_id = str(metadata["published_agent_id"])
+        source = str(metadata["published_source"])
+        credential_id = str(metadata["published_credential_id"])
+        actor_hash = str(metadata["published_external_actor_hash"])
+        conversation_id = str(metadata["published_conversation_id"])
+        model_name = str(metadata["published_model_name"])
+        idempotency_key = metadata.get("published_idempotency_key")
+        correlation_id = str(metadata["published_correlation_id"])
+    else:
+        agent_id = context.agent_id
+        source = context.source
+        credential_id = context.credential_id
+        actor_hash = hashlib.sha256(context.external_actor.encode("utf-8")).hexdigest()
+        conversation_id = context.conversation_scope
+        model_name = context.model_name
+        idempotency_key = context.idempotency_key
+        correlation_id = context.correlation_id
+    error_class = {
+        "cancelled": "CancelledError",
+        "timeout": "TimeoutError",
+        "failed": "RunError",
+    }.get(terminal)
+    return {
+        "owner_user_id": owner_user_id,
+        "agent_id": agent_id,
+        "source": source,
+        "credential_id": credential_id,
+        "external_actor_hash": actor_hash,
+        "conversation_id": conversation_id,
+        "run_id": record.run_id,
+        "model": model_name,
+        "input_tokens": int(getattr(record, "total_input_tokens", 0) or 0),
+        "output_tokens": int(getattr(record, "total_output_tokens", 0) or 0),
+        "total_tokens": int(getattr(record, "total_tokens", 0) or 0),
+        "latency_ms": max(0, int(latency_ms)),
+        "status": terminal,
+        "error_class": error_class,
+        "idempotency_key": idempotency_key,
+        "correlation_id": correlation_id,
+    }
+
+
+async def _settle_quota_with_retry(
+    ledger: QuotaLedger,
+    reservation_id: str,
+    *,
+    owner_user_id: str,
+    run_id: str,
+    terminal: str,
+    usage: dict[str, Any],
+) -> bool:
+    """Retry transient settlement failures without losing the durable outbox."""
+    for attempt in range(1, _SETTLEMENT_MAX_ATTEMPTS + 1):
+        try:
+            return await ledger.settle(
+                reservation_id,
+                owner_user_id=owner_user_id,
+                tokens_used=usage["total_tokens"],
+                status=terminal,
+                run_id=run_id,
+                usage=usage,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if attempt == _SETTLEMENT_MAX_ATTEMPTS:
+                logger.exception(
+                    "Published Agent quota settlement exhausted retries",
+                    extra={"reservation_id": reservation_id, "run_id": run_id},
+                )
+                return False
+            logger.warning(
+                "Published Agent quota settlement failed; retrying",
+                extra={"reservation_id": reservation_id, "run_id": run_id, "attempt": attempt},
+                exc_info=True,
+            )
+            await asyncio.sleep(_SETTLEMENT_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)))
+    return False
+
+
+def _recovered_latency_ms(record: Any) -> int:
+    try:
+        started = datetime.fromisoformat(str((record.metadata or {})["published_settlement_started_at"]))
+        finished = datetime.fromisoformat(str(record.updated_at))
+    except (KeyError, TypeError, ValueError):
+        return 0
+    return max(0, int((finished - started).total_seconds() * 1000))
+
+
+def _reservation_expired(reservation: dict[str, Any]) -> bool:
+    value = reservation.get("expires_at")
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return False
+    if not isinstance(value, datetime):
+        return False
+    expires_at = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return expires_at <= datetime.now(UTC)
+
+
+async def recover_pending_quota_settlements(app: Any) -> int:
+    """Settle terminal published Runs left in the durable outbox after restart."""
+    repository = getattr(app.state, "agent_usage_repo", None)
+    ledger = getattr(app.state, "quota_ledger", None)
+    manager = getattr(app.state, "run_manager", None)
+    if repository is None or ledger is None or manager is None:
+        return 0
+    from deerflow.persistence.agent_usage.sql import SYSTEM_SETTLEMENT_RECOVERY_SCOPE
+
+    recovered = 0
+    for reservation in await repository.list_pending_settlements(
+        recovery_scope=SYSTEM_SETTLEMENT_RECOVERY_SCOPE,
+    ):
+        run_id = str(reservation["run_id"])
+        owner_user_id = str(reservation["owner_user_id"])
+        record = await manager.get(run_id, user_id=owner_user_id)
+        if record is None:
+            if not _reservation_expired(reservation):
+                logger.warning(
+                    "Published Agent settlement outbox is awaiting Run persistence",
+                    extra={"reservation_id": reservation["id"], "run_id": run_id},
+                )
+                continue
+            idempotency = getattr(app.state, "external_idempotency_repo", None)
+            if idempotency is not None:
+                try:
+                    await idempotency.release_incomplete_by_run_id(
+                        run_id=run_id,
+                        user_id=owner_user_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to release incomplete idempotency claim for missing Run",
+                        extra={"reservation_id": reservation["id"], "run_id": run_id},
+                    )
+                    continue
+            if await ledger.release(
+                str(reservation["id"]),
+                owner_user_id=owner_user_id,
+            ):
+                recovered += 1
+                logger.warning(
+                    "Released expired pre-bound reservation whose Run was never persisted",
+                    extra={"reservation_id": reservation["id"], "run_id": run_id},
+                )
+            continue
+        terminal = _terminal_status(record)
+        if terminal is None and _reservation_expired(reservation):
+            # PostgreSQL may retain an orphaned running row because global
+            # startup reconciliation is unsafe with multiple Gateway replicas.
+            # Once the reservation's max-run deadline has passed, settlement
+            # can safely fail closed as timeout using the last durable snapshot.
+            terminal = "timeout"
+        if terminal is None:
+            continue
+        try:
+            usage = _usage_from_record(
+                record,
+                owner_user_id=owner_user_id,
+                terminal=terminal,
+                latency_ms=_recovered_latency_ms(record),
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.exception(
+                "Published Agent settlement outbox Run is missing trusted metadata",
+                extra={"reservation_id": reservation["id"], "run_id": run_id},
+            )
+            continue
+        if await _settle_quota_with_retry(
+            ledger,
+            str(reservation["id"]),
+            owner_user_id=owner_user_id,
+            run_id=run_id,
+            terminal=terminal,
+            usage=usage,
+        ):
+            recovered += 1
+    return recovered
+
+
+async def run_quota_settlement_recovery_loop(
+    app: Any,
+    *,
+    interval_seconds: float = 30.0,
+) -> None:
+    """Periodically recover terminal or expired settlement outbox rows."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            recovered = await recover_pending_quota_settlements(app)
+            if recovered:
+                logger.info("Recovered %d published-Agent quota settlement(s)", recovered)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic published-Agent quota settlement recovery failed")
 
 
 async def _claim_run(
@@ -301,6 +541,7 @@ async def _reserve_quota(
     context: PublishedAgentContext,
     body: AgentRunCreateRequest,
     operation: str,
+    run_id: str,
 ) -> Reservation:
     quota = context.effective_quota
     if len(body.message.encode("utf-8")) > quota.max_input_bytes:
@@ -309,6 +550,7 @@ async def _reserve_quota(
         return await ledger.reserve(
             context,
             request_key=_quota_request_key(context=context, operation=operation),
+            run_id=run_id,
         )
     except QuotaExceededError as exc:
         raise HTTPException(
@@ -360,47 +602,24 @@ def _schedule_quota_settlement(
         except Exception:
             pass
 
-        if timed_out:
-            terminal = "timeout"
-        elif record.status == RunStatus.timeout:
-            terminal = "timeout"
-        elif record.status == RunStatus.success:
-            terminal = "success"
-        elif record.status == RunStatus.interrupted:
-            terminal = "cancelled"
-        else:
-            terminal = "failed"
-        error_class = {
-            "cancelled": "CancelledError",
-            "timeout": "TimeoutError",
-            "failed": "RunError",
-        }.get(terminal)
-        usage = {
-            "owner_user_id": context.owner_user_id,
-            "agent_id": context.agent_id,
-            "source": context.source,
-            "credential_id": context.credential_id,
-            "external_actor_hash": hashlib.sha256(context.external_actor.encode("utf-8")).hexdigest(),
-            "conversation_id": context.conversation_scope,
-            "run_id": record.run_id,
-            "model": context.model_name,
-            "input_tokens": int(getattr(record, "total_input_tokens", 0) or 0),
-            "output_tokens": int(getattr(record, "total_output_tokens", 0) or 0),
-            "total_tokens": int(getattr(record, "total_tokens", 0) or 0),
-            "latency_ms": max(0, int((time.perf_counter() - started_at) * 1000)),
-            "status": terminal,
-            "error_class": error_class,
-            "idempotency_key": context.idempotency_key,
-            "correlation_id": context.correlation_id,
-        }
-        await ledger.settle(
+        terminal = "timeout" if timed_out else (_terminal_status(record) or "failed")
+        usage = _usage_from_record(
+            record,
+            owner_user_id=context.owner_user_id,
+            terminal=terminal,
+            latency_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            context=context,
+        )
+        settled = await _settle_quota_with_retry(
+            ledger,
             reservation.id,
             owner_user_id=context.owner_user_id,
-            tokens_used=usage["total_tokens"],
-            status=terminal,
             run_id=record.run_id,
+            terminal=terminal,
             usage=usage,
         )
+        if not settled:
+            return
         logger.info(
             "Published Agent run completed",
             extra={
@@ -474,12 +693,14 @@ async def _start_public_run(
     if replay is not None and not claimed:
         raise HTTPException(status_code=409, detail={"code": "idempotency_in_progress"})
 
+    run_id = str(replay["run_id"]) if claimed and replay is not None and replay.get("run_id") else str(uuid4())
     try:
         reservation = await _reserve_quota(
             ledger=quota_ledger,
             context=context,
             body=body,
             operation=operation,
+            run_id=run_id,
         )
     except Exception:
         if claimed and idempotency_key is not None:
@@ -500,8 +721,31 @@ async def _start_public_run(
             conversation["thread_id"],
             request,
             published_context=context,
-            run_id=str(replay["run_id"]) if claimed and replay is not None and replay.get("run_id") else None,
+            run_id=run_id,
         )
+    except asyncio.CancelledError:
+        cleanup = [
+            quota_ledger.release(
+                reservation.id,
+                owner_user_id=context.owner_user_id,
+            )
+        ]
+        if claimed and idempotency_key is not None:
+            cleanup.append(
+                idempotency.release(
+                    api_key_id=_credential_id(request),
+                    idempotency_key=idempotency_key,
+                )
+            )
+        cleanup_task = asyncio.ensure_future(asyncio.gather(*cleanup, return_exceptions=True))
+        try:
+            results = await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            results = await cleanup_task
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("Cancelled published Run startup cleanup failed", exc_info=result)
+        raise
     except HTTPException as exc:
         await quota_ledger.release(reservation.id, owner_user_id=context.owner_user_id)
         if claimed and idempotency_key is not None:

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_format_sse_basic():
@@ -13,6 +17,40 @@ def test_format_sse_basic():
     assert "data: " in frame
     parsed = json.loads(frame.split("data: ")[1].split("\n")[0])
     assert parsed["run_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_start_run_cancellation_during_thread_upsert_discards_pending_run(monkeypatch):
+    from app.gateway import services
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class CancellingThreadStore:
+        async def get(self, thread_id):
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+    run_store = MemoryRunStore()
+    manager = RunManager(store=run_store)
+    run_context = SimpleNamespace(thread_store=CancellingThreadStore())
+    monkeypatch.setattr(services, "get_stream_bridge", lambda request: object())
+    monkeypatch.setattr(services, "get_run_manager", lambda request: manager)
+    monkeypatch.setattr(services, "get_run_context", lambda request: run_context)
+    body = SimpleNamespace(
+        on_disconnect="continue",
+        context=None,
+        assistant_id="lead_agent",
+        metadata={"published_agent": True},
+        input={"messages": [{"role": "user", "content": "hello"}]},
+        config={},
+        multitask_strategy="reject",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await services.start_run(body, "thread-cancel", SimpleNamespace())
+
+    assert await manager.list_by_thread("thread-cancel") == []
+    assert await run_store.list_pending() == []
 
 
 def test_format_sse_with_event_id():

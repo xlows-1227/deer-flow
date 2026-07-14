@@ -43,6 +43,13 @@ class QuotaReservationLimitError(RuntimeError):
         self.retry_after = max(1, int(retry_after))
 
 
+class _SystemSettlementRecoveryScope:
+    """Unforgeable marker for the system-only cross-owner outbox scan."""
+
+
+SYSTEM_SETTLEMENT_RECOVERY_SCOPE = _SystemSettlementRecoveryScope()
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -154,6 +161,7 @@ class AgentUsageRepository:
                     AgentQuotaReservationRow.agent_id == agent_id,
                     AgentQuotaReservationRow.owner_user_id == owner_user_id,
                     AgentQuotaReservationRow.status == "pending",
+                    AgentQuotaReservationRow.run_id.is_(None),
                     AgentQuotaReservationRow.expires_at <= now,
                 )
                 .values(status="released", terminal_status="expired", settled_at=now)
@@ -214,6 +222,7 @@ class AgentUsageRepository:
                 owner_user_id=owner_user_id,
                 agent_id=agent_id,
                 credential_id=credential_id,
+                run_id=str(values["run_id"]) if values.get("run_id") else None,
                 reserved_tokens=reserved_tokens,
                 expires_at=now + timedelta(seconds=max(1, int(values.get("max_run_seconds") or quota.max_run_seconds)) + 60),
             )
@@ -236,6 +245,31 @@ class AgentUsageRepository:
                     return _row_dict(replay), False
             await session.refresh(row)
             return _row_dict(row), True
+
+    async def list_pending_settlements(
+        self,
+        *,
+        recovery_scope: _SystemSettlementRecoveryScope,
+    ) -> list[dict[str, Any]]:
+        """List durable, Run-bound outbox rows for system recovery passes."""
+        if recovery_scope is not SYSTEM_SETTLEMENT_RECOVERY_SCOPE:
+            raise PermissionError("cross-owner settlement recovery requires the system scope")
+        async with self._sf() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AgentQuotaReservationRow)
+                        .where(
+                            AgentQuotaReservationRow.status == "pending",
+                            AgentQuotaReservationRow.run_id.is_not(None),
+                        )
+                        .order_by(AgentQuotaReservationRow.created_at, AgentQuotaReservationRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [_row_dict(row) for row in rows]
 
     async def settle_reservation(
         self,
@@ -313,13 +347,24 @@ class AgentUsageRepository:
     async def record_usage(
         self,
         values: Mapping[str, Any],
-    ) -> tuple[dict[str, Any], bool]:
+        *,
+        owner_user_id: str,
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Insert one usage row per run, treating duplicates as idempotent."""
+        if str(values.get("owner_user_id") or "") != owner_user_id:
+            raise ValueError("usage owner_user_id must match repository scope")
         async with self._sf() as session:
             created = await self._insert_usage_ignore(session, values)
             await session.commit()
-            row = (await session.execute(select(AgentUsageRecordRow).where(AgentUsageRecordRow.run_id == str(values["run_id"])))).scalar_one()
-            return _usage_dict(row), created
+            row = (
+                await session.execute(
+                    select(AgentUsageRecordRow).where(
+                        AgentUsageRecordRow.run_id == str(values["run_id"]),
+                        AgentUsageRecordRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return (_usage_dict(row) if row is not None else None), created
 
     async def aggregate_daily(
         self,

@@ -376,6 +376,12 @@ async def start_run(
             )
         else:
             await run_ctx.thread_store.update_status(thread_id, "running")
+    except asyncio.CancelledError:
+        # The Run is already durable but no worker exists yet. Remove it before
+        # propagating cancellation so retries cannot replay a forever-pending
+        # record and published quota/idempotency cleanup can safely proceed.
+        await asyncio.shield(run_mgr.discard_unstarted(record.run_id))
+        raise
     except Exception:
         logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 

@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M2 实现规格（已发布运行时与 Agent API）
 
-**状态：** 实现与独立代码复审修复完成，代码侧 M2 Review Gate 已关闭；仓库全量测试、PostgreSQL 并发门禁与真实模型 smoke 仍待 CI/部署环境确认
+**状态：** 修复后二次独立复审发现 7 项 Spec P1 阻塞与 2 项 Standards 问题，代码侧 M2 Review Gate 已重新打开；仓库全量测试、PostgreSQL 并发门禁与真实模型 smoke 仍待 CI/部署环境确认
 
 **日期：** 2026-07-14
 
@@ -177,13 +177,15 @@ Key 级   = min(Agent 级, Key 覆盖或继承)
 
 ### 7.3 终态
 
-success/cancelled/timeout/failed 只允许 pending→settled 一次。Gateway shutdown 期间未确认终态的预留保持 pending，由下一次 reserve 的过期清理安全释放，避免错误计费。
+success/cancelled/timeout/failed 只允许 pending→settled 一次。公共 Run 在 quota reserve 事务中预先写入服务端 `run_id`，因此不存在“Run 已持久化但 reservation 尚未绑定”的崩溃窗口；尚未进入公共 Run 启动流程的未绑定预留仍可过期释放。已经绑定 Run 的 pending reservation 是持久化 settlement outbox，不参与静默过期释放。Gateway shutdown 会在关闭数据库前限时排空结算任务；未完成项由下次启动扫描，并由周期恢复任务继续补结算。共享 PostgreSQL 中超过 max-run deadline 仍为 pending/running 的 orphan 按 timeout 和最后持久化 token 快照收敛；若预绑定后 Run 从未持久化，恢复任务会在 deadline 后确认缺失，释放 reservation 与 owner-scoped 未完成 idempotency claim，不生成虚假的 usage。
 
 ---
 
 ## 8. 用量与双主体审计（F2.6）
 
 `agent_usage_records` 以 `UniqueConstraint(run_id)` 保证每个外部 Run 恰好一条。结算更新与 usage insert 在同一事务中执行；重复终态回调 no-op。
+
+Published Run 的计费用量独立于可选观测开关：即使 `run_events.track_token_usage=false`，RunJournal 仍强制累计真实 token。瞬时结算错误执行有界退避重试；若进程退出，Run 与 reservation 的持久化绑定为重启恢复提供至少一次交付点，数据库终态转换与 `run_id` 唯一约束共同保证 exactly-once 结果。
 
 记录字段包括 owner、Agent、source、credential、external actor hash、Conversation/Run、model、input/output/total tokens、latency、status、通用 error class、idempotency/correlation id 与时间。原始 external actor 不落库。
 
@@ -290,9 +292,9 @@ tests/test_auth_type_system.py::test_csrf_does_not_exempt_old_login_path
 
 详细证据、严重度与 Standards 轴结果见 [M2 代码复审](./2026-07-14-m2-published-runtime-agent-api-code-review.md)。这些问题关闭并补回归测试前，不应将 §11.1 的 focused regression 通过解释为 M2 Review Gate 通过。
 
-### 11.5 复审问题修复结果（2026-07-14）
+### 11.5 第一次复审问题修复记录（2026-07-14，已由 §11.6 修正）
 
-复审列出的 6 项 Spec 问题已按本规格关闭：
+修复提交当时声明复审列出的 6 项 Spec 问题已关闭：
 
 1. Resolver 从 Release 固定的 Skill revision/content store 读取冻结 `SKILL.md`，按既有 Skill 语义派生 `allowed_tool_names`；快照缺失、损坏或 name 不一致均 fail closed。
 2. Published runtime 将 Connector 授权以精确 `(connector_id, capability)` map 写入受信 `runtime.context`；Connector policy 在 owner shortcut 之前检查该 map，cached schema、query、generic action 与 summary 均走同一约束。
@@ -308,6 +310,52 @@ Standards 轴同步完成：Agent Key 管理通过 `published_agents.owner_user_
 最终独立复审追加的幂等 complete/serialization 窗口、单次模型调用越过 token cap、audit Agent 查询缺 owner 联合过滤也已关闭；追加后的可执行 M2 回归集合为 `78 passed`。新增 SQLite owner/idempotency 仓储用例使用内存数据库定向验证，不依赖受限的系统临时目录。
 
 同步 wait 的幂等重放也与首次请求统一：只要原 Run 的本机 task 仍存在，两次请求都等待同一 task 到终态；并发同键回归断言只启动一个 Run，且两次响应均为同一 completed 结果。
+
+### 11.6 修复后二次独立复审（HEAD `50788bbf`）
+
+以同一固定点 `3bc06941d6bf187df8d4a4a13af07752d5afd91f` 对 11 个 M2/修复提交重新执行 Spec/Standards 双轴复审后，§11.5 的“代码侧 Gate 已关闭”结论不成立。当前仍有以下 Spec 阻塞：
+
+1. Resolver 只从冻结 Skill revision 解析 `allowed-tools`；Published prompt 清空 Skill 列表，也没有把 content store 的 `SKILL.md` 正文注入提示或挂载为冻结文件树。因此开发计划最终验收 #4“外部 Run 读到旧快照”仍未实现。
+2. Connector 精确 capability map 已进入 runtime，但 `database.table.sample` 仍复用 `query_database()`，实际校验/审计为 `database.query`，没有按调用的精确 pair 授权。
+3. Published 模式仍安装 Title 与可选 Summarization middleware；二者直接调用全局 title/summary/default model，不经过 Release 模型锁定与 `TokenUsageMiddleware` 的 per-Run cap。
+4. Token budget middleware 注册在 LoopDetection middleware 之前；后者可在预算预检后追加 loop warning，令最终输入大于预估值并在单次模型调用内越过 cap。
+5. RunJournal 仍接受全局 `run_events.track_token_usage=false`；关闭后 Published Run 的 reservation 会以 0 token 结算，破坏精确 usage。
+6. quota settlement 只有进程内单次调用，没有 transient retry、shutdown drain 或持久化恢复；失败后 reservation 最终过期释放，但不会产生 usage row，不能满足“每个外部 Run 恰好一条”。
+7. `start_run()` 先持久化 pending Run，再经过可取消的 await/配置步骤创建 worker；此间的 `CancelledError` 逃逸 `except Exception` 清理，会留下无 worker/settlement 的 pending Run，幂等重试又复用该 Run 而不会补启动。
+
+Standards 轴仍有两项：运行时新增的 `SkillRevisionRepository.get(revision_id)` 没有 `owner_user_id`/public scope；`AgentUsageRepository.record_usage(values)` 在全局 `run_id` 冲突读取时不验证 owner。详细证据、严重度与所需回归见 [M2 代码复审 §7](./2026-07-14-m2-published-runtime-agent-api-code-review.md#7-修复后二次独立复审head-50788bbf)。
+
+本次验证记录：13 个相关测试文件 `171 passed, 2 failed`；两条失败均为固定点前已有的 RunManager 同时间戳排序基线，非 M2 diff 引入。`ruff check`、679 文件 format check、`git diff --check` 与 Alembic single head 通过。依赖 `tmp_path` 的用例已在获批的仓库内专用临时目录重跑，沙箱内 50 个 Temp ACL setup error 均已排除；PostgreSQL 并发门禁与真实模型 smoke 仍未执行。
+
+在以上问题关闭并补齐对应回归前，不得将 §11.1/§11.5 的历史 focused pass 解释为 M2 Review Gate 通过。
+
+### 11.7 更新版复审问题修复记录（2026-07-14）
+
+针对 §11.6 与代码复审 §7 的 7 项 Spec P1、1 项 Standards P1、1 项 Standards P2，本轮完成以下收敛：
+
+1. Resolver 以 `owner_user_id` 读取 Skill revision，只接受当前 owner 的 private revision 或 visibility 合法的 public revision；冻结 `SKILL.md` 正文与由同一正文派生的 `allowed-tools` 一并组合进可信 Published 指令。修改 live Skill 不会改变已发布 Release 的运行正文。
+2. `database.table.sample` 通过独立执行入口校验并审计 `database.table.sample`；sample-only grant 可用，只有 `database.query` 的 Release 调用 sample 会 fail closed。
+3. Published 模式禁用 Title 与 Summarization 辅助模型，避免 Release 外模型和预算外调用；TokenUsage middleware 调整到 LoopDetection 等请求改写之后，provider cap 使用包含 loop warning 的最终输入。
+4. Published Run 的 RunJournal 强制开启 token 累计，不受全局 `track_token_usage` 观测开关影响。
+5. Quota reserve 事务在 Run 持久化之前预绑定服务端 `run_id`，从根源关闭“Run 已存在但 reservation 未绑定”的崩溃窗口；结算有界重试，shutdown 限时 drain，startup 使用显式 system recovery scope 扫描 bound pending outbox，周期任务继续补写终态 usage。共享数据库中超过 max-run deadline 的非终态 orphan 按 timeout 收敛；若预绑定后 Run 从未落库，则在 deadline 后释放 reservation 与 owner-scoped 未完成 claim，且不生成 usage。
+6. `start_run()` 在 thread metadata await 点收到取消时，会删除已持久化但尚未绑定 worker 的 pending Run；Agent API 同时释放 quota 与 idempotency claim。若取消发生在 worker 已创建后的 outbox bind，则先完成绑定并挂 settlement，再传播取消。
+7. `AgentUsageRepository.record_usage()` 要求显式 `owner_user_id`，payload owner 必须一致；全局 `run_id` 与其他 owner 冲突时返回 `None`，不返回既有 usage 元数据。
+
+本轮验证记录：
+
+```text
+13 个 M2/修复相关测试文件：204 passed
+Gateway lifespan / Published service wiring：4 passed
+ruff check --no-cache --exclude .tmp-review .：All checks passed
+ruff format --no-cache --check --exclude .tmp-review .：679 files already formatted
+python -m compileall -q app packages/harness/deerflow：通过（pycache 写入仓库内专用临时目录）
+git diff --check：通过
+Alembic heads：2026_07_14_agent_audit_principals (head)
+```
+
+完整 `pytest tests -q -x` 在 `118 passed` 后被既有 Windows ACL 问题阻断：`test_aio_sandbox_provider.py::test_acquire_async_uses_async_readiness_polling[asyncio]` 对 `.deer-flow/.../workspace` 执行 `chmod(0o777)` 时收到 `PermissionError [WinError 5]`；该路径与本轮 M2 diff 无关。PostgreSQL 并发门禁和真实模型 live smoke 仍未执行。
+
+最终独立双轴复审结果：Standards 0 个剩余 finding，Spec 0 个剩余 blocker。代码侧 M2 Review Gate 关闭；生产合并仍需 PostgreSQL 并发 CI 与真实模型 smoke。
 
 ---
 

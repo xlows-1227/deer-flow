@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from deerflow.publishing.context import PublishedAgentContext
-from deerflow.publishing.instructions import compose_agent_instructions
+from deerflow.publishing.instructions import compose_published_agent_instructions
 from deerflow.skills.parser import parse_allowed_tools, parse_skill_frontmatter
 
 
@@ -53,7 +53,7 @@ class QuotaResolverLike(Protocol):
 class SkillRevisionRepoLike(Protocol):
     """Immutable Skill revision lookup required by the resolver."""
 
-    async def get(self, revision_id: str) -> dict[str, Any] | None: ...
+    async def get(self, revision_id: str, *, owner_user_id: str) -> dict[str, Any] | None: ...
 
 
 class ContentStoreLike(Protocol):
@@ -120,15 +120,19 @@ class PublishedAgentResolver:
             release=release,
         )
         skill_revision_ids = tuple(sorted(str(item["skill_revision_id"]) for item in release.get("skills") or [] if item.get("skill_revision_id")))
-        allowed_tool_names = await self._allowed_tool_names(skill_revision_ids)
+        allowed_tool_names, frozen_skills = await self._frozen_skill_policy(
+            skill_revision_ids,
+            owner_user_id=owner_user_id,
+        )
         effective_quota = await self._quotas.resolve(
             owner_user_id=owner_user_id,
             release=release,
             credential_id=credential_id,
         )
-        instructions = compose_agent_instructions(
+        instructions = compose_published_agent_instructions(
             str(release.get("agent_markdown") or ""),
             str(release.get("soul_markdown") or ""),
+            frozen_skills,
         )
         model_name = release.get("model_name")
         if not isinstance(model_name, str) or not model_name:
@@ -153,14 +157,27 @@ class PublishedAgentResolver:
             allowed_tool_names=allowed_tool_names,
         )
 
-    async def _allowed_tool_names(self, revision_ids: tuple[str, ...]) -> tuple[str, ...] | None:
-        """Derive the tool whitelist from the exact immutable Skill snapshots."""
+    async def _frozen_skill_policy(
+        self,
+        revision_ids: tuple[str, ...],
+        *,
+        owner_user_id: str,
+    ) -> tuple[tuple[str, ...] | None, tuple[tuple[str, str], ...]]:
+        """Load pinned Skill bodies and derive their exact tool whitelist."""
         allowed: set[str] = set()
+        frozen_skills: list[tuple[str, str]] = []
         has_explicit_declaration = False
         for revision_id in revision_ids:
-            revision = await self._skill_revisions.get(revision_id)
+            revision = await self._skill_revisions.get(revision_id, owner_user_id=owner_user_id)
             if revision is None:
                 raise AgentNotAvailableError(f"missing skill revision {revision_id}")
+            owner_scope = revision.get("owner_scope")
+            revision_owner = revision.get("owner_user_id")
+            visibility = revision.get("visibility")
+            is_public = owner_scope == "public" and revision_owner is None and visibility == "public"
+            is_owned = owner_scope == owner_user_id and revision_owner == owner_user_id
+            if not is_public and not is_owned:
+                raise AgentNotAvailableError(f"out-of-scope skill revision {revision_id}")
             skill_name = revision.get("skill_name")
             content_ref = revision.get("content_ref")
             if not isinstance(skill_name, str) or not skill_name or not isinstance(content_ref, str) or not content_ref:
@@ -177,7 +194,11 @@ class PublishedAgentResolver:
             if declared is not None:
                 has_explicit_declaration = True
                 allowed.update(declared)
-        return tuple(sorted(allowed)) if has_explicit_declaration else None
+            frozen_skills.append((skill_name, skill_md))
+        return (
+            tuple(sorted(allowed)) if has_explicit_declaration else None,
+            tuple(sorted(frozen_skills)),
+        )
 
     async def _active_connector_capabilities(
         self,

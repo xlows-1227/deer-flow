@@ -10,6 +10,7 @@ from deerflow.publishing.resolver import (
     AgentSuspendedError,
     PublishedAgentResolver,
 )
+from deerflow.publishing.runtime_policy import build_published_run_config
 
 
 class _AgentRepo:
@@ -58,13 +59,32 @@ class _QuotaResolver:
 class _SkillRevisionRepo:
     def __init__(self, revisions: dict[str, dict] | None = None) -> None:
         self.revisions = revisions or {
-            "sr_1": {"id": "sr_1", "skill_name": "billing-search", "content_ref": "cs://skills/sr_1"},
-            "sr_2": {"id": "sr_2", "skill_name": "billing-export", "content_ref": "cs://skills/sr_2"},
+            "sr_1": {
+                "id": "sr_1",
+                "skill_name": "billing-search",
+                "content_ref": "cs://skills/sr_1",
+                "owner_user_id": None,
+                "owner_scope": "public",
+                "visibility": "public",
+            },
+            "sr_2": {
+                "id": "sr_2",
+                "skill_name": "billing-export",
+                "content_ref": "cs://skills/sr_2",
+                "owner_user_id": None,
+                "owner_scope": "public",
+                "visibility": "public",
+            },
         }
 
-    async def get(self, revision_id: str) -> dict | None:
+    async def get(self, revision_id: str, *, owner_user_id: str) -> dict | None:
         revision = self.revisions.get(revision_id)
-        return dict(revision) if revision is not None else None
+        if revision is None:
+            return None
+        owner_scope = revision.get("owner_scope")
+        if owner_scope not in {"public", owner_user_id}:
+            return None
+        return dict(revision)
 
 
 class _ContentStore:
@@ -157,12 +177,80 @@ async def test_resolve_published_agent_builds_trusted_frozen_context() -> None:
     assert context.connector_capabilities == (("conn-live", "mail.send"),)
     assert context.tool_groups == ("search", "database")
     assert context.model_name == "model-a"
-    assert context.instructions == ("<agent_instructions>\nYou answer billing questions.\n</agent_instructions>\n\n<agent_soul>\nBe concise.\n</agent_soul>")
+    assert context.instructions.startswith("<agent_instructions>\nYou answer billing questions.\n</agent_instructions>\n\n<agent_soul>\nBe concise.\n</agent_soul>")
+    assert '<published_skill name="billing-search">' in context.instructions
+    assert "description: Search billing data" in context.instructions
     assert context.allowed_tool_names == ("read_file", "web_search")
     assert context.memory_enabled is False
     assert context.effective_quota == ("owner-a", {"daily_runs": 20}, "key_1")
     with pytest.raises(FrozenInstanceError):
         context.release_id = "rel_other"  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_acceptance_4_skill_revision_pinning_uses_frozen_body() -> None:
+    frozen = _ContentStore(
+        {
+            "cs://skills/sr_1": {
+                "SKILL.md": b"---\nname: billing-search\ndescription: Frozen\nallowed-tools: []\n---\n\nAlways answer with the frozen workflow.\n",
+            },
+            "cs://skills/sr_2": {
+                "SKILL.md": b"---\nname: billing-export\ndescription: Frozen export\nallowed-tools: []\n---\n\nExport only the pinned format.\n",
+            },
+        }
+    )
+    live_skill_after_publish = "Always answer with the NEW live workflow."
+
+    context = await _resolver(content_store=frozen).resolve(
+        "pa_1",
+        source="api",
+        credential_id="key_1",
+        external_actor="actor-hash",
+        conversation_scope="conv_1",
+        correlation_id="corr_1",
+    )
+
+    assert "Always answer with the frozen workflow." in context.instructions
+    assert live_skill_after_publish not in context.instructions
+    run_config = build_published_run_config(context)
+    runtime_context = run_config["configurable"]["published_agent_context"]
+    assert runtime_context is context
+    assert "Always answer with the frozen workflow." in runtime_context.instructions
+    assert live_skill_after_publish not in runtime_context.instructions
+
+
+@pytest.mark.asyncio
+async def test_resolve_rejects_cross_owner_private_skill_revision() -> None:
+    revisions = _SkillRevisionRepo(
+        {
+            "sr_1": {
+                "id": "sr_1",
+                "skill_name": "billing-search",
+                "content_ref": "cs://skills/sr_1",
+                "owner_user_id": "owner-b",
+                "owner_scope": "owner-b",
+                "visibility": "private",
+            },
+            "sr_2": {
+                "id": "sr_2",
+                "skill_name": "billing-export",
+                "content_ref": "cs://skills/sr_2",
+                "owner_user_id": None,
+                "owner_scope": "public",
+                "visibility": "public",
+            },
+        }
+    )
+
+    with pytest.raises(AgentNotAvailableError, match="missing skill revision sr_1"):
+        await _resolver(skill_revisions=revisions).resolve(
+            "pa_1",
+            source="api",
+            credential_id="key_1",
+            external_actor="actor-hash",
+            conversation_scope="conv_1",
+            correlation_id="corr_1",
+        )
 
 
 @pytest.mark.asyncio

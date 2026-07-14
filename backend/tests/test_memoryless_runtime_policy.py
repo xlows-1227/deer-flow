@@ -80,16 +80,25 @@ def test_published_middlewares_exclude_memory_and_memory_flush(monkeypatch: pyte
         memory=SimpleNamespace(enabled=True, injection_enabled=True),
         token_usage=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
-        loop_detection=SimpleNamespace(enabled=False),
+        loop_detection=SimpleNamespace(enabled=True),
         safety_finish_reason=SimpleNamespace(enabled=False),
         get_model_config=lambda name: SimpleNamespace(supports_vision=False),
     )
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda **kwargs: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config, memory_enabled=None: captured.setdefault("summarization_memory", memory_enabled))
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError(f"Published runtime must not create a summarization model: {kwargs}")),
+    )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda enabled: None)
-    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda **kwargs: "title")
+    monkeypatch.setattr(
+        lead_agent_module,
+        "TitleMiddleware",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError(f"Published runtime must not create a title model: {kwargs}")),
+    )
+    monkeypatch.setattr(lead_agent_module.LoopDetectionMiddleware, "from_config", lambda config: "loop")
     monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MemoryMiddleware must not be constructed")))
     monkeypatch.setattr(
         dynamic_context_module,
@@ -103,10 +112,11 @@ def test_published_middlewares_exclude_memory_and_memory_flush(monkeypatch: pyte
         app_config=app_config,
     )
 
-    assert captured == {"dynamic_include_memory": False, "summarization_memory": False}
-    assert "title" in middlewares
+    assert captured == {"dynamic_include_memory": False}
+    assert "title" not in middlewares
     token_middleware = next(item for item in middlewares if isinstance(item, lead_agent_module.TokenUsageMiddleware))
     assert token_middleware.max_tokens_per_run == 1000
+    assert middlewares.index(token_middleware) > middlewares.index("loop")
 
 
 def test_published_dynamic_context_never_loads_owner_memory(monkeypatch: pytest.MonkeyPatch) -> None:

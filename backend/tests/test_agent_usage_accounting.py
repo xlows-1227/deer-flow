@@ -53,14 +53,30 @@ def _usage(run_id: str, *, owner: str = "owner-1", agent: str = "pa_1", status: 
 
 @pytest.mark.asyncio
 async def test_usage_is_inserted_once_per_run_and_actor_is_hashed(usage_repo):
-    first, created = await usage_repo.record_usage(_usage("run-1"))
-    second, created_again = await usage_repo.record_usage({**_usage("run-1"), "total_tokens": 999})
+    first, created = await usage_repo.record_usage(_usage("run-1"), owner_user_id="owner-1")
+    second, created_again = await usage_repo.record_usage(
+        {**_usage("run-1"), "total_tokens": 999},
+        owner_user_id="owner-1",
+    )
     assert created is True
     assert created_again is False
     assert first["id"] == second["id"]
     assert second["total_tokens"] == 25
     assert second["external_actor_hash"] == hashlib.sha256(b"agent-key:key_1").hexdigest()
     assert "agent-key:key_1" not in repr(second)
+
+
+@pytest.mark.asyncio
+async def test_usage_run_conflict_never_returns_another_owners_row(usage_repo):
+    await usage_repo.record_usage(_usage("run-shared", owner="owner-1"), owner_user_id="owner-1")
+
+    row, created = await usage_repo.record_usage(
+        _usage("run-shared", owner="owner-2"),
+        owner_user_id="owner-2",
+    )
+
+    assert row is None
+    assert created is False
 
 
 @pytest.mark.asyncio
@@ -89,6 +105,7 @@ async def test_usage_insert_and_reservation_settlement_are_one_idempotent_path(u
     values = _usage("run-atomic", agent="pa_atomic")
     assert await ledger.settle(
         reservation.id,
+        owner_user_id="owner-1",
         tokens_used=25,
         status="success",
         run_id="run-atomic",
@@ -96,12 +113,16 @@ async def test_usage_insert_and_reservation_settlement_are_one_idempotent_path(u
     )
     assert not await ledger.settle(
         reservation.id,
+        owner_user_id="owner-1",
         tokens_used=999,
         status="success",
         run_id="run-atomic",
         usage={**values, "total_tokens": 999},
     )
-    stored, created = await usage_repo.record_usage({**values, "total_tokens": 999})
+    stored, created = await usage_repo.record_usage(
+        {**values, "total_tokens": 999},
+        owner_user_id="owner-1",
+    )
     assert created is False
     assert stored["total_tokens"] == 25
 
@@ -109,7 +130,10 @@ async def test_usage_insert_and_reservation_settlement_are_one_idempotent_path(u
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["success", "failed", "cancelled", "timeout"])
 async def test_daily_aggregate_includes_all_terminal_statuses(usage_repo, status):
-    await usage_repo.record_usage(_usage(f"run-{status}", agent=f"pa-{status}", status=status))
+    await usage_repo.record_usage(
+        _usage(f"run-{status}", agent=f"pa-{status}", status=status),
+        owner_user_id="owner-1",
+    )
     result = await usage_repo.aggregate_daily(
         owner_user_id="owner-1",
         agent_id=f"pa-{status}",

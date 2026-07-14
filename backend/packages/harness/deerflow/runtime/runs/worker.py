@@ -124,6 +124,13 @@ def _get_runtime_config(config: dict) -> dict[str, Any]:
     return cfg
 
 
+def _should_track_run_tokens(record: RunRecord, run_events_config: Any | None) -> bool:
+    """Keep published-run accounting mandatory even when event tracking is off."""
+    if bool((record.metadata or {}).get("published_agent")):
+        return True
+    return bool(getattr(run_events_config, "track_token_usage", True))
+
+
 def _current_turn_has_attachment(graph_input: dict) -> bool:
     messages = graph_input.get("messages")
     if not isinstance(messages, list):
@@ -618,7 +625,7 @@ async def run_agent(
                 run_id=run_id,
                 thread_id=thread_id,
                 event_store=event_store,
-                track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                track_token_usage=_should_track_run_tokens(record, run_events_config),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 

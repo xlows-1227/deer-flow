@@ -456,7 +456,16 @@ class ConnectorService:
             raise ConnectorDisabledError(f"Connector is not active: {connector_id}", recoverable=True)
         return await self.repository.get_metadata(connector_id, "schema")
 
-    async def query_database(self, connector_id: str, sql: str, *, reason: str, context: ConnectorRuntimeContext) -> QueryResult:
+    async def _execute_database_query(
+        self,
+        connector_id: str,
+        sql: str,
+        *,
+        reason: str,
+        context: ConnectorRuntimeContext,
+        capability: str,
+        operation: str,
+    ) -> QueryResult:
         instance, grants = await self._load_instance_and_grants(connector_id)
         start = time.perf_counter()
         safety = None
@@ -467,7 +476,7 @@ class ConnectorService:
                 connector_policy=instance.default_policy,
                 grants=grants,
                 context=context,
-                capability=DATABASE_QUERY,
+                capability=capability,
                 system_policy=self._system_policy_for(definition.category),
                 type_policy=definition.default_policy,
                 owner_id=instance.owner_id,
@@ -482,8 +491,8 @@ class ConnectorService:
                 connector_id=connector_id,
                 connector_type=instance.type,
                 context=context,
-                capability=DATABASE_QUERY,
-                operation="query",
+                capability=capability,
+                operation=operation,
                 decision="allow",
                 request_summary={"sql_hash": safety.sql_hash, "sql_preview": safety.normalized_preview, "tables": safety.tables, "reason": reason},
                 result_summary={"row_count": result.row_count, "truncated": result.truncated},
@@ -496,8 +505,8 @@ class ConnectorService:
                 connector_id=connector_id,
                 connector_type=instance.type,
                 context=context,
-                capability=DATABASE_QUERY,
-                operation="query",
+                capability=capability,
+                operation=operation,
                 decision="deny" if exc.status_code in (400, 403) else "error",
                 request_summary={"sql_hash": safety.sql_hash, "tables": safety.tables} if safety else {},
                 error_code=exc.code,
@@ -505,11 +514,29 @@ class ConnectorService:
             )
             raise
 
+    async def query_database(self, connector_id: str, sql: str, *, reason: str, context: ConnectorRuntimeContext) -> QueryResult:
+        """Execute an explicitly authorized read-only database query."""
+        return await self._execute_database_query(
+            connector_id,
+            sql,
+            reason=reason,
+            context=context,
+            capability=DATABASE_QUERY,
+            operation="query",
+        )
+
     async def sample_database_table(self, connector_id: str, *, schema: str, table: str, limit: int, context: ConnectorRuntimeContext) -> QueryResult:
         _assert_safe_identifier(schema)
         _assert_safe_identifier(table)
         sql = f"SELECT * FROM `{schema}`.`{table}` LIMIT {max(1, min(limit, 100))}"
-        return await self.query_database(connector_id, sql, reason=f"Sample table {schema}.{table}", context=context)
+        return await self._execute_database_query(
+            connector_id,
+            sql,
+            reason=f"Sample table {schema}.{table}",
+            context=context,
+            capability=DATABASE_TABLE_SAMPLE,
+            operation="sample",
+        )
 
     async def execute_connector_action(
         self,

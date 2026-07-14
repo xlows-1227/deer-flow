@@ -17,6 +17,7 @@ from deerflow.runtime.runs.worker import (
     _install_runtime_context,
     _queue_flash_memory_capture,
     _rollback_to_pre_run_checkpoint,
+    _should_track_run_tokens,
     _should_use_flash_direct_path,
     run_agent,
 )
@@ -45,6 +46,19 @@ def test_build_runtime_context_includes_app_config_when_present():
     assert context["thread_id"] == "thread-1"
     assert context["run_id"] == "run-1"
     assert context["app_config"] is app_config
+
+
+def test_published_run_tracks_tokens_when_global_tracking_is_disabled():
+    run_events_config = SimpleNamespace(track_token_usage=False)
+
+    assert _should_track_run_tokens(
+        SimpleNamespace(metadata={"published_agent": True}),
+        run_events_config,
+    )
+    assert not _should_track_run_tokens(
+        SimpleNamespace(metadata={}),
+        run_events_config,
+    )
 
 
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():

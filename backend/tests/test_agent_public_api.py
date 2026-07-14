@@ -107,7 +107,7 @@ def test_agent_key_auth_rejects_cross_agent_as_not_found_and_touches_valid_key()
 
 
 class _AllowLedger:
-    async def reserve(self, context, *, request_key):
+    async def reserve(self, context, *, request_key, run_id=None):
         return Reservation(
             id=f"qres_{request_key[:8]}",
             request_key=request_key,
@@ -361,8 +361,12 @@ def test_started_run_is_scheduled_for_settlement_before_serialization(monkeypatc
         status="pending",
     )
 
+    started_run_ids = []
+
     async def start(*args, **kwargs):
+        started_run_ids.append(kwargs["run_id"])
         record = _run_record(status=RunStatus.success)
+        record.run_id = kwargs["run_id"]
         record.total_input_tokens = 2
         record.total_output_tokens = 3
         record.total_tokens = 5
@@ -386,7 +390,60 @@ def test_started_run_is_scheduled_for_settlement_before_serialization(monkeypatc
     )
 
     assert response.status_code == 500
+    assert ledger.reserve.await_args.kwargs["run_id"] == started_run_ids[0]
     ledger.settle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_releases_quota_and_idempotency_claim(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    idempotency = AsyncMock()
+    idempotency.claim.return_value = ({"response_json": None, "run_id": "run-cancel"}, True)
+    ledger = AsyncMock()
+    ledger.reserve.return_value = Reservation(
+        id="qres-cancel",
+        request_key="request-cancel",
+        agent_id="pa_1",
+        credential_id="key_1",
+        reserved_tokens=1000,
+        status="pending",
+    )
+
+    async def cancelled_start(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(agent_public_api, "start_run", cancelled_start)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            owner_user_id="owner-1",
+            agent_key_id="key_1",
+            request_id="req_12345678",
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(run_manager=AsyncMock())),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent_public_api._start_public_run(
+            agent_id="pa_1",
+            conversation_id="conv_1",
+            body=agent_public_api.AgentRunCreateRequest(message="hello"),
+            request=request,
+            idempotency_key="cancel-key",
+            operation="run.create",
+            conversations=conversations,
+            idempotency=idempotency,
+            resolver=resolver,
+            quota_ledger=ledger,
+        )
+
+    ledger.release.assert_awaited_once_with("qres-cancel", owner_user_id="owner-1")
+    idempotency.release.assert_awaited_once_with(
+        api_key_id="key_1",
+        idempotency_key="cancel-key",
+    )
 
 
 def test_started_run_replays_bound_claim_when_idempotency_completion_fails(monkeypatch):
@@ -448,9 +505,9 @@ def test_non_idempotent_runs_with_same_request_id_use_distinct_quota_reservation
     ledger.request_keys = []
     original_reserve = ledger.reserve
 
-    async def capture_reserve(context, *, request_key):
+    async def capture_reserve(context, *, request_key, run_id=None):
         ledger.request_keys.append(request_key)
-        return await original_reserve(context, request_key=request_key)
+        return await original_reserve(context, request_key=request_key, run_id=run_id)
 
     ledger.reserve = capture_reserve
     monkeypatch.setattr(agent_public_api, "start_run", AsyncMock(return_value=_run_record()))

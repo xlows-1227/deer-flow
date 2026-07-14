@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.skill_revision.model import SkillRevisionRow
@@ -160,9 +160,24 @@ class SkillRevisionRepository:
         )
         return row
 
-    async def get(self, revision_id: str) -> dict[str, Any] | None:
+    async def get(self, revision_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Return a public or caller-owned immutable revision, else ``None``."""
+        stmt = select(SkillRevisionRow).where(
+            SkillRevisionRow.id == revision_id,
+            or_(
+                and_(
+                    SkillRevisionRow.owner_scope == "public",
+                    SkillRevisionRow.owner_user_id.is_(None),
+                    SkillRevisionRow.visibility == "public",
+                ),
+                and_(
+                    SkillRevisionRow.owner_scope == owner_user_id,
+                    SkillRevisionRow.owner_user_id == owner_user_id,
+                ),
+            ),
+        )
         async with self._sf() as session:
-            row = await session.get(SkillRevisionRow, revision_id)
+            row = (await session.execute(stmt)).scalar_one_or_none()
             return _to_dict(row) if row else None
 
     async def list_by_skill(self, skill_name: str) -> list[dict[str, Any]]:

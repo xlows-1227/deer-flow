@@ -203,6 +203,37 @@ async def test_idempotency_claim_persists_preallocated_run_id(memory_repos):
 
 
 @pytest.mark.anyio
+async def test_incomplete_idempotency_claim_release_by_run_is_owner_scoped(memory_repos):
+    repository = memory_repos["idempotency"]
+    values = {
+        "user_id": "alice",
+        "api_key_id": "key-recovery",
+        "idempotency_key": "request-recovery",
+        "request_hash": "r" * 64,
+        "run_id": "run-never-persisted",
+        "expires_at": datetime.now(UTC) + timedelta(hours=1),
+    }
+    await repository.claim(values)
+
+    assert not await repository.release_incomplete_by_run_id(
+        run_id="run-never-persisted",
+        user_id="bob",
+    )
+    assert await repository.release_incomplete_by_run_id(
+        run_id="run-never-persisted",
+        user_id="alice",
+    )
+    assert (
+        await repository.get(
+            api_key_id="key-recovery",
+            idempotency_key="request-recovery",
+            request_hash="r" * 64,
+        )
+        is None
+    )
+
+
+@pytest.mark.anyio
 async def test_concurrent_idempotency_claim_has_one_owner(repos):
     repository = repos["idempotency"]
     values = {

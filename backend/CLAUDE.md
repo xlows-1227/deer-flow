@@ -164,16 +164,19 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 6. **GuardrailMiddleware** - Pre-tool-call authorization via pluggable `GuardrailProvider` protocol (optional, if `guardrails.enabled` in config). Evaluates each tool call and returns error ToolMessage on deny. Three provider options: built-in `AllowlistProvider` (zero deps), OAP policy providers (e.g. `aport-agent-guardrails`), or custom providers. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md) for setup, usage, and how to implement a provider.
 7. **SandboxAuditMiddleware** - Audits sandboxed shell/file operations for security logging before tool execution continues
 8. **ToolErrorHandlingMiddleware** - Converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting
-9. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled)
-10. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
-11. **TokenUsageMiddleware** - Records token usage metrics when token tracking is enabled (optional); subagent usage is cached by `tool_call_id` only while token usage is enabled and merged back into the dispatching AIMessage by message position rather than message id
-12. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
-13. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
+9. **DynamicContextMiddleware** - Injects date and optional owner memory into the first HumanMessage; Published Runs keep date context but force memory off
+10. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled; disabled for Published Runs)
+11. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
+12. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model (disabled for Published Runs)
+13. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses; disabled for Published Runs)
 14. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
 15. **DeferredToolFilterMiddleware** - Hides deferred tool schemas from the bound model until tool search is enabled (optional)
 16. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if `subagent_enabled`)
 17. **LoopDetectionMiddleware** - Detects repeated tool-call loops; hard-stop responses clear both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer
-18. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
+18. **Custom middleware** - Caller-supplied request/response behavior (optional)
+19. **SafetyFinishReasonMiddleware** - Suppresses tool execution after provider safety termination (optional)
+20. **TokenUsageMiddleware** - Records token usage and enforces the Published per-Run cap after every request-rewriting middleware has produced the final outbound request; mandatory for Published Runs even when optional global tracking is disabled
+21. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
 
 ### Configuration System
 
@@ -314,18 +317,25 @@ instructions, and resolves Agent-wide plus Key-specific quotas. Only
 mapping keys use `agent-api:<credential_id>` and must never be passed as runtime
 source values.
 
-The resolver also reads each pinned Skill snapshot from the immutable content
-store and derives the effective `allowed-tools` whitelist; missing or malformed
-frozen content fails closed. Trusted Connector authority is copied into
+The resolver also reads each owner/public-scoped pinned Skill snapshot from the
+immutable content store, derives the effective `allowed-tools` whitelist, and
+composes the exact frozen `SKILL.md` body into the trusted Published prompt;
+missing, malformed, cross-owner, or visibility-invalid frozen content fails
+closed. Trusted Connector authority is copied into
 `runtime.context` as exact `(connector_id, capability)` pairs, and Connector
-owner matching never bypasses that published-Release restriction.
+owner matching never bypasses that published-Release restriction. Database
+table sampling authorizes and audits `database.table.sample` directly rather
+than inheriting `database.query`.
 
 `build_published_run_config()` is fail-closed: published runs do not install
 `MemoryMiddleware`, do not inject/read/write owner memory, disable subagents and
 plan mode, and filter management tools. Caller request bodies cannot select the
 owner, model, Release, Skills, connectors, tool policy, or runtime config.
-Published runs always install the token-limit middleware, even when optional
-global token attribution is disabled.
+Published runs disable Title and Summarization auxiliary-model middleware and
+always install the token-limit middleware after request-rewriting middleware,
+so loop warnings are included in the final input estimate. RunJournal token
+accounting is mandatory for Published Runs even when optional global token
+attribution is disabled.
 
 M2 persistence packages:
 
@@ -340,12 +350,25 @@ Quota reservation is serialized per Agent (SQLite `BEGIN IMMEDIATE`, PostgreSQL
 advisory transaction lock). Platform/owner limits are checked over all Agent
 Keys, while Key overrides are checked only over that credential; all Keys remain
 subject to Agent hard caps. The request key is unique, and settlement plus the
-usage insert occurs in one transaction. Success, failure, cancellation, and
-timeout are idempotent terminal states.
+usage insert occurs in one transaction. The quota-reserve transaction stores a
+server-allocated `run_id` before Run persistence begins, so every possible Run
+is already durably bound to its pending reservation settlement outbox. Terminal
+settlement uses bounded retry; Gateway
+shutdown drains in-memory settlement tasks within a fixed timeout, and startup
+uses an explicit privileged recovery scope to scan Run-bound pending
+reservations and recover terminal usage idempotently. A periodic recovery pass
+also settles shared-database orphan rows as timeout after their max-run deadline.
+If a process exits after pre-binding but before Run persistence, recovery waits
+until that deadline, confirms the Run is still absent, then releases the
+reservation and the owner-scoped incomplete idempotency claim. Bound
+reservations never expire into a silent release. Success, failure, cancellation,
+and timeout are idempotent terminal states.
 
 Correlation/`X-Request-ID` values are observability-only: non-idempotent calls
 receive a server-generated quota attempt id. Resolver failures happen before
-idempotency claim; after a Run starts, settlement is attached before response
+idempotency claim; cancellation before worker binding discards the durable
+pending Run and releases both quota and claim. After a Run starts, its durable
+outbox binding and settlement watcher are installed before response
 serialization/idempotency completion. Timeout settlement joins the cancelled
 worker so its final token flush is visible. Key overrides accept only supported
 positive-integer fields.
@@ -353,7 +376,11 @@ positive-integer fields.
 All owner management/accounting repository operations are owner-scoped. Agent
 Key management joins `published_agents.owner_user_id`; quota settlement,
 release, get, and list filter `owner_user_id`; published conversation lookup
-includes its owner; audit listing rejects an unscoped query.
+includes its owner; audit listing rejects an unscoped query. The retained direct
+`record_usage()` repository entry point also requires an explicit owner and
+never returns another owner's row on a global `run_id` conflict. The sole
+cross-owner read is the startup/periodic settlement recovery scan, guarded by a
+system-only recovery scope rather than exposed as an ordinary repository query.
 
 Public JSON/SSE responses are constructed by explicit allowlist serializers.
 Never expose owner ids, Release ids/numbers, instruction source, model policy,
@@ -372,7 +399,9 @@ pytest tests/test_published_agent_resolver.py tests/test_memoryless_runtime_poli
   tests/test_agent_api_key_repo.py tests/test_published_agent_keys_router.py \
   tests/test_agent_public_api.py tests/test_quota_inheritance.py \
   tests/test_quota_reservation.py tests/test_agent_usage_accounting.py \
-  tests/test_external_api_audit.py -q
+  tests/test_external_api_audit.py tests/test_connectors_service.py \
+  tests/test_skill_revision_repo.py tests/test_token_usage_middleware.py \
+  tests/test_run_worker_rollback.py tests/test_gateway_services.py -q
 ```
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
     PublishedRunTokenLimitError,
@@ -29,6 +30,14 @@ class _TokenCountingModel:
         del messages
         return 3
 
+    def get_num_tokens(self, text):
+        return len(text)
+
+
+class _MessageCountingModel(_TokenCountingModel):
+    def get_num_tokens_from_messages(self, messages):
+        return len(messages)
+
 
 class _UnboundedModel:
     model_fields = {}
@@ -45,12 +54,50 @@ class _ModelRequest:
     system_message: object | None = None
     tools: list | None = None
     model_settings: dict | None = None
+    runtime: object | None = None
 
     def override(self, **overrides):
         return replace(self, **overrides)
 
 
 class TestTokenUsageMiddleware:
+    def test_loop_warning_is_counted_before_final_output_cap(self):
+        runtime = _make_runtime()
+        loop = LoopDetectionMiddleware(warn_threshold=2, hard_limit=10)
+        repeated_call = {"name": "bash", "args": {"command": "ls"}}
+        for index in range(2):
+            loop.after_model(
+                {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[{**repeated_call, "id": f"call-{index}"}],
+                        )
+                    ]
+                },
+                runtime,
+            )
+        budget = TokenUsageMiddleware(max_tokens_per_run=10)
+        request = _ModelRequest(
+            model=_MessageCountingModel(),
+            messages=[
+                HumanMessage(content="current"),
+                AIMessage(content="", tool_calls=[{**repeated_call, "id": "call-1"}]),
+                ToolMessage(content="result", tool_call_id="call-1"),
+            ],
+            tools=[],
+            model_settings={},
+            runtime=runtime,
+        )
+
+        bounded = loop.wrap_model_call(
+            request,
+            lambda final_request: budget.wrap_model_call(final_request, lambda value: value),
+        )
+
+        assert bounded.messages[-1].name == "loop_warning"
+        assert bounded.model_settings["max_tokens"] == 6
+
     def test_published_run_caps_each_model_call_to_remaining_budget(self):
         middleware = TokenUsageMiddleware(max_tokens_per_run=10)
         request = _ModelRequest(

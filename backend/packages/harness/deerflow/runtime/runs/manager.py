@@ -498,6 +498,22 @@ class RunManager:
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
+    async def discard_unstarted(self, run_id: str) -> bool:
+        """Delete a pending Run that was cancelled before its worker was bound."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.pending or record.task is not None:
+                return False
+            self._runs.pop(run_id, None)
+        if self._store is not None:
+            await self._call_store_with_retry(
+                "delete",
+                run_id,
+                lambda: self._store.delete(run_id),
+            )
+        logger.info("Discarded unstarted run %s", run_id)
+        return True
+
     async def create_or_reject(
         self,
         thread_id: str,

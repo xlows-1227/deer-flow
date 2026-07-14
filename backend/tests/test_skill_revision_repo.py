@@ -92,7 +92,7 @@ async def test_changed_checksum_creates_new_revision(skill_repo):
     )
     assert first["id"] != second["id"]
     # The original revision is still retrievable unchanged.
-    again = await skill_repo.get(first["id"])
+    again = await skill_repo.get(first["id"], owner_user_id="any-owner")
     assert again is not None
     assert again["content_checksum"] == "sha256:v1"
 
@@ -120,6 +120,9 @@ async def test_private_skill_records_owner(skill_repo):
         declared_connector_caps=[],
     )
     assert rev["id"] != other["id"]
+
+    assert await skill_repo.get(rev["id"], owner_user_id="user-b") is None
+    assert (await skill_repo.get(rev["id"], owner_user_id="user-a"))["id"] == rev["id"]
 
 
 @pytest.mark.asyncio

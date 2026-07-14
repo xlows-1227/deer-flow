@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from deerflow.config.app_config import AppConfig
 from deerflow.config.connectors_config import ConnectorsConfig
 from deerflow.config.sandbox_config import SandboxConfig
-from deerflow.connectors.errors import ConnectorDisabledError, ConnectorNotFoundError, ConnectorValidationError
+from deerflow.connectors.errors import ConnectorAuthorizationError, ConnectorDisabledError, ConnectorNotFoundError, ConnectorValidationError
 from deerflow.connectors.registry import ConnectorRegistry
 from deerflow.connectors.schemas import ConnectorCredentialRef, ConnectorMetadata, ConnectorRuntimeContext, ConnectorTestResult, ConnectorTypeDefinition, QueryColumn, QueryResult
 from deerflow.connectors.secrets import InlineSecretStore, MultiSecretStore, SecretValue
@@ -82,6 +82,48 @@ async def test_connector_service_query_audits_and_masks_secrets(connector_servic
     audit = await connector_service.repository.list_audit(connector_id=connector.id)
     assert audit[0]["request_summary_json"]["tables"] == ["orders.fact_orders"]
     assert "MYSQL_URL" not in str(audit)
+
+
+@pytest.mark.asyncio
+async def test_database_table_sample_uses_exact_published_capability(connector_service: ConnectorService):
+    connector = await connector_service.create_connector(
+        {
+            "name": "orders",
+            "type": "mysql",
+            "config": {"host": "db", "database": "orders"},
+            "credential": {"provider": "env", "ref": "MYSQL_URL"},
+            "default_policy": {"allowed_schemas": ["orders"], "max_rows": 10},
+        },
+        owner_id="u1",
+    )
+
+    result = await connector_service.execute_connector_action(
+        connector.id,
+        capability="database.table.sample",
+        args={"schema": "orders", "table": "fact_orders", "limit": 5},
+        reason="preview orders",
+        context=ConnectorRuntimeContext(
+            user_id="u1",
+            connector_capabilities={connector.id: ["database.table.sample"]},
+        ),
+    )
+
+    assert result.rows == [[1]]
+    audit = await connector_service.repository.list_audit(connector_id=connector.id)
+    assert audit[0]["capability"] == "database.table.sample"
+    assert audit[0]["operation"] == "sample"
+
+    with pytest.raises(ConnectorAuthorizationError):
+        await connector_service.execute_connector_action(
+            connector.id,
+            capability="database.table.sample",
+            args={"schema": "orders", "table": "fact_orders", "limit": 5},
+            reason="preview orders",
+            context=ConnectorRuntimeContext(
+                user_id="u1",
+                connector_capabilities={connector.id: ["database.query"]},
+            ),
+        )
 
 
 @pytest.mark.asyncio
