@@ -75,6 +75,7 @@ class ExternalIdempotencyRepository:
             api_key_id=api_key_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
+            run_id=str(values["run_id"]) if values.get("run_id") else None,
             expires_at=values["expires_at"],
         )
         async with self._sf() as session:

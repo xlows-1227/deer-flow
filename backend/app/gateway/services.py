@@ -305,6 +305,7 @@ async def start_run(
     request: Request,
     *,
     published_context: PublishedAgentContext | None = None,
+    run_id: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -317,6 +318,11 @@ async def start_run(
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
+    published_context : PublishedAgentContext | None
+        Trusted immutable Release authority for published-Agent execution.
+    run_id : str | None
+        Optional preallocated Run id used to bind an idempotency claim before
+        execution starts.
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
@@ -345,6 +351,7 @@ async def start_run(
         record = await run_mgr.create_or_reject(
             thread_id,
             body.assistant_id,
+            run_id=run_id,
             on_disconnect=disconnect,
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},

@@ -387,6 +387,56 @@ def test_started_run_is_scheduled_for_settlement_before_serialization(monkeypatc
     ledger.settle.assert_awaited_once()
 
 
+def test_started_run_replays_bound_claim_when_idempotency_completion_fails(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    record = _run_record()
+
+    class Idempotency:
+        def __init__(self):
+            self.claimed = None
+
+        async def claim(self, values):
+            if self.claimed is None:
+                self.claimed = dict(values)
+                return self.claimed, True
+            return self.claimed, False
+
+        async def complete(self, **values):
+            del values
+            raise RuntimeError("database unavailable")
+
+        async def release(self, **values):
+            raise AssertionError(values)
+
+    async def start(*args, run_id=None, **kwargs):
+        del args, kwargs
+        record.run_id = run_id
+        return record
+
+    idempotency = Idempotency()
+    start_mock = AsyncMock(side_effect=start)
+    monkeypatch.setattr(agent_public_api, "start_run", start_mock)
+    app = _router_app(
+        resolver=resolver,
+        conversations=conversations,
+        idempotency=idempotency,
+    )
+    app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=record))
+    client = TestClient(app, raise_server_exceptions=False)
+    path = "/api/v1/agents/pa_1/conversations/conv_1/runs"
+    headers = {"Idempotency-Key": "completion-failure"}
+
+    assert client.post(path, json={"message": "hello"}, headers=headers).status_code == 500
+    replay = client.post(path, json={"message": "hello"}, headers=headers)
+
+    assert replay.status_code == 202
+    assert replay.json()["run_id"] == record.run_id == idempotency.claimed["run_id"]
+    start_mock.assert_awaited_once()
+
+
 def test_non_idempotent_runs_with_same_request_id_use_distinct_quota_reservations(monkeypatch):
     conversations = AsyncMock()
     conversations.get_for_agent.return_value = _conversation()

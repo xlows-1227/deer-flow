@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.todo import Todo
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -304,6 +307,52 @@ class TokenUsageMiddleware(AgentMiddleware):
         if consumed > limit or (consumed >= limit and (not after_model or has_pending_tools)):
             raise PublishedRunTokenLimitError(f"published run token limit exceeded: {consumed}/{limit}")
 
+    @staticmethod
+    def _output_token_setting(model: Any) -> str:
+        fields = getattr(type(model), "model_fields", {})
+        for name in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+            if name in fields:
+                return name
+        raise PublishedRunTokenLimitError(f"published model {type(model).__name__} does not support an enforceable output token cap")
+
+    @staticmethod
+    def _request_input_tokens(request: ModelRequest) -> int:
+        messages = list(request.messages)
+        if request.system_message is not None:
+            messages.insert(0, request.system_message)
+        try:
+            count = int(request.model.get_num_tokens_from_messages(messages))
+            tools = [convert_to_openai_tool(tool) for tool in (request.tools or [])]
+            if tools:
+                # Model-specific message counters commonly omit bound tool
+                # schemas. Count their canonical JSON separately and include a
+                # small per-tool envelope allowance.
+                import json
+
+                schema_text = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                count += int(request.model.get_num_tokens(schema_text)) + (8 * len(tools))
+        except Exception as exc:
+            raise PublishedRunTokenLimitError(f"cannot preflight published model token usage for {type(request.model).__name__}") from exc
+        if count < 0:
+            raise PublishedRunTokenLimitError("published model returned an invalid input token estimate")
+        return count
+
+    def _bounded_request(self, request: ModelRequest) -> ModelRequest:
+        limit = self.max_tokens_per_run
+        if limit is None:
+            return request
+        consumed = self._cumulative_tokens(list(request.messages))
+        remaining = limit - consumed - self._request_input_tokens(request)
+        if remaining <= 0:
+            raise PublishedRunTokenLimitError(f"published run token limit exhausted before model call: {consumed}/{limit}")
+
+        setting = self._output_token_setting(request.model)
+        model_settings = dict(request.model_settings or {})
+        configured_values = (model_settings.get(setting), getattr(request.model, setting, None))
+        configured_caps = [value for value in configured_values if isinstance(value, int) and not isinstance(value, bool) and value > 0]
+        model_settings[setting] = min([remaining, *configured_caps])
+        return request.override(model_settings=model_settings)
+
     def _apply(self, state: AgentState) -> dict | None:
         messages = state.get("messages", [])
         if not messages:
@@ -389,13 +438,33 @@ class TokenUsageMiddleware(AgentMiddleware):
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Reject a follow-up model call after the current Run exhausts its budget."""
         del runtime
         self._enforce_limit(state.get("messages", []), after_model=False)
         return None
 
     @override
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Apply the current-Run token limit before an asynchronous model call."""
         return self.before_model(state, runtime)
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        """Cap one synchronous model call to the current Run's remaining budget."""
+        return handler(self._bounded_request(request))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        """Cap one asynchronous model call to the current Run's remaining budget."""
+        return await handler(self._bounded_request(request))
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:

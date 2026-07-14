@@ -270,6 +270,11 @@ async def _claim_run(
                 "api_key_id": _credential_id(request),
                 "idempotency_key": idempotency_key,
                 "request_hash": _request_hash(operation, body),
+                # Bind the claim to its Run identity before starting work. If
+                # response serialization or completion persistence fails, a
+                # retry can still resolve this exact Run instead of creating a
+                # duplicate or waiting for claim expiry.
+                "run_id": str(uuid4()),
                 "expires_at": datetime.now(UTC) + timedelta(hours=24),
             }
         )
@@ -454,12 +459,18 @@ async def _start_public_run(
         idempotency_key=idempotency_key,
     )
     if replay is not None and replay.get("response_json"):
-        run_id = str(replay["response_json"]["run_id"])
-        return await _run_or_404(
-            request,
-            run_id,
-            scope=scope,
-        ), True
+        run_id = str(replay.get("run_id") or replay["response_json"]["run_id"])
+        return await _run_or_404(request, run_id, scope=scope), True
+    if replay is not None and not claimed and replay.get("run_id"):
+        try:
+            return await _run_or_404(request, str(replay["run_id"]), scope=scope), True
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            # The claim is bound, but its first request has not durably created
+            # the Run yet. Preserve the existing in-progress contract during
+            # this narrow concurrent-start window.
+            raise HTTPException(status_code=409, detail={"code": "idempotency_in_progress"}) from exc
     if replay is not None and not claimed:
         raise HTTPException(status_code=409, detail={"code": "idempotency_in_progress"})
 
@@ -489,6 +500,7 @@ async def _start_public_run(
             conversation["thread_id"],
             request,
             published_context=context,
+            run_id=str(replay["run_id"]) if claimed and replay is not None and replay.get("run_id") else None,
         )
     except HTTPException as exc:
         await quota_ledger.release(reservation.id, owner_user_id=context.owner_user_id)

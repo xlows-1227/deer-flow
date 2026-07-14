@@ -2,6 +2,7 @@
 
 import importlib
 import logging
+from dataclasses import dataclass, replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,7 +21,65 @@ def _make_runtime():
     return runtime
 
 
+class _TokenCountingModel:
+    model_fields = {"max_tokens": object()}
+    max_tokens = 20
+
+    def get_num_tokens_from_messages(self, messages):
+        del messages
+        return 3
+
+
+class _UnboundedModel:
+    model_fields = {}
+
+    def get_num_tokens_from_messages(self, messages):
+        del messages
+        return 3
+
+
+@dataclass(frozen=True)
+class _ModelRequest:
+    model: object
+    messages: list
+    system_message: object | None = None
+    tools: list | None = None
+    model_settings: dict | None = None
+
+    def override(self, **overrides):
+        return replace(self, **overrides)
+
+
 class TestTokenUsageMiddleware:
+    def test_published_run_caps_each_model_call_to_remaining_budget(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        request = _ModelRequest(
+            model=_TokenCountingModel(),
+            messages=[
+                HumanMessage(content="current"),
+                AIMessage(content="step", usage_metadata={"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}),
+                ToolMessage(content="result", tool_call_id="call-1"),
+            ],
+            tools=[],
+            model_settings={},
+        )
+
+        bounded = middleware.wrap_model_call(request, lambda value: value)
+
+        assert bounded.model_settings["max_tokens"] == 3
+
+    def test_published_run_rejects_models_without_an_output_token_cap(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        request = _ModelRequest(
+            model=_UnboundedModel(),
+            messages=[HumanMessage(content="current")],
+            tools=[],
+            model_settings={},
+        )
+
+        with pytest.raises(PublishedRunTokenLimitError, match="does not support"):
+            middleware.wrap_model_call(request, lambda value: value)
+
     def test_published_run_stops_when_cumulative_usage_exceeds_limit(self):
         middleware = TokenUsageMiddleware(max_tokens_per_run=10)
         messages = [

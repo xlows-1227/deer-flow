@@ -297,13 +297,15 @@ tests/test_auth_type_system.py::test_csrf_does_not_exempt_old_login_path
 1. Resolver 从 Release 固定的 Skill revision/content store 读取冻结 `SKILL.md`，按既有 Skill 语义派生 `allowed_tool_names`；快照缺失、损坏或 name 不一致均 fail closed。
 2. Published runtime 将 Connector 授权以精确 `(connector_id, capability)` map 写入受信 `runtime.context`；Connector policy 在 owner shortcut 之前检查该 map，cached schema、query、generic action 与 summary 均走同一约束。
 3. 未提供 `Idempotency-Key` 时，quota request key 使用服务端 UUID attempt identity，不再使用 caller 可控的 correlation/`X-Request-ID`；显式幂等请求仍保持稳定重放。
-4. Agent/Release Resolver 在 idempotency claim 之前执行；Run 启动后 settlement task 在响应序列化与 `idempotency.complete()` 之前挂接，避免已执行 Run 留下 pending reservation。
-5. timeout 取消后等待 worker task 的 `finally`/journal token flush 完成再结算；published graph 始终安装带 `max_tokens_per_run` 的 token middleware，达到硬上限时终止后续模型/工具循环。
+4. Agent/Release Resolver 在 idempotency claim 之前执行；claim 预先绑定 `run_id`，RunManager 使用同一 id 创建 Run；Run 启动后 settlement task 在响应序列化与 `idempotency.complete()` 之前挂接。即使序列化或 complete 失败，重试仍复用 claim 对应的原 Run，且不会留下只能等待过期的 in-progress 窗口。
+5. timeout 取消后等待 worker task 的 `finally`/journal token flush 完成再结算；published graph 始终安装带 `max_tokens_per_run` 的 token middleware。每次模型调用前按当前 Run 已用量和本次输入预估收紧 provider output-token cap；不能执行 cap/预估的 provider fail closed，响应后再做累计防御性检查，达到上限时终止后续模型/工具循环。
 6. Agent Key create/patch 只接受 `max_concurrent_runs`、`daily_runs`、`daily_tokens`、`max_run_seconds`、`max_tokens_per_run`、`max_input_bytes`、`inbound_rps`，且值必须为非布尔正整数，非法输入返回 422。
 
 Standards 轴同步完成：Agent Key 管理通过 `published_agents.owner_user_id` join 校验；quota reservation 的 reserve/settle/release/get/list、published conversation lookup 与 audit list 均在仓储层携带 owner/principal scope；补齐 `now_fn` / `__init__` 类型标注；Agent/credential quota 判断抽为共享 scope evaluator；公共 API 的三元 scope 收敛为 `_PublishedRequestScope`。
 
 修复后可在当前权限运行的测试记录为：能力策略 focused `20 passed`；公共 API、Key、Resolver、Token 等集合 `59 passed`；Agent Key repository/router `16 passed`；Ruff check、Ruff format check 与 `git diff --check` 通过。依赖 `tmp_path` 的 quota/conversation/Connector integration 在当前 Windows 沙箱因 Temp ACL 于 setup 阶段失败，提权重跑又被平台用量限制拒绝，需由 CI/可写临时目录补跑；本节不把 setup error 记为断言通过，也不据此声明全仓测试全绿。
+
+最终独立复审追加的幂等 complete/serialization 窗口、单次模型调用越过 token cap、audit Agent 查询缺 owner 联合过滤也已关闭；追加后的可执行 M2 回归集合为 `77 passed`。新增 SQLite owner/idempotency 仓储用例使用内存数据库定向验证，不依赖受限的系统临时目录。
 
 ---
 

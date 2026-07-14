@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from deerflow.skills.parser import parse_skill_file
+from deerflow.skills.parser import parse_skill_file, parse_skill_frontmatter
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,6 +26,16 @@ def _write_skill(tmp_path: Path, front_matter: str, body: str = "# My Skill\n") 
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(f"---\n{front_matter}\n---\n{body}", encoding="utf-8")
     return skill_file
+
+
+def test_parse_skill_frontmatter_accepts_crlf():
+    """Shared frontmatter parsing accepts immutable snapshots with CRLF lines."""
+    metadata = parse_skill_frontmatter(
+        "---\r\nname: my-skill\r\ndescription: Test\r\n---\r\n# Body\r\n",
+        Path("my-skill/SKILL.md"),
+    )
+
+    assert metadata == {"name": "my-skill", "description": "Test"}
 
 
 # ---------------------------------------------------------------------------

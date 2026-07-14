@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,19 +12,33 @@ from deerflow.persistence.external_conversation import ExternalConversationExist
 from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository, IdempotencyConflictError
 
 
-@pytest.fixture
-async def repos(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'external.db'}")
+@asynccontextmanager
+async def _repository_bundle(database_url: str):
+    engine = create_async_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sf = async_sessionmaker(engine, expire_on_commit=False)
-    yield {
-        "keys": APIKeyRepository(sf),
-        "conversations": ExternalConversationRepository(sf),
-        "idempotency": ExternalIdempotencyRepository(sf),
-        "audit": ExternalAuditRepository(sf),
-    }
-    await engine.dispose()
+    try:
+        yield {
+            "keys": APIKeyRepository(sf),
+            "conversations": ExternalConversationRepository(sf),
+            "idempotency": ExternalIdempotencyRepository(sf),
+            "audit": ExternalAuditRepository(sf),
+        }
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def repos(tmp_path):
+    async with _repository_bundle(f"sqlite+aiosqlite:///{tmp_path / 'external.db'}") as bundle:
+        yield bundle
+
+
+@pytest.fixture
+async def memory_repos():
+    async with _repository_bundle("sqlite+aiosqlite:///:memory:") as bundle:
+        yield bundle
 
 
 @pytest.mark.anyio
@@ -146,6 +161,7 @@ async def test_idempotency_claim_is_single_owner_and_can_complete(repos):
         "api_key_id": "key-2",
         "idempotency_key": "request-2",
         "request_hash": "c" * 64,
+        "run_id": "run-preallocated",
         "expires_at": datetime.now(UTC) + timedelta(hours=1),
     }
     first, first_claimed = await repository.claim(values)
@@ -153,6 +169,7 @@ async def test_idempotency_claim_is_single_owner_and_can_complete(repos):
     assert first_claimed is True
     assert second_claimed is False
     assert first["id"] == second["id"]
+    assert first["run_id"] == second["run_id"] == "run-preallocated"
 
     await repository.complete(
         api_key_id="key-2",
@@ -163,6 +180,26 @@ async def test_idempotency_claim_is_single_owner_and_can_complete(repos):
     )
     replay = await repository.get(api_key_id="key-2", idempotency_key="request-2", request_hash="c" * 64)
     assert replay["response_json"] == {"run_id": "run-2"}
+
+
+@pytest.mark.anyio
+async def test_idempotency_claim_persists_preallocated_run_id(memory_repos):
+    repository = memory_repos["idempotency"]
+    values = {
+        "user_id": "alice",
+        "api_key_id": "key-preallocated",
+        "idempotency_key": "request-preallocated",
+        "request_hash": "p" * 64,
+        "run_id": "run-preallocated",
+        "expires_at": datetime.now(UTC) + timedelta(hours=1),
+    }
+
+    first, first_claimed = await repository.claim(values)
+    second, second_claimed = await repository.claim(values)
+
+    assert first_claimed is True
+    assert second_claimed is False
+    assert first["run_id"] == second["run_id"] == "run-preallocated"
 
 
 @pytest.mark.anyio
@@ -233,3 +270,28 @@ async def test_audit_lists_by_user_and_key_without_bodies(repos):
 
     with pytest.raises(ValueError, match="scope"):
         await repository.list()
+
+
+@pytest.mark.anyio
+async def test_published_audit_agent_query_requires_and_filters_owner(memory_repos):
+    repository = memory_repos["audit"]
+    for owner in ("owner-a", "owner-b"):
+        await repository.append(
+            {
+                "request_id": f"req-{owner}",
+                "owner_user_id": owner,
+                "agent_id": "pa_shared",
+                "credential_id": f"key-{owner}",
+                "action": "run.create",
+                "method": "POST",
+                "path_template": "/api/v1/agents/{agent_id}/conversations/{conversation_id}/runs",
+                "status_code": 202,
+                "duration_ms": 5,
+            }
+        )
+
+    rows = await repository.list(owner_user_id="owner-a", agent_id="pa_shared")
+
+    assert [row["owner_user_id"] for row in rows] == ["owner-a"]
+    with pytest.raises(ValueError, match="owner"):
+        await repository.list(agent_id="pa_shared")

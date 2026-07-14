@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-import yaml
-
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.instructions import compose_agent_instructions
-from deerflow.skills.parser import parse_allowed_tools
+from deerflow.skills.parser import parse_allowed_tools, parse_skill_frontmatter
 
 
 class AgentNotAvailableError(LookupError):
@@ -171,14 +168,11 @@ class PublishedAgentResolver:
             try:
                 files = self._content.get(content_ref)
                 skill_md = files["SKILL.md"].decode("utf-8")
-                match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", skill_md, re.DOTALL)
-                if match is None:
-                    raise ValueError("missing frontmatter")
-                metadata = yaml.safe_load(match.group(1))
-                if not isinstance(metadata, dict) or metadata.get("name") != skill_name:
+                metadata = parse_skill_frontmatter(skill_md, Path(skill_name) / "SKILL.md")
+                if metadata.get("name") != skill_name:
                     raise ValueError("skill metadata mismatch")
                 declared = parse_allowed_tools(metadata.get("allowed-tools"), Path(skill_name) / "SKILL.md")
-            except (KeyError, UnicodeDecodeError, ValueError, yaml.YAMLError) as exc:
+            except (KeyError, UnicodeDecodeError, ValueError) as exc:
                 raise AgentNotAvailableError(f"unreadable skill revision {revision_id}") from exc
             if declared is not None:
                 has_explicit_declaration = True

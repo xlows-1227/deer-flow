@@ -503,6 +503,7 @@ class RunManager:
         thread_id: str,
         assistant_id: str | None = None,
         *,
+        run_id: str | None = None,
         on_disconnect: DisconnectMode = DisconnectMode.cancel,
         metadata: dict | None = None,
         kwargs: dict | None = None,
@@ -517,8 +518,10 @@ class RunManager:
 
         This method holds the lock across both the check and the insert,
         eliminating the TOCTOU race in separate ``has_inflight`` + ``create``.
+        ``run_id`` may be preallocated by a durable idempotency claim; ordinary
+        callers omit it and receive a random UUID.
         """
-        run_id = str(uuid.uuid4())
+        run_id = run_id or str(uuid.uuid4())
         now = _now_iso()
 
         _supported_strategies = ("reject", "interrupt", "rollback")
