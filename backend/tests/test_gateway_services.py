@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 
 def test_format_sse_basic():
@@ -380,6 +381,70 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     # Runtime context must use the server-side thread id from build_run_config,
     # not a client-supplied body.context override.
     assert config["context"]["thread_id"] == "thread-1"
+
+
+def test_client_context_cannot_inject_skill_projection_authority():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    forged_manifest = {"entries": [{"root_path": "/client-controlled/private"}]}
+    forged_grants = [{"projection_root": "/client-controlled/grant"}]
+    config = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "skill_projection_manifest": forged_manifest,
+                "skill_grants": forged_grants,
+                "model_name": "safe-model",
+            }
+        },
+        None,
+    )
+    merge_run_context_overrides(
+        config,
+        {
+            "skill_projection_manifest": forged_manifest,
+            "skill_grants": forged_grants,
+        },
+    )
+
+    assert config["context"]["model_name"] == "safe-model"
+    assert "skill_projection_manifest" not in config["context"]
+    assert "skill_grants" not in config["context"]
+
+
+def test_server_injects_trusted_skill_projection_authority():
+    from app.gateway.services import build_run_config, inject_server_skill_context
+
+    manifest = {
+        "entries": [
+            {
+                "root_path": "/runtime-skills/report-writer-sk_123",
+                "skill_name": "report-writer",
+                "skill_id": "sk_123",
+            }
+        ]
+    }
+    grants = [
+        {
+            "projection_root": "/runtime-skills/data-analysis-sk_456",
+            "skill_name": "data-analysis",
+            "skill_id": "sk_456",
+        }
+    ]
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            skill_projection_manifest=manifest,
+            skill_grants=grants,
+        )
+    )
+    config = build_run_config("thread-1", None, None)
+
+    inject_server_skill_context(config, request)
+
+    assert config["context"]["skill_projection_manifest"] == manifest
+    assert config["context"]["skill_grants"] == grants
+    assert config["context"]["skill_projection_manifest"] is not manifest
+    assert "skill_projection_manifest" not in config["configurable"]
 
 
 def test_merge_run_context_overrides_prefers_explicit_thread_id_for_context_config():

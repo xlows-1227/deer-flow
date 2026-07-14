@@ -22,7 +22,6 @@ import {
   ChainOfThoughtSearchResults,
   ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
-import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
@@ -32,6 +31,7 @@ import {
   findToolCallResult,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { getToolDisplayPolicy } from "@/core/tools/display-policy";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -228,7 +228,7 @@ export function MessageGroup({
   return (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
-      open={true}
+      defaultOpen={true}
     >
       {aboveLastToolCallSteps.length > 0 && (
         <Button
@@ -442,7 +442,9 @@ function ToolCall({
       fallback
     );
 
-  const path: string | undefined = (args as { path: string })?.path;
+  const displayPolicy = getToolDisplayPolicy(name, args);
+  const rawPath: string | undefined = (args as { path: string })?.path;
+  const path = displayPolicy.isProtected ? undefined : rawPath;
 
   // Hooks must be called unconditionally; the body short-circuits for tools that
   // should not auto-open an artifact editor.
@@ -586,16 +588,16 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.listFolder;
     }
-    const path: string | undefined = (args as { path: string })?.path;
+    const displayPath = displayPolicy.displayPath;
     return (
       <ChainOfThoughtStep
         key={id}
         label={resolveLabel(description)}
         icon={FolderOpenIcon}
       >
-        {path && (
+        {displayPath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {displayPath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -606,16 +608,16 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.readFile;
     }
-    const { path } = args as { path: string; content: string };
+    const displayPath = displayPolicy.displayPath;
     return (
       <ChainOfThoughtStep
         key={id}
         label={resolveLabel(description)}
         icon={BookOpenTextIcon}
       >
-        {path && (
+        {displayPath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {displayPath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -630,21 +632,25 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={path ? "cursor-pointer" : undefined}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
-        onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
-          setOpen(true);
-        }}
+        onClick={
+          path
+            ? () => {
+                select(
+                  new URL(
+                    `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+                  ).toString(),
+                );
+                setOpen(true);
+              }
+            : undefined
+        }
       >
-        {path && (
+        {displayPolicy.displayPath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {displayPolicy.displayPath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -661,22 +667,12 @@ function ToolCall({
         />
       );
     }
-    const command: string | undefined = (args as { command: string })?.command;
     return (
       <ChainOfThoughtStep
         key={id}
         label={resolveLabel(description)}
         icon={SquareTerminalIcon}
-      >
-        {command && (
-          <CodeBlock
-            className="mx-0 cursor-pointer border-none px-0"
-            showLineNumbers={false}
-            language="bash"
-            code={command}
-          />
-        )}
-      </ChainOfThoughtStep>
+      />
     );
   } else if (name === "ask_clarification") {
     return (

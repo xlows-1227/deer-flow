@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
@@ -39,6 +40,44 @@ def _make_event_store(rows: list[dict]):
 
 def _make_message(seq: int) -> dict:
     return {"seq": seq, "event_type": "ai_message", "category": "message", "content": f"msg-{seq}"}
+
+
+def _make_raw_skill_rows() -> list[dict]:
+    return [
+        {
+            "seq": 1,
+            "run_id": "run-skill",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {
+                "type": "ai",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "read_file",
+                        "args": {"path": "/mnt/skills/public/demo/SKILL.md"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            },
+            "metadata": {},
+        },
+        {
+            "seq": 2,
+            "run_id": "run-skill",
+            "event_type": "llm.tool.result",
+            "category": "message",
+            "content": {
+                "type": "tool",
+                "name": "read_file",
+                "tool_call_id": "call-1",
+                "content": "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE",
+                "additional_kwargs": {},
+            },
+            "metadata": {},
+        },
+    ]
 
 
 def _make_store_only_run_manager() -> RunManager:
@@ -145,6 +184,213 @@ def test_empty_data_when_no_messages():
     body = response.json()
     assert body["data"] == []
     assert body["has_more"] is False
+
+
+def test_run_messages_redacts_legacy_skill_results_at_read_time():
+    rows = _make_raw_skill_rows()
+    app = _make_app(event_store=_make_event_store(rows))
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-skill/messages")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+    assert body["data"][1]["content"]["content"] == "Skill instructions loaded."
+    assert body["data"][1]["metadata"]["skill_execution"]["skill_name"] == "demo"
+
+
+def test_run_events_redacts_legacy_skill_results_at_read_time():
+    rows = _make_raw_skill_rows()
+    event_store = _make_event_store([])
+    event_store.list_events = AsyncMock(return_value=rows)
+    app = _make_app(event_store=event_store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-skill/events")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+
+
+def test_run_events_redacts_trace_when_event_filter_omits_skill_call():
+    call_row = {
+        "seq": 10,
+        "run_id": "run-skill",
+        "event_type": "llm.ai.response",
+        "category": "message",
+        "content": {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "read_file",
+                    "args": {"path": "/mnt/skills/public/demo/SKILL.md"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        },
+        "metadata": {},
+    }
+    trace_row = {
+        "seq": 20,
+        "run_id": "run-skill",
+        "event_type": "llm.error",
+        "category": "trace",
+        "content": "provider echoed SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE",
+        "metadata": {"unsafe": "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE"},
+    }
+    event_store = _make_event_store([])
+    event_store.list_events = AsyncMock(return_value=[trace_row])
+    event_store.list_messages_by_run = AsyncMock(side_effect=[[call_row], []])
+    app = _make_app(event_store=event_store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-skill/events?event_types=llm.error")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+    assert response.json()[0]["content"] == "Sensitive execution details hidden."
+
+
+def test_thread_messages_redacts_skill_results_across_runs():
+    rows = _make_raw_skill_rows()
+    event_store = _make_event_store([])
+    event_store.list_messages = AsyncMock(return_value=rows)
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+    app = _make_app(event_store=event_store)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+
+
+def test_run_messages_loads_legacy_call_context_across_page_boundary():
+    tool_row = {
+        "seq": 20,
+        "run_id": "run-skill",
+        "event_type": "llm.tool.result",
+        "category": "message",
+        "content": {
+            "type": "tool",
+            "name": "bash",
+            "tool_call_id": "call-bash",
+            "content": "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE",
+            "additional_kwargs": {},
+        },
+        "metadata": {},
+    }
+    call_row = {
+        "seq": 10,
+        "run_id": "run-skill",
+        "event_type": "llm.ai.response",
+        "category": "message",
+        "content": {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "bash",
+                    "args": {"command": "cat /mnt/skills/custom/demo/SKILL.md"},
+                    "id": "call-bash",
+                    "type": "tool_call",
+                }
+            ],
+        },
+        "metadata": {},
+    }
+    event_store = MagicMock()
+    event_store.list_messages_by_run = AsyncMock(side_effect=[[tool_row], [call_row]])
+    app = _make_app(event_store=event_store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-skill/messages")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+    assert event_store.list_messages_by_run.await_count == 2
+
+
+def test_run_messages_preserves_non_skill_read_file_across_page_boundary():
+    tool_row = {
+        "seq": 20,
+        "run_id": "run-file",
+        "event_type": "llm.tool.result",
+        "category": "message",
+        "content": {
+            "type": "tool",
+            "name": "read_file",
+            "tool_call_id": "call-file",
+            "content": "ordinary user file contents",
+            "additional_kwargs": {},
+        },
+        "metadata": {},
+    }
+    call_row = {
+        "seq": 10,
+        "run_id": "run-file",
+        "event_type": "llm.ai.response",
+        "category": "message",
+        "content": {
+            "type": "ai",
+            "content": "",
+            "tool_calls": [
+                {
+                    "name": "read_file",
+                    "args": {"path": "/mnt/user-data/workspace/report.txt"},
+                    "id": "call-file",
+                    "type": "tool_call",
+                }
+            ],
+        },
+        "metadata": {},
+    }
+    event_store = MagicMock()
+    event_store.list_messages_by_run = AsyncMock(side_effect=[[tool_row], [call_row]])
+    app = _make_app(event_store=event_store)
+
+    app_config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
+    with (
+        patch("app.gateway.skill_redaction.get_app_config", return_value=app_config),
+        TestClient(app) as client,
+    ):
+        response = client.get("/api/threads/thread-1/runs/run-file/messages")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["content"]["content"] == "ordinary user file contents"
+    assert event_store.list_messages_by_run.await_count == 2
+
+
+def test_run_messages_fail_closed_when_legacy_call_context_is_missing():
+    tool_row = {
+        "seq": 20,
+        "run_id": "run-skill",
+        "event_type": "llm.tool.result",
+        "category": "message",
+        "content": {
+            "type": "tool",
+            "name": "bash",
+            "tool_call_id": "missing-call",
+            "content": "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE",
+            "additional_kwargs": {},
+        },
+        "metadata": {},
+    }
+    event_store = MagicMock()
+    event_store.list_messages_by_run = AsyncMock(side_effect=[[tool_row], []])
+    app = _make_app(event_store=event_store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-skill/messages")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+    assert response.json()["data"][0]["content"]["content"] == "Skill instructions loaded."
 
 
 def test_get_run_hydrates_store_only_run():

@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
+from app.gateway.skill_redaction import redact_channel_values, redact_run_event_rows, redact_thread_event_rows
+from deerflow.runtime import RunRecord, RunStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -190,7 +191,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         if checkpoint_tuple is not None:
             checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
             channel_values = checkpoint.get("channel_values", {})
-            return serialize_channel_values(channel_values)
+            return redact_channel_values(channel_values, boundary_id=record.run_id)
     except Exception:
         logger.exception("Failed to fetch final state for run %s", record.run_id)
 
@@ -350,6 +351,7 @@ async def list_thread_messages(
     """Return displayable messages for a thread (across all runs), with feedback attached."""
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
+    messages = await redact_thread_event_rows(event_store, messages, thread_id=thread_id)
 
     # Attach feedback to the last AI message of each run
     feedback_repo = get_feedback_repo(request)
@@ -406,7 +408,13 @@ async def list_run_messages(
         after_seq=after_seq,
     )
     has_more = len(rows) > limit
-    data = rows[:limit] if has_more else rows
+    safe_rows = await redact_run_event_rows(
+        event_store,
+        rows,
+        thread_id=thread_id,
+        run_id=run_id,
+    )
+    data = safe_rows[:limit] if has_more else safe_rows
     return {"data": data, "has_more": has_more}
 
 
@@ -422,7 +430,13 @@ async def list_run_events(
     """Return the full event stream for a run (debug/audit)."""
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
-    return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+    rows = await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+    return await redact_run_event_rows(
+        event_store,
+        rows,
+        thread_id=thread_id,
+        run_id=run_id,
+    )
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)

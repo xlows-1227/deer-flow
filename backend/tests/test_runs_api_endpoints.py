@@ -177,6 +177,55 @@ def test_run_messages_empty_data():
     assert body["has_more"] is False
 
 
+def test_run_messages_redacts_skill_results():
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-skill",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {
+                "type": "ai",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "read_file",
+                        "args": {"path": "/mnt/skills/public/demo/SKILL.md"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            },
+            "metadata": {},
+        },
+        {
+            "seq": 2,
+            "run_id": "run-skill",
+            "event_type": "llm.tool.result",
+            "category": "message",
+            "content": {
+                "type": "tool",
+                "name": "read_file",
+                "tool_call_id": "call-1",
+                "content": "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE",
+                "additional_kwargs": {},
+            },
+            "metadata": {},
+        },
+    ]
+    run_record = {"run_id": "run-skill", "thread_id": "thread-skill"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-skill/messages")
+
+    assert response.status_code == 200
+    assert "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE" not in response.text
+
+
 def _make_feedback_repo(rows: list[dict]):
     """Return an AsyncMock feedback repo whose list_by_run() returns rows."""
     repo = MagicMock()

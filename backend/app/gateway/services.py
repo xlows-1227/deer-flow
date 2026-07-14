@@ -8,6 +8,7 @@ frames, and consuming stream bridge events.  Router modules
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -139,6 +140,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "thread_id",
     }
 )
+_SERVER_ONLY_SKILL_CONTEXT_KEYS = frozenset({"skill_projection_manifest", "skill_grants"})
 
 
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, thread_id: str | None = None) -> None:
@@ -161,6 +163,28 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, value)
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, value)
+
+
+def inject_server_skill_context(config: dict[str, Any], request: Request) -> None:
+    """Inject trusted Skill projection authority from server-owned request state.
+
+    These fields define which runtime paths are protected Skill projections.
+    They must never be accepted from ``RunCreateRequest.context`` or the
+    client-controlled RunnableConfig. A resolver/middleware may attach them to
+    ``request.state`` after authorization; this function copies them into the
+    runtime-only ``config['context']`` container consumed by the worker.
+    """
+
+    runtime_context = config.setdefault("context", {})
+    if not isinstance(runtime_context, dict):
+        return
+    for key in _SERVER_ONLY_SKILL_CONTEXT_KEYS:
+        value = getattr(request.state, key, None)
+        if key == "skill_projection_manifest" and not isinstance(value, (Mapping, list)):
+            continue
+        if key == "skill_grants" and not isinstance(value, list):
+            continue
+        runtime_context[key] = copy.deepcopy(value)
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
@@ -236,6 +260,8 @@ def build_run_config(
                 context = dict(context_value)
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
+            for server_only_key in _SERVER_ONLY_SKILL_CONTEXT_KEYS:
+                context.pop(server_only_key, None)
             config["context"] = context
         else:
             configurable = {"thread_id": thread_id}
@@ -352,6 +378,7 @@ async def start_run(
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
     merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
+    inject_server_skill_context(config, request)
     inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)

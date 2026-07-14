@@ -33,6 +33,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.privacy import SkillContentRedactor
 from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
@@ -40,6 +41,32 @@ from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _make_skill_content_redactor(
+    app_config: AppConfig | None,
+    runtime_context: Any | None = None,
+) -> SkillContentRedactor:
+    return SkillContentRedactor.from_run_context(
+        app_config=app_config,
+        runtime_context=runtime_context if isinstance(runtime_context, dict) else None,
+        boundary="runtime",
+    )
+
+
+def _restrict_unsafe_tracing_callbacks(config: dict[str, Any]) -> None:
+    """Keep only callbacks that explicitly promise Skill-safe payload handling.
+
+    A Gateway run can load an enabled Skill at any point.  Provider callbacks
+    receive raw prompts and ToolMessages before user-boundary redaction, so
+    callbacks are fail-closed unless they opt into the safety contract.
+    """
+
+    callbacks = config.get("callbacks")
+    if callbacks is None:
+        return
+    materialized = list(callbacks) if not isinstance(callbacks, list) else callbacks
+    config["callbacks"] = [callback for callback in materialized if getattr(callback, "deerflow_skill_content_safe", False) is True]
 
 
 def _log_cleanup_exception(task: asyncio.Task, run_id: str, logger: logging.Logger) -> None:
@@ -458,6 +485,7 @@ async def _run_flash_direct_model(
     stream_subgraphs: bool,
     checkpointer: Any | None,
     pre_run_checkpoint_tuple: Any | None,
+    redactor: SkillContentRedactor,
 ) -> bool:
     from langchain_core.messages import AIMessage, SystemMessage, message_chunk_to_message
 
@@ -527,7 +555,12 @@ async def _run_flash_direct_model(
 
     if "messages" in lg_modes:
         for chunk in streamed_chunks:
-            await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize((chunk, metadata), mode="messages"))
+            safe_chunk = redactor.redact_stream_payload(
+                "messages",
+                (chunk, metadata),
+                run_id=record.run_id,
+            )
+            await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize(safe_chunk, mode="messages"))
 
     final_messages = [*conversation_messages, final_ai_message]
     channel_values = {
@@ -537,7 +570,8 @@ async def _run_flash_direct_model(
     }
 
     if "values" in lg_modes:
-        await bridge.publish(record.run_id, "values", serialize(channel_values, mode="values"))
+        safe_values = redactor.redact_stream_payload("values", channel_values, run_id=record.run_id)
+        await bridge.publish(record.run_id, "values", serialize(safe_values, mode="values"))
 
     if not record.abort_event.is_set():
         await _persist_flash_direct_checkpoint(
@@ -588,6 +622,7 @@ async def run_agent(
     pre_run_snapshot: dict[str, Any] | None = None
     pre_run_checkpoint_tuple: Any | None = None
     snapshot_capture_failed = False
+    redactor = _make_skill_content_redactor(ctx.app_config, config.get("context"))
 
     journal = None
 
@@ -614,6 +649,7 @@ async def run_agent(
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+                redactor=redactor,
             )
 
         # 1. Mark running
@@ -695,6 +731,7 @@ async def run_agent(
             tuple(interrupt_after or ()),
         )
         runnable_config = RunnableConfig(**config)
+        _restrict_unsafe_tracing_callbacks(runnable_config)
         if _should_use_flash_direct_path(
             graph_input=graph_input,
             config=config,
@@ -714,6 +751,7 @@ async def run_agent(
                 stream_subgraphs=stream_subgraphs,
                 checkpointer=checkpointer,
                 pre_run_checkpoint_tuple=pre_run_checkpoint_tuple,
+                redactor=redactor,
             )
             if flash_direct_handled:
                 if record.abort_event.is_set():
@@ -742,6 +780,10 @@ async def run_agent(
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
         else:
             agent = agent_factory(config=runnable_config)
+
+        # Agent factories attach tracing callbacks at graph construction time.
+        # Remove any callback that cannot guarantee pre-export Skill redaction.
+        _restrict_unsafe_tracing_callbacks(runnable_config)
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -801,7 +843,8 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 sse_event = _lg_mode_to_sse_event(single_mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                safe_chunk = redactor.redact_stream_payload(single_mode, chunk, run_id=run_id)
+                await bridge.publish(run_id, sse_event, serialize(safe_chunk, mode=single_mode))
         else:
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
@@ -819,7 +862,8 @@ async def run_agent(
                     continue
 
                 sse_event = _lg_mode_to_sse_event(mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                safe_chunk = redactor.redact_stream_payload(mode, chunk, run_id=run_id)
+                await bridge.publish(run_id, sse_event, serialize(safe_chunk, mode=mode))
 
         # 8. Final status
         if record.abort_event.is_set():
@@ -864,8 +908,8 @@ async def run_agent(
             logger.info("Run %s was cancelled", run_id)
 
     except Exception as exc:
-        error_msg = f"{exc}"
-        logger.exception("Run %s failed: %s", run_id, error_msg)
+        error_msg = "Run failed while processing the request."
+        logger.error("Run %s failed with %s", run_id, type(exc).__name__)
         await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         await bridge.publish(
             run_id,

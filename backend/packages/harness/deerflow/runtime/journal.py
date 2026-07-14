@@ -31,12 +31,15 @@ from langgraph.types import Command
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
+    from deerflow.skills.privacy import SkillContentRedactor
 
 logger = logging.getLogger(__name__)
 
 
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
+
+    deerflow_skill_content_safe = True
 
     def __init__(
         self,
@@ -48,6 +51,7 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        redactor: SkillContentRedactor | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -57,6 +61,7 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        self._redactor = redactor
 
         # Write buffer
         self._buffer: list[dict] = []
@@ -340,17 +345,18 @@ class RunJournal(BaseCallbackHandler):
     # -- Internal methods --
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
-        self._buffer.append(
-            {
-                "thread_id": self.thread_id,
-                "run_id": self.run_id,
-                "event_type": event_type,
-                "category": category,
-                "content": content,
-                "metadata": metadata or {},
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        )
+        event = {
+            "thread_id": self.thread_id,
+            "run_id": self.run_id,
+            "event_type": event_type,
+            "category": category,
+            "content": content,
+            "metadata": metadata or {},
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        if self._redactor is not None:
+            event = self._redactor.redact_event(event)
+        self._buffer.append(event)
         if len(self._buffer) >= self._flush_threshold:
             self._flush_sync()
 

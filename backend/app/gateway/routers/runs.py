@@ -18,7 +18,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import serialize_channel_values
+from app.gateway.skill_redaction import redact_channel_values, redact_run_event_rows
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -104,7 +104,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
         if checkpoint_tuple is not None:
             checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
             channel_values = checkpoint.get("channel_values", {})
-            return serialize_channel_values(channel_values)
+            return redact_channel_values(channel_values, boundary_id=record.run_id)
     except Exception:
         logger.exception("Failed to fetch final state for run %s", record.run_id)
 
@@ -153,7 +153,13 @@ async def run_messages(
         after_seq=after_seq,
     )
     has_more = len(rows) > limit
-    data = rows[:limit] if has_more else rows
+    safe_rows = await redact_run_event_rows(
+        event_store,
+        rows,
+        thread_id=run["thread_id"],
+        run_id=run_id,
+    )
+    data = safe_rows[:limit] if has_more else safe_rows
     return {"data": data, "has_more": has_more}
 
 

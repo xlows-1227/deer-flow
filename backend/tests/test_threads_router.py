@@ -6,6 +6,7 @@ import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -16,6 +17,7 @@ from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+_SECRET_SKILL_MARKER = "SECRET_SKILL_MARKER_123_DO_NOT_EXPOSE"
 
 
 class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
@@ -466,6 +468,177 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     body = response.json()
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["checkpoint"]["ts"]), body["checkpoint"]
+
+
+def test_get_thread_state_redacts_skill_contents_from_checkpoint() -> None:
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "skill-state"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-07-13T00:00:00+00:00",
+                "updated_at": "2026-07-13T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"path": "/runtime-skills/private-projection/SKILL.md"},
+                            "id": "call-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=_SECRET_SKILL_MARKER,
+                    tool_call_id="call-1",
+                    name="read_file",
+                ),
+            ]
+        }
+        checkpoint["channel_versions"] = {"messages": 1}
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            checkpoint,
+            {"step": 0, "source": "loop", "writes": None, "parents": {}},
+            {"messages": 1},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
+
+    assert response.status_code == 200, response.text
+    assert _SECRET_SKILL_MARKER not in response.text
+    messages = response.json()["values"]["messages"]
+    assert messages[1]["content"] == "Skill instructions loaded."
+
+
+@pytest.mark.parametrize("tool_name", ["grep", "glob", "ls", "bash"])
+def test_get_thread_state_fails_closed_for_orphan_skill_context_tools(tool_name: str) -> None:
+    app, store, checkpointer = _build_thread_app()
+    thread_id = f"orphan-{tool_name}-state"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-07-13T00:00:00+00:00",
+                "updated_at": "2026-07-13T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {
+            "messages": [
+                ToolMessage(
+                    content=_SECRET_SKILL_MARKER,
+                    tool_call_id=f"orphan-{tool_name}",
+                    name=tool_name,
+                )
+            ]
+        }
+        checkpoint["channel_versions"] = {"messages": 1}
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            checkpoint,
+            {"step": 0, "source": "loop", "writes": None, "parents": {}},
+            {"messages": 1},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
+
+    assert response.status_code == 200, response.text
+    assert _SECRET_SKILL_MARKER not in response.text
+    message = response.json()["values"]["messages"][0]
+    assert message["content"] == "Skill instructions loaded."
+    assert message["tool_call_id"] == f"orphan-{tool_name}"
+
+
+def test_get_thread_history_redacts_skill_contents_from_checkpoint() -> None:
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "skill-history"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-07-13T00:00:00+00:00",
+                "updated_at": "2026-07-13T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"path": "/mnt/skills/custom/demo/SKILL.md"},
+                            "id": "call-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=_SECRET_SKILL_MARKER,
+                    tool_call_id="call-1",
+                    name="read_file",
+                ),
+            ]
+        }
+        checkpoint["channel_versions"] = {"messages": 1}
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            checkpoint,
+            {"step": 0, "source": "loop", "writes": None, "parents": {}},
+            {"messages": 1},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    assert _SECRET_SKILL_MARKER not in response.text
+    messages = response.json()[0]["values"]["messages"]
+    assert messages[1]["content"] == "Skill instructions loaded."
 
 
 def test_rollup_thread_memory_captures_checkpoint_messages_and_rebuilds_profile() -> None:
