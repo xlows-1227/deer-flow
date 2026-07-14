@@ -8,6 +8,10 @@
 
 export type FileSource = "uploaded" | "generated";
 
+export type ConversationFileSource = FileSource;
+
+export type SystemFileFolder = ConversationFileSource | "shared";
+
 export type FileItemKind = "file" | "folder";
 
 export interface FileItem {
@@ -25,22 +29,28 @@ export interface FileItem {
   preview_url: string | null;
   download_url: string | null;
   /**
-   * Set when this record is a thread upload (a file the user attached to a
-   * chat turn via the paperclip / drag-drop), NOT a library file. The
-   * `useAllUserFiles` hook stitches library files and per-thread uploads
-   * into a single list for the file-management page; this field is the
-   * switch the page uses to render the source label and route
-   * open/delete calls to the right endpoint.
+   * Set when this record belongs to a conversation, either as an uploaded
+   * attachment or a generated artifact. The files page uses this field to
+   * render the source conversation and route open/download calls correctly.
    *
    * `undefined` / absent for library files.
    */
   source_thread_id?: string;
   /**
-   * Optional human-readable title for the source thread (only set on
-   * thread uploads). The hook looks it up from `useThreads`; falls back
-   * to the thread id when no title is available.
+   * Optional human-readable title for the source thread. The hook looks it up
+   * from `useThreads`; the UI falls back to the thread id when unavailable.
    */
   source_thread_title?: string;
+  /** Identifies a file that belongs to a locked conversation collection. */
+  conversation_source?: ConversationFileSource;
+  /** Set only on a synthetic, read-only system folder at the root. */
+  system_folder?: SystemFileFolder;
+  /** Present only on a file shared with the current user. */
+  shared_file_id?: string;
+  /** Registered account email of the user who shared this file. */
+  shared_by_email?: string;
+  /** ISO 8601 timestamp for when the share was created. */
+  shared_at?: string;
 }
 
 export interface FileListResponse {

@@ -258,5 +258,6 @@ export function threadUploadToFileItem(
     download_url: file.artifact_url ?? null,
     source_thread_id: threadId,
     source_thread_title: threadTitle,
+    conversation_source: "uploaded",
   };
 }

@@ -23,6 +23,7 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 METADATA_FILENAME = ".deerflow-files.json"
+RESERVED_SYSTEM_FOLDER_NAMES = frozenset({"对话上传", "对话生成", "他人分享"})
 ACTIVE_CONTENT_MIME_TYPES = {
     "text/html",
     "application/xhtml+xml",
@@ -134,6 +135,12 @@ def _normalize_library_path(value: str | None) -> str:
     if any(part in {"", ".", ".."} for part in parts):
         raise HTTPException(status_code=400, detail="Invalid path")
     return "/".join(parts)
+
+
+def _reject_reserved_system_path(value: str | None) -> None:
+    relative = _normalize_library_path(value)
+    if relative and relative.split("/", 1)[0] in RESERVED_SYSTEM_FOLDER_NAMES:
+        raise HTTPException(status_code=403, detail="System folders are read-only")
 
 
 def _resolve_inside(root: Path, value: str | None) -> Path:
@@ -280,7 +287,9 @@ async def create_folder(data: FolderCreateRequest, request: Request, user_id: st
         raise HTTPException(status_code=400, detail="Parent path is not a folder")
 
     name = normalize_filename(data.name.strip())
-    folder = _resolve_inside(root, f"{_normalize_library_path(data.parent_path)}/{name}".strip("/"))
+    folder_path = f"{_normalize_library_path(data.parent_path)}/{name}".strip("/")
+    _reject_reserved_system_path(folder_path)
+    folder = _resolve_inside(root, folder_path)
     if folder.exists():
         raise HTTPException(status_code=409, detail="Folder already exists")
     folder.mkdir(parents=False)
@@ -300,6 +309,7 @@ async def upload_files(
     effective_user_id = await _require_user_id(request)
     _reject_user_id_override(user_id, effective_user_id)
     root = _library_dir(effective_user_id)
+    _reject_reserved_system_path(folder_path)
     folder = _resolve_inside(root, folder_path)
     if not folder.exists():
         raise HTTPException(status_code=404, detail="Folder not found")

@@ -37,6 +37,7 @@ describe("threadUploadToFileItem", () => {
       download_url: baseUpload.artifact_url,
       source_thread_id: "thread-abc",
       source_thread_title: "Q3 plan",
+      conversation_source: "uploaded",
     });
   });
 
