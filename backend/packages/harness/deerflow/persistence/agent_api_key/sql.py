@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.agent_api_key.model import AgentAPIKeyRow
+from deerflow.persistence.published_agent.model import PublishedAgentRow
 
 _KEY_RE = re.compile(r"^dfa_([0-9a-f]{32})_([A-Za-z0-9_-]{40,})$")
 _SCRYPT_N = 2**14
@@ -130,6 +131,7 @@ class AgentAPIKeyRepository:
         self,
         *,
         agent_id: str,
+        owner_user_id: str,
         name: str,
         quota_overrides: Mapping[str, Any] | None = None,
         expires_at: datetime | None = None,
@@ -142,16 +144,38 @@ class AgentAPIKeyRepository:
             expires_at=expires_at,
         )
         async with self._sf() as session:
+            owned = await session.scalar(
+                select(PublishedAgentRow.id).where(
+                    PublishedAgentRow.id == agent_id,
+                    PublishedAgentRow.owner_user_id == owner_user_id,
+                )
+            )
+            if owned is None:
+                raise PermissionError("Agent is not owned by caller")
             session.add(row)
             await session.commit()
             await session.refresh(row)
             return {**_public_dict(row), "api_key": plaintext}
 
-    async def list_by_agent(self, agent_id: str) -> list[dict[str, Any]]:
+    async def list_by_agent(self, agent_id: str, *, owner_user_id: str) -> list[dict[str, Any]]:
         """List safe key metadata for one Agent, expiring stale rows first."""
         now = self._now()
         async with self._sf() as session:
-            rows = (await session.execute(select(AgentAPIKeyRow).where(AgentAPIKeyRow.agent_id == agent_id).order_by(AgentAPIKeyRow.created_at.desc(), AgentAPIKeyRow.id))).scalars().all()
+            rows = (
+                (
+                    await session.execute(
+                        select(AgentAPIKeyRow)
+                        .join(PublishedAgentRow, PublishedAgentRow.id == AgentAPIKeyRow.agent_id)
+                        .where(
+                            AgentAPIKeyRow.agent_id == agent_id,
+                            PublishedAgentRow.owner_user_id == owner_user_id,
+                        )
+                        .order_by(AgentAPIKeyRow.created_at.desc(), AgentAPIKeyRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             changed = False
             for row in rows:
                 if row.status == "active" and row.expires_at is not None and _as_utc(row.expires_at) <= now:
@@ -161,14 +185,17 @@ class AgentAPIKeyRepository:
                 await session.commit()
             return [_public_dict(row) for row in rows]
 
-    async def get(self, agent_id: str, key_id: str) -> dict[str, Any] | None:
+    async def get(self, agent_id: str, key_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         """Return safe key metadata within an Agent scope."""
         async with self._sf() as session:
             row = (
                 await session.execute(
-                    select(AgentAPIKeyRow).where(
+                    select(AgentAPIKeyRow)
+                    .join(PublishedAgentRow, PublishedAgentRow.id == AgentAPIKeyRow.agent_id)
+                    .where(
                         AgentAPIKeyRow.id == key_id,
                         AgentAPIKeyRow.agent_id == agent_id,
+                        PublishedAgentRow.owner_user_id == owner_user_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -198,6 +225,7 @@ class AgentAPIKeyRepository:
         agent_id: str,
         key_id: str,
         *,
+        owner_user_id: str,
         overlap_seconds: int = 24 * 60 * 60,
     ) -> dict[str, Any] | None:
         """Issue a successor key and bound the predecessor overlap period."""
@@ -205,9 +233,12 @@ class AgentAPIKeyRepository:
         async with self._sf() as session:
             old = (
                 await session.execute(
-                    select(AgentAPIKeyRow).where(
+                    select(AgentAPIKeyRow)
+                    .join(PublishedAgentRow, PublishedAgentRow.id == AgentAPIKeyRow.agent_id)
+                    .where(
                         AgentAPIKeyRow.id == key_id,
                         AgentAPIKeyRow.agent_id == agent_id,
+                        PublishedAgentRow.owner_user_id == owner_user_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -231,14 +262,17 @@ class AgentAPIKeyRepository:
             await session.refresh(row)
             return {**_public_dict(row), "api_key": plaintext}
 
-    async def revoke(self, agent_id: str, key_id: str) -> bool:
+    async def revoke(self, agent_id: str, key_id: str, *, owner_user_id: str) -> bool:
         """Immediately revoke an Agent-scoped key idempotently."""
         async with self._sf() as session:
             row = (
                 await session.execute(
-                    select(AgentAPIKeyRow).where(
+                    select(AgentAPIKeyRow)
+                    .join(PublishedAgentRow, PublishedAgentRow.id == AgentAPIKeyRow.agent_id)
+                    .where(
                         AgentAPIKeyRow.id == key_id,
                         AgentAPIKeyRow.agent_id == agent_id,
+                        PublishedAgentRow.owner_user_id == owner_user_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -255,6 +289,7 @@ class AgentAPIKeyRepository:
         agent_id: str,
         key_id: str,
         *,
+        owner_user_id: str,
         name: str | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -262,9 +297,12 @@ class AgentAPIKeyRepository:
         async with self._sf() as session:
             row = (
                 await session.execute(
-                    select(AgentAPIKeyRow).where(
+                    select(AgentAPIKeyRow)
+                    .join(PublishedAgentRow, PublishedAgentRow.id == AgentAPIKeyRow.agent_id)
+                    .where(
                         AgentAPIKeyRow.id == key_id,
                         AgentAPIKeyRow.agent_id == agent_id,
+                        PublishedAgentRow.owner_user_id == owner_user_id,
                     )
                 )
             ).scalar_one_or_none()

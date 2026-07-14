@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any, Literal, Protocol
+
+import yaml
 
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.instructions import compose_agent_instructions
+from deerflow.skills.parser import parse_allowed_tools
 
 
 class AgentNotAvailableError(LookupError):
@@ -48,6 +53,18 @@ class QuotaResolverLike(Protocol):
     ) -> Any: ...
 
 
+class SkillRevisionRepoLike(Protocol):
+    """Immutable Skill revision lookup required by the resolver."""
+
+    async def get(self, revision_id: str) -> dict[str, Any] | None: ...
+
+
+class ContentStoreLike(Protocol):
+    """Read access to immutable Skill revision snapshots."""
+
+    def get(self, content_ref: str) -> dict[str, bytes]: ...
+
+
 class PublishedAgentResolver:
     """Load the current immutable release and derive least-privilege context."""
 
@@ -58,11 +75,15 @@ class PublishedAgentResolver:
         release_repo: AgentReleaseRepoLike,
         connector_repo: ConnectorRepoLike,
         quota_resolver: QuotaResolverLike,
+        skill_revision_repo: SkillRevisionRepoLike,
+        content_store: ContentStoreLike,
     ) -> None:
         self._agents = agent_repo
         self._releases = release_repo
         self._connectors = connector_repo
         self._quotas = quota_resolver
+        self._skill_revisions = skill_revision_repo
+        self._content = content_store
 
     async def resolve(
         self,
@@ -101,6 +122,8 @@ class PublishedAgentResolver:
             owner_user_id=owner_user_id,
             release=release,
         )
+        skill_revision_ids = tuple(sorted(str(item["skill_revision_id"]) for item in release.get("skills") or [] if item.get("skill_revision_id")))
+        allowed_tool_names = await self._allowed_tool_names(skill_revision_ids)
         effective_quota = await self._quotas.resolve(
             owner_user_id=owner_user_id,
             release=release,
@@ -122,7 +145,7 @@ class PublishedAgentResolver:
             credential_id=credential_id,
             external_actor=external_actor,
             conversation_scope=conversation_scope,
-            skill_revision_ids=tuple(sorted(str(item["skill_revision_id"]) for item in release.get("skills") or [] if item.get("skill_revision_id"))),
+            skill_revision_ids=skill_revision_ids,
             connector_capabilities=connector_capabilities,
             tool_groups=tuple(str(group) for group in release.get("tool_groups") or []),
             model_name=model_name,
@@ -130,7 +153,37 @@ class PublishedAgentResolver:
             effective_quota=effective_quota,
             correlation_id=correlation_id,
             idempotency_key=idempotency_key,
+            allowed_tool_names=allowed_tool_names,
         )
+
+    async def _allowed_tool_names(self, revision_ids: tuple[str, ...]) -> tuple[str, ...] | None:
+        """Derive the tool whitelist from the exact immutable Skill snapshots."""
+        allowed: set[str] = set()
+        has_explicit_declaration = False
+        for revision_id in revision_ids:
+            revision = await self._skill_revisions.get(revision_id)
+            if revision is None:
+                raise AgentNotAvailableError(f"missing skill revision {revision_id}")
+            skill_name = revision.get("skill_name")
+            content_ref = revision.get("content_ref")
+            if not isinstance(skill_name, str) or not skill_name or not isinstance(content_ref, str) or not content_ref:
+                raise AgentNotAvailableError(f"invalid skill revision {revision_id}")
+            try:
+                files = self._content.get(content_ref)
+                skill_md = files["SKILL.md"].decode("utf-8")
+                match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", skill_md, re.DOTALL)
+                if match is None:
+                    raise ValueError("missing frontmatter")
+                metadata = yaml.safe_load(match.group(1))
+                if not isinstance(metadata, dict) or metadata.get("name") != skill_name:
+                    raise ValueError("skill metadata mismatch")
+                declared = parse_allowed_tools(metadata.get("allowed-tools"), Path(skill_name) / "SKILL.md")
+            except (KeyError, UnicodeDecodeError, ValueError, yaml.YAMLError) as exc:
+                raise AgentNotAvailableError(f"unreadable skill revision {revision_id}") from exc
+            if declared is not None:
+                has_explicit_declaration = True
+                allowed.update(declared)
+        return tuple(sorted(allowed)) if has_explicit_declaration else None
 
     async def _active_connector_capabilities(
         self,

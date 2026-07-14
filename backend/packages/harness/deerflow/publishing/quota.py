@@ -111,7 +111,7 @@ def resolve_effective_quota(
 class AgentKeyRepoLike(Protocol):
     """Minimal Agent-key repository contract used by quota resolution."""
 
-    async def get(self, agent_id: str, key_id: str) -> dict[str, Any] | None: ...
+    async def get(self, agent_id: str, key_id: str, *, owner_user_id: str) -> dict[str, Any] | None: ...
 
 
 class PublishedQuotaResolver:
@@ -129,8 +129,7 @@ class PublishedQuotaResolver:
         credential_id: str,
     ) -> EffectiveQuota:
         """Resolve Agent-wide owner limits and credential-specific tightening."""
-        del owner_user_id
-        key = await self._keys.get(str(release["agent_id"]), credential_id)
+        key = await self._keys.get(str(release["agent_id"]), credential_id, owner_user_id=owner_user_id)
         key_overrides = key.get("quota_overrides") if key is not None else {}
         return resolve_effective_quota(
             self._platform,
@@ -153,13 +152,14 @@ class UsageRepoLike(Protocol):
         self,
         reservation_id: str,
         *,
+        owner_user_id: str,
         tokens_used: int,
         status: str,
         run_id: str | None,
         usage: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]: ...
 
-    async def release_reservation(self, reservation_id: str) -> bool: ...
+    async def release_reservation(self, reservation_id: str, *, owner_user_id: str) -> bool: ...
 
 
 class QuotaLedger:
@@ -202,6 +202,7 @@ class QuotaLedger:
         self,
         reservation_id: str,
         *,
+        owner_user_id: str,
         tokens_used: int,
         status: str,
         run_id: str | None = None,
@@ -210,6 +211,7 @@ class QuotaLedger:
         """Settle a reservation once and optionally persist terminal usage."""
         _row, changed = await self._repository.settle_reservation(
             reservation_id,
+            owner_user_id=owner_user_id,
             tokens_used=max(0, int(tokens_used)),
             status=status,
             run_id=run_id,
@@ -217,9 +219,9 @@ class QuotaLedger:
         )
         return changed
 
-    async def release(self, reservation_id: str) -> bool:
+    async def release(self, reservation_id: str, *, owner_user_id: str) -> bool:
         """Release a reservation that never reached a running Run."""
-        return await self._repository.release_reservation(reservation_id)
+        return await self._repository.release_reservation(reservation_id, owner_user_id=owner_user_id)
 
 
 __all__ = [

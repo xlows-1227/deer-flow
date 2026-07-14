@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 TOKEN_USAGE_ATTRIBUTION_KEY = "token_usage_attribution"
 
 
+class PublishedRunTokenLimitError(RuntimeError):
+    """Raised when a published Run exhausts its effective token budget."""
+
+
 def _string_arg(value: Any) -> str | None:
     if isinstance(value, str):
         normalized = value.strip()
@@ -267,10 +271,37 @@ def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
 class TokenUsageMiddleware(AgentMiddleware):
     """Logs token usage from model responses and annotates the AI step."""
 
+    def __init__(self, *, max_tokens_per_run: int | None = None) -> None:
+        self.max_tokens_per_run = max_tokens_per_run
+
+    @staticmethod
+    def _cumulative_tokens(messages: list[Any]) -> int:
+        total = 0
+        for message in messages:
+            if not isinstance(message, AIMessage):
+                continue
+            usage = getattr(message, "usage_metadata", None) or {}
+            value = usage.get("total_tokens", 0) or 0
+            if not value:
+                value = (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0)
+            total += int(value)
+        return total
+
+    def _enforce_limit(self, messages: list[Any], *, after_model: bool) -> None:
+        limit = self.max_tokens_per_run
+        if limit is None:
+            return
+        consumed = self._cumulative_tokens(messages)
+        last = messages[-1] if messages else None
+        has_pending_tools = after_model and isinstance(last, AIMessage) and bool(last.tool_calls)
+        if consumed > limit or (consumed >= limit and (not after_model or has_pending_tools)):
+            raise PublishedRunTokenLimitError(f"published run token limit exceeded: {consumed}/{limit}")
+
     def _apply(self, state: AgentState) -> dict | None:
         messages = state.get("messages", [])
         if not messages:
             return None
+        self._enforce_limit(messages, after_model=True)
 
         # Annotate subagent token usage onto the AIMessage that dispatched it.
         # When a task tool completes, its usage is cached by tool_call_id.  Detect
@@ -348,6 +379,16 @@ class TokenUsageMiddleware(AgentMiddleware):
         updated_msg = last.model_copy(update={"additional_kwargs": additional_kwargs})
         state_updates[len(messages) - 1] = updated_msg
         return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
+
+    @override
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        del runtime
+        self._enforce_limit(state.get("messages", []), after_model=False)
+        return None
+
+    @override
+    async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self.before_model(state, runtime)
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:

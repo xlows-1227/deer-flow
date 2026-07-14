@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
@@ -58,6 +59,53 @@ def _usage_dict(row: AgentUsageRecordRow) -> dict[str, Any]:
     return row.to_dict()
 
 
+@dataclass(frozen=True)
+class _ScopeLimits:
+    max_concurrent_runs: int
+    daily_runs: int
+    daily_tokens: int
+    inbound_rps: int
+
+
+@dataclass(frozen=True)
+class _ScopeUsage:
+    pending: tuple[AgentQuotaReservationRow, ...]
+    daily_runs: int
+    consumed_tokens: int
+    recent_runs: int
+
+
+def _scope_usage(rows: list[AgentQuotaReservationRow], *, one_second_ago: datetime) -> _ScopeUsage:
+    return _ScopeUsage(
+        pending=tuple(row for row in rows if row.status == "pending"),
+        daily_runs=len(rows),
+        consumed_tokens=sum(row.reserved_tokens if row.status == "pending" else row.tokens_used for row in rows),
+        recent_runs=sum(1 for row in rows if _as_utc(row.created_at) >= one_second_ago),
+    )
+
+
+def _enforce_scope_limits(
+    scopes: tuple[tuple[_ScopeUsage, _ScopeLimits], ...],
+    *,
+    now: datetime,
+    next_day: datetime,
+    reserved_tokens: int,
+) -> None:
+    for usage, limits in scopes:
+        if len(usage.pending) >= limits.max_concurrent_runs:
+            retry_after = min(max(1, math.ceil((_as_utc(row.expires_at) - now).total_seconds())) for row in usage.pending)
+            raise QuotaReservationLimitError("max_concurrent_runs_exceeded", retry_after=retry_after)
+    for usage, limits in scopes:
+        if usage.daily_runs >= limits.daily_runs:
+            raise QuotaReservationLimitError("daily_runs_exceeded", retry_after=math.ceil((next_day - now).total_seconds()))
+    for usage, limits in scopes:
+        if usage.consumed_tokens + reserved_tokens > limits.daily_tokens:
+            raise QuotaReservationLimitError("daily_tokens_exceeded", retry_after=math.ceil((next_day - now).total_seconds()))
+    for usage, limits in scopes:
+        if usage.recent_runs >= limits.inbound_rps:
+            raise QuotaReservationLimitError("inbound_rps_exceeded", retry_after=1)
+
+
 class AgentUsageRepository:
     """Persist reservations and exactly-once usage records for published runs."""
 
@@ -65,7 +113,7 @@ class AgentUsageRepository:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        now_fn=_now,
+        now_fn: Callable[[], datetime] = _now,
     ) -> None:
         self._sf = session_factory
         self._now = now_fn
@@ -88,6 +136,7 @@ class AgentUsageRepository:
     ) -> tuple[dict[str, Any], bool]:
         """Atomically enforce Agent and credential scopes, then reserve capacity."""
         agent_id = str(values["agent_id"])
+        owner_user_id = str(values["owner_user_id"])
         credential_id = str(values["credential_id"])
         request_key = str(values["request_key"])
         if len(request_key) > 128:
@@ -103,12 +152,20 @@ class AgentUsageRepository:
                 update(AgentQuotaReservationRow)
                 .where(
                     AgentQuotaReservationRow.agent_id == agent_id,
+                    AgentQuotaReservationRow.owner_user_id == owner_user_id,
                     AgentQuotaReservationRow.status == "pending",
                     AgentQuotaReservationRow.expires_at <= now,
                 )
                 .values(status="released", terminal_status="expired", settled_at=now)
             )
-            existing = (await session.execute(select(AgentQuotaReservationRow).where(AgentQuotaReservationRow.request_key == request_key))).scalar_one_or_none()
+            existing = (
+                await session.execute(
+                    select(AgentQuotaReservationRow).where(
+                        AgentQuotaReservationRow.request_key == request_key,
+                        AgentQuotaReservationRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
             if existing is not None and existing.status != "released":
                 await session.commit()
                 return _row_dict(existing), False
@@ -121,6 +178,7 @@ class AgentUsageRepository:
                     await session.execute(
                         select(AgentQuotaReservationRow).where(
                             AgentQuotaReservationRow.agent_id == agent_id,
+                            AgentQuotaReservationRow.owner_user_id == owner_user_id,
                             AgentQuotaReservationRow.created_at >= day_start,
                             AgentQuotaReservationRow.status.in_(("pending", "settled")),
                         )
@@ -130,57 +188,30 @@ class AgentUsageRepository:
                 .all()
             )
             credential_rows = [row for row in agent_rows if row.credential_id == credential_id]
-            agent_pending = [row for row in agent_rows if row.status == "pending"]
-            credential_pending = [row for row in credential_rows if row.status == "pending"]
-            if len(agent_pending) >= quota.agent_max_concurrent_runs:
-                retry_after = min(max(1, math.ceil((_as_utc(row.expires_at) - now).total_seconds())) for row in agent_pending)
-                raise QuotaReservationLimitError(
-                    "max_concurrent_runs_exceeded",
-                    retry_after=retry_after,
-                )
-            if len(credential_pending) >= quota.max_concurrent_runs:
-                retry_after = min(max(1, math.ceil((_as_utc(row.expires_at) - now).total_seconds())) for row in credential_pending)
-                raise QuotaReservationLimitError(
-                    "max_concurrent_runs_exceeded",
-                    retry_after=retry_after,
-                )
-            if len(agent_rows) >= quota.agent_daily_runs:
-                raise QuotaReservationLimitError(
-                    "daily_runs_exceeded",
-                    retry_after=math.ceil((next_day - now).total_seconds()),
-                )
-            if len(credential_rows) >= quota.daily_runs:
-                raise QuotaReservationLimitError(
-                    "daily_runs_exceeded",
-                    retry_after=math.ceil((next_day - now).total_seconds()),
-                )
-            agent_consumed_tokens = sum(row.reserved_tokens if row.status == "pending" else row.tokens_used for row in agent_rows)
-            credential_consumed_tokens = sum(row.reserved_tokens if row.status == "pending" else row.tokens_used for row in credential_rows)
             reserved_tokens = min(
                 int(values.get("reserved_tokens") or quota.max_tokens_per_run),
                 quota.max_tokens_per_run,
             )
-            if agent_consumed_tokens + reserved_tokens > quota.agent_daily_tokens:
-                raise QuotaReservationLimitError(
-                    "daily_tokens_exceeded",
-                    retry_after=math.ceil((next_day - now).total_seconds()),
-                )
-            if credential_consumed_tokens + reserved_tokens > quota.daily_tokens:
-                raise QuotaReservationLimitError(
-                    "daily_tokens_exceeded",
-                    retry_after=math.ceil((next_day - now).total_seconds()),
-                )
-            agent_recent_count = sum(1 for row in agent_rows if _as_utc(row.created_at) >= one_second_ago)
-            credential_recent_count = sum(1 for row in credential_rows if _as_utc(row.created_at) >= one_second_ago)
-            if agent_recent_count >= quota.agent_inbound_rps:
-                raise QuotaReservationLimitError("inbound_rps_exceeded", retry_after=1)
-            if credential_recent_count >= quota.inbound_rps:
-                raise QuotaReservationLimitError("inbound_rps_exceeded", retry_after=1)
+            _enforce_scope_limits(
+                (
+                    (
+                        _scope_usage(agent_rows, one_second_ago=one_second_ago),
+                        _ScopeLimits(quota.agent_max_concurrent_runs, quota.agent_daily_runs, quota.agent_daily_tokens, quota.agent_inbound_rps),
+                    ),
+                    (
+                        _scope_usage(credential_rows, one_second_ago=one_second_ago),
+                        _ScopeLimits(quota.max_concurrent_runs, quota.daily_runs, quota.daily_tokens, quota.inbound_rps),
+                    ),
+                ),
+                now=now,
+                next_day=next_day,
+                reserved_tokens=reserved_tokens,
+            )
 
             row = AgentQuotaReservationRow(
                 id=str(values.get("id") or f"qres_{uuid4().hex}"),
                 request_key=request_key,
-                owner_user_id=str(values["owner_user_id"]),
+                owner_user_id=owner_user_id,
                 agent_id=agent_id,
                 credential_id=credential_id,
                 reserved_tokens=reserved_tokens,
@@ -192,7 +223,14 @@ class AgentUsageRepository:
             except IntegrityError:
                 await session.rollback()
                 async with self._sf() as retry_session:
-                    replay = (await retry_session.execute(select(AgentQuotaReservationRow).where(AgentQuotaReservationRow.request_key == request_key))).scalar_one_or_none()
+                    replay = (
+                        await retry_session.execute(
+                            select(AgentQuotaReservationRow).where(
+                                AgentQuotaReservationRow.request_key == request_key,
+                                AgentQuotaReservationRow.owner_user_id == owner_user_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
                     if replay is None:
                         raise
                     return _row_dict(replay), False
@@ -203,6 +241,7 @@ class AgentUsageRepository:
         self,
         reservation_id: str,
         *,
+        owner_user_id: str,
         tokens_used: int,
         status: str,
         run_id: str | None,
@@ -211,11 +250,14 @@ class AgentUsageRepository:
         """Settle a pending reservation and optionally insert usage atomically."""
         if status not in {"success", "cancelled", "timeout", "failed"}:
             raise ValueError(f"unsupported quota terminal status: {status}")
+        if usage is not None and str(usage.get("owner_user_id") or "") != owner_user_id:
+            raise ValueError("usage owner_user_id must match reservation scope")
         async with self._sf() as session:
             result = await session.execute(
                 update(AgentQuotaReservationRow)
                 .where(
                     AgentQuotaReservationRow.id == reservation_id,
+                    AgentQuotaReservationRow.owner_user_id == owner_user_id,
                     AgentQuotaReservationRow.status == "pending",
                 )
                 .values(
@@ -229,7 +271,14 @@ class AgentUsageRepository:
             if result.rowcount == 1 and usage is not None:
                 await self._insert_usage_ignore(session, usage)
             await session.commit()
-            row = await session.get(AgentQuotaReservationRow, reservation_id)
+            row = (
+                await session.execute(
+                    select(AgentQuotaReservationRow).where(
+                        AgentQuotaReservationRow.id == reservation_id,
+                        AgentQuotaReservationRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
             return (_row_dict(row) if row else None), result.rowcount == 1
 
     async def _insert_usage_ignore(
@@ -330,13 +379,14 @@ class AgentUsageRepository:
             "totals": totals,
         }
 
-    async def release_reservation(self, reservation_id: str) -> bool:
+    async def release_reservation(self, reservation_id: str, *, owner_user_id: str) -> bool:
         """Release a pending reservation idempotently."""
         async with self._sf() as session:
             result = await session.execute(
                 update(AgentQuotaReservationRow)
                 .where(
                     AgentQuotaReservationRow.id == reservation_id,
+                    AgentQuotaReservationRow.owner_user_id == owner_user_id,
                     AgentQuotaReservationRow.status == "pending",
                 )
                 .values(
@@ -348,16 +398,36 @@ class AgentUsageRepository:
             await session.commit()
             return result.rowcount == 1
 
-    async def get_reservation(self, reservation_id: str) -> dict[str, Any] | None:
+    async def get_reservation(self, reservation_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         """Return one reservation by internal id."""
         async with self._sf() as session:
-            row = await session.get(AgentQuotaReservationRow, reservation_id)
+            row = (
+                await session.execute(
+                    select(AgentQuotaReservationRow).where(
+                        AgentQuotaReservationRow.id == reservation_id,
+                        AgentQuotaReservationRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
             return _row_dict(row) if row else None
 
-    async def list_reservations(self, *, agent_id: str) -> list[dict[str, Any]]:
+    async def list_reservations(self, *, owner_user_id: str, agent_id: str) -> list[dict[str, Any]]:
         """List reservations for one Agent in creation order."""
         async with self._sf() as session:
-            rows = (await session.execute(select(AgentQuotaReservationRow).where(AgentQuotaReservationRow.agent_id == agent_id).order_by(AgentQuotaReservationRow.created_at, AgentQuotaReservationRow.id))).scalars().all()
+            rows = (
+                (
+                    await session.execute(
+                        select(AgentQuotaReservationRow)
+                        .where(
+                            AgentQuotaReservationRow.owner_user_id == owner_user_id,
+                            AgentQuotaReservationRow.agent_id == agent_id,
+                        )
+                        .order_by(AgentQuotaReservationRow.created_at, AgentQuotaReservationRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             return [_row_dict(row) for row in rows]
 
 

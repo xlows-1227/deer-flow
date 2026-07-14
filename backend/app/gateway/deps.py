@@ -183,6 +183,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             from deerflow.connectors.service import make_connector_service
             from deerflow.persistence.agent_release import AgentReleaseRepository
+            from deerflow.persistence.skill_revision import SkillRevisionRepository
+            from deerflow.publishing.content_store import get_content_store
             from deerflow.publishing.quota import PublishedQuotaResolver, QuotaLedger
             from deerflow.publishing.resolver import PublishedAgentResolver
             from deerflow.publishing.skills_index import ConnectorServiceRepo
@@ -198,6 +200,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 release_repo=AgentReleaseRepository(sf),
                 connector_repo=ConnectorServiceRepo(make_connector_service()),
                 quota_resolver=quota_resolver,
+                skill_revision_repo=SkillRevisionRepository(sf),
+                content_store=get_content_store(),
             )
         else:
             from deerflow.persistence.scheduled_task import make_scheduled_task_store

@@ -216,8 +216,8 @@ def test_conversation_lookup_is_scoped_by_agent_and_credential():
     now = datetime.now(UTC)
     conversations = AsyncMock()
 
-    async def get_for_agent(conversation_id, *, agent_id, credential_id):
-        if (conversation_id, agent_id, credential_id) != ("conv_1", "pa_1", "key_1"):
+    async def get_for_agent(conversation_id, *, owner_user_id, agent_id, credential_id):
+        if (conversation_id, owner_user_id, agent_id, credential_id) != ("conv_1", "owner-1", "pa_1", "key_1"):
             return None
         return {
             "conversation_id": "conv_1",
@@ -322,6 +322,95 @@ def test_run_idempotency_replays_one_internal_run(monkeypatch):
     assert second.status_code == 202
     assert first.json()["run_id"] == second.json()["run_id"] == "run_1"
     start.assert_awaited_once()
+
+
+def test_resolver_failure_does_not_leave_an_idempotency_claim():
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.side_effect = AgentNotAvailableError("pa_1")
+    idempotency = AsyncMock()
+    app = _router_app(resolver=resolver, conversations=conversations, idempotency=idempotency)
+
+    response = TestClient(app).post(
+        "/api/v1/agents/pa_1/conversations/conv_1/runs",
+        json={"message": "hello"},
+        headers={"Idempotency-Key": "retryable"},
+    )
+
+    assert response.status_code == 404
+    idempotency.claim.assert_not_awaited()
+
+
+def test_started_run_is_scheduled_for_settlement_before_serialization(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    idempotency = AsyncMock()
+    idempotency.claim.return_value = ({"response_json": None}, True)
+    ledger = AsyncMock()
+    ledger.reserve.return_value = Reservation(
+        id="qres_1",
+        request_key="request-1",
+        agent_id="pa_1",
+        credential_id="key_1",
+        reserved_tokens=1000,
+        status="pending",
+    )
+
+    async def start(*args, **kwargs):
+        record = _run_record(status=RunStatus.success)
+        record.total_input_tokens = 2
+        record.total_output_tokens = 3
+        record.total_tokens = 5
+        record.task = asyncio.create_task(asyncio.sleep(0))
+        await record.task
+        return record
+
+    monkeypatch.setattr(agent_public_api, "start_run", start)
+    monkeypatch.setattr(agent_public_api, "serialize_agent_run", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("serialization failed")))
+    app = _router_app(
+        resolver=resolver,
+        conversations=conversations,
+        idempotency=idempotency,
+        quota_ledger=ledger,
+    )
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/v1/agents/pa_1/conversations/conv_1/runs",
+        json={"message": "hello"},
+        headers={"Idempotency-Key": "settle-even-on-response-failure"},
+    )
+
+    assert response.status_code == 500
+    ledger.settle.assert_awaited_once()
+
+
+def test_non_idempotent_runs_with_same_request_id_use_distinct_quota_reservations(monkeypatch):
+    conversations = AsyncMock()
+    conversations.get_for_agent.return_value = _conversation()
+    resolver = AsyncMock()
+    resolver.resolve.return_value = _context()
+    ledger = _AllowLedger()
+    ledger.request_keys = []
+    original_reserve = ledger.reserve
+
+    async def capture_reserve(context, *, request_key):
+        ledger.request_keys.append(request_key)
+        return await original_reserve(context, request_key=request_key)
+
+    ledger.reserve = capture_reserve
+    monkeypatch.setattr(agent_public_api, "start_run", AsyncMock(return_value=_run_record()))
+    app = _router_app(resolver=resolver, conversations=conversations, quota_ledger=ledger)
+    client = TestClient(app)
+    path = "/api/v1/agents/pa_1/conversations/conv_1/runs"
+
+    assert client.post(path, json={"message": "first"}).status_code == 202
+    assert client.post(path, json={"message": "second"}).status_code == 202
+
+    assert len(ledger.request_keys) == 2
+    assert ledger.request_keys[0] != ledger.request_keys[1]
 
 
 def test_quota_rejection_returns_429_retry_after_and_creates_no_run(monkeypatch):

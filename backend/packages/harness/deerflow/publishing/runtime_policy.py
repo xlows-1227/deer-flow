@@ -32,6 +32,9 @@ def build_published_run_config(
             config[key] = dict(value) if key == "metadata" and isinstance(value, dict) else value
 
     connector_ids = sorted({connector_id for connector_id, _capability in context.connector_capabilities})
+    connector_capabilities: dict[str, list[str]] = {}
+    for connector_id, capability in context.connector_capabilities:
+        connector_capabilities.setdefault(connector_id, []).append(capability)
     config["configurable"] = {
         "published_agent_context": context,
         "model_name": context.model_name,
@@ -45,5 +48,11 @@ def build_published_run_config(
         "is_bootstrap": False,
         "thinking_enabled": False,
         "mode": "published",
+    }
+    config["context"] = {
+        "user_id": context.owner_user_id,
+        "connector_ids": connector_ids,
+        "connector_capabilities": connector_capabilities,
+        "published_agent_id": context.agent_id,
     }
     return RunnableConfig(**config)

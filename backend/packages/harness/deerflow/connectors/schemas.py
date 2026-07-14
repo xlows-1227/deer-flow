@@ -85,6 +85,9 @@ class ConnectorRuntimeContext(BaseModel):
     agent_id: str | None = None
     skill_name: str | None = None
     connector_ids: list[str] | None = None
+    # ``None`` means an ordinary owner/grant-authorized runtime. A mapping is
+    # trusted Release authority and restricts calls to exact connector/capability pairs.
+    connector_capabilities: dict[str, list[str]] | None = None
 
 
 class AuthorizationDecision(BaseModel):

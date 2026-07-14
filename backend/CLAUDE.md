@@ -314,10 +314,18 @@ instructions, and resolves Agent-wide plus Key-specific quotas. Only
 mapping keys use `agent-api:<credential_id>` and must never be passed as runtime
 source values.
 
+The resolver also reads each pinned Skill snapshot from the immutable content
+store and derives the effective `allowed-tools` whitelist; missing or malformed
+frozen content fails closed. Trusted Connector authority is copied into
+`runtime.context` as exact `(connector_id, capability)` pairs, and Connector
+owner matching never bypasses that published-Release restriction.
+
 `build_published_run_config()` is fail-closed: published runs do not install
 `MemoryMiddleware`, do not inject/read/write owner memory, disable subagents and
 plan mode, and filter management tools. Caller request bodies cannot select the
 owner, model, Release, Skills, connectors, tool policy, or runtime config.
+Published runs always install the token-limit middleware, even when optional
+global token attribution is disabled.
 
 M2 persistence packages:
 
@@ -334,6 +342,18 @@ Keys, while Key overrides are checked only over that credential; all Keys remain
 subject to Agent hard caps. The request key is unique, and settlement plus the
 usage insert occurs in one transaction. Success, failure, cancellation, and
 timeout are idempotent terminal states.
+
+Correlation/`X-Request-ID` values are observability-only: non-idempotent calls
+receive a server-generated quota attempt id. Resolver failures happen before
+idempotency claim; after a Run starts, settlement is attached before response
+serialization/idempotency completion. Timeout settlement joins the cancelled
+worker so its final token flush is visible. Key overrides accept only supported
+positive-integer fields.
+
+All owner management/accounting repository operations are owner-scoped. Agent
+Key management joins `published_agents.owner_user_id`; quota settlement,
+release, get, and list filter `owner_user_id`; published conversation lookup
+includes its owner; audit listing rejects an unscoped query.
 
 Public JSON/SSE responses are constructed by explicit allowlist serializers.
 Never expose owner ids, Release ids/numbers, instruction source, model policy,

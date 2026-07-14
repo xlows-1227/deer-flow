@@ -4,10 +4,12 @@ import importlib
 import logging
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
+    PublishedRunTokenLimitError,
     TokenUsageMiddleware,
 )
 
@@ -19,6 +21,27 @@ def _make_runtime():
 
 
 class TestTokenUsageMiddleware:
+    def test_published_run_stops_when_cumulative_usage_exceeds_limit(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        messages = [
+            AIMessage(content="step", usage_metadata={"input_tokens": 3, "output_tokens": 3, "total_tokens": 6}),
+            AIMessage(content="done", usage_metadata={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}),
+        ]
+
+        with pytest.raises(PublishedRunTokenLimitError):
+            middleware.after_model({"messages": messages}, _make_runtime())
+
+    def test_published_run_does_not_execute_tools_after_consuming_exact_limit(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-1", "name": "web_search", "args": {"query": "x"}}],
+            usage_metadata={"input_tokens": 6, "output_tokens": 4, "total_tokens": 10},
+        )
+
+        with pytest.raises(PublishedRunTokenLimitError):
+            middleware.after_model({"messages": [message]}, _make_runtime())
+
     def test_logs_cache_token_details(self, caplog):
         middleware = TokenUsageMiddleware()
         message = AIMessage(

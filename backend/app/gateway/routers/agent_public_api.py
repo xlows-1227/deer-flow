@@ -8,8 +8,10 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -127,6 +129,23 @@ def _owner_user_id(request: Request) -> str:
     return str(value)
 
 
+@dataclass(frozen=True)
+class _PublishedRequestScope:
+    owner_user_id: str
+    agent_id: str
+    credential_id: str
+    conversation_id: str
+
+
+def _request_scope(request: Request, *, agent_id: str, conversation_id: str) -> _PublishedRequestScope:
+    return _PublishedRequestScope(
+        owner_user_id=_owner_user_id(request),
+        agent_id=agent_id,
+        credential_id=_credential_id(request),
+        conversation_id=conversation_id,
+    )
+
+
 def _validate_idempotency_key(value: str | None) -> str | None:
     if value is None:
         return None
@@ -168,14 +187,13 @@ async def _resolve_context(
 async def _conversation_or_404(
     repository: ExternalConversationRepository,
     *,
-    agent_id: str,
-    credential_id: str,
-    conversation_id: str,
+    scope: _PublishedRequestScope,
 ) -> dict[str, Any]:
     row = await repository.get_for_agent(
-        conversation_id,
-        agent_id=agent_id,
-        credential_id=credential_id,
+        scope.conversation_id,
+        owner_user_id=scope.owner_user_id,
+        agent_id=scope.agent_id,
+        credential_id=scope.credential_id,
     )
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "conversation_not_found"})
@@ -185,27 +203,22 @@ async def _conversation_or_404(
 def _run_belongs_to_scope(
     row: Any,
     *,
-    agent_id: str,
-    credential_id: str,
-    conversation_id: str,
+    scope: _PublishedRequestScope,
 ) -> bool:
     metadata = row.metadata if hasattr(row, "metadata") else (row.get("metadata") or {})
-    return metadata.get("published_agent_id") == agent_id and metadata.get("published_credential_id") == credential_id and metadata.get("published_conversation_id") == conversation_id
+    return metadata.get("published_agent_id") == scope.agent_id and metadata.get("published_credential_id") == scope.credential_id and metadata.get("published_conversation_id") == scope.conversation_id
 
 
 async def _run_or_404(
     request: Request,
     run_id: str,
     *,
-    agent_id: str,
-    conversation_id: str,
+    scope: _PublishedRequestScope,
 ) -> Any:
-    row = await get_run_manager(request).get(run_id, user_id=_owner_user_id(request))
+    row = await get_run_manager(request).get(run_id, user_id=scope.owner_user_id)
     if row is None or not _run_belongs_to_scope(
         row,
-        agent_id=agent_id,
-        credential_id=_credential_id(request),
-        conversation_id=conversation_id,
+        scope=scope,
     ):
         raise HTTPException(status_code=404, detail={"code": "run_not_found"})
     return row
@@ -269,7 +282,10 @@ def _quota_request_key(
     context: PublishedAgentContext,
     operation: str,
 ) -> str:
-    identity = context.idempotency_key or context.correlation_id
+    # Caller-provided correlation/request ids are observability data, not a
+    # reservation identity. Only an Idempotency-Key may deliberately reuse a
+    # reservation; every ordinary request gets a server-generated attempt id.
+    identity = f"idempotency:{context.idempotency_key}" if context.idempotency_key else f"attempt:{uuid4().hex}"
     payload = f"{context.agent_id}:{context.credential_id}:{operation}:{identity}"
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -319,6 +335,18 @@ def _schedule_quota_settlement(
         except TimeoutError:
             timed_out = True
             await get_run_manager(request).cancel(record.run_id)
+            # RunManager.cancel() signals/cancels but intentionally does not
+            # join the worker. Await it here so worker.finally can flush journal
+            # token totals before this settlement snapshots the RunRecord.
+            if record.task is not None:
+                try:
+                    await record.task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    # The terminal mapping below already accounts for failure;
+                    # settlement itself must still proceed.
+                    pass
         except asyncio.CancelledError:
             # Gateway shutdown leaves the reservation pending; expiry cleanup
             # releases it on the next reserve rather than mis-accounting it.
@@ -362,6 +390,7 @@ def _schedule_quota_settlement(
         }
         await ledger.settle(
             reservation.id,
+            owner_user_id=context.owner_user_id,
             tokens_used=usage["total_tokens"],
             status=terminal,
             run_id=record.run_id,
@@ -400,15 +429,23 @@ async def _start_public_run(
     resolver: PublishedAgentResolver,
     quota_ledger: QuotaLedger,
 ) -> tuple[Any, bool]:
+    scope = _request_scope(request, agent_id=agent_id, conversation_id=conversation_id)
     conversation = await _conversation_or_404(
         conversations,
-        agent_id=agent_id,
-        credential_id=_credential_id(request),
-        conversation_id=conversation_id,
+        scope=scope,
     )
     if conversation["status"] != "active":
         raise HTTPException(status_code=409, detail={"code": "conversation_closed"})
 
+    context = await _resolve_context(
+        resolver=resolver,
+        agent_id=agent_id,
+        request=request,
+        conversation_scope=conversation_id,
+        idempotency_key=idempotency_key,
+    )
+    # Resolve all lifecycle/Release authority before claiming the key. A
+    # missing, suspended, or invalid Agent must remain immediately retryable.
     replay, claimed = await _claim_run(
         idempotency,
         request=request,
@@ -421,19 +458,11 @@ async def _start_public_run(
         return await _run_or_404(
             request,
             run_id,
-            agent_id=agent_id,
-            conversation_id=conversation_id,
+            scope=scope,
         ), True
     if replay is not None and not claimed:
         raise HTTPException(status_code=409, detail={"code": "idempotency_in_progress"})
 
-    context = await _resolve_context(
-        resolver=resolver,
-        agent_id=agent_id,
-        request=request,
-        conversation_scope=conversation_id,
-        idempotency_key=idempotency_key,
-    )
     try:
         reservation = await _reserve_quota(
             ledger=quota_ledger,
@@ -441,7 +470,7 @@ async def _start_public_run(
             body=body,
             operation=operation,
         )
-    except HTTPException:
+    except Exception:
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),
@@ -462,7 +491,7 @@ async def _start_public_run(
             published_context=context,
         )
     except HTTPException as exc:
-        await quota_ledger.release(reservation.id)
+        await quota_ledger.release(reservation.id, owner_user_id=context.owner_user_id)
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),
@@ -472,7 +501,7 @@ async def _start_public_run(
             raise HTTPException(status_code=409, detail={"code": "conversation_busy"}) from exc
         raise
     except Exception:
-        await quota_ledger.release(reservation.id)
+        await quota_ledger.release(reservation.id, owner_user_id=context.owner_user_id)
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),
@@ -480,6 +509,16 @@ async def _start_public_run(
             )
         raise
 
+    # From this point the Run is executing independently. Install settlement
+    # before response serialization/idempotency persistence so either layer
+    # failing cannot strand its quota reservation.
+    _schedule_quota_settlement(
+        request=request,
+        record=record,
+        reservation=reservation,
+        context=context,
+        ledger=quota_ledger,
+    )
     response = serialize_agent_run(record, conversation_id=conversation_id)
     if claimed and idempotency_key is not None:
         await idempotency.complete(
@@ -489,13 +528,6 @@ async def _start_public_run(
             response_status=202,
             response_json=response,
         )
-    _schedule_quota_settlement(
-        request=request,
-        record=record,
-        reservation=reservation,
-        context=context,
-        ledger=quota_ledger,
-    )
     request.state.external_audit_resource_type = "run"
     request.state.external_audit_resource_id = record.run_id
     logger.info(
@@ -616,9 +648,7 @@ async def get_agent_conversation(
     )
     row = await _conversation_or_404(
         repository,
-        agent_id=agent_id,
-        credential_id=_credential_id(request),
-        conversation_id=conversation_id,
+        scope=_request_scope(request, agent_id=agent_id, conversation_id=conversation_id),
     )
     return serialize_agent_conversation(row)
 
@@ -746,15 +776,12 @@ async def get_agent_run(
     )
     await _conversation_or_404(
         conversations,
-        agent_id=agent_id,
-        credential_id=_credential_id(request),
-        conversation_id=conversation_id,
+        scope=(scope := _request_scope(request, agent_id=agent_id, conversation_id=conversation_id)),
     )
     row = await _run_or_404(
         request,
         run_id,
-        agent_id=agent_id,
-        conversation_id=conversation_id,
+        scope=scope,
     )
     return serialize_agent_run(row, conversation_id=conversation_id)
 
@@ -777,22 +804,18 @@ async def cancel_agent_run(
     )
     await _conversation_or_404(
         conversations,
-        agent_id=agent_id,
-        credential_id=_credential_id(request),
-        conversation_id=conversation_id,
+        scope=(scope := _request_scope(request, agent_id=agent_id, conversation_id=conversation_id)),
     )
     row = await _run_or_404(
         request,
         run_id,
-        agent_id=agent_id,
-        conversation_id=conversation_id,
+        scope=scope,
     )
     if row.status in (RunStatus.pending, RunStatus.running, RunStatus.interrupted):
         await get_run_manager(request).cancel(run_id)
     updated = await _run_or_404(
         request,
         run_id,
-        agent_id=agent_id,
-        conversation_id=conversation_id,
+        scope=scope,
     )
     return serialize_agent_run(updated, conversation_id=conversation_id)

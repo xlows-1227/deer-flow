@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -94,7 +95,7 @@ async def test_concurrent_reservations_never_exceed_agent_limit(quota_repo):
     assert len(reservations) == 2
     assert len(rejected) == 4
     assert {item.code for item in rejected} == {"max_concurrent_runs_exceeded"}
-    rows = await quota_repo.list_reservations(agent_id="pa_1")
+    rows = await quota_repo.list_reservations(owner_user_id="owner-1", agent_id="pa_1")
     assert sum(row["status"] == "pending" for row in rows) == 2
 
 
@@ -105,7 +106,7 @@ async def test_daily_limit_rejects_without_creating_reservation(quota_repo):
         _context(agent_id="pa_daily", daily_runs=1),
         request_key="daily-1",
     )
-    await ledger.settle(first.id, tokens_used=10, status="success", run_id="run-daily-1")
+    await ledger.settle(first.id, owner_user_id="owner-1", tokens_used=10, status="success", run_id="run-daily-1")
     with pytest.raises(QuotaExceededError) as captured:
         await ledger.reserve(
             _context(agent_id="pa_daily", daily_runs=1, correlation_id="req_2"),
@@ -113,7 +114,7 @@ async def test_daily_limit_rejects_without_creating_reservation(quota_repo):
         )
     assert captured.value.code == "daily_runs_exceeded"
     assert captured.value.retry_after > 0
-    assert len(await quota_repo.list_reservations(agent_id="pa_daily")) == 1
+    assert len(await quota_repo.list_reservations(owner_user_id="owner-1", agent_id="pa_daily")) == 1
 
 
 @pytest.mark.asyncio
@@ -128,7 +129,7 @@ async def test_key_daily_limits_are_isolated_but_agent_limit_still_caps_all_keys
         ),
         request_key="key-1-first",
     )
-    await ledger.settle(first.id, tokens_used=1, status="success", run_id="run-key-1")
+    await ledger.settle(first.id, owner_user_id="owner-1", tokens_used=1, status="success", run_id="run-key-1")
 
     second = await ledger.reserve(
         _context(
@@ -139,7 +140,7 @@ async def test_key_daily_limits_are_isolated_but_agent_limit_still_caps_all_keys
         ),
         request_key="key-2-first",
     )
-    await ledger.settle(second.id, tokens_used=1, status="success", run_id="run-key-2")
+    await ledger.settle(second.id, owner_user_id="owner-1", tokens_used=1, status="success", run_id="run-key-2")
 
     with pytest.raises(QuotaExceededError) as credential_limit:
         await ledger.reserve(
@@ -173,7 +174,7 @@ async def test_request_key_reservation_is_idempotent(quota_repo):
     first = await ledger.reserve(context, request_key="same-key")
     second = await ledger.reserve(context, request_key="same-key")
     assert first.id == second.id
-    assert len(await quota_repo.list_reservations(agent_id="pa_idem")) == 1
+    assert len(await quota_repo.list_reservations(owner_user_id="owner-1", agent_id="pa_idem")) == 1
 
 
 @pytest.mark.asyncio
@@ -184,21 +185,23 @@ async def test_all_terminal_states_settle_exactly_once(quota_repo, terminal):
     reservation = await ledger.reserve(context, request_key=f"request-{terminal}")
     assert await ledger.settle(
         reservation.id,
+        owner_user_id="owner-1",
         tokens_used=25,
         status=terminal,
         run_id=f"run-{terminal}",
     )
     assert not await ledger.settle(
         reservation.id,
+        owner_user_id="owner-1",
         tokens_used=999,
         status=terminal,
         run_id=f"run-{terminal}",
     )
-    row = await quota_repo.get_reservation(reservation.id)
+    row = await quota_repo.get_reservation(reservation.id, owner_user_id="owner-1")
     assert row["status"] == "settled"
     assert row["terminal_status"] == terminal
     assert row["tokens_used"] == 25
-    assert not any(item["status"] == "pending" for item in await quota_repo.list_reservations(agent_id=f"pa_{terminal}"))
+    assert not any(item["status"] == "pending" for item in await quota_repo.list_reservations(owner_user_id="owner-1", agent_id=f"pa_{terminal}"))
 
 
 @pytest.mark.asyncio
@@ -206,10 +209,29 @@ async def test_release_is_idempotent_and_allows_retry_with_same_request_key(quot
     ledger = QuotaLedger(quota_repo)
     context = _context(agent_id="pa_release")
     first = await ledger.reserve(context, request_key="retry-key")
-    assert await ledger.release(first.id)
-    assert not await ledger.release(first.id)
+    assert await ledger.release(first.id, owner_user_id="owner-1")
+    assert not await ledger.release(first.id, owner_user_id="owner-1")
     retried = await ledger.reserve(context, request_key="retry-key")
     assert retried.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_reservation_mutations_and_reads_are_owner_scoped(quota_repo):
+    ledger = QuotaLedger(quota_repo)
+    context = _context(agent_id="pa-owner-scope")
+    reservation = await ledger.reserve(context, request_key="owner-scope")
+
+    assert await quota_repo.get_reservation(reservation.id, owner_user_id="other-owner") is None
+    assert await quota_repo.list_reservations(owner_user_id="other-owner", agent_id=context.agent_id) == []
+    assert not await ledger.release(reservation.id, owner_user_id="other-owner")
+    assert not await ledger.settle(
+        reservation.id,
+        owner_user_id="other-owner",
+        tokens_used=5,
+        status="success",
+        run_id="run-owner-scope",
+    )
+    assert await quota_repo.get_reservation(reservation.id, owner_user_id="owner-1") is not None
 
 
 @pytest.mark.asyncio
@@ -265,3 +287,66 @@ async def test_run_completion_callback_maps_every_terminal_state(run_status, exp
     assert usage["external_actor_hash"] != context.external_actor
     assert context.external_actor not in usage.values()
     assert usage["status"] == expected
+
+
+@pytest.mark.asyncio
+async def test_timeout_waits_for_worker_token_flush_before_settlement(monkeypatch):
+    context = _context(agent_id="pa-timeout-flush")
+    context = replace(
+        context,
+        effective_quota=replace(context.effective_quota, max_run_seconds=1),
+    )
+    record = SimpleNamespace(
+        task=None,
+        run_id="run-timeout-flush",
+        status=RunStatus.running,
+        total_input_tokens=0,
+        total_output_tokens=0,
+        total_tokens=1,
+    )
+
+    async def worker():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            record.total_input_tokens = 8
+            record.total_output_tokens = 15
+            record.total_tokens = 23
+
+    record.task = asyncio.create_task(worker())
+
+    class Manager:
+        async def cancel(self, run_id):
+            assert run_id == record.run_id
+            record.status = RunStatus.interrupted
+            record.task.cancel()
+            return True
+
+    async def timeout_immediately(awaitable, *, timeout):
+        assert timeout == 1
+        del awaitable
+        raise TimeoutError
+
+    monkeypatch.setattr(agent_public_api.asyncio, "wait_for", timeout_immediately)
+    ledger = AsyncMock()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=Manager())))
+    reservation = Reservation(
+        id="qres-timeout-flush",
+        request_key="request-timeout-flush",
+        agent_id=context.agent_id,
+        credential_id=context.credential_id,
+        reserved_tokens=100,
+        status="pending",
+    )
+
+    agent_public_api._schedule_quota_settlement(
+        request=request,
+        record=record,
+        reservation=reservation,
+        context=context,
+        ledger=ledger,
+    )
+    await asyncio.gather(*request.app.state.agent_quota_tasks)
+
+    assert ledger.settle.await_args.kwargs["tokens_used"] == 23

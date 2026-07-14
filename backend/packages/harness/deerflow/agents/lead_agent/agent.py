@@ -435,9 +435,11 @@ def _build_middlewares(
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
-    # Add TokenUsageMiddleware when token_usage tracking is enabled
-    if resolved_app_config.token_usage.enabled:
-        middlewares.append(TokenUsageMiddleware())
+    # Published runs enforce their quota even when optional global token
+    # attribution/logging is disabled.
+    if resolved_app_config.token_usage.enabled or is_published:
+        max_tokens_per_run = int(published_context.effective_quota.max_tokens_per_run) if is_published else None
+        middlewares.append(TokenUsageMiddleware(max_tokens_per_run=max_tokens_per_run))
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))

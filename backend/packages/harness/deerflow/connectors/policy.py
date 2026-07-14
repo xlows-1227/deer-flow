@@ -80,6 +80,7 @@ def _grant_matches(grant: ConnectorGrant, context: ConnectorRuntimeContext, capa
 
 def authorize_connector_action(
     *,
+    connector_id: str | None = None,
     connector_policy: dict[str, Any],
     grants: list[ConnectorGrant],
     context: ConnectorRuntimeContext,
@@ -89,6 +90,14 @@ def authorize_connector_action(
     runtime_policy: dict[str, Any] | None = None,
     owner_id: str | None = None,
 ) -> AuthorizationDecision:
+    if context.connector_capabilities is not None:
+        allowed = context.connector_capabilities.get(connector_id or "", [])
+        if capability not in allowed:
+            raise ConnectorAuthorizationError(
+                f"Published runtime is not granted capability {capability} on connector {connector_id}",
+                recoverable=True,
+            )
+
     if owner_id and context.user_id == owner_id:
         return AuthorizationDecision(
             allow=True,

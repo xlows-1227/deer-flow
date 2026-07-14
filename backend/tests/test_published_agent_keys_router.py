@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.testclient import TestClient
@@ -34,7 +35,8 @@ class _KeyRepo:
         self.rows: dict[str, dict] = {}
         self.serial = 0
 
-    async def create(self, *, agent_id: str, name: str, quota_overrides: dict | None = None):
+    async def create(self, *, agent_id: str, owner_user_id: str, name: str, quota_overrides: dict | None = None):
+        assert owner_user_id == "owner-a"
         self.serial += 1
         key_id = f"{self.serial:032x}"
         plaintext = f"dfa_{key_id}_{'s' * 40}{self.serial:03d}"
@@ -55,26 +57,30 @@ class _KeyRepo:
         self.rows[key_id] = row
         return {**row, "api_key": plaintext}
 
-    async def list_by_agent(self, agent_id: str):
+    async def list_by_agent(self, agent_id: str, *, owner_user_id: str):
+        assert owner_user_id == "owner-a"
         return [dict(row) for row in self.rows.values() if row["agent_id"] == agent_id]
 
-    async def rotate(self, agent_id: str, key_id: str, *, overlap_seconds: int):  # noqa: ARG002
+    async def rotate(self, agent_id: str, key_id: str, *, owner_user_id: str, overlap_seconds: int):  # noqa: ARG002
+        assert owner_user_id == "owner-a"
         old = self.rows.get(key_id)
         if old is None or old["agent_id"] != agent_id:
             return None
-        created = await self.create(agent_id=agent_id, name=old["name"], quota_overrides=old["quota_overrides"])
+        created = await self.create(agent_id=agent_id, owner_user_id=owner_user_id, name=old["name"], quota_overrides=old["quota_overrides"])
         created["rotation_of"] = key_id
         self.rows[created["id"]]["rotation_of"] = key_id
         return created
 
-    async def revoke(self, agent_id: str, key_id: str):
+    async def revoke(self, agent_id: str, key_id: str, *, owner_user_id: str):
+        assert owner_user_id == "owner-a"
         row = self.rows.get(key_id)
         if row is None or row["agent_id"] != agent_id:
             return False
         row["status"] = "revoked"
         return True
 
-    async def update(self, agent_id: str, key_id: str, *, name=None, quota_overrides=None):
+    async def update(self, agent_id: str, key_id: str, *, owner_user_id: str, name=None, quota_overrides=None):
+        assert owner_user_id == "owner-a"
         row = self.rows.get(key_id)
         if row is None or row["agent_id"] != agent_id:
             return None
@@ -141,3 +147,37 @@ def test_agent_key_cannot_call_owner_management_api() -> None:
     client, _repo = _client(auth_method="agent_api_key")
     response = client.post("/api/published-agents/pa_owned/keys", json={"name": "Escalate"})
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "quota_overrides",
+    [
+        {"unknown_limit": 1},
+        {"daily_runs": 0},
+        {"daily_runs": -1},
+        {"daily_runs": True},
+    ],
+)
+def test_create_rejects_invalid_quota_overrides(quota_overrides) -> None:
+    client, repo = _client()
+
+    response = client.post(
+        "/api/published-agents/pa_owned/keys",
+        json={"name": "Invalid", "quota_overrides": quota_overrides},
+    )
+
+    assert response.status_code == 422
+    assert repo.rows == {}
+
+
+def test_patch_rejects_invalid_quota_overrides_without_mutating_key() -> None:
+    client, repo = _client()
+    created = client.post("/api/published-agents/pa_owned/keys", json={"name": "Valid"}).json()
+
+    response = client.patch(
+        f"/api/published-agents/pa_owned/keys/{created['id']}",
+        json={"quota_overrides": {"daily_tokens": 0}},
+    )
+
+    assert response.status_code == 422
+    assert repo.rows[created["id"]]["quota_overrides"] == {}

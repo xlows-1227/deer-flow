@@ -123,6 +123,10 @@ def _connector_runtime_context(runtime: Runtime | None):
 
     ctx = runtime.context if runtime is not None else {}
     ctx = ctx if isinstance(ctx, dict) else {}
+    raw_capabilities = ctx.get("connector_capabilities")
+    connector_capabilities = (
+        {str(connector_id): [str(capability) for capability in capabilities if capability] for connector_id, capabilities in raw_capabilities.items() if isinstance(capabilities, list)} if isinstance(raw_capabilities, dict) else None
+    )
     return ConnectorRuntimeContext(
         user_id=resolve_runtime_user_id(runtime),
         thread_id=str(ctx.get("thread_id")) if ctx.get("thread_id") else None,
@@ -130,6 +134,7 @@ def _connector_runtime_context(runtime: Runtime | None):
         agent_id=str(ctx.get("agent_name")) if ctx.get("agent_name") else None,
         skill_name=str(ctx.get("skill_name")) if ctx.get("skill_name") else None,
         connector_ids=list(_runtime_connector_ids(runtime)) or None,
+        connector_capabilities=connector_capabilities,
     )
 
 
@@ -249,7 +254,7 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None, include_memory: bool = True):
+    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None, include_memory: bool = True) -> None:
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config

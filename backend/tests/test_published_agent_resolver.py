@@ -55,6 +55,35 @@ class _QuotaResolver:
         return (owner_user_id, release["quota_overrides"], credential_id)
 
 
+class _SkillRevisionRepo:
+    def __init__(self, revisions: dict[str, dict] | None = None) -> None:
+        self.revisions = revisions or {
+            "sr_1": {"id": "sr_1", "skill_name": "billing-search", "content_ref": "cs://skills/sr_1"},
+            "sr_2": {"id": "sr_2", "skill_name": "billing-export", "content_ref": "cs://skills/sr_2"},
+        }
+
+    async def get(self, revision_id: str) -> dict | None:
+        revision = self.revisions.get(revision_id)
+        return dict(revision) if revision is not None else None
+
+
+class _ContentStore:
+    def __init__(self, snapshots: dict[str, dict[str, bytes]] | None = None) -> None:
+        self.snapshots = snapshots or {
+            "cs://skills/sr_1": {
+                "SKILL.md": b"---\nname: billing-search\ndescription: Search billing data\nallowed-tools:\n  - web_search\n---\n",
+            },
+            "cs://skills/sr_2": {
+                "SKILL.md": b"---\nname: billing-export\ndescription: Export billing data\nallowed-tools:\n  - read_file\n---\n",
+            },
+        }
+
+    def get(self, content_ref: str) -> dict[str, bytes]:
+        if content_ref not in self.snapshots:
+            raise KeyError(content_ref)
+        return dict(self.snapshots[content_ref])
+
+
 def _agent(*, status: str = "published", release_id: str | None = "rel_1") -> dict:
     return {
         "id": "pa_1",
@@ -81,7 +110,14 @@ def _release() -> dict:
     }
 
 
-def _resolver(*, agent: dict | None = None, release: dict | None = None, connectors: dict[str, dict] | None = None) -> PublishedAgentResolver:
+def _resolver(
+    *,
+    agent: dict | None = None,
+    release: dict | None = None,
+    connectors: dict[str, dict] | None = None,
+    skill_revisions: _SkillRevisionRepo | None = None,
+    content_store: _ContentStore | None = None,
+) -> PublishedAgentResolver:
     return PublishedAgentResolver(
         agent_repo=_AgentRepo(_agent() if agent is None else agent),
         release_repo=_ReleaseRepo(_release() if release is None else release),
@@ -98,6 +134,8 @@ def _resolver(*, agent: dict | None = None, release: dict | None = None, connect
             }
         ),
         quota_resolver=_QuotaResolver(),
+        skill_revision_repo=skill_revisions or _SkillRevisionRepo(),
+        content_store=content_store or _ContentStore(),
     )
 
 
@@ -120,6 +158,7 @@ async def test_resolve_published_agent_builds_trusted_frozen_context() -> None:
     assert context.tool_groups == ("search", "database")
     assert context.model_name == "model-a"
     assert context.instructions == ("<agent_instructions>\nYou answer billing questions.\n</agent_instructions>\n\n<agent_soul>\nBe concise.\n</agent_soul>")
+    assert context.allowed_tool_names == ("read_file", "web_search")
     assert context.memory_enabled is False
     assert context.effective_quota == ("owner-a", {"daily_runs": 20}, "key_1")
     with pytest.raises(FrozenInstanceError):
@@ -209,6 +248,21 @@ async def test_connector_revocation_takes_effect_without_mutating_release() -> N
         "connector_instance_id": "conn-revoked",
         "capability": "drive.read",
     }
+
+
+@pytest.mark.asyncio
+async def test_resolve_fails_closed_when_frozen_skill_content_is_missing() -> None:
+    resolver = _resolver(content_store=_ContentStore(snapshots={"other": {}}))
+
+    with pytest.raises(AgentNotAvailableError):
+        await resolver.resolve(
+            "pa_1",
+            source="api",
+            credential_id="key_1",
+            external_actor="actor-hash",
+            conversation_scope="conv_1",
+            correlation_id="corr_1",
+        )
 
 
 def test_published_context_cannot_enable_memory() -> None:

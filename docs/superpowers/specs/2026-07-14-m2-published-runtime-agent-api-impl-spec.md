@@ -1,6 +1,6 @@
 # 多租户 Agent 发布平台 — M2 实现规格（已发布运行时与 Agent API）
 
-**状态：** 功能实现完成；M2 专项与兼容回归通过；仓库全量测试仍受既有基线/本地环境失败阻塞，待 CI 或干净基线确认
+**状态：** 实现提交完成且 M2 focused regression 通过；2026-07-14 独立复审发现新的 Spec P0/P1 阻塞，M2 Review Gate 未通过；仓库全量测试仍待 CI 或干净基线确认
 
 **日期：** 2026-07-14
 
@@ -277,6 +277,33 @@ tests/test_auth_type_system.py::test_csrf_does_not_exempt_old_login_path
 ### 11.3 冒烟范围
 
 本轮没有连接真实外部模型执行 live curl。等价 ASGI 路由测试覆盖：Agent Key 认证、同步 wait、SSE、异步、get、cancel、幂等重放、撤销 Key 401、跨 Agent/credential 404、配额 429。部署环境仍应按 [backend API 文档](../../../backend/docs/API.md#published-agent-api-m2) 的 curl 示例做一次 live smoke。
+
+### 11.4 独立复审补充（2026-07-14）
+
+以 `3bc06941d6bf187df8d4a4a13af07752d5afd91f` 为固定点重新执行 Spec/Standards 双轴复审后，发现现有测试未覆盖的阻塞边界：
+
+- Release 的 Skill revision、Connector capability 与工具策略没有完整进入真实运行时，Connector owner shortcut 还可能放行 Release 未授予的 capability；
+- 无 `Idempotency-Key` 时，调用方可复用 `X-Request-ID` 复用 reservation，创建额外 Run 而不新增配额/usage；
+- idempotency claim、Run 启动与 settlement task 挂接之间存在孤儿窗口；
+- timeout 在 worker 最终 token flush 前结算，`max_tokens_per_run` 也没有运行时强制点；
+- Key quota override 缺少写入期字段/正整数验证。
+
+详细证据、严重度与 Standards 轴结果见 [M2 代码复审](./2026-07-14-m2-published-runtime-agent-api-code-review.md)。这些问题关闭并补回归测试前，不应将 §11.1 的 focused regression 通过解释为 M2 Review Gate 通过。
+
+### 11.5 复审问题修复结果（2026-07-14）
+
+复审列出的 6 项 Spec 问题已按本规格关闭：
+
+1. Resolver 从 Release 固定的 Skill revision/content store 读取冻结 `SKILL.md`，按既有 Skill 语义派生 `allowed_tool_names`；快照缺失、损坏或 name 不一致均 fail closed。
+2. Published runtime 将 Connector 授权以精确 `(connector_id, capability)` map 写入受信 `runtime.context`；Connector policy 在 owner shortcut 之前检查该 map，cached schema、query、generic action 与 summary 均走同一约束。
+3. 未提供 `Idempotency-Key` 时，quota request key 使用服务端 UUID attempt identity，不再使用 caller 可控的 correlation/`X-Request-ID`；显式幂等请求仍保持稳定重放。
+4. Agent/Release Resolver 在 idempotency claim 之前执行；Run 启动后 settlement task 在响应序列化与 `idempotency.complete()` 之前挂接，避免已执行 Run 留下 pending reservation。
+5. timeout 取消后等待 worker task 的 `finally`/journal token flush 完成再结算；published graph 始终安装带 `max_tokens_per_run` 的 token middleware，达到硬上限时终止后续模型/工具循环。
+6. Agent Key create/patch 只接受 `max_concurrent_runs`、`daily_runs`、`daily_tokens`、`max_run_seconds`、`max_tokens_per_run`、`max_input_bytes`、`inbound_rps`，且值必须为非布尔正整数，非法输入返回 422。
+
+Standards 轴同步完成：Agent Key 管理通过 `published_agents.owner_user_id` join 校验；quota reservation 的 reserve/settle/release/get/list、published conversation lookup 与 audit list 均在仓储层携带 owner/principal scope；补齐 `now_fn` / `__init__` 类型标注；Agent/credential quota 判断抽为共享 scope evaluator；公共 API 的三元 scope 收敛为 `_PublishedRequestScope`。
+
+修复后可在当前权限运行的测试记录为：能力策略 focused `20 passed`；公共 API、Key、Resolver、Token 等集合 `59 passed`；Agent Key repository/router `16 passed`；Ruff check、Ruff format check 与 `git diff --check` 通过。依赖 `tmp_path` 的 quota/conversation/Connector integration 在当前 Windows 沙箱因 Temp ACL 于 setup 阶段失败，提权重跑又被平台用量限制拒绝，需由 CI/可写临时目录补跑；本节不把 setup error 记为断言通过，也不据此声明全仓测试全绿。
 
 ---
 

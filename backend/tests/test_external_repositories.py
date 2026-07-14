@@ -94,6 +94,31 @@ async def test_conversation_mapping_is_user_scoped_and_conflicts(repos):
 
 
 @pytest.mark.anyio
+async def test_published_conversation_lookup_is_owner_scoped(repos):
+    repository = repos["conversations"]
+    await repository.create(
+        {
+            "conversation_id": "conv-agent",
+            "user_id": "alice",
+            "credential_id": "agent-key-1",
+            "source": "agent-api:agent-key-1",
+            "thread_id": "thread-agent",
+            "agent_id": "pa_1",
+        }
+    )
+
+    assert (
+        await repository.get_for_agent(
+            "conv-agent",
+            owner_user_id="bob",
+            agent_id="pa_1",
+            credential_id="agent-key-1",
+        )
+        is None
+    )
+
+
+@pytest.mark.anyio
 async def test_idempotency_replay_conflict_and_expiry(repos):
     repository = repos["idempotency"]
     await repository.put(
@@ -205,3 +230,6 @@ async def test_audit_lists_by_user_and_key_without_bodies(repos):
     rows = await repository.list(user_id="alice", api_key_id="key-1")
     assert len(rows) == 1
     assert "request_body" not in rows[0] and "response_body" not in rows[0]
+
+    with pytest.raises(ValueError, match="scope"):
+        await repository.list()

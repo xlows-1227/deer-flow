@@ -33,7 +33,7 @@ def _context(*, allowed_tool_names: tuple[str, ...] | None = ("read_file",)) -> 
         tool_groups=("safe",),
         model_name="trusted-model",
         instructions="trusted instructions",
-        effective_quota=object(),
+        effective_quota=SimpleNamespace(max_tokens_per_run=1000),
         correlation_id="corr_1",
         idempotency_key="idem_1",
         allowed_tool_names=allowed_tool_names,
@@ -70,6 +70,9 @@ def test_build_published_run_config_ignores_untrusted_runtime_fields() -> None:
     assert configurable["mode"] == "published"
     assert "skills" not in configurable
     assert config["metadata"] == {"caller_trace": "keep"}
+    assert config["context"]["user_id"] == "owner-a"
+    assert config["context"]["connector_ids"] == ["conn_1"]
+    assert config["context"]["connector_capabilities"] == {"conn_1": ["database.query"]}
 
 
 def test_published_middlewares_exclude_memory_and_memory_flush(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,6 +105,8 @@ def test_published_middlewares_exclude_memory_and_memory_flush(monkeypatch: pyte
 
     assert captured == {"dynamic_include_memory": False, "summarization_memory": False}
     assert "title" in middlewares
+    token_middleware = next(item for item in middlewares if isinstance(item, lead_agent_module.TokenUsageMiddleware))
+    assert token_middleware.max_tokens_per_run == 1000
 
 
 def test_published_dynamic_context_never_loads_owner_memory(monkeypatch: pytest.MonkeyPatch) -> None:

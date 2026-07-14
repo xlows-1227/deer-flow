@@ -35,6 +35,7 @@ class ExternalConversationRepository:
                 existing = (
                     await session.execute(
                         select(ExternalConversationRow).where(
+                            ExternalConversationRow.user_id == user_id,
                             ExternalConversationRow.agent_id == str(values["agent_id"]),
                             ExternalConversationRow.credential_id == str(credential_id),
                             ExternalConversationRow.source == source,
@@ -76,6 +77,7 @@ class ExternalConversationRepository:
                     raise
                 if credential_id is not None:
                     stmt = select(ExternalConversationRow).where(
+                        ExternalConversationRow.user_id == user_id,
                         ExternalConversationRow.agent_id == str(values["agent_id"]),
                         ExternalConversationRow.credential_id == str(credential_id),
                         ExternalConversationRow.source == source,
@@ -110,6 +112,7 @@ class ExternalConversationRepository:
         self,
         conversation_id: str,
         *,
+        owner_user_id: str,
         agent_id: str,
         credential_id: str,
     ) -> dict[str, Any] | None:
@@ -119,6 +122,7 @@ class ExternalConversationRepository:
                 await session.execute(
                     select(ExternalConversationRow).where(
                         ExternalConversationRow.conversation_id == conversation_id,
+                        ExternalConversationRow.user_id == owner_user_id,
                         ExternalConversationRow.agent_id == agent_id,
                         ExternalConversationRow.credential_id == credential_id,
                     )

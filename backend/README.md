@@ -81,6 +81,8 @@ curl -X POST 'http://localhost:8001/api/v1/external/conversations/<conversation_
 
 启用 SQLite/PostgreSQL 持久化后，自定义 Agent 的 `setup_agent` / `update_agent` 写入应走异步 Gateway：身份、草稿、Skills 只在单个数据库事务中提交。Gateway 每次构建 Agent 前按 owner 注入当前数据库草稿，将 AGENT.md 与 SOUL.md 组合为可信运行指令，并丢弃请求伪造的 `__agent_*` 内部字段。数据库明确查无该草稿时，迁移窗口内可只读回退到当前 owner 的旧 `SOUL.md` / `config.yaml`；数据库错误、跨 owner 文件和共享目录均不触发回退，旧文件也不再参与双写。同步 `DeerFlowClient` 在该模式下会拒绝自定义 Agent 运行，避免从新事件循环复用 Gateway 所属的异步数据库引擎；无数据库的 CLI/embedded 模式仍支持同步文件读写。Studio 新建草稿默认使用显式空 Skills；对话式/旧导入省略 Skills 时才使用继承模式，发布时会把 owner 当前可选择的 Skills 固化为不可变 revisions。发布服务以单条 SQL 捕获草稿及子表；Skill 文件树经过稳定性复核，connector requirements 直接从最终冻结的 `SKILL.md` bytes 派生，同 checksum revision 的 owner/visibility/caps/content_ref 不变量不一致会 fail closed。发布与对话式 authoring 统一按 identity → draft 加锁，并发编辑时返回 409 且不创建 Release。Connector grant 在草稿保存和发布时都会与权威 Connector type capabilities 求交；PATCH 的 Skill/grant 子项拒绝空值、额外字段和重复项。旧 Agent 导入在一个事务内写 identity、draft 与 Skills，失败后可安全重试。Published-Agent slug 在控制面创建/导入、Gateway assistant 路由和数据库草稿运行时查询中统一使用保留大小写的 `[A-Za-z0-9-]{1,64}` 契约。
 
+Published Agent 公共运行时会从不可变 Skill revision 的 `SKILL.md` 派生 `allowed-tools`，并在 Connector 服务层按 `(connector_id, capability)` 执行 Release 授权，即使运行身份是 owner 也不能绕过。无 `Idempotency-Key` 的 Run 使用服务端唯一 quota attempt id；超时会等待 worker 刷新 token 后再结算，published middleware 同时强制 `max_tokens_per_run`。Agent Key quota override 在写入时仅接受已知字段的正整数。Agent Key、quota reservation、published conversation 与 audit 查询均在仓储层携带 owner scope。
+
 ---
 
 ## Core Components

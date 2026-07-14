@@ -34,6 +34,8 @@ class ExternalAuditRepository:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """List recent audit events within an optional principal scope."""
+        if user_id is None and api_key_id is None and agent_id is None:
+            raise ValueError("at least one audit principal scope is required")
         stmt = select(ExternalAuditRow).order_by(ExternalAuditRow.created_at.desc()).limit(limit)
         if user_id is not None:
             stmt = stmt.where(ExternalAuditRow.user_id == user_id)

@@ -13,6 +13,31 @@ from app.gateway.routers.published_agents import DraftService, get_draft_service
 from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
 
 router = APIRouter(prefix="/api/published-agents/{agent_id}/keys", tags=["published-agent-keys"])
+_QUOTA_OVERRIDE_FIELDS = frozenset(
+    {
+        "max_concurrent_runs",
+        "daily_runs",
+        "daily_tokens",
+        "max_run_seconds",
+        "max_tokens_per_run",
+        "max_input_bytes",
+        "inbound_rps",
+    }
+)
+
+
+def _validate_quota_overrides(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("quota_overrides must be an object")
+    unknown = sorted(set(value) - _QUOTA_OVERRIDE_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown quota override fields: {', '.join(unknown)}")
+    invalid = [name for name, limit in value.items() if type(limit) is not int or limit <= 0]
+    if invalid:
+        raise ValueError(f"quota overrides must be positive integers: {', '.join(sorted(invalid))}")
+    return value
 
 
 class AgentKeyCreateRequest(BaseModel):
@@ -28,6 +53,11 @@ class AgentKeyCreateRequest(BaseModel):
         if not (cleaned := value.strip()):
             raise ValueError("name must not be blank")
         return cleaned
+
+    @field_validator("quota_overrides", mode="before")
+    @classmethod
+    def _quota_overrides_are_supported(cls, value: Any) -> Any:
+        return _validate_quota_overrides(value)
 
 
 class AgentKeyUpdateRequest(BaseModel):
@@ -45,6 +75,11 @@ class AgentKeyUpdateRequest(BaseModel):
         if not (cleaned := value.strip()):
             raise ValueError("name must not be blank")
         return cleaned
+
+    @field_validator("quota_overrides", mode="before")
+    @classmethod
+    def _quota_overrides_are_supported(cls, value: Any) -> Any:
+        return _validate_quota_overrides(value)
 
     @model_validator(mode="after")
     def _require_change(self) -> Self:
@@ -100,8 +135,8 @@ async def create_agent_key(
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
     """Create an Agent credential and reveal its plaintext exactly once."""
-    await _require_owned_agent(request, agent_id, service)
-    created = await repository.create(agent_id=agent_id, name=body.name, quota_overrides=body.quota_overrides)
+    owner_user_id = await _require_owned_agent(request, agent_id, service)
+    created = await repository.create(agent_id=agent_id, owner_user_id=owner_user_id, name=body.name, quota_overrides=body.quota_overrides)
     return {
         **_safe_key(created),
         "api_key": created["api_key"],
@@ -117,8 +152,8 @@ async def list_agent_keys(
     service: DraftService = Depends(get_draft_service),
 ) -> list[dict[str, Any]]:
     """List safe metadata for the current owner's Agent credentials."""
-    await _require_owned_agent(request, agent_id, service)
-    return [_safe_key(item) for item in await repository.list_by_agent(agent_id)]
+    owner_user_id = await _require_owned_agent(request, agent_id, service)
+    return [_safe_key(item) for item in await repository.list_by_agent(agent_id, owner_user_id=owner_user_id)]
 
 
 @router.post("/{key_id}/rotate", status_code=201)
@@ -130,8 +165,8 @@ async def rotate_agent_key(
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
     """Rotate a credential while preserving the configured overlap window."""
-    await _require_owned_agent(request, agent_id, service)
-    rotated = await repository.rotate(agent_id, key_id, overlap_seconds=_rotation_overlap_seconds())
+    owner_user_id = await _require_owned_agent(request, agent_id, service)
+    rotated = await repository.rotate(agent_id, key_id, owner_user_id=owner_user_id, overlap_seconds=_rotation_overlap_seconds())
     if rotated is None:
         raise HTTPException(status_code=404, detail="Key not found")
     return {
@@ -150,8 +185,8 @@ async def revoke_agent_key(
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, bool]:
     """Immediately revoke one Agent credential."""
-    await _require_owned_agent(request, agent_id, service)
-    if not await repository.revoke(agent_id, key_id):
+    owner_user_id = await _require_owned_agent(request, agent_id, service)
+    if not await repository.revoke(agent_id, key_id, owner_user_id=owner_user_id):
         raise HTTPException(status_code=404, detail="Key not found")
     return {"revoked": True}
 
@@ -166,10 +201,11 @@ async def update_agent_key(
     service: DraftService = Depends(get_draft_service),
 ) -> dict[str, Any]:
     """Update a credential name or its stricter quota overrides."""
-    await _require_owned_agent(request, agent_id, service)
+    owner_user_id = await _require_owned_agent(request, agent_id, service)
     updated = await repository.update(
         agent_id,
         key_id,
+        owner_user_id=owner_user_id,
         name=body.name,
         quota_overrides=body.quota_overrides,
     )
