@@ -15,6 +15,7 @@ its storage implementation lives in ``deerflow.runtime.events.store.db`` and
 there is no matching entity directory.
 """
 
+from deerflow.persistence.agent_api_key.model import AgentAPIKeyRow
 from deerflow.persistence.agent_release.model import (
     AgentReleaseConnectorGrantRow,
     AgentReleaseRow,
@@ -53,6 +54,7 @@ __all__ = [
     "FeedbackRow",
     "InviteCodeRow",
     "APIKeyRow",
+    "AgentAPIKeyRow",
     "AgentDraftConnectorGrantRow",
     "AgentDraftRow",
     "AgentDraftSkillRow",

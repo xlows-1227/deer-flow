@@ -147,7 +147,11 @@ def test_lifespan_mounts_services_on_app_state(staged_env):
         assert hasattr(app.state, "draft_service"), "draft_service not mounted on app.state"
         assert hasattr(app.state, "publish_service"), "publish_service not mounted on app.state"
         assert hasattr(app.state, "import_service"), "import_service not mounted on app.state"
+        assert hasattr(app.state, "agent_api_key_repo"), "agent_api_key_repo not mounted on app.state"
         # With a configured sqlite backend they should be fully built.
         assert app.state.draft_service is not None, "draft_service is None despite sqlite backend"
         assert app.state.publish_service is not None, "publish_service is None despite sqlite backend"
         assert app.state.import_service is not None, "import_service is None despite sqlite backend"
+        assert app.state.agent_api_key_repo is not None, "agent_api_key_repo is None despite sqlite backend"
+        paths = {route.path for route in app.routes}
+        assert "/api/published-agents/{agent_id}/keys" in paths
