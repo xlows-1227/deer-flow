@@ -54,6 +54,19 @@ class AgentChannelRepository:
             )
         )
 
+    async def owns_agent(self, agent_id: str, *, owner_user_id: str) -> bool:
+        """Return whether ``owner_user_id`` owns the stable Agent identity."""
+        async with self._sf() as session:
+            value = (
+                await session.execute(
+                    select(PublishedAgentRow.id).where(
+                        PublishedAgentRow.id == agent_id,
+                        PublishedAgentRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return value is not None
+
     async def create(
         self,
         *,
@@ -128,6 +141,17 @@ class AgentChannelRepository:
                 )
             ).all()
             return [_to_dict(row, owner_user_id=str(owner_user_id)) for row, owner_user_id in rows]
+
+    async def get_for_supervisor(self, binding_id: str, *, supervisor_scope: object) -> dict[str, Any] | None:
+        """Resolve one binding across owners for the trusted Supervisor only."""
+        if supervisor_scope is not SYSTEM_CHANNEL_SUPERVISOR_SCOPE:
+            raise PermissionError("system channel supervisor scope required")
+        async with self._sf() as session:
+            result = (await session.execute(select(AgentChannelRow, PublishedAgentRow.owner_user_id).join(PublishedAgentRow, PublishedAgentRow.id == AgentChannelRow.agent_id).where(AgentChannelRow.id == binding_id))).one_or_none()
+            if result is None:
+                return None
+            row, owner_user_id = result
+            return _to_dict(row, owner_user_id=str(owner_user_id))
 
     async def activate(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:

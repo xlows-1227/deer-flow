@@ -32,6 +32,7 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    published_agent_channels,
     published_agent_keys,
     published_agents,
     runs,
@@ -255,6 +256,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning("Flash direct path warm-up failed (non-fatal)", exc_info=True)
 
         # Start IM channel service if any channels are configured
+        channel_service = None
+        feishu_supervisor = None
         try:
             from app.channels.service import start_channel_service
 
@@ -263,7 +266,42 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
+        # DB-backed Feishu bindings share the legacy service bus/dispatcher,
+        # but each binding owns an isolated channel instance and lifecycle.
+        app.state.agent_channel_secret_store = None
+        app.state.feishu_supervisor = None
+        if channel_service is not None and getattr(app.state, "agent_channel_repo", None) is not None:
+            try:
+                from app.channels.supervisor import FeishuSupervisor
+                from deerflow.publishing.secret_store import get_secret_store
+
+                app.state.agent_channel_secret_store = get_secret_store()
+                feishu_supervisor = FeishuSupervisor(
+                    app.state.agent_channel_repo,
+                    app.state.agent_channel_secret_store,
+                    channel_service.bus,
+                    channel_registry=channel_service,
+                )
+                app.state.feishu_supervisor = feishu_supervisor
+                await feishu_supervisor.load_active_bindings()
+                logger.info("Published Feishu Supervisor started with %d binding(s)", len(feishu_supervisor.running_binding_ids))
+            except Exception as exc:
+                # A missing deployment encryption key disables only DB-backed
+                # Feishu integrations; legacy config.yaml channels and Agent
+                # publication remain available.
+                logger.warning("Published Feishu Supervisor unavailable: %s", type(exc).__name__)
+                app.state.agent_channel_secret_store = None
+                app.state.feishu_supervisor = None
+
         yield
+
+        if feishu_supervisor is not None:
+            try:
+                await asyncio.wait_for(feishu_supervisor.shutdown(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning("Published Feishu Supervisor shutdown exceeded %.1fs", _SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+            except Exception:
+                logger.exception("Failed to stop Published Feishu Supervisor")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -555,6 +593,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Published-agent control plane (draft CRUD). Mounted at /api/published-agents.
     app.include_router(published_agents.router)
+    app.include_router(published_agent_channels.router)
     app.include_router(published_agent_keys.router)
     app.include_router(agent_public_api.router)
 

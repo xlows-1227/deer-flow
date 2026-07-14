@@ -605,6 +605,8 @@ class ChannelManager:
             channel = service.get_channel(channel_name)
             if channel is not None:
                 return channel.supports_streaming
+        if channel_name.startswith("feishu:"):
+            return True
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:

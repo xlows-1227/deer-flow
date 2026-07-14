@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
+    from deerflow.persistence.agent_channel import AgentChannelRepository
     from deerflow.persistence.agent_usage import AgentUsageRepository
     from deerflow.persistence.api_key import APIKeyRepository
     from deerflow.persistence.external_audit import ExternalAuditRepository
@@ -151,6 +152,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
+            from deerflow.persistence.agent_channel import AgentChannelRepository
             from deerflow.persistence.agent_usage import AgentUsageRepository
             from deerflow.persistence.api_key import APIKeyRepository
             from deerflow.persistence.external_audit import ExternalAuditRepository
@@ -175,6 +177,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 sf,
                 pepper=get_external_api_config().api_key_pepper,
             )
+            app.state.agent_channel_repo = AgentChannelRepository(sf)
             app.state.published_agent_repo = PublishedAgentRepository(sf)
             app.state.agent_usage_repo = AgentUsageRepository(sf)
             app.state.external_conversation_repo = ExternalConversationRepository(sf)
@@ -215,6 +218,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
             app.state.api_key_repo = None
             app.state.agent_api_key_repo = None
+            app.state.agent_channel_repo = None
             app.state.published_agent_repo = None
             app.state.published_agent_resolver = None
             app.state.agent_usage_repo = None
@@ -334,6 +338,7 @@ get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store"
 get_scheduler_store: Callable[[Request], object] = _require("scheduler_store", "Scheduler store")
 get_api_key_repo: Callable[[Request], APIKeyRepository] = _require("api_key_repo", "External API persistence")
 get_agent_api_key_repo: Callable[[Request], AgentAPIKeyRepository] = _require("agent_api_key_repo", "Agent API Key persistence")
+get_agent_channel_repo: Callable[[Request], AgentChannelRepository] = _require("agent_channel_repo", "Agent channel persistence")
 get_published_agent_repo: Callable[[Request], PublishedAgentRepository] = _require("published_agent_repo", "Published Agent persistence")
 get_published_agent_resolver: Callable[[Request], PublishedAgentResolver] = _require("published_agent_resolver", "Published Agent resolver")
 get_agent_usage_repo: Callable[[Request], AgentUsageRepository] = _require("agent_usage_repo", "Agent usage persistence")

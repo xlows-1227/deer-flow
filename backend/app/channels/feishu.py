@@ -43,8 +43,25 @@ class FeishuChannel(Channel):
         5. Bot adds "DONE" emoji reaction to the original message
     """
 
-    def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
-        super().__init__(name="feishu", bus=bus, config=config)
+    def __init__(
+        self,
+        bus: MessageBus,
+        config: dict[str, Any] | None = None,
+        *,
+        app_id: str | None = None,
+        app_secret: str | None = None,
+        binding_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        resolved_config = dict(config or {})
+        if app_id is not None:
+            resolved_config["app_id"] = app_id
+        if app_secret is not None:
+            resolved_config["app_secret"] = app_secret
+        channel_name = f"feishu:{binding_id}" if binding_id else "feishu"
+        super().__init__(name=channel_name, bus=bus, config=resolved_config)
+        self.binding_id = binding_id
+        self.agent_id = agent_id
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._api_client = None
@@ -160,7 +177,14 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            event_handler = (
+                lark.EventDispatcherHandler.builder(
+                    str(self.config.get("encrypt_key", "")),
+                    str(self.config.get("verification_token", "")),
+                )
+                .register_p2_im_message_receive_v1(self._on_message)
+                .build()
+            )
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -683,7 +707,11 @@ class FeishuChannel(Channel):
                 msg_type=msg_type,
                 thread_ts=msg_id,
                 files=files_list,
-                metadata={"message_id": msg_id, "root_id": root_id},
+                metadata={
+                    "message_id": msg_id,
+                    "root_id": root_id,
+                    **({"binding_id": self.binding_id, "agent_id": self.agent_id} if self.binding_id else {}),
+                },
             )
             inbound.topic_id = topic_id
 
