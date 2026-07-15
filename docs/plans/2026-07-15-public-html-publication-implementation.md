@@ -1,6 +1,6 @@
 # HTML 对外发布功能实施计划
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **执行说明：** 使用 `executing-plans` 工作流逐项实施并在每个批次后检查结果。
 
 **目标：** 为“对话生成”中的 HTML 文件增加永久、可撤销、无需登录且支持交互的公开访问链接。
 

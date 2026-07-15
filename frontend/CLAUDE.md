@@ -73,8 +73,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - **Server Components by default**, `"use client"` only for interactive components
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
 - **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
-- **Conversation-generated files** are discovered by searching recent threads for titles, then loading each latest thread state for `artifacts`; thread search responses do not contain checkpoint artifacts
-- **Shared HTML previews** use `allow-scripts allow-forms` without `allow-same-origin`, preserving interaction while isolating app cookies, storage, and the parent DOM
+- **对话生成文件发现**：先搜索近期对话及标题，再读取每个对话的最新状态取得 `artifacts`；对话搜索响应本身不包含 checkpoint 中的产物列表
+- **共享 HTML 预览**：使用包含 `allow-scripts allow-forms`、但不包含 `allow-same-origin` 的 iframe，在保留交互能力的同时隔离应用 Cookie、本地存储和父页面 DOM
+- **HTML 永久外链**：只有“对话生成”中的 `.html` 和 `.htm` 文件显示发布操作；文件页通过 `['files', 'publications']` 查询一次映射发布状态。公开路由 `/published/[token]` 不依赖登录态，先以纯文本加载 HTML，再通过 `srcDoc` 注入同样的不透明源沙箱；页面必须设置 `noindex`，并为失效 token 显示独立错误状态
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 
 ## Code Style
