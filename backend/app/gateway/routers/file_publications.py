@@ -7,7 +7,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -39,6 +40,11 @@ class FilePublicationResponse(BaseModel):
 class FilePublicationListResponse(BaseModel):
     items: list[FilePublicationResponse]
     total: int
+
+
+class PublicFileResponse(BaseModel):
+    name: str
+    content_url: str
 
 
 def _request_user_id(request: Request) -> str:
@@ -201,3 +207,76 @@ async def list_file_publications(request: Request) -> FilePublicationListRespons
             continue
         items.append(_publication_response(row, target))
     return FilePublicationListResponse(items=items, total=len(items))
+
+
+@router.delete(
+    "/api/file-publications/{publication_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Cancel a public HTML link",
+)
+async def delete_file_publication(publication_id: str, request: Request) -> Response:
+    owner_user_id = _request_user_id(request)
+    sf = get_session_factory()
+    if sf is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with sf() as session:
+        row = (
+            await session.execute(
+                select(FilePublicationRow).where(
+                    FilePublicationRow.id == publication_id,
+                    FilePublicationRow.owner_user_id == owner_user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Publication not found")
+        await session.delete(row)
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _get_publication_by_token(token: str) -> FilePublicationRow:
+    sf = get_session_factory()
+    if sf is None:
+        raise HTTPException(status_code=404, detail="Published file not found")
+    async with sf() as session:
+        row = (
+            await session.execute(
+                select(FilePublicationRow).where(FilePublicationRow.public_token == token)
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Published file not found")
+    return row
+
+
+@router.get(
+    "/api/public-files/{token}",
+    response_model=PublicFileResponse,
+    summary="Get public HTML metadata",
+)
+async def get_public_file(token: str) -> PublicFileResponse:
+    row = await _get_publication_by_token(token)
+    target = _resolve_publication_source(row)
+    return PublicFileResponse(
+        name=target.name,
+        content_url=f"/api/public-files/{token}/content",
+    )
+
+
+@router.get(
+    "/api/public-files/{token}/content",
+    summary="Read published HTML as non-executable text",
+)
+async def get_public_file_content(token: str) -> FileResponse:
+    row = await _get_publication_by_token(token)
+    target = _resolve_publication_source(row)
+    return FileResponse(
+        target,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

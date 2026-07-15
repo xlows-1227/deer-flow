@@ -23,6 +23,8 @@ from app.gateway.auth_middleware import AuthMiddleware, _is_public
         "/api/v1/auth/register",
         "/api/v1/auth/logout",
         "/api/v1/auth/setup-status",
+        "/api/public-files/public-token",
+        "/api/public-files/public-token/content",
     ],
 )
 def test_public_paths(path: str):

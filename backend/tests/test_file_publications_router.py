@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -44,6 +45,12 @@ def _app_for(user: User, *, owner_check_passes: bool = True):
         user_factory=lambda: user,
         owner_check_passes=owner_check_passes,
     )
+    app.include_router(file_publications.router)
+    return app
+
+
+def _public_app():
+    app = FastAPI()
     app.include_router(file_publications.router)
     return app
 
@@ -141,5 +148,116 @@ async def test_publish_hides_a_conversation_owned_by_someone_else(tmp_path, monk
             },
         )
     assert response.status_code == 404
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_anyone_can_read_published_html_as_non_sniffable_text(tmp_path, monkeypatch):
+    engine, session_factory = await _setup_database(tmp_path)
+    paths = Paths(tmp_path / "data")
+    monkeypatch.setattr(file_publications, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(paths_module, "_paths", paths)
+
+    virtual_path = "/mnt/user-data/outputs/interactive.html"
+    html = '<button onclick="this.textContent=\'done\'">run</button>'
+    target = paths.resolve_virtual_path("thread-1", virtual_path, user_id=OWNER_ID)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(html, encoding="utf-8")
+
+    owner_app = _app_for(_user(OWNER_ID, "owner@example.com"))
+    async with AsyncClient(transport=ASGITransport(app=owner_app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/file-publications",
+            json={"thread_id": "thread-1", "path": virtual_path},
+        )
+    token = created.json()["public_token"]
+
+    async with AsyncClient(transport=ASGITransport(app=_public_app()), base_url="http://test") as client:
+        metadata = await client.get(f"/api/public-files/{token}")
+        content = await client.get(f"/api/public-files/{token}/content")
+
+    assert metadata.status_code == 200
+    assert metadata.json() == {
+        "name": "interactive.html",
+        "content_url": f"/api/public-files/{token}/content",
+    }
+    assert content.status_code == 200
+    assert content.text == html
+    assert content.headers["content-type"].startswith("text/plain")
+    assert content.headers["x-content-type-options"] == "nosniff"
+    assert content.headers["cache-control"] == "no-store"
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_only_owner_can_cancel_a_publication_and_link_then_returns_404(tmp_path, monkeypatch):
+    engine, session_factory = await _setup_database(tmp_path)
+    paths = Paths(tmp_path / "data")
+    monkeypatch.setattr(file_publications, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(paths_module, "_paths", paths)
+
+    virtual_path = "/mnt/user-data/outputs/revocable.html"
+    target = paths.resolve_virtual_path("thread-1", virtual_path, user_id=OWNER_ID)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("<p>published</p>", encoding="utf-8")
+
+    owner_app = _app_for(_user(OWNER_ID, "owner@example.com"))
+    async with AsyncClient(transport=ASGITransport(app=owner_app), base_url="http://test") as client:
+        created = await client.post(
+            "/api/file-publications",
+            json={"thread_id": "thread-1", "path": virtual_path},
+        )
+    publication_id = created.json()["id"]
+    token = created.json()["public_token"]
+
+    other_app = _app_for(_user(OTHER_ID, "other@example.com"))
+    async with AsyncClient(transport=ASGITransport(app=other_app), base_url="http://test") as client:
+        denied = await client.delete(f"/api/file-publications/{publication_id}")
+    assert denied.status_code == 404
+
+    async with AsyncClient(transport=ASGITransport(app=owner_app), base_url="http://test") as client:
+        cancelled = await client.delete(f"/api/file-publications/{publication_id}")
+    assert cancelled.status_code == 204
+
+    async with AsyncClient(transport=ASGITransport(app=_public_app()), base_url="http://test") as client:
+        missing = await client.get(f"/api/public-files/{token}")
+    assert missing.status_code == 404
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_replacement_file_requires_explicit_republish_but_keeps_public_url(tmp_path, monkeypatch):
+    engine, session_factory = await _setup_database(tmp_path)
+    paths = Paths(tmp_path / "data")
+    monkeypatch.setattr(file_publications, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(paths_module, "_paths", paths)
+
+    virtual_path = "/mnt/user-data/outputs/replaceable.html"
+    target = paths.resolve_virtual_path("thread-1", virtual_path, user_id=OWNER_ID)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("<p>original</p>", encoding="utf-8")
+
+    request_body = {"thread_id": "thread-1", "path": virtual_path}
+    owner_app = _app_for(_user(OWNER_ID, "owner@example.com"))
+    async with AsyncClient(transport=ASGITransport(app=owner_app), base_url="http://test") as client:
+        created = await client.post("/api/file-publications", json=request_body)
+    token = created.json()["public_token"]
+
+    target.unlink()
+    target.write_text("<p>replacement</p>", encoding="utf-8")
+    async with AsyncClient(transport=ASGITransport(app=_public_app()), base_url="http://test") as client:
+        stale = await client.get(f"/api/public-files/{token}/content")
+    assert stale.status_code == 404
+
+    async with AsyncClient(transport=ASGITransport(app=owner_app), base_url="http://test") as client:
+        republished = await client.post("/api/file-publications", json=request_body)
+    assert republished.json()["public_token"] == token
+
+    async with AsyncClient(transport=ASGITransport(app=_public_app()), base_url="http://test") as client:
+        refreshed = await client.get(f"/api/public-files/{token}/content")
+    assert refreshed.text == "<p>replacement</p>"
 
     await engine.dispose()
