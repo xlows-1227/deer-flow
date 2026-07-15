@@ -16,29 +16,27 @@ import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-function FridayBrand() {
+function ShisanxiangBrand() {
   return (
-    <>
+    <span
+      className="inline-flex min-w-0 items-center gap-2"
+      aria-label="十三香"
+    >
       <Image
-        src="/images/friday-icon.png"
+        src="/images/shisanxiang-icon.png"
         alt=""
         width={32}
         height={32}
-        className="size-8 rounded-lg object-cover shadow-sm"
+        className="size-8 shrink-0 rounded-lg object-cover shadow-sm"
       />
       <span
-        className="flex items-center gap-px text-[17px] leading-none font-black tracking-[0.02em] text-gray-950 uppercase"
-        aria-label="Friday"
+        aria-hidden="true"
+        className="flex items-center text-[17px] leading-none font-black tracking-[0.04em] text-gray-950"
       >
-        <span>Frid</span>
-        <span className="relative ml-0.5 inline-block h-[13px] w-[14px] translate-y-px">
-          <span className="absolute bottom-0 left-0 h-[3px] w-[13px] rounded-full bg-gray-950" />
-          <span className="absolute bottom-[1px] left-[1px] h-[3px] w-[12px] origin-left rotate-[-58deg] rounded-full bg-gray-950" />
-          <span className="absolute right-0 bottom-[1px] h-[3px] w-[12px] origin-right rotate-[58deg] rounded-full bg-gray-950" />
-        </span>
-        <span>y</span>
+        <span>十三</span>
+        <span className="text-[#c93229]">香</span>
       </span>
-    </>
+    </span>
   );
 }
 
@@ -61,11 +59,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
               prefetch={false}
               className="ml-1 flex min-w-0 items-center gap-2 group-data-[collapsible=icon]:hidden"
             >
-              <FridayBrand />
+              <ShisanxiangBrand />
             </Link>
           ) : (
             <div className="ml-1 flex min-w-0 cursor-default items-center gap-2 group-data-[collapsible=icon]:hidden">
-              <FridayBrand />
+              <ShisanxiangBrand />
             </div>
           )}
           <SidebarTrigger
