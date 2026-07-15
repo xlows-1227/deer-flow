@@ -275,6 +275,43 @@ sandbox:
 
 此模式还需要可用的 Kubernetes 配置。更多 provisioner 细节见 [provisioner 说明](../docker/provisioner/README.md)。
 
+## PostgreSQL 本机备份
+
+生产库数据在宿主机目录（默认 `/data/postgres`）。脚本 `scripts/backup-postgres.sh` 做物理拷贝备份：
+
+1. `docker stop` 停库（保证文件一致；不停止直接拷容易坏）
+2. `tar` 打包数据目录到 `/data/postgres-backups/postgres_YYYYMMDD.tar.gz`
+3. `docker start` 拉起
+4. 删除超过 8 周的旧包
+
+备份期间数据库短暂不可用，请选业务低峰（例如凌晨）。
+
+### 手动执行
+
+```bash
+mkdir -p /data/postgres-backups
+./scripts/backup-postgres.sh
+```
+
+可选环境变量：`POSTGRES_CONTAINER`、`POSTGRES_DATA_DIR`、`POSTGRES_BACKUP_DIR`、`POSTGRES_BACKUP_KEEP_WEEKS`（默认分别为 `deer-flow-postgres`、`/data/postgres`、`/data/postgres-backups`、`8`）。
+
+### 定时任务（每周）
+
+```cron
+0 3 * * 0 /path/to/deer-flow/scripts/backup-postgres.sh >> /data/postgres-backups/backup.log 2>&1
+```
+
+### 恢复
+
+```bash
+docker stop deer-flow-postgres
+rm -rf /data/postgres
+tar -xzf /data/postgres-backups/postgres_YYYYMMDD.tar.gz -C /data
+docker start deer-flow-postgres
+```
+
+恢复前确认 `POSTGRES_DATA_DIR` 路径与备份时一致。
+
 ## 安全建议
 
 DeerFlow 具备执行工具、读写运行期文件、调用外部资源等能力。生产部署请至少做到：
@@ -285,7 +322,7 @@ DeerFlow 具备执行工具、读写运行期文件、调用外部资源等能�
 - 持久保存并保护 `.better-auth-secret`，避免每次重启生成不同 secret。
 - 不在日志、文档、Git 提交中泄露 API key。
 - 使用 HTTPS 终止代理保护跨网络访问。
-- 定期备份 `DEER_FLOW_HOME`。
+- 定期备份 `DEER_FLOW_HOME`，并用 `scripts/backup-postgres.sh` 备份 PostgreSQL。
 
 ## 排障
 
