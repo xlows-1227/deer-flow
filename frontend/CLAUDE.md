@@ -73,6 +73,8 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - **Server Components by default**, `"use client"` only for interactive components
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
 - **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
+- **Conversation-generated files** are discovered by searching recent threads for titles, then loading each latest thread state for `artifacts`; thread search responses do not contain checkpoint artifacts
+- **Shared HTML previews** use `allow-scripts allow-forms` without `allow-same-origin`, preserving interaction while isolating app cookies, storage, and the parent DOM
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 
 ## Code Style
