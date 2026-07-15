@@ -7,8 +7,14 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.channels.store import DbMappingStore
+from deerflow.persistence.agent_channel import AgentChannelRow
 from deerflow.persistence.base import Base
-from deerflow.persistence.channel_mapping import ChannelConversationMappingRow, MappingScopeConflictError
+from deerflow.persistence.channel_mapping import (
+    SYSTEM_CHANNEL_MAPPING_SCOPE,
+    ChannelConversationMappingRow,
+    MappingScopeConflictError,
+)
+from deerflow.persistence.published_agent import PublishedAgentRow
 
 
 @pytest_asyncio.fixture
@@ -17,7 +23,44 @@ async def mapping_store(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    store = DbMappingStore(async_sessionmaker(engine, expire_on_commit=False))
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                PublishedAgentRow(
+                    id="agent-1",
+                    owner_user_id="owner-a",
+                    slug="agent-one",
+                    display_name="Agent One",
+                    status="published",
+                ),
+                PublishedAgentRow(
+                    id="agent-2",
+                    owner_user_id="owner-b",
+                    slug="agent-two",
+                    display_name="Agent Two",
+                    status="published",
+                ),
+                AgentChannelRow(
+                    id="binding-1",
+                    agent_id="agent-1",
+                    channel_type="feishu",
+                    app_id="app-one",
+                    secret_ref="secret://feishu/11111111111111111111111111111111",
+                    status="active",
+                ),
+                AgentChannelRow(
+                    id="binding-2",
+                    agent_id="agent-2",
+                    channel_type="feishu",
+                    app_id="app-two",
+                    secret_ref="secret://feishu/22222222222222222222222222222222",
+                    status="active",
+                ),
+            ]
+        )
+        await session.commit()
+    store = DbMappingStore(session_factory)
     yield store
     await engine.dispose()
 
@@ -30,6 +73,7 @@ async def test_private_chat_isolated_by_feishu_user(mapping_store: DbMappingStor
         chat_id="chat-1",
         feishu_user_id="user-a",
         chat_type="p2p",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
     second = await mapping_store.get_or_create_thread(
         binding_id="binding-1",
@@ -37,6 +81,7 @@ async def test_private_chat_isolated_by_feishu_user(mapping_store: DbMappingStor
         chat_id="chat-1",
         feishu_user_id="user-b",
         chat_type="p2p",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
 
     assert first != second
@@ -50,6 +95,7 @@ async def test_group_members_share_thread(mapping_store: DbMappingStore) -> None
         chat_id="group-1",
         feishu_user_id="user-a",
         chat_type="group",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
     second = await mapping_store.get_or_create_thread(
         binding_id="binding-1",
@@ -57,6 +103,7 @@ async def test_group_members_share_thread(mapping_store: DbMappingStore) -> None
         chat_id="group-1",
         feishu_user_id="user-b",
         chat_type="group",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
 
     assert first == second
@@ -71,6 +118,7 @@ async def test_group_topics_are_isolated(mapping_store: DbMappingStore) -> None:
         feishu_user_id="user-a",
         chat_type="group",
         topic_id="topic-a",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
     second = await mapping_store.get_or_create_thread(
         binding_id="binding-1",
@@ -79,6 +127,7 @@ async def test_group_topics_are_isolated(mapping_store: DbMappingStore) -> None:
         feishu_user_id="user-b",
         chat_type="group",
         topic_id="topic-b",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
 
     assert first != second
@@ -92,6 +141,7 @@ async def test_same_chat_isolated_across_bindings(mapping_store: DbMappingStore)
         chat_id="chat-1",
         feishu_user_id="user-a",
         chat_type="p2p",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
     second = await mapping_store.get_or_create_thread(
         binding_id="binding-2",
@@ -99,6 +149,7 @@ async def test_same_chat_isolated_across_bindings(mapping_store: DbMappingStore)
         chat_id="chat-1",
         feishu_user_id="user-a",
         chat_type="p2p",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
 
     assert first != second
@@ -112,6 +163,7 @@ async def test_existing_binding_mapping_cannot_be_reassigned_to_another_agent(ma
         chat_id="chat-1",
         feishu_user_id="user-a",
         chat_type="p2p",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
     )
 
     with pytest.raises(MappingScopeConflictError):
@@ -121,6 +173,7 @@ async def test_existing_binding_mapping_cannot_be_reassigned_to_another_agent(ma
             chat_id="chat-1",
             feishu_user_id="user-a",
             chat_type="p2p",
+            system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
         )
 
 
@@ -133,11 +186,27 @@ async def test_concurrent_get_or_create_returns_one_mapping(mapping_store: DbMap
             chat_id="chat-1",
             feishu_user_id="user-a",
             chat_type="p2p",
+            system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
         )
 
     thread_ids = await asyncio.gather(*(resolve() for _ in range(12)))
-    rows = await mapping_store.list_mappings(binding_id="binding-1")
+    rows = await mapping_store.list_mappings(binding_id="binding-1", owner_user_id="owner-a")
 
     assert len(set(thread_ids)) == 1
     assert len(rows) == 1
     assert isinstance(rows[0], ChannelConversationMappingRow)
+
+
+@pytest.mark.asyncio
+async def test_mapping_store_rejects_untrusted_system_scope_and_cross_owner_list(mapping_store: DbMappingStore) -> None:
+    with pytest.raises(PermissionError):
+        await mapping_store.get_or_create_thread(
+            binding_id="binding-1",
+            agent_id="agent-1",
+            chat_id="chat-1",
+            feishu_user_id="user-a",
+            chat_type="p2p",
+            system_scope=object(),
+        )
+
+    assert await mapping_store.list_mappings(binding_id="binding-1", owner_user_id="owner-b") == []

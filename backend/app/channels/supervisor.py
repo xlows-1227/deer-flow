@@ -13,12 +13,36 @@ import httpx
 from app.channels.base import Channel
 from app.channels.message_bus import MessageBus
 from deerflow.persistence.agent_channel import SYSTEM_CHANNEL_SUPERVISOR_SCOPE, AgentChannelRepository
+from deerflow.publishing.feishu_credentials import decode_feishu_credentials
 from deerflow.publishing.secret_store import SecretStore
 
 logger = logging.getLogger(__name__)
 
-ChannelFactory = Callable[..., Channel]
 ConnectionTester = Callable[[str, str], Awaitable[tuple[bool, str]]]
+
+
+class EventDeduplicator(Protocol):
+    """Durably claim a provider event before binding execution."""
+
+    async def claim(self, binding_id: str, event_id: str) -> bool: ...
+
+
+class ChannelFactory(Protocol):
+    """Build one isolated dynamic channel from decrypted credentials."""
+
+    def __call__(
+        self,
+        bus: MessageBus,
+        *,
+        app_id: str,
+        app_secret: str,
+        verification_token: str,
+        encrypt_key: str,
+        binding_id: str,
+        agent_id: str,
+        event_deduplicator: EventDeduplicator | None = None,
+        runtime_error_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> Channel: ...
 
 
 class DynamicChannelRegistry(Protocol):
@@ -49,6 +73,7 @@ class _RunningChannel:
     channel: Channel
     owner_user_id: str
     agent_id: str
+    generation: object
 
 
 def _default_channel_factory(
@@ -56,9 +81,12 @@ def _default_channel_factory(
     *,
     app_id: str,
     app_secret: str,
+    verification_token: str,
+    encrypt_key: str,
     binding_id: str,
     agent_id: str,
-    event_deduplicator: Any | None = None,
+    event_deduplicator: EventDeduplicator | None = None,
+    runtime_error_callback: Callable[[str], Awaitable[None]] | None = None,
 ) -> Channel:
     from app.channels.feishu import FeishuChannel
 
@@ -66,9 +94,12 @@ def _default_channel_factory(
         bus=bus,
         app_id=app_id,
         app_secret=app_secret,
+        verification_token=verification_token,
+        encrypt_key=encrypt_key,
         binding_id=binding_id,
         agent_id=agent_id,
         event_deduplicator=event_deduplicator,
+        runtime_error_callback=runtime_error_callback,
     )
 
 
@@ -98,8 +129,9 @@ class FeishuSupervisor:
         channel_factory: ChannelFactory | None = None,
         connection_tester: ConnectionTester | None = None,
         channel_registry: DynamicChannelRegistry | None = None,
-        event_deduplicator: Any | None = None,
+        event_deduplicator: EventDeduplicator | None = None,
     ) -> None:
+        """Configure isolated binding lifecycles and trusted system seams."""
         self._repository = repository
         self._secret_store = secret_store
         self._bus = bus
@@ -113,9 +145,11 @@ class FeishuSupervisor:
 
     @property
     def running_binding_ids(self) -> tuple[str, ...]:
+        """Return process-local bindings whose ready handshake completed."""
         return tuple(sorted(self._running))
 
     def health(self) -> dict[str, BindingHealth]:
+        """Return a snapshot of redacted process-local binding health."""
         return dict(self._health)
 
     async def _binding(self, binding_id: str) -> dict[str, Any]:
@@ -160,13 +194,21 @@ class FeishuSupervisor:
             return await self._record_health(row, health="healthy", detail=None, running=True)
 
         channel: Channel | None = None
+        generation = object()
         try:
-            app_secret = await self._secret_store.get(str(row["secret_ref"]))
+            credentials = decode_feishu_credentials(await self._secret_store.get(str(row["secret_ref"])))
             channel_kwargs = {
                 "app_id": str(row["app_id"]),
-                "app_secret": app_secret,
+                "app_secret": credentials.app_secret,
+                "verification_token": credentials.verification_token,
+                "encrypt_key": credentials.encrypt_key,
                 "binding_id": binding_id,
                 "agent_id": str(row["agent_id"]),
+                "runtime_error_callback": lambda detail: self._handle_runtime_error(
+                    binding_id,
+                    detail,
+                    generation=generation,
+                ),
             }
             if self._event_deduplicator is not None:
                 channel_kwargs["event_deduplicator"] = self._event_deduplicator
@@ -178,6 +220,7 @@ class FeishuSupervisor:
                 channel=channel,
                 owner_user_id=str(row["owner_user_id"]),
                 agent_id=str(row["agent_id"]),
+                generation=generation,
             )
             if self._channel_registry is not None:
                 self._channel_registry.register_dynamic_channel(channel)
@@ -215,6 +258,7 @@ class FeishuSupervisor:
             )
 
     async def start_binding(self, binding_id: str) -> BindingHealth:
+        """Activate and start one binding after its connection reports ready."""
         async with self._lifecycle_lock:
             row = await self._binding(binding_id)
             if row["status"] != "active":
@@ -229,22 +273,53 @@ class FeishuSupervisor:
             return await self._start_row(row)
 
     async def _stop_runtime(self, binding_id: str) -> None:
-        running = self._running.pop(binding_id, None)
+        running = self._running.get(binding_id)
         if running is None:
             return
-        if self._channel_registry is not None:
-            self._channel_registry.unregister_dynamic_channel(running.channel.name)
         try:
             await asyncio.wait_for(running.channel.stop(), timeout=10.0)
-        except TimeoutError:
+        except TimeoutError as exc:
             logger.warning("Published Feishu binding stop timed out", extra={"binding_id": binding_id})
+            raise RuntimeError("Feishu channel stop timed out") from exc
         except Exception as exc:
             logger.error(
                 "Published Feishu binding failed to stop cleanly",
                 extra={"binding_id": binding_id, "error_class": type(exc).__name__},
             )
+            raise
+        self._running.pop(binding_id, None)
+        if self._channel_registry is not None:
+            self._channel_registry.unregister_dynamic_channel(running.channel.name)
+
+    async def _handle_runtime_error(
+        self,
+        binding_id: str,
+        detail: str,
+        *,
+        generation: object,
+    ) -> None:
+        """Remove one failed runtime and persist unhealthy without touching peers."""
+        async with self._lifecycle_lock:
+            current = self._running.get(binding_id)
+            if current is None or current.generation is not generation:
+                logger.info(
+                    "Ignoring stale Feishu runtime error",
+                    extra={"binding_id": binding_id},
+                )
+                return
+            row = await self._binding(binding_id)
+            running = self._running.pop(binding_id, None)
+            if running is not None and self._channel_registry is not None:
+                self._channel_registry.unregister_dynamic_channel(running.channel.name)
+            await self._record_health(
+                row,
+                health="unhealthy",
+                detail=detail,
+                running=False,
+            )
 
     async def stop_binding(self, binding_id: str) -> BindingHealth:
+        """Stop one confirmed runtime before persisting its inactive state."""
         async with self._lifecycle_lock:
             row = await self._binding(binding_id)
             await self._stop_runtime(binding_id)
@@ -260,6 +335,7 @@ class FeishuSupervisor:
             return value
 
     async def restart_binding(self, binding_id: str) -> BindingHealth:
+        """Replace one binding only after its previous runtime fully exits."""
         async with self._lifecycle_lock:
             row = await self._binding(binding_id)
             if row["status"] != "active":
@@ -274,6 +350,7 @@ class FeishuSupervisor:
             return await self._start_row(await self._binding(binding_id))
 
     async def load_active_bindings(self) -> None:
+        """Start all desired-active bindings while isolating per-binding failures."""
         rows = await self._repository.list_active(
             supervisor_scope=SYSTEM_CHANNEL_SUPERVISOR_SCOPE,
         )
@@ -282,11 +359,12 @@ class FeishuSupervisor:
                 await self._start_row(row)
 
     async def test_binding(self, binding_id: str) -> BindingHealth:
+        """Test credentials and persist only a redacted health result."""
         row = await self._binding(binding_id)
         try:
-            app_secret = await self._secret_store.get(str(row["secret_ref"]))
-            healthy, detail = await self._connection_tester(str(row["app_id"]), app_secret)
-            safe_detail = detail.replace(app_secret, "[REDACTED]") if detail else None
+            credentials = decode_feishu_credentials(await self._secret_store.get(str(row["secret_ref"])))
+            healthy, detail = await self._connection_tester(str(row["app_id"]), credentials.app_secret)
+            safe_detail = detail.replace(credentials.app_secret, "[REDACTED]") if detail else None
             return await self._record_health(
                 row,
                 health="healthy" if healthy else "unhealthy",
@@ -311,7 +389,10 @@ class FeishuSupervisor:
         """Stop process-local instances while preserving desired DB status."""
         async with self._lifecycle_lock:
             for binding_id in list(self._running):
-                await self._stop_runtime(binding_id)
+                try:
+                    await self._stop_runtime(binding_id)
+                except Exception:
+                    logger.exception("Failed to stop Feishu binding during shutdown", extra={"binding_id": binding_id})
 
 
 __all__ = [

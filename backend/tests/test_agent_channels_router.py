@@ -16,15 +16,30 @@ from app.gateway.routers import published_agent_channels
 from deerflow.persistence.agent_channel import AgentChannelRepository
 from deerflow.persistence.base import Base
 from deerflow.persistence.published_agent import PublishedAgentRow
+from deerflow.publishing.feishu_credentials import decode_feishu_credentials
 from deerflow.publishing.secret_store import LocalEncryptedSecretStore
 
 
 class _FakeFeishuChannel(Channel):
-    def __init__(self, bus, *, app_id, app_secret, binding_id, agent_id) -> None:
+    def __init__(
+        self,
+        bus,
+        *,
+        app_id,
+        app_secret,
+        verification_token,
+        encrypt_key,
+        binding_id,
+        agent_id,
+        runtime_error_callback,
+    ) -> None:
         super().__init__(name=f"feishu:{binding_id}", bus=bus, config={})
         self.app_id = app_id
         self.app_secret = app_secret
+        self.verification_token = verification_token
+        self.encrypt_key = encrypt_key
         self.agent_id = agent_id
+        self.runtime_error_callback = runtime_error_callback
 
     async def start(self) -> None:
         self._running = True
@@ -40,13 +55,27 @@ class _Factory:
     def __init__(self) -> None:
         self.instances: list[_FakeFeishuChannel] = []
 
-    def __call__(self, bus, *, app_id, app_secret, binding_id, agent_id):
+    def __call__(
+        self,
+        bus,
+        *,
+        app_id,
+        app_secret,
+        verification_token,
+        encrypt_key,
+        binding_id,
+        agent_id,
+        runtime_error_callback,
+    ):
         channel = _FakeFeishuChannel(
             bus,
             app_id=app_id,
             app_secret=app_secret,
+            verification_token=verification_token,
+            encrypt_key=encrypt_key,
             binding_id=binding_id,
             agent_id=agent_id,
+            runtime_error_callback=runtime_error_callback,
         )
         self.instances.append(channel)
         return channel
@@ -86,7 +115,12 @@ async def test_owner_channel_api_never_returns_secret_and_supports_lifecycle(tmp
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/api/published-agents/pa_1/channels",
-            json={"app_id": "cli_owner", "app_secret": "owner-secret-value"},
+            json={
+                "app_id": "cli_owner",
+                "app_secret": "owner-secret-value",
+                "verification_token": "owner-verification-token",
+                "encrypt_key": "owner-encrypt-key",
+            },
         )
         assert created.status_code == 201
         payload = created.json()
@@ -94,6 +128,11 @@ async def test_owner_channel_api_never_returns_secret_and_supports_lifecycle(tmp
         assert "owner-secret-value" not in json.dumps(payload)
         assert "secret_ref" not in payload
         binding_id = payload["id"]
+        stored = await repository.get("pa_1", binding_id, owner_user_id="owner-a")
+        credentials = decode_feishu_credentials(await secrets.get(stored["secret_ref"]))
+        assert credentials.app_secret == "owner-secret-value"
+        assert credentials.verification_token == "owner-verification-token"
+        assert credentials.encrypt_key == "owner-encrypt-key"
 
         cross_owner = await client.get(
             "/api/published-agents/pa_1/channels",
@@ -108,11 +147,18 @@ async def test_owner_channel_api_never_returns_secret_and_supports_lifecycle(tmp
 
         rotated = await client.patch(
             f"/api/published-agents/pa_1/channels/{binding_id}",
-            json={"app_id": "cli_rotated", "app_secret": "rotated-secret-value"},
+            json={
+                "app_id": "cli_rotated",
+                "app_secret": "rotated-secret-value",
+                "verification_token": "rotated-verification-token",
+                "encrypt_key": "rotated-encrypt-key",
+            },
         )
         assert rotated.status_code == 200
         assert "rotated-secret-value" not in json.dumps(rotated.json())
         assert factory.instances[-1].app_secret == "rotated-secret-value"
+        assert factory.instances[-1].verification_token == "rotated-verification-token"
+        assert factory.instances[-1].encrypt_key == "rotated-encrypt-key"
 
         stopped = await client.post(f"/api/published-agents/pa_1/channels/{binding_id}/stop")
         assert stopped.status_code == 200
@@ -159,7 +205,12 @@ async def test_connection_test_returns_health_without_echoing_secret(tmp_path) -
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
             "/api/published-agents/pa_1/channels",
-            json={"app_id": "cli_owner", "app_secret": "owner-secret-value"},
+            json={
+                "app_id": "cli_owner",
+                "app_secret": "owner-secret-value",
+                "verification_token": "owner-verification-token",
+                "encrypt_key": "owner-encrypt-key",
+            },
         )
         binding_id = created.json()["id"]
         tested = await client.post(f"/api/published-agents/pa_1/channels/{binding_id}/test")

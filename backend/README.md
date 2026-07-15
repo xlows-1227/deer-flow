@@ -182,9 +182,40 @@ Notes:
 
 ### IM Channels
 
-The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
+The IM bridge supports Feishu, Slack, and Telegram through two compatible paths:
 
-For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
+- Legacy channels remain configured in `config.yaml`. They use the JSON conversation mapping store; Slack and Telegram use `runs.wait()`, while legacy Feishu streams and updates one in-thread card.
+- Published-Agent Feishu bindings are created by an authenticated Agent owner under `/api/published-agents/{agent_id}/channels`. They are database-backed and execute the binding's immutable Published-Agent Release through resolver and quota policy; they never fall back to the default Agent or legacy JSON mapping.
+
+Database-backed Feishu requires a stable Fernet deployment key. Generate one once and provide the same value to every Gateway replica and restart:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+export DEER_FLOW_SECRET_STORE_KEY='<generated-key>'
+```
+
+The encrypted credential bundle (`app_secret`, required `verification_token`, and optional `encrypt_key`) is stored below `${DEER_FLOW_HOME:-.deer-flow}/secret-store/feishu/`; SQL rows contain only an opaque `secret_ref`. Do not rotate the deployment key without re-encrypting existing entries. If the key is absent or invalid, the Gateway logs `Published Feishu Supervisor unavailable`; Published-Agent APIs and legacy `config.yaml` channels continue to run, but binding lifecycle routes return 503.
+
+Owner routes support create/list/test/start/stop/restart/credential rotation/delete. A create request uses:
+
+```json
+{
+  "app_id": "cli_...",
+  "app_secret": "...",
+  "verification_token": "...",
+  "encrypt_key": "..."
+}
+```
+
+Creating a binding leaves it inactive. `start` returns healthy only after the WebSocket ready handshake; `stop`, `restart`, rotation, and delete first confirm the old SDK connection has exited. Runtime connection loss marks only that binding unhealthy. Incoming events follow `verify → durable dedup → binding → DB conversation mapping → Published-Agent resolver → quota reserve → Run → usage settlement`; private chats isolate by Feishu user, while groups isolate by chat and optional topic.
+
+Gateway startup automatically upgrades persistence to Alembic head `2026_07_14_channel_mappings` (`agent_channels`, `channel_conversation_mappings`, and `channel_event_dedup`). Diagnose an unhealthy binding through `GET .../channels` and `POST .../channels/{binding_id}/test`, then check Gateway logs for the redacted error class. Focused regression:
+
+```bash
+uv run pytest tests/test_agent_channels_router.py tests/test_feishu_supervisor.py \
+  tests/test_feishu_event_dedup.py tests/test_feishu_websocket_lifecycle.py \
+  tests/test_channel_mapping_store.py tests/test_feishu_published_run_flow.py -q
+```
 
 ---
 

@@ -14,6 +14,7 @@ from app.channels.store import ChannelStore
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from app.channels.published_runtime import PublishedChannelRuntime
     from deerflow.config.app_config import AppConfig
 
 # Channel name → import path for lazy loading
@@ -220,6 +221,10 @@ class ChannelService:
     def unregister_dynamic_channel(self, channel_name: str) -> None:
         """Remove one Supervisor-managed channel from dispatcher lookup."""
         self._dynamic_channels.pop(channel_name, None)
+
+    def configure_published_runtime(self, runtime: PublishedChannelRuntime) -> None:
+        """Attach the DB-backed Published-Agent dispatcher before bindings start."""
+        self.manager.configure_published_runtime(runtime)
 
 
 # -- singleton access -------------------------------------------------------

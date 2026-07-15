@@ -54,6 +54,7 @@ def staged_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
+    monkeypatch.delenv("DEER_FLOW_SECRET_STORE_KEY", raising=False)
 
     staged_config = tmp_path / "config.yaml"
     staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
@@ -154,6 +155,8 @@ def test_lifespan_mounts_services_on_app_state(staged_env):
         assert app.state.import_service is not None, "import_service is None despite sqlite backend"
         assert app.state.agent_api_key_repo is not None, "agent_api_key_repo is None despite sqlite backend"
         assert app.state.published_agent_resolver is not None, "resolver is None despite sqlite backend"
+        assert app.state.published_channel_runtime is not None, "published channel runtime is not wired"
+        assert app.state.feishu_supervisor is None, "missing secret key should disable only the DB Supervisor"
         from deerflow.publishing.skills_index import ConnectorServiceRepo
 
         assert isinstance(app.state.published_agent_resolver._connectors, ConnectorServiceRepo)

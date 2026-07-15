@@ -497,32 +497,44 @@ pytest tests/test_published_agent_resolver.py tests/test_memoryless_runtime_poli
 Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the DeerFlow agent via the LangGraph Server.
 
 
-**Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
+**Architecture**: Legacy `config.yaml` channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend). Database-backed Published-Agent Feishu bindings share the MessageBus but take a binding-aware branch before any legacy session resolution: durable DB mapping → `PublishedAgentResolver(source="feishu")` → quota reservation → memory-free Published Run → exactly-once usage settlement. A dynamic binding must never use the default assistant or JSON mapping fallback.
 
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
-- `store.py` - JSON-file persistence mapping `channel_name:chat_id[:topic_id]` → `thread_id` (keys are `channel:chat` for root conversations and `channel:chat:topic` for threaded conversations)
-- `manager.py` - Core dispatcher: creates threads via `client.threads.create()`, routes commands, keeps Slack/Telegram on `client.runs.wait()`, and uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates
+- `store.py` - legacy JSON mapping plus `DbMappingStore`; DB mapping scopes p2p by `(binding, chat, user)` and groups by `(binding, chat, topic)`
+- `manager.py` - Core dispatcher: routes trusted `binding_id` metadata to `PublishedChannelRuntime`; other messages retain legacy SDK behavior
+- `published_runtime.py` - trusted mapping/resolver/quota/Run/usage composition for dynamic bindings
+- `supervisor.py` - one ready/error-handshaked Feishu WebSocket lifecycle per active DB binding; stop/restart waits for confirmed SDK exit
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
 - `slack.py` / `feishu.py` / `telegram.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured)
 
-**Message Flow**:
-1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
-2. `ChannelManager._dispatch_loop()` consumes from queue
-3. For chat: look up/create thread through Gateway's LangGraph-compatible API
-4. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
-5. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
-6. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
-7. DingTalk AI Card mode (when `card_template_id` configured): `runs.stream()` → create card with initial text → stream updates via `PUT /v1.0/card/streaming` → finalize on `is_final=True`. Falls back to `sampleMarkdown` if card creation or streaming fails
-8. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
-9. Outbound → channel callbacks → platform reply
+**Published Feishu flow**: app-credential-authenticated SDK WebSocket → application event-header token comparison + timestamp replay check → durable `(binding_id, event_id)` claim → MessageBus → stable binding/Agent DB mapping → Published resolver → quota reserve → Gateway Run with Published runtime policy → terminal usage settlement → outbound card. The SDK long-connection path exposes no HTTP callback signature and internally uses `do_without_validation`, so the application token check is mandatory. Verification and dedup occur before quota. Same event ids on different bindings are independent.
+
+**Legacy flow**: External platform → MessageBus → JSON thread mapping/Gateway thread creation → Feishu streaming or Slack/Telegram `runs.wait()` → outbound callback. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair.
 
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
 - In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://gateway:8001/api` for `langgraph_url` and `http://gateway:8001` for `gateway_url`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `dingtalk` (client_id, client_secret, optional `card_template_id` for AI Card streaming)
+
+**Published Feishu deployment and operations**:
+
+- Set one stable `DEER_FLOW_SECRET_STORE_KEY` on every Gateway replica. Generate it with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Ciphertext lives at `${DEER_FLOW_HOME:-.deer-flow}/secret-store/feishu/`; the database stores opaque refs only. Never log or return the decrypted `app_secret`, `verification_token`, or `encrypt_key`.
+- Owner/session + CSRF routes are `/api/published-agents/{agent_id}/channels`: `POST/GET`, `POST /{binding_id}/{test|start|stop|restart}`, `PATCH /{binding_id}`, and `DELETE /{binding_id}`. Create and rotate carry the entire encrypted credential bundle; active rotation restarts only after the old connection exits.
+- Desired state and redacted health live in `agent_channels`. Ready is persisted healthy only after the SDK connection handshake; late failure marks that binding unhealthy. Missing/invalid deployment key logs `Published Feishu Supervisor unavailable` and disables only DB bindings, not publication or legacy channels.
+- Conversation mappings and event claims live in `channel_conversation_mappings` and `channel_event_dedup`. Inbound cross-owner access requires the unforgeable system scope and still validates binding → Agent; owner listing joins through `published_agents.owner_user_id`.
+- Gateway startup auto-applies Alembic `2026_07_14_agent_channels → 2026_07_14_channel_mappings`. When diagnosing, inspect the redacted `health`/`health_detail`, call the `test` route, verify the deployment key is mounted consistently, and look for ready/stop/runtime-loss log events.
+
+M3 focused regression:
+
+```bash
+pytest tests/test_agent_channel_repo.py tests/test_agent_channels_router.py \
+  tests/test_feishu_supervisor.py tests/test_feishu_event_dedup.py \
+  tests/test_feishu_websocket_lifecycle.py tests/test_channel_mapping_store.py \
+  tests/test_feishu_published_run_flow.py tests/test_channels.py tests/test_feishu_parser.py -q
+```
 
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)

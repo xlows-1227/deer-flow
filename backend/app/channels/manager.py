@@ -10,7 +10,10 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.channels.published_runtime import PublishedChannelRuntime
 
 import httpx
 from langgraph_sdk.errors import ConflictError
@@ -576,6 +579,7 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        published_runtime: PublishedChannelRuntime | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -585,6 +589,7 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._published_runtime = published_runtime
         self._client = None  # lazy init — langgraph_sdk async client
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -685,6 +690,10 @@ class ChannelManager:
         self._task = asyncio.create_task(self._dispatch_loop())
         logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
 
+    def configure_published_runtime(self, runtime: PublishedChannelRuntime) -> None:
+        """Attach the trusted runtime used only by DB-backed channel bindings."""
+        self._published_runtime = runtime
+
     async def stop(self) -> None:
         """Stop the dispatch loop."""
         self._running = False
@@ -731,7 +740,12 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         async with self._semaphore:
             try:
-                if msg.msg_type == InboundMessageType.COMMAND:
+                # Binding metadata is emitted only by Supervisor-owned channels.
+                # Route it before legacy command handling so /memory, /models,
+                # or /new can never escape Published-Agent runtime policy.
+                if isinstance(msg.metadata.get("binding_id"), str):
+                    await self._handle_published_chat(msg)
+                elif msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
                     await self._handle_chat(msg)
@@ -789,6 +803,10 @@ class ChannelManager:
                 self._create_thread_locks.pop(key, None)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
+        # Defense in depth for direct callers that bypass ``_handle_message``.
+        if isinstance(msg.metadata.get("binding_id"), str):
+            await self._handle_published_chat(msg)
+            return
         client = self._get_client()
 
         # Serialize get-or-create for the same conversation/topic so that
@@ -886,6 +904,37 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+    async def _handle_published_chat(self, msg: InboundMessage) -> None:
+        """Route a trusted binding message without falling back to legacy Agent config."""
+        from app.channels.published_runtime import (
+            PublishedChannelBusyError,
+            PublishedChannelUnavailableError,
+        )
+
+        runtime = self._published_runtime
+        if runtime is None:
+            await self._send_error(msg, "This agent is temporarily unavailable.")
+            return
+        try:
+            execution = await runtime.run(msg)
+        except PublishedChannelBusyError:
+            await self._send_error(msg, "This agent is busy. Please try again later.")
+            return
+        except PublishedChannelUnavailableError:
+            await self._send_error(msg, "This agent is currently unavailable.")
+            return
+        text = execution.text or "(No response from agent)"
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=execution.thread_id,
+                text=text,
+                thread_ts=msg.thread_ts,
+                metadata=_slim_metadata(msg.metadata),
+            )
+        )
 
     async def _handle_streaming_chat(
         self,

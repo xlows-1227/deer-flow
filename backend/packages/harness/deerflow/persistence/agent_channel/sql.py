@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql import Select
 
 from deerflow.persistence.agent_channel.model import AgentChannelRow
 from deerflow.persistence.published_agent.model import PublishedAgentRow
@@ -40,10 +41,15 @@ class AgentChannelRepository:
     """CRUD for channel bindings with explicit owner isolation."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """Bind the repository to the application's async session factory."""
         self._sf = session_factory
 
     @staticmethod
-    def _owned_query(agent_id: str, binding_id: str, owner_user_id: str):
+    def _owned_query(
+        agent_id: str,
+        binding_id: str,
+        owner_user_id: str,
+    ) -> Select[tuple[AgentChannelRow]]:
         return (
             select(AgentChannelRow)
             .join(PublishedAgentRow, PublishedAgentRow.id == AgentChannelRow.agent_id)
@@ -104,11 +110,13 @@ class AgentChannelRepository:
             return _to_dict(row)
 
     async def get(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Return one binding only when the caller owns its stable Agent."""
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id))).scalar_one_or_none()
             return _to_dict(row) if row is not None else None
 
     async def list_by_agent(self, agent_id: str, *, owner_user_id: str) -> list[dict[str, Any]]:
+        """List bindings for one owner-scoped Agent without exposing secrets."""
         async with self._sf() as session:
             rows = (
                 (
@@ -154,6 +162,7 @@ class AgentChannelRepository:
             return _to_dict(row, owner_user_id=str(owner_user_id))
 
     async def activate(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Set desired state active under an owner lock and enforce uniqueness."""
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
             if row is None:
@@ -171,6 +180,7 @@ class AgentChannelRepository:
             return _to_dict(row)
 
     async def deactivate(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Persist inactive desired state after the Supervisor confirms stop."""
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
             if row is None:
@@ -191,6 +201,7 @@ class AgentChannelRepository:
         app_id: str,
         secret_ref: str,
     ) -> dict[str, Any] | None:
+        """Atomically replace one owner's encrypted credential reference."""
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
             if row is None:
@@ -212,6 +223,7 @@ class AgentChannelRepository:
         health: str,
         detail: str | None = None,
     ) -> dict[str, Any] | None:
+        """Persist a redacted health result for one owner-scoped binding."""
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
             if row is None:
@@ -223,6 +235,7 @@ class AgentChannelRepository:
             return _to_dict(row)
 
     async def delete(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
+        """Delete one owner-scoped binding after runtime shutdown is complete."""
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
             if row is None:

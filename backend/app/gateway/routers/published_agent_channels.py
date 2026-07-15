@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 
 from app.channels.supervisor import BindingNotFoundError, FeishuSupervisor
 from deerflow.persistence.agent_channel import ActiveAgentChannelConflictError, AgentChannelRepository
+from deerflow.publishing.feishu_credentials import FeishuCredentials, encode_feishu_credentials
 from deerflow.publishing.secret_store import SecretStore
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,8 @@ class AgentChannelCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     app_id: str = Field(min_length=1, max_length=128)
     app_secret: SecretStr = Field(min_length=1, max_length=512)
+    verification_token: SecretStr = Field(min_length=1, max_length=512)
+    encrypt_key: SecretStr | None = Field(default=None, max_length=512)
 
     @field_validator("app_id")
     @classmethod
@@ -30,7 +33,7 @@ class AgentChannelCreateRequest(BaseModel):
             raise ValueError("value must not be blank")
         return cleaned
 
-    @field_validator("app_secret", mode="before")
+    @field_validator("app_secret", "verification_token", "encrypt_key", mode="before")
     @classmethod
     def _strip_secret(cls, value: Any) -> Any:
         if isinstance(value, str):
@@ -44,6 +47,8 @@ class AgentChannelUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     app_id: str | None = Field(default=None, min_length=1, max_length=128)
     app_secret: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    verification_token: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    encrypt_key: SecretStr | None = Field(default=None, max_length=512)
 
     @field_validator("app_id")
     @classmethod
@@ -54,7 +59,7 @@ class AgentChannelUpdateRequest(BaseModel):
             raise ValueError("value must not be blank")
         return cleaned
 
-    @field_validator("app_secret", mode="before")
+    @field_validator("app_secret", "verification_token", "encrypt_key", mode="before")
     @classmethod
     def _strip_optional_secret(cls, value: Any) -> Any:
         if isinstance(value, str):
@@ -63,9 +68,25 @@ class AgentChannelUpdateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _require_secret_for_rotation(self) -> Self:
-        if self.app_secret is None:
-            raise ValueError("app_secret is required for credential rotation")
+        if self.app_secret is None or self.verification_token is None:
+            raise ValueError("app_secret and verification_token are required for credential rotation")
         return self
+
+
+def _secret_payload(
+    *,
+    app_secret: SecretStr,
+    verification_token: SecretStr,
+    encrypt_key: SecretStr | None,
+) -> str:
+    """Build the versioned value encrypted by the configured SecretStore."""
+    return encode_feishu_credentials(
+        FeishuCredentials(
+            app_secret=app_secret.get_secret_value(),
+            verification_token=verification_token.get_secret_value(),
+            encrypt_key=encrypt_key.get_secret_value() if encrypt_key is not None else "",
+        )
+    )
 
 
 def _owner_id(request: Request) -> str:
@@ -97,6 +118,7 @@ def _supervisor(request: Request) -> FeishuSupervisor:
 
 
 async def _require_owned_agent(repository: AgentChannelRepository, agent_id: str, owner_user_id: str) -> None:
+    """Reject access unless the session owner owns the stable Agent."""
     if not await repository.owns_agent(agent_id, owner_user_id=owner_user_id):
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -107,6 +129,7 @@ async def _binding_or_404(
     binding_id: str,
     owner_user_id: str,
 ) -> dict[str, Any]:
+    """Resolve one binding through an owner-scoped repository lookup."""
     row = await repository.get(agent_id, binding_id, owner_user_id=owner_user_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Channel binding not found")
@@ -132,11 +155,18 @@ def _safe_binding(row: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("", status_code=201)
 async def create_agent_channel(agent_id: str, body: AgentChannelCreateRequest, request: Request) -> dict[str, Any]:
+    """Create an inactive binding and encrypt its complete credential bundle."""
     repository = _repository(request)
     secrets = _secret_store(request)
     owner_user_id = _owner_id(request)
     await _require_owned_agent(repository, agent_id, owner_user_id)
-    secret_ref = await secrets.put(body.app_secret.get_secret_value())
+    secret_ref = await secrets.put(
+        _secret_payload(
+            app_secret=body.app_secret,
+            verification_token=body.verification_token,
+            encrypt_key=body.encrypt_key,
+        )
+    )
     try:
         created = await repository.create(
             agent_id=agent_id,
@@ -155,6 +185,7 @@ async def create_agent_channel(agent_id: str, body: AgentChannelCreateRequest, r
 
 @router.get("")
 async def list_agent_channels(agent_id: str, request: Request) -> list[dict[str, Any]]:
+    """List the authenticated owner's redacted bindings for one Agent."""
     repository = _repository(request)
     owner_user_id = _owner_id(request)
     await _require_owned_agent(repository, agent_id, owner_user_id)
@@ -163,6 +194,7 @@ async def list_agent_channels(agent_id: str, request: Request) -> list[dict[str,
 
 @router.post("/{binding_id}/test")
 async def test_agent_channel(agent_id: str, binding_id: str, request: Request) -> dict[str, Any]:
+    """Test provider credentials and persist only a redacted health result."""
     repository = _repository(request)
     owner_user_id = _owner_id(request)
     await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
@@ -171,6 +203,7 @@ async def test_agent_channel(agent_id: str, binding_id: str, request: Request) -
 
 
 async def _lifecycle_action(agent_id: str, binding_id: str, request: Request, action: str) -> dict[str, Any]:
+    """Run an owner-authorized Supervisor lifecycle operation."""
     repository = _repository(request)
     owner_user_id = _owner_id(request)
     await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
@@ -186,16 +219,19 @@ async def _lifecycle_action(agent_id: str, binding_id: str, request: Request, ac
 
 @router.post("/{binding_id}/start")
 async def start_agent_channel(agent_id: str, binding_id: str, request: Request) -> dict[str, Any]:
+    """Activate a binding and return only after WebSocket readiness."""
     return await _lifecycle_action(agent_id, binding_id, request, "start")
 
 
 @router.post("/{binding_id}/stop")
 async def stop_agent_channel(agent_id: str, binding_id: str, request: Request) -> dict[str, Any]:
+    """Stop a binding connection before persisting inactive desired state."""
     return await _lifecycle_action(agent_id, binding_id, request, "stop")
 
 
 @router.post("/{binding_id}/restart")
 async def restart_agent_channel(agent_id: str, binding_id: str, request: Request) -> dict[str, Any]:
+    """Replace a binding runtime without overlapping WebSocket connections."""
     return await _lifecycle_action(agent_id, binding_id, request, "restart")
 
 
@@ -206,11 +242,24 @@ async def rotate_agent_channel_credentials(
     body: AgentChannelUpdateRequest,
     request: Request,
 ) -> dict[str, Any]:
+    """Rotate an encrypted credential bundle and restart an active binding."""
     repository = _repository(request)
     secrets = _secret_store(request)
     owner_user_id = _owner_id(request)
     current = await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
-    new_ref = await secrets.put(body.app_secret.get_secret_value())
+    app_secret = body.app_secret
+    verification_token = body.verification_token
+    if app_secret is None or verification_token is None:
+        # The Pydantic model validator rejects this first; keep the route
+        # explicitly narrowed for static typing and defensive direct calls.
+        raise HTTPException(status_code=422, detail="Complete credentials are required")
+    new_ref = await secrets.put(
+        _secret_payload(
+            app_secret=app_secret,
+            verification_token=verification_token,
+            encrypt_key=body.encrypt_key,
+        )
+    )
     credentials_updated = False
     try:
         updated = await repository.update_credentials(
@@ -253,6 +302,7 @@ async def rotate_agent_channel_credentials(
 
 @router.delete("/{binding_id}")
 async def delete_agent_channel(agent_id: str, binding_id: str, request: Request) -> dict[str, bool]:
+    """Stop, delete and erase one owner-scoped binding's encrypted secret."""
     repository = _repository(request)
     secrets = _secret_store(request)
     owner_user_id = _owner_id(request)

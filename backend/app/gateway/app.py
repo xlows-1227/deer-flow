@@ -270,7 +270,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # but each binding owns an isolated channel instance and lifecycle.
         app.state.agent_channel_secret_store = None
         app.state.feishu_supervisor = None
+        app.state.published_channel_runtime = None
         if channel_service is not None and getattr(app.state, "agent_channel_repo", None) is not None:
+            try:
+                from app.channels.published_runtime import GatewayPublishedRunExecutor, PublishedChannelRuntime
+
+                app.state.published_channel_runtime = PublishedChannelRuntime(
+                    mapping_store=app.state.channel_mapping_store,
+                    resolver=app.state.published_agent_resolver,
+                    quota_ledger=app.state.quota_ledger,
+                    executor=GatewayPublishedRunExecutor(app),
+                )
+                channel_service.configure_published_runtime(app.state.published_channel_runtime)
+                logger.info("Published channel execution runtime configured")
+            except Exception:
+                logger.exception("Published channel execution runtime unavailable")
+
             try:
                 from app.channels.supervisor import FeishuSupervisor
                 from deerflow.publishing.secret_store import get_secret_store

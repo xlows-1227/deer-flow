@@ -10,19 +10,24 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.channels.feishu import FeishuChannel, FeishuEventVerifier
+from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import MessageBus
 from deerflow.persistence.base import Base
 from deerflow.persistence.channel_mapping import ChannelEventRepository
 
 
-def _event(*, event_id: str = "event-1", created_at: float | None = None):
+def _event(
+    *,
+    event_id: str = "event-1",
+    created_at: float | None = None,
+    token: str = "verification-token",
+):
     created_at = created_at if created_at is not None else time.time()
     return SimpleNamespace(
         header=SimpleNamespace(
             event_id=event_id,
             create_time=str(int(created_at * 1000)),
-            token="verification-token",
+            token=token,
         ),
         event=SimpleNamespace(
             message=SimpleNamespace(
@@ -61,7 +66,7 @@ async def test_duplicate_event_is_dropped_before_bus_dispatch(event_repository: 
         binding_id="binding-1",
         agent_id="agent-1",
         event_deduplicator=event_repository,
-        event_verifier=FeishuEventVerifier(verification_token="verification-token"),
+        verification_token="verification-token",
     )
     channel._main_loop = asyncio.get_running_loop()
 
@@ -82,7 +87,7 @@ async def test_event_id_is_isolated_by_binding(event_repository: ChannelEventRep
     assert await event_repository.claim("binding-2", "event-1") is True
 
 
-def test_invalid_signature_is_rejected_before_dispatch() -> None:
+def test_tampered_verification_token_is_rejected_before_dispatch() -> None:
     bus = MessageBus()
     channel = FeishuChannel(
         bus,
@@ -90,11 +95,11 @@ def test_invalid_signature_is_rejected_before_dispatch() -> None:
         app_secret="app-secret",
         binding_id="binding-1",
         agent_id="agent-1",
-        event_verifier=lambda _event: False,
+        verification_token="verification-token",
     )
     channel._make_inbound = MagicMock()
 
-    channel._on_message(_event())
+    channel._on_message(_event(token="tampered-token"))
 
     channel._make_inbound.assert_not_called()
     assert bus.inbound_queue.empty()
@@ -108,11 +113,7 @@ def test_stale_timestamp_is_rejected_before_dispatch() -> None:
         app_secret="app-secret",
         binding_id="binding-1",
         agent_id="agent-1",
-        event_verifier=FeishuEventVerifier(
-            verification_token="verification-token",
-            max_age_seconds=300,
-            clock=lambda: 2_000.0,
-        ),
+        verification_token="verification-token",
     )
     channel._make_inbound = MagicMock()
 

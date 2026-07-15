@@ -197,7 +197,9 @@ class DbMappingStore:
         feishu_user_id: str,
         chat_type: Literal["p2p", "group"],
         topic_id: str | None = None,
+        system_scope: object,
     ) -> str:
+        """Resolve a trusted binding-scoped conversation through SQL."""
         return await self._repository.get_or_create_thread(
             binding_id=binding_id,
             agent_id=agent_id,
@@ -205,7 +207,17 @@ class DbMappingStore:
             feishu_user_id=feishu_user_id,
             chat_type=chat_type,
             topic_id=topic_id,
+            system_scope=system_scope,
         )
 
-    async def list_mappings(self, *, binding_id: str | None = None) -> list[ChannelConversationMappingRow]:
-        return await self._repository.list_mappings(binding_id=binding_id)
+    async def list_mappings(
+        self,
+        *,
+        binding_id: str,
+        owner_user_id: str,
+    ) -> list[ChannelConversationMappingRow]:
+        """List mappings only when the owner controls the binding's Agent."""
+        return await self._repository.list_mappings(
+            binding_id=binding_id,
+            owner_user_id=owner_user_id,
+        )

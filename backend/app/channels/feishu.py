@@ -9,7 +9,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
 from app.channels.base import Channel
@@ -31,10 +31,13 @@ class FeishuEventDeduplicator(Protocol):
 class FeishuEventVerifier:
     """Validate the authenticated SDK event header and replay window.
 
-    The lark-oapi dispatcher performs the encrypted-envelope signature and
-    verification-token checks before invoking ``_on_message``. This verifier
-    keeps that boundary injectable for tests and additionally requires a
-    stable event ID plus a fresh timestamp at the application ingress.
+    Feishu long-connection mode authenticates the WebSocket with app
+    credentials, but lark-oapi deliberately dispatches WebSocket frames through
+    ``do_without_validation``. Dynamic bindings therefore compare the event
+    header token here and additionally require a stable ID and fresh timestamp
+    before durable deduplication. HTTP callback signatures are not present on
+    this transport; ``encrypt_key`` remains part of the encrypted credential
+    bundle and dispatcher construction for provider configuration parity.
     """
 
     def __init__(
@@ -79,6 +82,169 @@ class FeishuEventVerifier:
         return True
 
 
+class FeishuWebSocketSession(Protocol):
+    """Blocking SDK connection owned by one Feishu channel worker thread."""
+
+    def run(
+        self,
+        *,
+        on_ready: Callable[[], None],
+        on_error: Callable[[str], None],
+    ) -> None: ...
+
+    def stop(self, *, timeout_seconds: float) -> bool: ...
+
+
+class WebSocketSessionFactory(Protocol):
+    """Construct a terminable SDK session for one isolated binding."""
+
+    def __call__(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        domain: str,
+        message_handler: Callable[[Any], None],
+        encrypt_key: str,
+        verification_token: str,
+    ) -> FeishuWebSocketSession: ...
+
+
+RuntimeErrorCallback = Callable[[str], Awaitable[None]]
+
+
+class _LarkWebSocketSession:
+    """Terminable adapter around lark-oapi's blocking WebSocket client."""
+
+    def __init__(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        domain: str,
+        event_handler: object,
+    ) -> None:
+        self._app_id = app_id
+        self._app_secret = app_secret
+        self._domain = domain
+        self._event_handler = event_handler
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._client: object | None = None
+        self._stopping = threading.Event()
+        self._exited = threading.Event()
+
+    def run(
+        self,
+        *,
+        on_ready: Callable[[], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        import lark_oapi as lark
+        import lark_oapi.ws.client as ws_client_module
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        ws_client_module.loop = loop
+        client = lark.ws.Client(
+            app_id=self._app_id,
+            app_secret=self._app_secret,
+            event_handler=self._event_handler,
+            log_level=lark.LogLevel.INFO,
+            domain=self._domain,
+            auto_reconnect=False,
+        )
+        self._client = client
+
+        def handle_loop_error(_loop: asyncio.AbstractEventLoop, _context: dict[str, object]) -> None:
+            if not self._stopping.is_set():
+                on_error("connection lost")
+                _loop.stop()
+
+        loop.set_exception_handler(handle_loop_error)
+        try:
+            loop.run_until_complete(client._connect())
+            if client._conn is None:
+                raise RuntimeError("Feishu WebSocket connection was not established")
+
+            # The SDK starts its receive loop as an unreferenced task inside
+            # ``_connect``. Attach an explicit observer so a late connection
+            # failure reaches Supervisor immediately instead of waiting for
+            # asyncio's task finalizer to report an unretrieved exception.
+            def handle_sdk_task_done(task: asyncio.Task[object]) -> None:
+                if self._stopping.is_set() or task.cancelled():
+                    return
+                try:
+                    error = task.exception()
+                except asyncio.CancelledError:
+                    return
+                if error is not None:
+                    on_error("connection lost")
+                    loop.stop()
+
+            for task in asyncio.all_tasks(loop):
+                if not task.done():
+                    task.add_done_callback(handle_sdk_task_done)
+            loop.create_task(client._ping_loop())
+            on_ready()
+            loop.run_forever()
+        except Exception:
+            if not self._stopping.is_set():
+                on_error("connection failed")
+        finally:
+            try:
+                if client._conn is not None:
+                    loop.run_until_complete(client._disconnect())
+            except Exception:
+                logger.warning("Feishu WebSocket disconnect failed", exc_info=True)
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+            self._exited.set()
+
+    def stop(self, *, timeout_seconds: float) -> bool:
+        """Close the SDK connection and confirm its worker loop has exited."""
+        self._stopping.set()
+        loop = self._loop
+        client = self._client
+        if loop is not None and loop.is_running():
+
+            async def disconnect_and_stop() -> None:
+                if client is not None and getattr(client, "_conn", None) is not None:
+                    await client._disconnect()
+                loop.stop()
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(disconnect_and_stop(), loop)
+                future.result(timeout=timeout_seconds)
+            except Exception:
+                loop.call_soon_threadsafe(loop.stop)
+        return self._exited.wait(timeout_seconds)
+
+
+def _default_websocket_session_factory(
+    *,
+    app_id: str,
+    app_secret: str,
+    domain: str,
+    message_handler: Callable[[Any], None],
+    encrypt_key: str,
+    verification_token: str,
+) -> FeishuWebSocketSession:
+    import lark_oapi as lark
+
+    event_handler = lark.EventDispatcherHandler.builder(encrypt_key, verification_token).register_p2_im_message_receive_v1(message_handler).build()
+    return _LarkWebSocketSession(
+        app_id=app_id,
+        app_secret=app_secret,
+        domain=domain,
+        event_handler=event_handler,
+    )
+
+
 def _is_feishu_command(text: str) -> bool:
     if not text.startswith("/"):
         return False
@@ -110,22 +276,41 @@ class FeishuChannel(Channel):
         *,
         app_id: str | None = None,
         app_secret: str | None = None,
+        verification_token: str | None = None,
+        encrypt_key: str | None = None,
         binding_id: str | None = None,
         agent_id: str | None = None,
         event_deduplicator: FeishuEventDeduplicator | None = None,
         event_verifier: Callable[[Any], bool] | None = None,
+        websocket_session_factory: WebSocketSessionFactory | None = None,
+        startup_timeout_seconds: float = 15.0,
+        runtime_error_callback: RuntimeErrorCallback | None = None,
     ) -> None:
         resolved_config = dict(config or {})
         if app_id is not None:
             resolved_config["app_id"] = app_id
         if app_secret is not None:
             resolved_config["app_secret"] = app_secret
+        if verification_token is not None:
+            resolved_config["verification_token"] = verification_token
+        if encrypt_key is not None:
+            resolved_config["encrypt_key"] = encrypt_key
         channel_name = f"feishu:{binding_id}" if binding_id else "feishu"
         super().__init__(name=channel_name, bus=bus, config=resolved_config)
         self.binding_id = binding_id
         self.agent_id = agent_id
         self._event_deduplicator = event_deduplicator
-        self._event_verifier = event_verifier or (FeishuEventVerifier() if binding_id else None)
+        self._event_verifier = event_verifier or (FeishuEventVerifier(verification_token=str(resolved_config.get("verification_token", ""))) if binding_id else None)
+        if startup_timeout_seconds <= 0:
+            raise ValueError("startup_timeout_seconds must be positive")
+        self._websocket_session_factory = websocket_session_factory or _default_websocket_session_factory
+        self._startup_timeout_seconds = startup_timeout_seconds
+        self._runtime_error_callback = runtime_error_callback
+        self._ws_session: FeishuWebSocketSession | None = None
+        self._startup_event = threading.Event()
+        self._startup_error: RuntimeError | None = None
+        self._startup_acknowledged = False
+        self._stop_requested = False
         self._thread: threading.Thread | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._api_client = None
@@ -147,6 +332,11 @@ class FeishuChannel(Channel):
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    @property
+    def websocket_thread_alive(self) -> bool:
+        """Return whether this binding still owns a live SDK worker thread."""
+        return self._thread is not None and self._thread.is_alive()
 
     async def start(self) -> None:
         if self._running:
@@ -195,15 +385,19 @@ class FeishuChannel(Channel):
         domain = self.config.get("domain", "https://open.feishu.cn")
 
         if not app_id or not app_secret:
-            logger.error("Feishu channel requires app_id and app_secret")
-            return
+            raise RuntimeError("Feishu channel requires app_id and app_secret")
+        if self.binding_id and not str(self.config.get("verification_token", "")).strip():
+            raise RuntimeError("Dynamic Feishu binding requires a verification token")
+        if self.binding_id and self._event_deduplicator is None:
+            raise RuntimeError("Dynamic Feishu binding requires durable event deduplication")
 
         self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
         logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
-
-        self._running = True
-        self.bus.subscribe_outbound(self._on_outbound)
+        self._startup_event.clear()
+        self._startup_error = None
+        self._startup_acknowledged = False
+        self._stop_requested = False
 
         # Both ws.Client construction and start() must happen in a dedicated
         # thread with its own event loop.  lark-oapi caches the running loop
@@ -215,6 +409,12 @@ class FeishuChannel(Channel):
             daemon=True,
         )
         self._thread.start()
+        signalled = await asyncio.to_thread(self._startup_event.wait, self._startup_timeout_seconds)
+        if not signalled or self._startup_error is not None or not self._running:
+            await self.stop()
+            raise self._startup_error or RuntimeError("Feishu WebSocket failed to connect")
+        self._startup_acknowledged = True
+        self.bus.subscribe_outbound(self._on_outbound)
         logger.info("Feishu channel started")
 
     def _run_ws(self, app_id: str, app_secret: str, domain: str) -> None:
@@ -230,38 +430,45 @@ class FeishuChannel(Channel):
         thread and patching the SDK's module-level reference before calling
         ``start()``.
         """
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            import lark_oapi as lark
-            import lark_oapi.ws.client as _ws_client_mod
-
-            # Replace the SDK's module-level loop so Client.start() uses
-            # this thread's (non-running) event loop instead of the main
-            # thread's uvloop.
-            _ws_client_mod.loop = loop
-
-            event_handler = (
-                lark.EventDispatcherHandler.builder(
-                    str(self.config.get("encrypt_key", "")),
-                    str(self.config.get("verification_token", "")),
-                )
-                .register_p2_im_message_receive_v1(self._on_message)
-                .build()
-            )
-            ws_client = lark.ws.Client(
+            session = self._websocket_session_factory(
                 app_id=app_id,
                 app_secret=app_secret,
-                event_handler=event_handler,
-                log_level=lark.LogLevel.INFO,
                 domain=domain,
+                message_handler=self._on_message,
+                encrypt_key=str(self.config.get("encrypt_key", "")),
+                verification_token=str(self.config.get("verification_token", "")),
             )
-            ws_client.start()
+            self._ws_session = session
+            session.run(on_ready=self._on_ws_ready, on_error=self._on_ws_error)
+            if not self._stop_requested and self._running:
+                self._on_ws_error("connection lost")
         except Exception:
-            if self._running:
+            if not self._stop_requested:
                 logger.exception("Feishu WebSocket error")
+                self._on_ws_error("connection failed")
+
+    def _on_ws_ready(self) -> None:
+        self._running = True
+        self._startup_event.set()
+
+    def _on_ws_error(self, _detail: str) -> None:
+        if self._stop_requested:
+            return
+        was_ready = self._running and self._startup_acknowledged
+        self._running = False
+        if not self._startup_acknowledged:
+            self._startup_error = RuntimeError("Feishu WebSocket failed to connect")
+        self._startup_event.set()
+        if was_ready and self._runtime_error_callback is not None and self._main_loop is not None:
+            future = asyncio.run_coroutine_threadsafe(
+                self._runtime_error_callback("Feishu WebSocket connection lost"),
+                self._main_loop,
+            )
+            future.add_done_callback(lambda done: self._log_future_error(done, "runtime_error_callback", "runtime"))
 
     async def stop(self) -> None:
+        self._stop_requested = True
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         for task in list(self._background_tasks):
@@ -270,9 +477,18 @@ class FeishuChannel(Channel):
         for task in list(self._running_card_tasks.values()):
             task.cancel()
         self._running_card_tasks.clear()
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
+        session = self._ws_session
+        if session is not None:
+            stopped = await asyncio.to_thread(session.stop, timeout_seconds=5.0)
+            if not stopped:
+                raise RuntimeError("Feishu WebSocket client did not stop")
+        thread = self._thread
+        if thread is not None:
+            await asyncio.to_thread(thread.join, 5.0)
+            if thread.is_alive():
+                raise RuntimeError("Feishu WebSocket worker thread did not exit")
+        self._thread = None
+        self._ws_session = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -663,8 +879,13 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
-    async def _prepare_inbound(self, msg_id: str, inbound, event_id: str | None = None) -> None:
-        """Kick off Feishu side effects without delaying inbound dispatch."""
+    async def _prepare_inbound(
+        self,
+        msg_id: str,
+        inbound: InboundMessage,
+        event_id: str | None = None,
+    ) -> None:
+        """Claim a trusted event before reactions or MessageBus dispatch."""
         if self.binding_id:
             if not event_id or self._event_deduplicator is None:
                 logger.error(
@@ -683,8 +904,11 @@ class FeishuChannel(Channel):
         self._ensure_running_card_started(msg_id)
         await self.bus.publish_inbound(inbound)
 
-    def _on_message(self, event) -> None:
-        """Called by lark-oapi when a message is received (runs in lark thread)."""
+    def _on_message(self, event: Any) -> None:
+        """Validate and enqueue one SDK message callback on the main loop."""
+        if self.binding_id and self._stop_requested:
+            logger.info("[Feishu] ignored event received while binding is stopping")
+            return
         try:
             logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
             if self.binding_id and (self._event_verifier is None or not self._event_verifier(event)):
