@@ -86,6 +86,50 @@ def test_get_thread_mounts_includes_user_data_dirs(tmp_path, monkeypatch):
     assert "/mnt/user-data/outputs" in container_paths
 
 
+def test_aio_provider_scopes_same_thread_cache_id_and_mounts_by_explicit_owner(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"replicas": 3}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._thread_owners = {}
+    provider._thread_locks = {}
+    provider._last_activity = {}
+    provider._warm_pool = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    create_calls: list[tuple[str | None, str, list[tuple[str, str, bool]] | None]] = []
+
+    def create(thread_id, sandbox_id, *, extra_mounts=None):
+        create_calls.append((thread_id, sandbox_id, extra_mounts))
+        return aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=f"http://{sandbox_id}")
+
+    provider._backend = SimpleNamespace(
+        create=create,
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+
+    owner_a_id = provider.acquire("shared-thread", user_id="owner-a")
+    with pytest.raises(PermissionError, match="different owner"):
+        provider.acquire("shared-thread", user_id="owner-b")
+
+    assert len(create_calls) == 1
+    mounts_by_id = {sandbox_id: {container: host for host, container, _readonly in mounts or []} for _thread, sandbox_id, mounts in create_calls}
+    assert "users/owner-a/threads/shared-thread" in mounts_by_id[owner_a_id]["/mnt/user-data/uploads"].replace("\\", "/")
+    owner_b_mounts = {
+        container: host
+        for host, container, _readonly in provider._get_thread_mounts(
+            "shared-thread",
+            user_id="owner-b",
+        )
+    }
+    assert "users/owner-b/threads/shared-thread" in owner_b_mounts["/mnt/user-data/uploads"].replace("\\", "/")
+
+
 def test_join_host_path_preserves_windows_drive_letter_style():
     base = r"C:\Users\demo\deer-flow\backend\.deer-flow"
 
@@ -142,9 +186,10 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
 
 
 @pytest.mark.anyio
-async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
+async def test_acquire_async_uses_async_readiness_polling(tmp_path, monkeypatch):
     """AioSandboxProvider async creation must not use sync readiness polling."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
     provider = _make_provider(None)
     provider._config = {"replicas": 3}
     provider._thread_locks = {}

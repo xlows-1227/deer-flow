@@ -12,8 +12,10 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from email.message import Message
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -33,6 +35,8 @@ FEISHU_PUBLISHED_INBOUND_MAX_FILES = 10
 FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 15.0
 FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS = 5.0
 FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS = 10.0
+FEISHU_PUBLISHED_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+FEISHU_SANDBOX_SYNC_CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
 def _read_inbound_resource(stream: Any) -> bytes:
@@ -468,6 +472,7 @@ class FeishuChannel(Channel):
         websocket_session_factory: WebSocketSessionFactory | None = None,
         startup_timeout_seconds: float = 15.0,
         runtime_error_callback: RuntimeErrorCallback | None = None,
+        published_http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         resolved_config = dict(config or {})
         if app_id is not None:
@@ -489,6 +494,7 @@ class FeishuChannel(Channel):
         self._websocket_session_factory = websocket_session_factory or _default_websocket_session_factory
         self._startup_timeout_seconds = startup_timeout_seconds
         self._runtime_error_callback = runtime_error_callback
+        self._published_http_client_factory = published_http_client_factory or self._new_published_http_client
         self._ws_session: FeishuWebSocketSession | None = None
         self._startup_event = threading.Event()
         self._startup_error: RuntimeError | None = None
@@ -511,6 +517,17 @@ class FeishuChannel(Channel):
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
+
+    def _new_published_http_client(self) -> httpx.AsyncClient:
+        """Build the bounded client used for authenticated resource streaming."""
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS,
+                read=FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS,
+                write=FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS,
+                pool=FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS,
+            )
+        )
 
     @property
     def supports_streaming(self) -> bool:
@@ -805,7 +822,39 @@ class FeishuChannel(Channel):
         owner_user_id: str,
         max_input_bytes: int,
     ) -> tuple[InboundMessage, int]:
-        """Stream admitted published attachments into the explicit owner path."""
+        """Stream published attachments into one trusted owner scope.
+
+        The caller must resolve ``owner_user_id`` from the published Agent; it
+        must never come from Feishu message metadata. Downloads use
+        authenticated streaming HTTP, enforce count, per-file, and aggregate
+        actual-byte limits, then expose the fully admitted set to the same
+        owner-scoped sandbox. Cancellation closes the network response and
+        removes partial host files. A blocked non-mounted sandbox upload is
+        handed to a tracked cleanup task that removes both host and sandbox
+        residues when the worker exits.
+
+        Args:
+            msg: Verified inbound message containing Feishu resource keys and
+                matching ``[image]`` or ``[file]`` placeholders.
+            thread_id: Trusted runtime thread receiving the files.
+            owner_user_id: Trusted published-Agent owner used for host paths,
+                sandbox acquisition, and cache ownership checks.
+            max_input_bytes: Maximum combined UTF-8 text and actual attachment
+                bytes admitted for the request.
+
+        Returns:
+            The message with placeholders replaced by sandbox virtual paths,
+            plus the total actual attachment byte count.
+
+        Raises:
+            ValueError: Attachment metadata, count, filename, empty content,
+                per-file size, or aggregate input admission is invalid.
+            RuntimeError: Authentication, download, or sandbox synchronization
+                fails.
+            PermissionError: The thread sandbox is bound to another owner.
+            asyncio.CancelledError: The caller is cancelled after bounded or
+                recoverable cleanup has been arranged.
+        """
         if not msg.thread_ts:
             raise ValueError("Feishu attachment message is missing its message ID")
         if len(msg.files) > FEISHU_PUBLISHED_INBOUND_MAX_FILES:
@@ -814,6 +863,7 @@ class FeishuChannel(Channel):
         text = msg.text
         total_bytes = 0
         created_paths: list[Path] = []
+        materialized_files: list[_MaterializedInboundFile] = []
         try:
             for file_info in msg.files:
                 if not isinstance(file_info, dict):
@@ -840,11 +890,18 @@ class FeishuChannel(Channel):
                     owner_user_id=owner_user_id,
                     max_bytes=min(FEISHU_INBOUND_FILE_MAX_BYTES, remaining_bytes),
                 )
+                materialized_files.append(materialized)
                 created_paths.append(materialized.actual_path)
                 total_bytes += materialized.size
                 text = text.replace(placeholder, materialized.virtual_path, 1)
                 if total_bytes + len(text.encode("utf-8")) > max_input_bytes:
                     raise ValueError("Feishu attachments exceed the published input quota")
+            await self._sync_published_files(
+                materialized_files,
+                thread_id=thread_id,
+                owner_user_id=owner_user_id,
+                message_id=msg.thread_ts,
+            )
         except BaseException:
             for created_path in created_paths:
                 try:
@@ -874,70 +931,175 @@ class FeishuChannel(Channel):
             open_upload_file_no_symlink,
         )
 
-        request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(resource_type).build()
-        response = await asyncio.to_thread(self._api_client.im.v1.message_resource.get, request)
-        if not response.success():
-            raise RuntimeError(f"Feishu resource get failed: code={response.code}, msg={response.msg}")
-        resource_stream = getattr(response, "file", None)
-        if resource_stream is None:
-            raise RuntimeError("Feishu resource response has no file stream")
-
         paths = get_paths()
         paths.ensure_thread_dirs(thread_id, user_id=owner_user_id)
         uploads_dir = ensure_uploads_dir(thread_id, user_id=owner_user_id).resolve()
         extension = "png" if resource_type == "image" else "bin"
-        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{extension}"
-
-        def persist_stream() -> tuple[Path, int]:
-            resolved_target = None
-            try:
-                with self._thread_lock:
-                    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
-                    safe_name = claim_unique_filename(normalize_filename(raw_filename), seen_names)
-                    resolved_target, file_handle = open_upload_file_no_symlink(uploads_dir, safe_name)
-                    total = 0
-                    with file_handle:
-                        while True:
-                            chunk = resource_stream.read(64 * 1024)
-                            if not chunk:
-                                break
-                            if not isinstance(chunk, (bytes, bytearray)):
-                                raise ValueError("Feishu inbound resource did not contain bytes")
-                            total += len(chunk)
-                            if total > max_bytes:
-                                raise ValueError("Feishu inbound resource exceeds size limit")
-                            file_handle.write(chunk)
-                if total == 0:
-                    raise ValueError("Feishu inbound resource is empty")
-                return resolved_target, total
-            except BaseException:
-                if resolved_target is not None:
-                    resolved_target.unlink(missing_ok=True)
-                raise
-
-        resolved_target, total_bytes = await asyncio.to_thread(persist_stream)
-        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+        fallback_filename = f"feishu_{file_key[-12:]}.{extension}"
+        domain = str(self.config.get("domain", "https://open.feishu.cn")).rstrip("/")
+        app_id = str(self.config.get("app_id", ""))
+        app_secret = str(self.config.get("app_secret", ""))
+        if not app_id or not app_secret:
+            raise RuntimeError("Feishu channel requires app_id and app_secret")
+        resource_url = f"{domain}/open-apis/im/v1/messages/{quote(message_id, safe='')}/resources/{quote(file_key, safe='')}"
+        resolved_target: Path | None = None
+        total_bytes = 0
         try:
-            sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id)
-            if sandbox_id != "local":
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    raise RuntimeError(f"Sandbox not found for thread {thread_id}")
-                await asyncio.to_thread(
-                    sandbox.update_file_from_path,
-                    virtual_path,
-                    str(resolved_target),
-                )
+            async with asyncio.timeout(FEISHU_PUBLISHED_DOWNLOAD_TIMEOUT_SECONDS):
+                async with self._published_http_client_factory() as client:
+                    token_response = await client.post(
+                        f"{domain}/open-apis/auth/v3/tenant_access_token/internal",
+                        json={"app_id": app_id, "app_secret": app_secret},
+                    )
+                    token_response.raise_for_status()
+                    token_payload = token_response.json()
+                    if token_payload.get("code") not in {0, None}:
+                        raise RuntimeError(f"Feishu tenant token request failed: code={token_payload.get('code')}, msg={token_payload.get('msg', '')}")
+                    tenant_token = token_payload.get("tenant_access_token")
+                    if not isinstance(tenant_token, str) or not tenant_token:
+                        raise RuntimeError("Feishu tenant token response is missing a token")
+
+                    async with client.stream(
+                        "GET",
+                        resource_url,
+                        params={"type": resource_type},
+                        headers={"Authorization": f"Bearer {tenant_token}"},
+                    ) as response:
+                        response.raise_for_status()
+                        content_length_header = response.headers.get("content-length")
+                        if content_length_header is not None:
+                            try:
+                                content_length = int(content_length_header)
+                            except ValueError as exc:
+                                raise ValueError("Feishu resource Content-Length is invalid") from exc
+                            if content_length < 0 or content_length > max_bytes:
+                                raise ValueError("Feishu inbound resource exceeds size limit")
+
+                        disposition = Message()
+                        disposition["content-disposition"] = response.headers.get(
+                            "content-disposition",
+                            "",
+                        )
+                        raw_filename = disposition.get_filename() or fallback_filename
+                        with self._thread_lock:
+                            seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                            safe_name = claim_unique_filename(normalize_filename(raw_filename), seen_names)
+                            resolved_target, file_handle = open_upload_file_no_symlink(
+                                uploads_dir,
+                                safe_name,
+                            )
+                        with file_handle:
+                            async for chunk in response.aiter_raw():
+                                total_bytes += len(chunk)
+                                if total_bytes > max_bytes:
+                                    raise ValueError("Feishu inbound resource exceeds size limit")
+                                file_handle.write(chunk)
+            if total_bytes == 0:
+                raise ValueError("Feishu inbound resource is empty")
         except BaseException:
-            resolved_target.unlink(missing_ok=True)
+            if resolved_target is not None:
+                resolved_target.unlink(missing_ok=True)
             raise
 
+        assert resolved_target is not None
         return _MaterializedInboundFile(
-            virtual_path=virtual_path,
+            virtual_path=f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}",
             actual_path=resolved_target,
             size=total_bytes,
         )
+
+    @staticmethod
+    async def _delete_published_sandbox_files(sandbox: Any, files: list[_MaterializedInboundFile]) -> None:
+        """Best-effort removal of files copied into a non-mounted sandbox."""
+        for materialized in files:
+            try:
+                await asyncio.to_thread(sandbox.delete_file, materialized.virtual_path)
+            except Exception:
+                logger.warning(
+                    "[Feishu] failed to clean sandbox attachment: %s",
+                    materialized.virtual_path,
+                    exc_info=True,
+                )
+
+    async def _finish_cancelled_sandbox_sync(
+        self,
+        sync_task: asyncio.Task[object],
+        sandbox: Any,
+        materialized_files: list[_MaterializedInboundFile],
+    ) -> None:
+        """Finish an uncancellable worker and remove every possible residue."""
+        await asyncio.gather(sync_task, return_exceptions=True)
+        await self._delete_published_sandbox_files(sandbox, materialized_files)
+        for materialized in materialized_files:
+            try:
+                materialized.actual_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "[Feishu] failed to clean host attachment after sandbox sync: %s",
+                    materialized.actual_path,
+                    exc_info=True,
+                )
+
+    async def _sync_published_files(
+        self,
+        materialized_files: list[_MaterializedInboundFile],
+        *,
+        thread_id: str,
+        owner_user_id: str,
+        message_id: str,
+    ) -> None:
+        """Expose admitted files to the explicitly owner-scoped sandbox."""
+        if not materialized_files:
+            return
+        sandbox_provider = get_sandbox_provider()
+        sandbox_id = sandbox_provider.acquire(thread_id, user_id=owner_user_id)
+        if sandbox_id == "local" or sandbox_provider.uses_thread_data_mounts:
+            return
+        sandbox = sandbox_provider.get(sandbox_id)
+        if sandbox is None:
+            raise RuntimeError(f"Sandbox not found for thread {thread_id}")
+
+        synced_files: list[_MaterializedInboundFile] = []
+        for materialized in materialized_files:
+            sync_task = asyncio.create_task(
+                asyncio.to_thread(
+                    sandbox.update_file_from_path,
+                    materialized.virtual_path,
+                    str(materialized.actual_path),
+                )
+            )
+            try:
+                await asyncio.shield(sync_task)
+                synced_files.append(materialized)
+            except asyncio.CancelledError:
+                done, _pending = await asyncio.wait(
+                    {sync_task},
+                    timeout=FEISHU_SANDBOX_SYNC_CLEANUP_TIMEOUT_SECONDS,
+                )
+                cleanup_files = [*synced_files, materialized]
+                if done:
+                    await asyncio.gather(sync_task, return_exceptions=True)
+                    await self._delete_published_sandbox_files(sandbox, cleanup_files)
+                else:
+                    cleanup_task = asyncio.create_task(
+                        self._finish_cancelled_sandbox_sync(
+                            sync_task,
+                            sandbox,
+                            cleanup_files,
+                        )
+                    )
+                    self._track_background_task(
+                        cleanup_task,
+                        name="published_attachment_cleanup",
+                        msg_id=message_id,
+                    )
+                raise
+            except BaseException:
+                await self._delete_published_sandbox_files(
+                    sandbox,
+                    [*synced_files, materialized],
+                )
+                raise
 
     async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
         request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()

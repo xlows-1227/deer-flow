@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _SETTLEMENT_MAX_ATTEMPTS = 5
 _SETTLEMENT_RETRY_DELAY_SECONDS = 0.05
 _PROGRESS_DRAIN_TIMEOUT_SECONDS = 0.25
+_RUN_CLEANUP_TIMEOUT_SECONDS = 1.0
 PUBLISHED_INBOUND_MAX_FILES = 10
 PUBLISHED_INBOUND_MAX_FILE_BYTES = 50 * 1024 * 1024
 
@@ -429,9 +430,13 @@ class GatewayPublishedRunExecutor:
         app: FastAPI,
         *,
         run_starter: GatewayRunStarter | None = None,
+        cleanup_timeout_seconds: float = _RUN_CLEANUP_TIMEOUT_SECONDS,
     ) -> None:
+        if cleanup_timeout_seconds <= 0:
+            raise ValueError("cleanup_timeout_seconds must be positive")
         self._app = app
         self._run_starter = run_starter
+        self._cleanup_timeout_seconds = cleanup_timeout_seconds
 
     @staticmethod
     def _request(app: FastAPI) -> Request:
@@ -453,17 +458,45 @@ class GatewayPublishedRunExecutor:
 
     async def _cancel_started_run(self, record: RunRecord) -> None:
         """Cancel and join a started Run or fail without releasing its quota."""
-        cancelled = await self._app.state.run_manager.cancel(record.run_id)
+        cancel_task = asyncio.create_task(self._app.state.run_manager.cancel(record.run_id))
+        try:
+            done, _pending = await asyncio.wait(
+                {cancel_task},
+                timeout=self._cleanup_timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            cancel_task.cancel()
+            cancel_task.add_done_callback(self._consume_task_result)
+            raise
+        if not done:
+            cancel_task.cancel()
+            cancel_task.add_done_callback(self._consume_task_result)
+            raise TimeoutError("RunManager cancellation exceeded its cleanup deadline")
+        cancelled = await cancel_task
         task = record.task
         if cancelled is False and task is not None and not task.done():
             raise RuntimeError("RunManager did not confirm cancellation")
         if task is not None:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+            await self._join_cleanup_task(task, label="Run worker")
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[object]) -> None:
+        """Retrieve a detached cleanup task result to avoid loop warnings."""
+        try:
+            task.result()
+        except BaseException:
+            pass
+
+    async def _join_cleanup_task(self, task: asyncio.Task[object], *, label: str) -> None:
+        """Join a cleanup task without allowing it to extend the deadline."""
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=self._cleanup_timeout_seconds,
+        )
+        if not done:
+            task.add_done_callback(self._consume_task_result)
+            raise TimeoutError(f"{label} exceeded its cleanup deadline")
+        await asyncio.gather(task, return_exceptions=True)
 
     async def execute(
         self,
@@ -474,6 +507,47 @@ class GatewayPublishedRunExecutor:
         context: PublishedAgentContext,
         reservation: Reservation,
         on_progress: ExecutorProgressCallback | None = None,
+    ) -> PublishedChannelExecution:
+        """Start and own one Run, preserving quota after durable creation.
+
+        Once ``run_starter`` returns, every otherwise-unhandled exception or
+        cancellation is converted to :class:`PublishedRunDetachedError`. The
+        outer reservation owner can therefore release quota only when this
+        method fails before the Run starter succeeds.
+        """
+        started = False
+
+        def mark_started() -> None:
+            nonlocal started
+            started = True
+
+        try:
+            return await self._execute(
+                run_id=run_id,
+                thread_id=thread_id,
+                message=message,
+                context=context,
+                reservation=reservation,
+                on_progress=on_progress,
+                _on_started=mark_started,
+            )
+        except PublishedRunDetachedError:
+            raise
+        except BaseException as exc:
+            if started:
+                raise PublishedRunDetachedError("started Run finalization could not be confirmed") from exc
+            raise
+
+    async def _execute(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        message: str,
+        context: PublishedAgentContext,
+        reservation: Reservation,
+        on_progress: ExecutorProgressCallback | None = None,
+        _on_started: Callable[[], None],
     ) -> PublishedChannelExecution:
         """Start, await and safely serialize one memory-free published Run."""
         from app.gateway.routers.thread_runs import RunCreateRequest
@@ -515,6 +589,7 @@ class GatewayPublishedRunExecutor:
             published_context=context,
             run_id=run_id,
         )
+        _on_started()
         last_values: dict[str, object] | list[object] | None = None
         stream_task: asyncio.Task[None] | None = None
         progress_task: asyncio.Task[None] | None = None
@@ -637,6 +712,7 @@ class GatewayPublishedRunExecutor:
 
         if progress_task is not None:
             assert progress_queue is not None
+            drain_cancelled: asyncio.CancelledError | None = None
             try:
                 await asyncio.wait_for(
                     progress_queue.join(),
@@ -647,9 +723,18 @@ class GatewayPublishedRunExecutor:
                     "Dropping slow published Feishu progress update",
                     extra={"run_id": record.run_id},
                 )
+            except asyncio.CancelledError as exc:
+                drain_cancelled = exc
             finally:
                 progress_task.cancel()
-                await asyncio.gather(progress_task, return_exceptions=True)
+                try:
+                    await self._join_cleanup_task(progress_task, label="progress callback")
+                except asyncio.CancelledError as exc:
+                    raise PublishedRunDetachedError("dispatcher cancellation interrupted progress cleanup") from exc
+                except TimeoutError as exc:
+                    raise PublishedRunDetachedError("progress cleanup exceeded its deadline") from exc
+            if drain_cancelled is not None:
+                raise PublishedRunDetachedError("dispatcher cancellation interrupted progress cleanup") from drain_cancelled
 
         if timed_out or record.status == RunStatus.timeout:
             status: Literal["success", "cancelled", "timeout", "failed"] = "timeout"

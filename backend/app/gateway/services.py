@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
@@ -35,6 +36,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.user_context import runtime_user_scope
 
 if TYPE_CHECKING:
     from deerflow.publishing.context import PublishedAgentContext
@@ -415,20 +417,23 @@ async def start_run(
     user_id = published_context.owner_user_id if published_context is not None else runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
 
     async def _run_with_effective_config() -> None:
-        async with effective_app_config_scope(str(user_id) if user_id else None):
-            await run_agent(
-                bridge,
-                run_mgr,
-                record,
-                ctx=run_ctx,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
-            )
+        resolved_user_id = str(user_id) if user_id else None
+        user_scope = runtime_user_scope(resolved_user_id) if resolved_user_id else nullcontext()
+        with user_scope:
+            async with effective_app_config_scope(resolved_user_id):
+                await run_agent(
+                    bridge,
+                    run_mgr,
+                    record,
+                    ctx=run_ctx,
+                    agent_factory=agent_factory,
+                    graph_input=graph_input,
+                    config=config,
+                    stream_modes=stream_modes,
+                    stream_subgraphs=body.stream_subgraphs,
+                    interrupt_before=body.interrupt_before,
+                    interrupt_after=body.interrupt_after,
+                )
 
     task = asyncio.create_task(_run_with_effective_config())
     record.task = task

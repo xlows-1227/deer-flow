@@ -490,3 +490,15 @@ class LocalSandbox(Sandbox):
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
+
+    def delete_file(self, path: str) -> None:
+        """Delete a writable mapped file without invoking a shell."""
+        resolved = self._resolve_path_with_mapping(path)
+        if self._is_resolved_path_read_only(resolved):
+            raise OSError(errno.EROFS, "Read-only file system", path)
+        try:
+            os.unlink(resolved.path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise type(exc)(exc.errno, exc.strerror, path) from None

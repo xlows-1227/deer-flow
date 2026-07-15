@@ -38,7 +38,21 @@ def validate_thread_id(thread_id: str) -> None:
 
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
-    """Return the uploads directory path for a thread (no side effects)."""
+    """Resolve a thread uploads directory without creating it.
+
+    Args:
+        thread_id: Validated conversation thread identifier.
+        user_id: Trusted owner scope. Published and cross-owner ingress must
+            pass this explicitly; authenticated legacy request paths may omit
+            it to use the current user context, whose final fallback is the
+            legacy ``default`` bucket.
+
+    Returns:
+        Owner-scoped uploads path for ``thread_id``.
+
+    Raises:
+        ValueError: ``thread_id`` contains unsafe path characters.
+    """
     validate_thread_id(thread_id)
     return get_paths().sandbox_uploads_dir(
         thread_id,
@@ -47,7 +61,21 @@ def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
 
 
 def ensure_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
-    """Return the uploads directory for a thread, creating it if needed."""
+    """Resolve and create an owner-scoped thread uploads directory.
+
+    Args:
+        thread_id: Validated conversation thread identifier.
+        user_id: Trusted owner scope. Published and cross-owner ingress must
+            pass it explicitly; authenticated legacy paths may use ambient
+            context via ``None``.
+
+    Returns:
+        Existing or newly created owner-scoped uploads directory.
+
+    Raises:
+        ValueError: ``thread_id`` contains unsafe path characters.
+        OSError: The directory cannot be created.
+    """
     base = get_uploads_dir(thread_id, user_id=user_id)
     base.mkdir(parents=True, exist_ok=True)
     return base

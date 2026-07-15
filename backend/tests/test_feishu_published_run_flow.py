@@ -793,6 +793,138 @@ async def test_dispatcher_cancellation_cancels_started_run_and_settles_once() ->
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_cancellation_during_progress_drain_keeps_started_reservation_pending() -> None:
+    progress_started = asyncio.Event()
+    worker_finished = asyncio.Event()
+    record_holder: list[RunRecord] = []
+    bridge = MemoryStreamBridge()
+
+    async def start_run(body, thread_id, request, *, published_context=None, run_id=None) -> RunRecord:
+        record = RunRecord(
+            run_id=str(run_id),
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+
+        async def run_worker() -> None:
+            await bridge.publish(
+                record.run_id,
+                "messages-tuple",
+                [{"type": "ai", "id": "answer-1", "content": "working"}, {}],
+            )
+            record.last_ai_message = "done"
+            record.status = RunStatus.success
+            await bridge.publish_end(record.run_id)
+            worker_finished.set()
+
+        record.task = asyncio.create_task(run_worker())
+        record_holder.append(record)
+        return record
+
+    async def blocked_progress(_thread_id: str, _text: str) -> None:
+        progress_started.set()
+        await asyncio.Event().wait()
+
+    app = FastAPI()
+    app.state.stream_bridge = bridge
+    order: list[str] = []
+    ledger = _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_Resolver(order),
+        quota_ledger=ledger,
+        executor=GatewayPublishedRunExecutor(app, run_starter=start_run),
+    )
+
+    dispatcher = asyncio.create_task(runtime.run(_inbound(), on_progress=blocked_progress))
+    await asyncio.wait_for(progress_started.wait(), timeout=1.0)
+    await asyncio.wait_for(worker_finished.wait(), timeout=1.0)
+    assert record_holder[0].task is not None
+    await asyncio.wait_for(asyncio.shield(record_holder[0].task), timeout=1.0)
+    dispatcher.cancel()
+
+    with pytest.raises(PublishedRunDetachedError, match="progress cleanup"):
+        await asyncio.wait_for(dispatcher, timeout=1.0)
+
+    assert ledger.released == []
+    assert ledger.settled_usage == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_cleanup_is_bounded_when_worker_suppresses_cancellation() -> None:
+    record_holder: list[RunRecord] = []
+    cancellation_suppressed = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    class _ShortTimeoutResolver(_Resolver):
+        async def resolve(self, agent_id: str, **kwargs) -> PublishedAgentContext:
+            context = await super().resolve(agent_id, **kwargs)
+            return replace(
+                context,
+                effective_quota=replace(context.effective_quota, max_run_seconds=0.01),
+            )
+
+    async def start_run(body, thread_id, request, *, published_context=None, run_id=None) -> RunRecord:
+        async def run_worker() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_suppressed.set()
+                await release_worker.wait()
+
+        record = RunRecord(
+            run_id=str(run_id),
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+        record.task = asyncio.create_task(run_worker())
+        record_holder.append(record)
+        return record
+
+    class _RunManager:
+        async def cancel(self, run_id: str) -> bool:
+            record = record_holder[0]
+            assert record.run_id == run_id
+            assert record.task is not None
+            record.task.cancel()
+            return True
+
+    app = FastAPI()
+    app.state.run_manager = _RunManager()
+    order: list[str] = []
+    ledger = _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_ShortTimeoutResolver(order),
+        quota_ledger=ledger,
+        executor=GatewayPublishedRunExecutor(
+            app,
+            run_starter=start_run,
+            cleanup_timeout_seconds=0.05,
+        ),
+    )
+
+    started_at = time.perf_counter()
+    try:
+        with pytest.raises(PublishedRunDetachedError, match="timeout cleanup failed"):
+            await asyncio.wait_for(runtime.run(_inbound()), timeout=0.5)
+        await asyncio.wait_for(cancellation_suppressed.wait(), timeout=0.5)
+    finally:
+        release_worker.set()
+        worker = record_holder[0].task if record_holder else None
+        if worker is not None:
+            await asyncio.gather(worker, return_exceptions=True)
+
+    assert time.perf_counter() - started_at < 0.5
+    assert ledger.released == []
+    assert ledger.settled_usage == []
+
+
+@pytest.mark.asyncio
 async def test_timeout_cancel_failure_keeps_started_run_reservation_pending() -> None:
     record_holder: list[RunRecord] = []
 

@@ -509,7 +509,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
 - `slack.py` / `feishu.py` / `telegram.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured)
 
-**Published Feishu flow**: app-credential-authenticated SDK WebSocket → application event-header token comparison + timestamp replay check → durable `(binding_id, event_id)` claim → MessageBus → stable binding/Agent DB mapping → Published resolver → quota reserve → Gateway Run with Published runtime policy → terminal usage settlement → outbound card. The SDK long-connection path exposes no HTTP callback signature and internally uses `do_without_validation`, so the application token check is mandatory. Verification and dedup occur before quota. Same event ids on different bindings are independent.
+**Published Feishu flow**: app-credential-authenticated SDK WebSocket → application event-header token comparison + timestamp replay check → durable `(binding_id, event_id)` claim → MessageBus → stable binding/Agent DB mapping → Published resolver → cheap declared-input checks → quota reserve → authenticated streaming attachment materialization → Gateway Run with Published runtime policy → terminal usage settlement → outbound card. The SDK long-connection path exposes no HTTP callback signature and internally uses `do_without_validation`, so the application token check is mandatory. Verification and dedup occur before quota. Same event ids on different bindings are independent.
 
 **Legacy flow**: External platform → MessageBus → JSON thread mapping/Gateway thread creation → Feishu streaming or Slack/Telegram `runs.wait()` → outbound callback. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair.
 
@@ -525,8 +525,10 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - Owner/session + CSRF routes are `/api/published-agents/{agent_id}/channels`: `POST/GET`, `POST /{binding_id}/{test|start|stop|restart}`, `PATCH /{binding_id}`, and `DELETE /{binding_id}`. Create and rotate carry the entire encrypted credential bundle; active rotation restarts only after the old connection exits.
 - Desired state and redacted health live in `agent_channels`. Ready is persisted healthy only after the SDK connection handshake; late failure marks that binding unhealthy. Missing/invalid deployment key logs `Published Feishu Supervisor unavailable` and disables only DB bindings, not publication or legacy channels.
 - Conversation mappings and event claims live in `channel_conversation_mappings` and `channel_event_dedup`. Both inbound repositories require the unforgeable system scope; mapping validates binding-to-Agent ownership and event claim validates a persisted Feishu binding before insertion. Owner listing joins through `published_agents.owner_user_id`.
-- Dynamic Runs consume `StreamBridge` values/messages for throttled in-place cards, resolve last-turn `present_files` outputs into Feishu attachments, and download inbound image/file resources (maximum 50 MiB each) into the mapped thread before resolver input-size checks and execution.
-- A Run-bound quota reservation cannot use ordinary release. Dispatcher cancellation cancels and joins the started Run before terminal settlement; if joining cannot be confirmed, the reservation remains pending for durable recovery. `release_unstarted` is limited to the exact pre-bound Run ID when Run creation failed.
+- Dynamic Runs consume `StreamBridge` values/messages independently from card delivery. A capacity-one latest-progress queue may drop slow intermediate updates after a 250 ms drain window, while final values and `present_files` artifacts always drain on the main stream path.
+- Attachment admission happens after Published resolver and quota reservation. It permits at most 10 resources, 50 MiB each, and an effective aggregate `UTF-8 text + actual bytes` limit. Published resources bypass the lark-oapi binary helper (which buffers `resp.content`) and use authenticated `httpx` streaming with 5 s connect, 10 s read, and 60 s overall deadlines, `Content-Length` preflight, and per-raw-chunk accounting. Rejection/cancellation removes host partials and non-mounted sandbox copies; a blocked sync worker is followed by a tracked cleanup task.
+- The trusted `owner_user_id` is explicit through host paths and sandbox acquisition. Local/AIO providers bind cached thread entries to that owner and fail closed on conflict; deterministic AIO sandbox IDs include owner scope. Published Run workers establish the real owner ContextVar for their full lifetime so middleware, uploads, outputs, and final attachment resolution stay in the same tenant.
+- A Run-bound quota reservation cannot use ordinary release. Every exception or cancellation after `run_starter` succeeds has explicit started/detached semantics. Dispatcher cancellation cancels and joins the started Run before terminal settlement; cancellation RPC and worker join have independent short cleanup deadlines, and any unconfirmed cleanup leaves the reservation pending for durable recovery. `release_unstarted` is limited to failures before Run creation succeeds.
 - Gateway startup auto-applies Alembic `2026_07_14_agent_channels → 2026_07_14_channel_mappings`. When diagnosing, inspect the redacted `health`/`health_detail`, call the `test` route, verify the deployment key is mounted consistently, and look for ready/stop/runtime-loss log events.
 
 M3 focused regression:
@@ -535,7 +537,10 @@ M3 focused regression:
 pytest tests/test_agent_channel_repo.py tests/test_agent_channels_router.py \
   tests/test_feishu_supervisor.py tests/test_feishu_event_dedup.py \
   tests/test_feishu_websocket_lifecycle.py tests/test_channel_mapping_store.py \
-  tests/test_feishu_published_run_flow.py tests/test_channels.py tests/test_feishu_parser.py -q
+  tests/test_feishu_published_run_flow.py tests/test_channels.py tests/test_feishu_parser.py \
+  tests/test_aio_sandbox.py tests/test_aio_sandbox_provider.py \
+  tests/test_local_sandbox_provider_mounts.py \
+  tests/test_user_context.py -q
 ```
 
 

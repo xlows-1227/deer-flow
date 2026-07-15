@@ -34,7 +34,10 @@ a background task must *not* see the foreground user, wrap it with
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from typing import Final, Protocol, runtime_checkable
 
 
@@ -52,6 +55,13 @@ class CurrentUser(Protocol):
 _current_user: Final[ContextVar[CurrentUser | None]] = ContextVar("deerflow_current_user", default=None)
 
 
+@dataclass(frozen=True)
+class _RuntimeUser:
+    """Minimal trusted user object for non-HTTP runtime scopes."""
+
+    id: str
+
+
 def set_current_user(user: CurrentUser) -> Token[CurrentUser | None]:
     """Set the current user for this async task.
 
@@ -65,6 +75,31 @@ def set_current_user(user: CurrentUser) -> Token[CurrentUser | None]:
 def reset_current_user(token: Token[CurrentUser | None]) -> None:
     """Restore the context to the state captured by ``token``."""
     _current_user.reset(token)
+
+
+@contextmanager
+def runtime_user_scope(user_id: str) -> Iterator[None]:
+    """Establish and reliably restore an explicit runtime owner context.
+
+    Args:
+        user_id: Trusted owner identifier resolved before entering a background
+            Run worker. Empty identifiers are rejected instead of falling back
+            to the shared default filesystem bucket.
+
+    Yields:
+        Control while repository, upload, and sandbox code see ``user_id`` as
+        the current owner.
+
+    Raises:
+        ValueError: If ``user_id`` is empty or not a string.
+    """
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("runtime user_id must be a non-empty string")
+    token = set_current_user(_RuntimeUser(id=user_id))
+    try:
+        yield
+    finally:
+        reset_current_user(token)
 
 
 def get_current_user() -> CurrentUser | None:

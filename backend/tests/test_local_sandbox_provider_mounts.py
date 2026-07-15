@@ -542,6 +542,38 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_same_thread_id_is_cached_and_mounted_per_explicit_owner(self, tmp_path, monkeypatch):
+        import deerflow.config.paths as paths_module
+        from deerflow.config.paths import Paths
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+        config = SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: tmp_path / "missing-skills",
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            ),
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        )
+        with patch("deerflow.config.get_app_config", return_value=config):
+            provider = LocalSandboxProvider()
+            provider_b = LocalSandboxProvider()
+
+        owner_a_id = provider.acquire("shared-thread", user_id="owner-a")
+        with pytest.raises(PermissionError, match="different owner"):
+            provider.acquire("shared-thread", user_id="owner-b")
+        owner_b_id = provider_b.acquire("shared-thread", user_id="owner-b")
+        owner_a = provider.get(owner_a_id)
+        owner_b = provider_b.get(owner_b_id)
+
+        assert owner_a is not None
+        assert owner_b is not None
+        owner_a.write_file("/mnt/user-data/uploads/input.txt", "owner-a")
+        owner_b.write_file("/mnt/user-data/uploads/input.txt", "owner-b")
+        assert (tmp_path / "users" / "owner-a" / "threads" / "shared-thread" / "user-data" / "uploads" / "input.txt").read_text() == "owner-a"
+        assert (tmp_path / "users" / "owner-b" / "threads" / "shared-thread" / "user-data" / "uploads" / "input.txt").read_text() == "owner-b"
+
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()

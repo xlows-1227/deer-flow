@@ -207,18 +207,22 @@ Owner routes support create/list/test/start/stop/restart/credential rotation/del
 }
 ```
 
-Creating a binding leaves it inactive. `start` returns healthy only after the WebSocket ready handshake; `stop`, `restart`, rotation, and delete first confirm the old SDK connection has exited. Runtime connection loss marks only that binding unhealthy. Incoming events follow `verify → durable dedup → binding → DB conversation mapping → Published-Agent resolver → quota reserve → Run → usage settlement`; private chats isolate by Feishu user, while groups isolate by chat and optional topic.
+Creating a binding leaves it inactive. `start` returns healthy only after the WebSocket ready handshake; `stop`, `restart`, rotation, and delete first confirm the old SDK connection has exited. Runtime connection loss marks only that binding unhealthy. Incoming events follow `verify → durable dedup → binding → DB conversation mapping → Published-Agent resolver → cheap input checks → quota reserve → attachment materialization → Run → usage settlement`; private chats isolate by Feishu user, while groups isolate by chat and optional topic.
 
 All database-backed Feishu clients are scheduled on one process-owned SDK event loop because `lark-oapi` 1.x exposes a module-level loop. Each binding still owns and stops only its own connection/tasks, so stopping one binding does not interrupt peers. Event claims require the unforgeable system scope and a persisted Feishu binding before any dedup row is written.
 
-Dynamic binding Runs consume Gateway stream events for throttled card updates, extract last-turn artifacts for Feishu attachment delivery, and materialize inbound Feishu image/file resources (maximum 50 MiB each) into the mapped thread before execution. Once a quota reservation is bound to a started Run, ordinary release cannot free it: dispatcher cancellation cancels and joins the Run for terminal settlement, while an unjoinable Run remains pending for durable recovery.
+Dynamic binding Runs accept at most 10 inbound files, at most 50 MiB per file, and enforce the Release's aggregate `UTF-8 text + actual attachment bytes` limit. After resolver and quota admission, resources are fetched with authenticated streaming HTTP: connection/read timeouts are 5/10 seconds, the complete download is capped at 60 seconds, `Content-Length` is prechecked, and every raw network chunk is counted before it is written. Partial host and remote-sandbox files are removed on rejection or cancellation. Host uploads, sandbox acquisition/cache ownership, Run worker context, outputs, and final attachments all use the trusted Published-Agent owner; a cached thread/owner conflict fails closed.
+
+Gateway stream consumption is decoupled from Feishu card I/O through a one-item latest-progress queue. Slow intermediate progress may be dropped after the 250 ms drain window, but final values and artifacts are drained independently. Once a quota reservation is bound to a started Run, ordinary release cannot free it: every post-start cancellation/finalization failure becomes detached recovery, while Run cancellation and worker join each have a short cleanup deadline so a non-cooperative worker cannot hold the dispatcher forever.
 
 Gateway startup automatically upgrades persistence to Alembic head `2026_07_14_channel_mappings` (`agent_channels`, `channel_conversation_mappings`, and `channel_event_dedup`). Diagnose an unhealthy binding through `GET .../channels` and `POST .../channels/{binding_id}/test`, then check Gateway logs for the redacted error class. Focused regression:
 
 ```bash
 uv run pytest tests/test_agent_channels_router.py tests/test_feishu_supervisor.py \
   tests/test_feishu_event_dedup.py tests/test_feishu_websocket_lifecycle.py \
-  tests/test_channel_mapping_store.py tests/test_feishu_published_run_flow.py -q
+  tests/test_channel_mapping_store.py tests/test_feishu_published_run_flow.py \
+  tests/test_feishu_parser.py tests/test_aio_sandbox.py tests/test_aio_sandbox_provider.py \
+  tests/test_local_sandbox_provider_mounts.py tests/test_user_context.py -q
 ```
 
 ---

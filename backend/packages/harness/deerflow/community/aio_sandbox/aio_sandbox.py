@@ -301,3 +301,30 @@ class AioSandbox(Sandbox):
             except Exception as e:
                 logger.error(f"Failed to upload file to sandbox: {e}")
                 raise
+
+    def delete_file(self, path: str) -> None:
+        """Delete and confirm one file under the sandbox user-data prefix."""
+        normalised = path.replace("\\", "/")
+        if ".." in normalised.split("/"):
+            raise PermissionError(f"Access denied: path traversal detected in '{path}'")
+        allowed_prefix = VIRTUAL_PATH_PREFIX.rstrip("/")
+        if normalised != allowed_prefix and not normalised.startswith(f"{allowed_prefix}/"):
+            raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
+
+        with self._lock:
+            try:
+                result = self._client.shell.exec_command(
+                    command=f"rm -f -- {shlex.quote(normalised)}",
+                    no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT,
+                )
+                data = result.data
+                if data is None or data.exit_code != 0:
+                    raise OSError(
+                        errno.EIO,
+                        f"Sandbox did not confirm file deletion (exit_code={getattr(data, 'exit_code', None)})",
+                        path,
+                    )
+            except (OSError, PermissionError):
+                raise
+            except Exception as exc:
+                raise OSError(f"Failed to delete file '{path}' from sandbox: {exc}") from exc
