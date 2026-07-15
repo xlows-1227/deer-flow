@@ -51,6 +51,7 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   SYSTEM_FOLDERS,
   SYSTEM_FOLDER_NAMES,
+  SHARED_HTML_IFRAME_SANDBOX,
   createUserFolder,
   deleteUserFile,
   isReservedSystemFolderPath,
@@ -1123,7 +1124,7 @@ export default function WorkspaceFilesPage() {
               <iframe
                 className="size-full border-0"
                 title={previewItem?.name ?? "HTML 文件预览"}
-                sandbox=""
+                sandbox={SHARED_HTML_IFRAME_SANDBOX}
                 referrerPolicy="no-referrer"
                 srcDoc={previewContent}
               />

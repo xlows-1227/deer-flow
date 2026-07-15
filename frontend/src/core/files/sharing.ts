@@ -3,6 +3,11 @@ import { getBackendBaseURL } from "@/core/config";
 
 import type { FileItem } from "./type";
 
+// Scripts and forms make self-contained generated HTML interactive. Omitting
+// `allow-same-origin` keeps shared content in an opaque origin, preventing it
+// from reading the app's cookies, storage, or parent DOM.
+export const SHARED_HTML_IFRAME_SANDBOX = "allow-scripts allow-forms";
+
 export type FileShareSourceType =
   | "library"
   | "conversation_upload"

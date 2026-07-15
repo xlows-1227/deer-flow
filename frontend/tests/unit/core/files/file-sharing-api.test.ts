@@ -15,6 +15,15 @@ beforeEach(() => {
 });
 
 describe("file sharing api", () => {
+  test("allows shared HTML interactions without granting same-origin access", async () => {
+    const { SHARED_HTML_IFRAME_SANDBOX } = await import("@/core/files/sharing");
+
+    expect(SHARED_HTML_IFRAME_SANDBOX.split(" ")).toEqual(
+      expect.arrayContaining(["allow-scripts", "allow-forms"]),
+    );
+    expect(SHARED_HTML_IFRAME_SANDBOX).not.toContain("allow-same-origin");
+  });
+
   test("maps files shared by registered users into read-only file items", async () => {
     fetchWithAuth.mockResolvedValue({
       ok: true,
