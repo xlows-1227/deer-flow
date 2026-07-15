@@ -668,7 +668,9 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
-The web file manager groups conversation attachments under the locked **Conversation Uploads** folder, agent-produced artifacts under **Conversation Generated**, and files received from registered users under **Shared by Others**. All three are read-only system collections: manual uploads continue to use the root or a user-created folder selected in the upload dialog. Any owned file can be shared by entering another registered account's email; recipients can preview shared Markdown and interact with sandboxed HTML without receiving edit or re-share access. Shared HTML can run scripts and forms inside an opaque-origin iframe, but it cannot read DeerFlow cookies, storage, or the parent page.
+网页文件管理器把对话附件归入锁定的**对话上传**目录，把智能体生成的产物归入锁定的**对话生成**目录，并把注册用户分享来的文件归入锁定的**他人分享**目录。这三个系统目录均不允许人工上传或修改；人工上传仍可选择根目录或用户创建的普通目录。自己的文件可以通过注册邮箱分享给指定用户，接收者可以预览 Markdown，并在隔离的 iframe 中操作 HTML，但不能修改或再次分享源文件。
+
+“对话生成”目录中的 HTML 文件还可以发布为永久外链。首次发布会生成稳定的 `/published/{token}` 地址，无需登录即可访问；同一源文件重复发布会沿用原地址，直到所有者主动取消。公开 HTML 支持脚本和表单交互，但运行在不含 `allow-same-origin` 的沙箱 iframe 中，无法读取 DeerFlow 的 Cookie、本地存储或父页面 DOM。源文件被删除或替换后，原外链会停止访问；所有者明确重新发布替换后的文件时继续沿用原 token。
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows.
 

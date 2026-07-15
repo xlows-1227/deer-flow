@@ -16,6 +16,7 @@ import {
   type ListFilesParams,
 } from "./api";
 import { threadArtifactToFileItem } from "./conversation";
+import { listFilePublications } from "./publication";
 import { listReceivedFileShares } from "./sharing";
 import type { ConversationFileSource, FileItem } from "./type";
 
@@ -25,6 +26,23 @@ interface FilesQueryOptions {
 
 interface AllUserFilesOptions extends FilesQueryOptions {
   conversationSource?: ConversationFileSource | null;
+}
+
+export function useFilePublications({
+  enabled = true,
+}: FilesQueryOptions = {}) {
+  const query = useQuery({
+    queryKey: ["files", "publications"],
+    queryFn: listFilePublications,
+    enabled,
+  });
+  return {
+    publications: query.data ?? [],
+    isLoading: enabled ? query.isLoading : false,
+    isFetching: enabled && query.isFetching,
+    error: query.error,
+    refetch: query.refetch,
+  };
 }
 
 export function useSharedFiles({ enabled = true }: FilesQueryOptions = {}) {

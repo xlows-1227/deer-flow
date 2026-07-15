@@ -2,6 +2,7 @@
 
 import {
   ChevronRightIcon,
+  CopyIcon,
   DownloadIcon,
   FileArchiveIcon,
   FileAudioIcon,
@@ -9,9 +10,11 @@ import {
   FileTextIcon,
   FolderIcon,
   FolderPlusIcon,
+  Globe2Icon,
   Grid2X2Icon,
   ListIcon,
   LoaderCircleIcon,
+  Link2OffIcon,
   LockIcon,
   MessageSquareIcon,
   MoreHorizontalIcon,
@@ -52,27 +55,33 @@ import {
   SYSTEM_FOLDERS,
   SYSTEM_FOLDER_NAMES,
   SHARED_HTML_IFRAME_SANDBOX,
+  cancelFilePublication,
   createUserFolder,
   deleteUserFile,
   isReservedSystemFolderPath,
+  isPublishableGeneratedHtml,
   loadSharedFileText,
+  publishGeneratedHtml,
   shareFileWithUser,
   threadUploadDownloadUrl,
   threadGeneratedFileUrl,
   uploadUserFiles,
   useAllUserFiles,
+  useFilePublications,
   useSharedFiles,
   useUserFileUploadConfig,
   useUserFolders,
   userFileUrl,
 } from "@/core/files";
 import type {
+  FilePublicationRecord,
   SystemFileFolder,
   UserFileItem,
   UserFileTypeFilter,
 } from "@/core/files";
 import { streamdownPlugins } from "@/core/streamdown";
 import { deleteUploadedFile } from "@/core/uploads/api";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "list" | "grid";
@@ -293,6 +302,9 @@ export default function WorkspaceFilesPage() {
   const [shareItem, setShareItem] = useState<UserFileItem | null>(null);
   const [shareEmail, setShareEmail] = useState("");
   const [sharing, setSharing] = useState(false);
+  const [publicationActionFileId, setPublicationActionFileId] = useState<
+    string | null
+  >(null);
   const [previewItem, setPreviewItem] = useState<UserFileItem | null>(null);
   const [previewContent, setPreviewContent] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -323,6 +335,19 @@ export default function WorkspaceFilesPage() {
     },
   );
   const sharedFiles = useSharedFiles({ enabled: systemFolder === "shared" });
+  const filePublications = useFilePublications({
+    enabled: systemFolder === "generated",
+  });
+  const publicationBySource = useMemo(
+    () =>
+      new Map(
+        filePublications.publications.map((publication) => [
+          `${publication.thread_id}:${publication.path}`,
+          publication,
+        ]),
+      ),
+    [filePublications.publications],
+  );
   const rawItems =
     systemFolder === "shared" ? sharedFiles.files : ownFiles.files;
   const isLoading =
@@ -475,6 +500,50 @@ export default function WorkspaceFilesPage() {
     }
   };
 
+  const handlePublish = async (item: UserFileItem) => {
+    setPublicationActionFileId(item.id);
+    try {
+      await publishGeneratedHtml(item);
+      toast.success("外链已发布");
+      await filePublications.refetch();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "发布外链失败");
+    } finally {
+      setPublicationActionFileId(null);
+    }
+  };
+
+  const handleCopyPublication = async (publication: FilePublicationRecord) => {
+    const publicUrl = new URL(
+      publication.public_url,
+      window.location.origin,
+    ).toString();
+    if (await copyTextToClipboard(publicUrl)) {
+      toast.success("外链已复制");
+    } else {
+      toast.error("复制外链失败");
+    }
+  };
+
+  const handleCancelPublication = async (
+    item: UserFileItem,
+    publication: FilePublicationRecord,
+  ) => {
+    if (!window.confirm(`确定取消发布「${item.name}」吗？原外链将立即失效。`)) {
+      return;
+    }
+    setPublicationActionFileId(item.id);
+    try {
+      await cancelFilePublication(publication.id);
+      toast.success("已取消发布");
+      await filePublications.refetch();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "取消发布失败");
+    } finally {
+      setPublicationActionFileId(null);
+    }
+  };
+
   const openSharedItem = async (item: UserFileItem) => {
     if (!item.shared_file_id) return;
     const extension = normalizeExtension(item.extension);
@@ -559,6 +628,10 @@ export default function WorkspaceFilesPage() {
       );
     }
 
+    const publication = item.source_thread_id
+      ? publicationBySource.get(`${item.source_thread_id}:${item.path}`)
+      : undefined;
+
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -605,6 +678,33 @@ export default function WorkspaceFilesPage() {
               <Share2Icon className="size-4" />
               分享
             </DropdownMenuItem>
+          )}
+          {isPublishableGeneratedHtml(item) && !publication && (
+            <DropdownMenuItem
+              disabled={publicationActionFileId === item.id}
+              onClick={() => void handlePublish(item)}
+            >
+              <Globe2Icon className="size-4" />
+              发布外链
+            </DropdownMenuItem>
+          )}
+          {isPublishableGeneratedHtml(item) && publication && (
+            <>
+              <DropdownMenuItem
+                onClick={() => void handleCopyPublication(publication)}
+              >
+                <CopyIcon className="size-4" />
+                复制外链
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={publicationActionFileId === item.id}
+                className="text-red-600 focus:text-red-600"
+                onClick={() => void handleCancelPublication(item, publication)}
+              >
+                <Link2OffIcon className="size-4" />
+                取消发布
+              </DropdownMenuItem>
+            </>
           )}
           {item.kind === "file" && item.source_thread_id && (
             <DropdownMenuItem asChild>
