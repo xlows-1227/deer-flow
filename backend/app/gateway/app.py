@@ -26,6 +26,7 @@ from app.gateway.routers import (
     connectors,
     external,
     feedback,
+    file_publications,
     files,
     mcp,
     memory,
@@ -507,6 +508,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # User file library API is mounted at /api/files
     app.include_router(files.router)
+
+    # Permanent public links for generated HTML files.
+    app.include_router(file_publications.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
