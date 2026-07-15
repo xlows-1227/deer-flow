@@ -7,7 +7,7 @@ import hashlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 from uuid import uuid4
@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 _SETTLEMENT_MAX_ATTEMPTS = 5
 _SETTLEMENT_RETRY_DELAY_SECONDS = 0.05
+_PROGRESS_DRAIN_TIMEOUT_SECONDS = 0.25
+PUBLISHED_INBOUND_MAX_FILES = 10
+PUBLISHED_INBOUND_MAX_FILE_BYTES = 50 * 1024 * 1024
 
 
 class PublishedChannelUnavailableError(RuntimeError):
@@ -53,9 +56,21 @@ class PublishedChannelExecution:
     total_tokens: int
     latency_ms: int
     artifacts: tuple[str, ...] = ()
+    owner_user_id: str = ""
 
 
-PublishedInboundPreparer = Callable[[InboundMessage, str], Awaitable[InboundMessage]]
+@dataclass(frozen=True)
+class PublishedInboundPreparation:
+    """Materialized inbound message and its measured attachment byte count."""
+
+    message: InboundMessage
+    attachment_bytes: int = 0
+
+
+PublishedInboundPreparer = Callable[
+    [InboundMessage, str, str, int],
+    Awaitable[PublishedInboundPreparation],
+]
 PublishedProgressCallback = Callable[[str, str], Awaitable[None]]
 ExecutorProgressCallback = Callable[[str], Awaitable[None]]
 
@@ -297,8 +312,6 @@ class PublishedChannelRuntime:
             topic_id=message.topic_id,
             system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
         )
-        if prepare_inbound is not None:
-            message = await prepare_inbound(message, thread_id)
         try:
             context = await self._resolver.resolve(
                 agent_id,
@@ -312,7 +325,18 @@ class PublishedChannelRuntime:
         except (AgentNotAvailableError, AgentSuspendedError) as exc:
             raise PublishedChannelUnavailableError("published Agent is unavailable") from exc
 
-        if len(message.text.encode("utf-8")) > context.effective_quota.max_input_bytes:
+        text_bytes = len(message.text.encode("utf-8"))
+        if len(message.files) > PUBLISHED_INBOUND_MAX_FILES:
+            raise PublishedChannelBusyError("published Agent input has too many attachments")
+        declared_attachment_bytes = 0
+        for file_info in message.files:
+            declared_size = file_info.get("size") if isinstance(file_info, dict) else None
+            if not isinstance(declared_size, int) or isinstance(declared_size, bool) or declared_size < 0:
+                continue
+            if declared_size > PUBLISHED_INBOUND_MAX_FILE_BYTES:
+                raise PublishedChannelBusyError("published Agent attachment exceeds its size limit")
+            declared_attachment_bytes += declared_size
+        if text_bytes + declared_attachment_bytes > context.effective_quota.max_input_bytes:
             raise PublishedChannelBusyError("published Agent input exceeds its quota")
         run_id = str(uuid4())
         request_key = hashlib.sha256(f"feishu:{binding_id}:{event_id}".encode()).hexdigest()
@@ -326,6 +350,20 @@ class PublishedChannelRuntime:
             raise PublishedChannelBusyError(exc.code) from exc
 
         try:
+            if prepare_inbound is not None:
+                try:
+                    prepared = await prepare_inbound(
+                        message,
+                        thread_id,
+                        context.owner_user_id,
+                        context.effective_quota.max_input_bytes,
+                    )
+                except Exception as exc:
+                    raise PublishedChannelBusyError("published Agent attachment could not be admitted") from exc
+                message = prepared.message
+                effective_input_bytes = len(message.text.encode("utf-8")) + prepared.attachment_bytes
+                if effective_input_bytes > context.effective_quota.max_input_bytes:
+                    raise PublishedChannelBusyError("published Agent input exceeds its quota")
 
             async def publish_progress(text: str) -> None:
                 if on_progress is not None:
@@ -380,7 +418,7 @@ class PublishedChannelRuntime:
             execution=execution,
             usage=usage,
         )
-        return execution
+        return replace(execution, owner_user_id=context.owner_user_id)
 
 
 class GatewayPublishedRunExecutor:
@@ -412,6 +450,20 @@ class GatewayPublishedRunExecutor:
                 "app": app,
             }
         )
+
+    async def _cancel_started_run(self, record: RunRecord) -> None:
+        """Cancel and join a started Run or fail without releasing its quota."""
+        cancelled = await self._app.state.run_manager.cancel(record.run_id)
+        task = record.task
+        if cancelled is False and task is not None and not task.done():
+            raise RuntimeError("RunManager did not confirm cancellation")
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
     async def execute(
         self,
@@ -465,9 +517,32 @@ class GatewayPublishedRunExecutor:
         )
         last_values: dict[str, object] | list[object] | None = None
         stream_task: asyncio.Task[None] | None = None
+        progress_task: asyncio.Task[None] | None = None
+        progress_queue: asyncio.Queue[str] | None = None
         bridge = getattr(self._app.state, "stream_bridge", None)
         if bridge is not None:
             from app.channels.manager import _accumulate_stream_text, _extract_response_text
+
+            if on_progress is not None:
+                progress_queue = asyncio.Queue(maxsize=1)
+
+                async def deliver_progress() -> None:
+                    assert progress_queue is not None
+                    while True:
+                        progress_text = await progress_queue.get()
+                        try:
+                            await on_progress(progress_text)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "Published Feishu progress callback failed",
+                                extra={"run_id": record.run_id},
+                            )
+                        finally:
+                            progress_queue.task_done()
+
+                progress_task = asyncio.create_task(deliver_progress())
 
             async def consume_stream() -> None:
                 nonlocal last_values
@@ -498,13 +573,14 @@ class GatewayPublishedRunExecutor:
                     now = time.monotonic()
                     if last_published_text and now - last_publish_at < 0.35:
                         continue
-                    try:
-                        await on_progress(latest_text)
-                    except Exception:
-                        logger.exception(
-                            "Published Feishu progress callback failed",
-                            extra={"run_id": record.run_id},
-                        )
+                    assert progress_queue is not None
+                    if progress_queue.full():
+                        try:
+                            progress_queue.get_nowait()
+                            progress_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            pass
+                    progress_queue.put_nowait(latest_text)
                     last_published_text = latest_text
                     last_publish_at = now
 
@@ -518,26 +594,17 @@ class GatewayPublishedRunExecutor:
                 )
             except TimeoutError:
                 timed_out = True
-                await self._app.state.run_manager.cancel(record.run_id)
-                if record.task is not None:
-                    try:
-                        await record.task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        pass
+                try:
+                    await self._cancel_started_run(record)
+                except asyncio.CancelledError as exc:
+                    raise PublishedRunDetachedError("started Run timeout cleanup failed") from exc
+                except Exception as exc:
+                    raise PublishedRunDetachedError("started Run timeout cleanup failed") from exc
             except asyncio.CancelledError:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     try:
-                        await self._app.state.run_manager.cancel(record.run_id)
-                        if record.task is not None:
-                            try:
-                                await record.task
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception:
-                                pass
+                        await self._cancel_started_run(record)
                     except asyncio.CancelledError as exc:
                         raise PublishedRunDetachedError("dispatcher cancellation interrupted Run cleanup") from exc
                     except Exception as exc:
@@ -549,19 +616,16 @@ class GatewayPublishedRunExecutor:
 
         if stream_task is not None:
             try:
-                await asyncio.wait_for(asyncio.shield(stream_task), timeout=1.0)
+                # A Run worker publishes ``__end__`` before its task completes.
+                # Once the worker is joined, drain that retained terminal log
+                # without an arbitrary short timeout that could discard final
+                # values and artifacts under scheduler or I/O pressure.
+                await asyncio.shield(stream_task)
             except asyncio.CancelledError as exc:
                 if not stream_task.cancelled():
                     raise PublishedRunDetachedError("dispatcher cancellation interrupted stream cleanup") from exc
                 logger.warning(
                     "Published Feishu stream consumer was cancelled",
-                    extra={"run_id": record.run_id},
-                )
-            except TimeoutError:
-                stream_task.cancel()
-                await asyncio.gather(stream_task, return_exceptions=True)
-                logger.warning(
-                    "Published Feishu stream did not terminate after Run completion",
                     extra={"run_id": record.run_id},
                 )
             except Exception:
@@ -570,6 +634,22 @@ class GatewayPublishedRunExecutor:
                     extra={"run_id": record.run_id},
                     exc_info=True,
                 )
+
+        if progress_task is not None:
+            assert progress_queue is not None
+            try:
+                await asyncio.wait_for(
+                    progress_queue.join(),
+                    timeout=_PROGRESS_DRAIN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.info(
+                    "Dropping slow published Feishu progress update",
+                    extra={"run_id": record.run_id},
+                )
+            finally:
+                progress_task.cancel()
+                await asyncio.gather(progress_task, return_exceptions=True)
 
         if timed_out or record.status == RunStatus.timeout:
             status: Literal["success", "cancelled", "timeout", "failed"] = "timeout"

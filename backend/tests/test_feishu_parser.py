@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.feishu import FEISHU_INBOUND_FILE_MAX_BYTES, FeishuChannel, _read_inbound_resource
 from app.channels.message_bus import InboundMessage, MessageBus
+from deerflow.config.paths import Paths, get_paths
 
 
 def _run(coro):
@@ -110,6 +112,179 @@ def test_feishu_inbound_resource_reader_enforces_size_limit():
 
     with pytest.raises(ValueError, match="size limit"):
         _read_inbound_resource(io.BytesIO(allowed + b"b"))
+
+
+@pytest.mark.asyncio
+async def test_published_feishu_files_use_explicit_owner_paths_and_stream_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    import deerflow.config.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    monkeypatch.setattr(
+        "app.channels.feishu.get_sandbox_provider",
+        lambda: SimpleNamespace(acquire=lambda _thread_id: "local"),
+    )
+
+    class _RequestBuilder:
+        def message_id(self, _value):
+            return self
+
+        def file_key(self, _value):
+            return self
+
+        def type(self, _value):
+            return self
+
+        def build(self):
+            return object()
+
+    class _Request:
+        @staticmethod
+        def builder():
+            return _RequestBuilder()
+
+    class _Response:
+        code = 0
+        msg = "ok"
+        file_name = "shared.bin"
+
+        def __init__(self, content: bytes) -> None:
+            self.file = io.BytesIO(content)
+
+        def success(self) -> bool:
+            return True
+
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    channel._GetMessageResourceRequest = _Request
+    responses = iter([_Response(b"owner-a"), _Response(b"owner-b")])
+    channel._api_client = SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(
+                message_resource=SimpleNamespace(get=lambda _request: next(responses)),
+            )
+        )
+    )
+
+    for owner, expected in (("owner-a", b"owner-a"), ("owner-b", b"owner-b")):
+        message = InboundMessage(
+            channel_name="feishu:binding-1",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="review [file]",
+            thread_ts="message-1",
+            files=[{"file_key": f"file-{owner}"}],
+        )
+        prepared, byte_count = await channel.materialize_published_files(
+            message,
+            "shared-thread",
+            owner_user_id=owner,
+            max_input_bytes=1_024,
+        )
+        actual = get_paths().sandbox_uploads_dir("shared-thread", user_id=owner) / "shared.bin"
+        assert actual.read_bytes() == expected
+        assert byte_count == len(expected)
+        assert prepared.text == "review /mnt/user-data/uploads/shared.bin"
+
+    assert get_paths().sandbox_uploads_dir("shared-thread", user_id="owner-a") != get_paths().sandbox_uploads_dir(
+        "shared-thread",
+        user_id="owner-b",
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_feishu_aggregate_limit_cleans_partial_files_and_accepts_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    import deerflow.config.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    monkeypatch.setattr(
+        "app.channels.feishu.get_sandbox_provider",
+        lambda: SimpleNamespace(acquire=lambda _thread_id: "local"),
+    )
+
+    class _RequestBuilder:
+        def message_id(self, _value):
+            return self
+
+        def file_key(self, _value):
+            return self
+
+        def type(self, _value):
+            return self
+
+        def build(self):
+            return object()
+
+    class _Request:
+        builder = staticmethod(_RequestBuilder)
+
+    class _Response:
+        code = 0
+        msg = "ok"
+        file_name = "input.bin"
+
+        def __init__(self) -> None:
+            self.file = io.BytesIO(b"abc")
+
+        def success(self) -> bool:
+            return True
+
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    channel._GetMessageResourceRequest = _Request
+
+    def reset_responses() -> None:
+        responses = iter([_Response(), _Response()])
+        channel._api_client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message_resource=SimpleNamespace(get=lambda _request: next(responses)),
+                )
+            )
+        )
+
+    final_text = "compare /mnt/user-data/uploads/input.bin and /mnt/user-data/uploads/input_1.bin"
+    files = [{"file_key": "file-1"}, {"file_key": "file-2"}]
+    reset_responses()
+    rejected = InboundMessage(
+        channel_name="feishu:binding-1",
+        chat_id="chat-1",
+        user_id="user-1",
+        text="compare [file] and [file]",
+        thread_ts="message-1",
+        files=files,
+    )
+    with pytest.raises(ValueError, match="input quota"):
+        await channel.materialize_published_files(
+            rejected,
+            "aggregate-reject",
+            owner_user_id="owner-a",
+            max_input_bytes=len(final_text.encode("utf-8")) + 5,
+        )
+    reject_dir = get_paths().sandbox_uploads_dir("aggregate-reject", user_id="owner-a")
+    assert list(reject_dir.iterdir()) == []
+
+    reset_responses()
+    accepted = InboundMessage(
+        channel_name="feishu:binding-1",
+        chat_id="chat-1",
+        user_id="user-1",
+        text="compare [file] and [file]",
+        thread_ts="message-2",
+        files=files,
+    )
+    prepared, byte_count = await channel.materialize_published_files(
+        accepted,
+        "aggregate-boundary",
+        owner_user_id="owner-a",
+        max_input_bytes=len(final_text.encode("utf-8")) + 6,
+    )
+    assert prepared.text == final_text
+    assert byte_count == 6
+    assert len(list(get_paths().sandbox_uploads_dir("aggregate-boundary", user_id="owner-a").iterdir())) == 2
 
 
 def test_feishu_on_message_extracts_image_and_file_keys():

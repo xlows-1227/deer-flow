@@ -375,7 +375,12 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
-def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+def _resolve_attachments(
+    thread_id: str,
+    artifacts: list[str],
+    *,
+    owner_user_id: str | None = None,
+) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
     Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
@@ -389,7 +394,7 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
+    user_id = owner_user_id if owner_user_id is not None else get_effective_user_id()
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
@@ -429,13 +434,19 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    owner_user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
+    attachments = _resolve_attachments(
+        thread_id,
+        artifacts,
+        owner_user_id=owner_user_id,
+    )
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -452,7 +463,12 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
-async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dict[str, Any]]:
+async def _ingest_inbound_files(
+    thread_id: str,
+    msg: InboundMessage,
+    *,
+    owner_user_id: str | None = None,
+) -> list[dict[str, Any]]:
     if not msg.files:
         return []
 
@@ -464,7 +480,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
         write_upload_file_no_symlink,
     )
 
-    uploads_dir = ensure_uploads_dir(thread_id)
+    uploads_dir = ensure_uploads_dir(thread_id, user_id=owner_user_id)
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
 
     created: list[dict[str, Any]] = []
@@ -910,6 +926,7 @@ class ChannelManager:
         from app.channels.published_runtime import (
             PublishedChannelBusyError,
             PublishedChannelUnavailableError,
+            PublishedInboundPreparation,
         )
 
         runtime = self._published_runtime
@@ -917,18 +934,48 @@ class ChannelManager:
             await self._send_error(msg, "This agent is temporarily unavailable.")
             return
 
-        async def prepare_inbound(message: InboundMessage, thread_id: str) -> InboundMessage:
+        async def prepare_inbound(
+            message: InboundMessage,
+            thread_id: str,
+            owner_user_id: str,
+            max_input_bytes: int,
+        ) -> PublishedInboundPreparation:
+            attachment_bytes = 0
+            materialized_by_channel = False
             if message.files:
                 from .service import get_channel_service
 
                 service = get_channel_service()
                 channel = service.get_channel(message.channel_name) if service else None
-                if channel is not None:
+                if channel is None:
+                    raise RuntimeError("published inbound channel is unavailable")
+                materialize = getattr(channel, "materialize_published_files", None)
+                if callable(materialize):
+                    message, attachment_bytes = await materialize(
+                        message,
+                        thread_id,
+                        owner_user_id=owner_user_id,
+                        max_input_bytes=max_input_bytes,
+                    )
+                    materialized_by_channel = True
+                else:
                     message = await channel.receive_file(message, thread_id)
-            uploaded = await _ingest_inbound_files(thread_id, message)
+            uploaded = (
+                []
+                if materialized_by_channel
+                else await _ingest_inbound_files(
+                    thread_id,
+                    message,
+                    owner_user_id=owner_user_id,
+                )
+            )
             if uploaded:
                 message.text = f"{_format_uploaded_files_block(uploaded)}\n\n{message.text}".strip()
-            return message
+                attachment_bytes += sum(int(file_info.get("size") or 0) for file_info in uploaded)
+            return PublishedInboundPreparation(
+                message=message,
+                attachment_bytes=attachment_bytes,
+            )
 
         async def publish_progress(thread_id: str, text: str) -> None:
             if not text:
@@ -962,6 +1009,7 @@ class ChannelManager:
             execution.thread_id,
             execution.text,
             artifacts,
+            owner_user_id=execution.owner_user_id,
         )
         if not text:
             text = _format_artifact_text(artifacts) if artifacts else "(No response from agent)"

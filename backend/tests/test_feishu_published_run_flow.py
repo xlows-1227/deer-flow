@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +15,12 @@ from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, MessageBus
 from app.channels.published_runtime import (
     GatewayPublishedRunExecutor,
+    PublishedChannelBusyError,
     PublishedChannelExecution,
     PublishedChannelRuntime,
+    PublishedChannelUnavailableError,
+    PublishedInboundPreparation,
+    PublishedRunDetachedError,
 )
 from app.channels.store import ChannelStore, DbMappingStore
 from deerflow.persistence.agent_channel import AgentChannelRow
@@ -346,6 +351,57 @@ async def test_unpublished_agent_returns_safe_unavailable_message_before_quota(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reject_at", ["unavailable", "quota"])
+async def test_attachment_download_starts_only_after_release_and_quota_admission(reject_at: str) -> None:
+    order: list[str] = []
+    resolver = _UnavailableResolver() if reject_at == "unavailable" else _Resolver(order)
+    ledger = _QuotaExceededLedger(order) if reject_at == "quota" else _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=resolver,
+        quota_ledger=ledger,
+        executor=_Executor(order),
+    )
+    inbound = _inbound(text="review [file]")
+    inbound.thread_ts = "message-1"
+    inbound.files = [{"file_key": "file-1", "filename": "input.txt"}]
+    downloads: list[str] = []
+
+    async def prepare(message, thread_id, owner_user_id, max_input_bytes):
+        downloads.append("download")
+        return PublishedInboundPreparation(message=message, attachment_bytes=1)
+
+    expected_error = PublishedChannelUnavailableError if reject_at == "unavailable" else PublishedChannelBusyError
+    with pytest.raises(expected_error):
+        await runtime.run(inbound, prepare_inbound=prepare)
+
+    assert downloads == []
+
+
+@pytest.mark.asyncio
+async def test_rejected_materialization_releases_only_the_unstarted_reservation() -> None:
+    order: list[str] = []
+    ledger = _Ledger(order)
+    executor = _Executor(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_Resolver(order),
+        quota_ledger=ledger,
+        executor=executor,
+    )
+
+    async def reject_materialization(message, thread_id, owner_user_id, max_input_bytes):
+        raise ValueError("aggregate attachment limit exceeded")
+
+    with pytest.raises(PublishedChannelBusyError, match="attachment could not be admitted"):
+        await runtime.run(_inbound(), prepare_inbound=reject_materialization)
+
+    assert ledger.released == ["reservation-1"]
+    assert ledger.settled_usage == []
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
 async def test_timeout_returns_safe_message_and_settles_one_terminal_usage(tmp_path) -> None:
     order: list[str] = []
     ledger = _Ledger(order)
@@ -514,6 +570,87 @@ async def test_gateway_executor_forwards_stream_progress_and_last_turn_artifacts
 
 
 @pytest.mark.asyncio
+async def test_slow_progress_delivery_never_blocks_final_stream_artifacts() -> None:
+    context = await _Resolver([]).resolve(
+        "agent-1",
+        source="feishu",
+        credential_id="binding-1",
+        external_actor="feishu:user-1",
+        conversation_scope="thread-1",
+        correlation_id="event-1",
+    )
+    reservation = Reservation(
+        id="reservation-1",
+        request_key="request-1",
+        agent_id="agent-1",
+        credential_id="binding-1",
+        reserved_tokens=2_000,
+        status="reserved",
+    )
+    bridge = MemoryStreamBridge()
+    app = FastAPI()
+    app.state.stream_bridge = bridge
+
+    async def start_run(body, thread_id, request, *, published_context=None, run_id=None) -> RunRecord:
+        record = RunRecord(
+            run_id=str(run_id),
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+
+        async def worker() -> None:
+            await bridge.publish(
+                record.run_id,
+                "messages-tuple",
+                [{"type": "ai", "id": "answer-1", "content": "working"}, {}],
+            )
+            await bridge.publish(
+                record.run_id,
+                "values",
+                {
+                    "messages": [
+                        {"type": "human", "content": "hello"},
+                        {
+                            "type": "ai",
+                            "content": "done",
+                            "tool_calls": [
+                                {
+                                    "name": "present_files",
+                                    "args": {"filepaths": ["/mnt/user-data/outputs/final.txt"]},
+                                }
+                            ],
+                        },
+                    ]
+                },
+            )
+            record.last_ai_message = "done"
+            record.status = RunStatus.success
+            await bridge.publish_end(record.run_id)
+
+        record.task = asyncio.create_task(worker())
+        return record
+
+    async def slow_progress(_text: str) -> None:
+        await asyncio.sleep(2.0)
+
+    started = time.perf_counter()
+    result = await GatewayPublishedRunExecutor(app, run_starter=start_run).execute(
+        run_id="run-slow-progress",
+        thread_id="thread-1",
+        message="hello",
+        context=context,
+        reservation=reservation,
+        on_progress=slow_progress,
+    )
+
+    assert time.perf_counter() - started < 1.0
+    assert result.text == "done"
+    assert result.artifacts == ("/mnt/user-data/outputs/final.txt",)
+
+
+@pytest.mark.asyncio
 async def test_published_manager_emits_progress_and_resolves_final_attachment(tmp_path, monkeypatch) -> None:
     output_dir = tmp_path / "outputs"
     output_dir.mkdir()
@@ -523,11 +660,13 @@ async def test_published_manager_emits_progress_and_resolves_final_attachment(tm
     class _Paths:
         def sandbox_outputs_dir(self, thread_id: str, *, user_id: str):
             assert thread_id == "thread-1"
+            assert user_id == "owner-a"
             return output_dir
 
         def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str):
             assert thread_id == "thread-1"
             assert virtual_path == "/mnt/user-data/outputs/report.txt"
+            assert user_id == "owner-a"
             return report_path
 
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: _Paths())
@@ -546,6 +685,7 @@ async def test_published_manager_emits_progress_and_resolves_final_attachment(tm
                 total_tokens=2,
                 latency_ms=1,
                 artifacts=("/mnt/user-data/outputs/report.txt",),
+                owner_user_id="owner-a",
             )
 
     bus = MessageBus()
@@ -650,3 +790,59 @@ async def test_dispatcher_cancellation_cancels_started_run_and_settles_once() ->
     assert ledger.released == []
     assert len(ledger.settled_usage) == 1
     assert ledger.settled_usage[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_timeout_cancel_failure_keeps_started_run_reservation_pending() -> None:
+    record_holder: list[RunRecord] = []
+
+    class _ShortTimeoutResolver(_Resolver):
+        async def resolve(self, agent_id: str, **kwargs) -> PublishedAgentContext:
+            context = await super().resolve(agent_id, **kwargs)
+            return replace(
+                context,
+                effective_quota=replace(context.effective_quota, max_run_seconds=0.01),
+            )
+
+    async def start_run(body, thread_id, request, *, published_context=None, run_id=None) -> RunRecord:
+        async def run_worker() -> None:
+            await asyncio.Event().wait()
+
+        record = RunRecord(
+            run_id=str(run_id),
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+        record.task = asyncio.create_task(run_worker())
+        record_holder.append(record)
+        return record
+
+    class _FailingRunManager:
+        async def cancel(self, run_id: str) -> bool:
+            assert record_holder[0].run_id == run_id
+            raise RuntimeError("persistence unavailable")
+
+    app = FastAPI()
+    app.state.run_manager = _FailingRunManager()
+    order: list[str] = []
+    ledger = _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_ShortTimeoutResolver(order),
+        quota_ledger=ledger,
+        executor=GatewayPublishedRunExecutor(app, run_starter=start_run),
+    )
+
+    try:
+        with pytest.raises(PublishedRunDetachedError, match="started Run timeout cleanup failed"):
+            await runtime.run(_inbound())
+    finally:
+        worker = record_holder[0].task
+        assert worker is not None
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+    assert ledger.released == []
+    assert ledger.settled_usage == []

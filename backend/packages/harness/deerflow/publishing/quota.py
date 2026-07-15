@@ -167,7 +167,19 @@ class UsageRepoLike(Protocol):
         *,
         owner_user_id: str,
         run_id: str,
-    ) -> bool: ...
+    ) -> bool:
+        """Release only a pending reservation bound to a Run that never started.
+
+        Args:
+            reservation_id: Pending reservation selected for compensation.
+            owner_user_id: Owner scope that must match the reservation.
+            run_id: Pre-bound Run ID whose absence was confirmed by the caller.
+
+        Returns:
+            ``True`` when the exact owner/reservation/Run tuple is released;
+            ``False`` when it is absent, terminal, or bound to another Run.
+        """
+        ...
 
 
 class QuotaLedger:

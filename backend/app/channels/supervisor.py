@@ -11,6 +11,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.channels.base import Channel
+from app.channels.contracts import EventDeduplicator
 from app.channels.message_bus import MessageBus
 from deerflow.persistence.agent_channel import SYSTEM_CHANNEL_SUPERVISOR_SCOPE, AgentChannelRepository
 from deerflow.publishing.feishu_credentials import decode_feishu_credentials
@@ -19,18 +20,6 @@ from deerflow.publishing.secret_store import SecretStore
 logger = logging.getLogger(__name__)
 
 ConnectionTester = Callable[[str, str], Awaitable[tuple[bool, str]]]
-
-
-class EventDeduplicator(Protocol):
-    """Durably claim a provider event before binding execution."""
-
-    async def claim(
-        self,
-        binding_id: str,
-        event_id: str,
-        *,
-        system_scope: object,
-    ) -> bool: ...
 
 
 class ChannelFactory(Protocol):

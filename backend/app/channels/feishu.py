@@ -11,10 +11,15 @@ import re
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
+
+import httpx
 
 from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.contracts import EventDeduplicator as FeishuEventDeduplicator
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.persistence.channel_mapping import SYSTEM_CHANNEL_MAPPING_SCOPE
@@ -24,6 +29,10 @@ from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 logger = logging.getLogger(__name__)
 
 FEISHU_INBOUND_FILE_MAX_BYTES = 50 * 1024 * 1024
+FEISHU_PUBLISHED_INBOUND_MAX_FILES = 10
+FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 15.0
+FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS = 5.0
+FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS = 10.0
 
 
 def _read_inbound_resource(stream: Any) -> bytes:
@@ -36,10 +45,11 @@ def _read_inbound_resource(stream: Any) -> bytes:
     return bytes(content)
 
 
-class FeishuEventDeduplicator(Protocol):
-    """Atomic event-claim seam used before dispatching inbound work."""
-
-    async def claim(self, binding_id: str, event_id: str, *, system_scope: object) -> bool: ...
+@dataclass(frozen=True)
+class _MaterializedInboundFile:
+    virtual_path: str
+    actual_path: Path
+    size: int
 
 
 class FeishuEventVerifier:
@@ -125,6 +135,46 @@ class WebSocketSessionFactory(Protocol):
 
 
 RuntimeErrorCallback = Callable[[str], Awaitable[None]]
+LarkEndpointResolver = Callable[[object], Awaitable[str]]
+
+
+async def _resolve_lark_endpoint(client: object) -> str:
+    """Fetch one SDK endpoint asynchronously with bounded network timeouts."""
+    from lark_oapi.ws.const import GEN_ENDPOINT_URI, OK
+
+    app_id = getattr(client, "_app_id", "")
+    app_secret = getattr(client, "_app_secret", "")
+    domain = getattr(client, "_domain", "")
+    if not app_id or not app_secret:
+        raise RuntimeError("Feishu app_id or app_secret is empty")
+
+    timeout = httpx.Timeout(
+        FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS,
+        connect=FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as http_client:
+        response = await http_client.post(
+            f"{domain}{GEN_ENDPOINT_URI}",
+            headers={"locale": "zh"},
+            json={"AppID": app_id, "AppSecret": app_secret},
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Feishu endpoint request failed with HTTP {response.status_code}")
+    payload = response.json()
+    code = payload.get("code")
+    if code != OK:
+        raise RuntimeError(f"Feishu endpoint request failed: code={code}, msg={payload.get('msg', '')}")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("URL"), str) or not data["URL"]:
+        raise RuntimeError("Feishu endpoint response did not contain a WebSocket URL")
+
+    client_config = data.get("ClientConfig")
+    configure = getattr(client, "_configure", None)
+    if isinstance(client_config, dict) and callable(configure):
+        from lark_oapi.ws.model import ClientConfig
+
+        configure(ClientConfig(client_config))
+    return data["URL"]
 
 
 class _LarkSdkRuntime:
@@ -217,11 +267,17 @@ class _LarkWebSocketSession:
         app_secret: str,
         domain: str,
         event_handler: object,
+        endpoint_resolver: LarkEndpointResolver = _resolve_lark_endpoint,
+        connect_timeout_seconds: float = FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS,
     ) -> None:
+        if connect_timeout_seconds <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
         self._app_id = app_id
         self._app_secret = app_secret
         self._domain = domain
         self._event_handler = event_handler
+        self._endpoint_resolver = endpoint_resolver
+        self._connect_timeout_seconds = connect_timeout_seconds
         self._runtime: _LarkSdkRuntime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: object | None = None
@@ -270,7 +326,13 @@ class _LarkWebSocketSession:
                 waiter.set_result(None)
 
         try:
-            await client._connect()
+            async with asyncio.timeout(self._connect_timeout_seconds):
+                conn_url = await self._endpoint_resolver(client)
+                # lark-oapi 1.5.x performs a synchronous, unbounded
+                # ``requests.post`` inside ``_connect``. Resolve it above with
+                # async bounded I/O, then let the SDK consume the cached URL.
+                client._get_conn_url = lambda: conn_url
+                await client._connect()
             self._owned_tasks.update(task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and self._belongs_to_client(task, client))
             if client._conn is None:
                 raise RuntimeError("Feishu WebSocket connection was not established")
@@ -734,6 +796,148 @@ class FeishuChannel(Channel):
                 text = text.replace("[file]", virtual_path, 1)
         msg.text = text
         return msg
+
+    async def materialize_published_files(
+        self,
+        msg: InboundMessage,
+        thread_id: str,
+        *,
+        owner_user_id: str,
+        max_input_bytes: int,
+    ) -> tuple[InboundMessage, int]:
+        """Stream admitted published attachments into the explicit owner path."""
+        if not msg.thread_ts:
+            raise ValueError("Feishu attachment message is missing its message ID")
+        if len(msg.files) > FEISHU_PUBLISHED_INBOUND_MAX_FILES:
+            raise ValueError("Feishu attachment count exceeds the published input limit")
+
+        text = msg.text
+        total_bytes = 0
+        created_paths: list[Path] = []
+        try:
+            for file_info in msg.files:
+                if not isinstance(file_info, dict):
+                    raise ValueError("Feishu attachment metadata is invalid")
+                if file_info.get("image_key"):
+                    file_key = file_info["image_key"]
+                    resource_type: Literal["image", "file"] = "image"
+                    placeholder = "[image]"
+                elif file_info.get("file_key"):
+                    file_key = file_info["file_key"]
+                    resource_type = "file"
+                    placeholder = "[file]"
+                else:
+                    raise ValueError("Feishu attachment metadata has no resource key")
+
+                remaining_bytes = max_input_bytes - total_bytes - len(text.encode("utf-8"))
+                if remaining_bytes <= 0:
+                    raise ValueError("Feishu attachments exceed the published input quota")
+                materialized = await self._materialize_published_file(
+                    msg.thread_ts,
+                    str(file_key),
+                    resource_type,
+                    thread_id,
+                    owner_user_id=owner_user_id,
+                    max_bytes=min(FEISHU_INBOUND_FILE_MAX_BYTES, remaining_bytes),
+                )
+                created_paths.append(materialized.actual_path)
+                total_bytes += materialized.size
+                text = text.replace(placeholder, materialized.virtual_path, 1)
+                if total_bytes + len(text.encode("utf-8")) > max_input_bytes:
+                    raise ValueError("Feishu attachments exceed the published input quota")
+        except BaseException:
+            for created_path in created_paths:
+                try:
+                    created_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("[Feishu] failed to clean rejected inbound file: %s", created_path)
+            raise
+
+        msg.text = text
+        return msg, total_bytes
+
+    async def _materialize_published_file(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: Literal["image", "file"],
+        thread_id: str,
+        *,
+        owner_user_id: str,
+        max_bytes: int,
+    ) -> _MaterializedInboundFile:
+        """Download one resource with bounded memory and remove partial files."""
+        from deerflow.uploads.manager import (
+            claim_unique_filename,
+            ensure_uploads_dir,
+            normalize_filename,
+            open_upload_file_no_symlink,
+        )
+
+        request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(resource_type).build()
+        response = await asyncio.to_thread(self._api_client.im.v1.message_resource.get, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu resource get failed: code={response.code}, msg={response.msg}")
+        resource_stream = getattr(response, "file", None)
+        if resource_stream is None:
+            raise RuntimeError("Feishu resource response has no file stream")
+
+        paths = get_paths()
+        paths.ensure_thread_dirs(thread_id, user_id=owner_user_id)
+        uploads_dir = ensure_uploads_dir(thread_id, user_id=owner_user_id).resolve()
+        extension = "png" if resource_type == "image" else "bin"
+        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{extension}"
+
+        def persist_stream() -> tuple[Path, int]:
+            resolved_target = None
+            try:
+                with self._thread_lock:
+                    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                    safe_name = claim_unique_filename(normalize_filename(raw_filename), seen_names)
+                    resolved_target, file_handle = open_upload_file_no_symlink(uploads_dir, safe_name)
+                    total = 0
+                    with file_handle:
+                        while True:
+                            chunk = resource_stream.read(64 * 1024)
+                            if not chunk:
+                                break
+                            if not isinstance(chunk, (bytes, bytearray)):
+                                raise ValueError("Feishu inbound resource did not contain bytes")
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise ValueError("Feishu inbound resource exceeds size limit")
+                            file_handle.write(chunk)
+                if total == 0:
+                    raise ValueError("Feishu inbound resource is empty")
+                return resolved_target, total
+            except BaseException:
+                if resolved_target is not None:
+                    resolved_target.unlink(missing_ok=True)
+                raise
+
+        resolved_target, total_bytes = await asyncio.to_thread(persist_stream)
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+        try:
+            sandbox_provider = get_sandbox_provider()
+            sandbox_id = sandbox_provider.acquire(thread_id)
+            if sandbox_id != "local":
+                sandbox = sandbox_provider.get(sandbox_id)
+                if sandbox is None:
+                    raise RuntimeError(f"Sandbox not found for thread {thread_id}")
+                await asyncio.to_thread(
+                    sandbox.update_file_from_path,
+                    virtual_path,
+                    str(resolved_target),
+                )
+        except BaseException:
+            resolved_target.unlink(missing_ok=True)
+            raise
+
+        return _MaterializedInboundFile(
+            virtual_path=virtual_path,
+            actual_path=resolved_target,
+            size=total_bytes,
+        )
 
     async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
         request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()

@@ -169,6 +169,10 @@ def test_two_sdk_sessions_share_one_owned_loop_and_stop_independently(monkeypatc
             self.loop.call_soon_threadsafe(self._inbox.put_nowait, payload)
 
     monkeypatch.setattr(lark.ws, "Client", _SdkClient)
+
+    async def resolve_endpoint(_client) -> str:
+        return "wss://example.test/ws?device_id=device&service_id=1"
+
     first_ready = threading.Event()
     second_ready = threading.Event()
     first = _LarkWebSocketSession(
@@ -176,12 +180,14 @@ def test_two_sdk_sessions_share_one_owned_loop_and_stop_independently(monkeypatc
         app_secret="secret-1",
         domain="https://open.feishu.cn",
         event_handler=lambda payload: received.append(("app-1", payload, asyncio.get_running_loop())),
+        endpoint_resolver=resolve_endpoint,
     )
     second = _LarkWebSocketSession(
         app_id="app-2",
         app_secret="secret-2",
         domain="https://open.feishu.cn",
         event_handler=lambda payload: received.append(("app-2", payload, asyncio.get_running_loop())),
+        endpoint_resolver=resolve_endpoint,
     )
     first_thread = threading.Thread(
         target=first.run,
@@ -228,3 +234,93 @@ def test_two_sdk_sessions_share_one_owned_loop_and_stop_independently(monkeypatc
         first.stop(timeout_seconds=2.0)
         first_thread.join(2.0)
         second_thread.join(2.0)
+
+
+def test_stalled_endpoint_is_binding_local_and_does_not_block_ready_session(monkeypatch) -> None:
+    clients: dict[str, object] = {}
+    received = threading.Event()
+    first_pinged = threading.Event()
+    stalled = asyncio.Event()
+
+    class _Connection:
+        async def close(self) -> None:
+            return None
+
+    class _SdkClient:
+        def __init__(self, *, app_id, event_handler, **_kwargs) -> None:
+            self.app_id = app_id
+            self.event_handler = event_handler
+            self._conn = None
+            self._inbox: asyncio.Queue[str] | None = None
+            clients[app_id] = self
+
+        async def _connect(self) -> None:
+            self._inbox = asyncio.Queue()
+            self._conn = _Connection()
+            lark_ws_module.loop.create_task(self._receive_message_loop())
+
+        async def _receive_message_loop(self) -> None:
+            assert self._inbox is not None
+            while True:
+                payload = await self._inbox.get()
+                self.event_handler(payload)
+
+        async def _ping_loop(self) -> None:
+            first_pinged.set()
+            await asyncio.Event().wait()
+
+        async def _disconnect(self) -> None:
+            self._conn = None
+
+        def deliver(self, payload: str) -> None:
+            assert self._inbox is not None
+            lark_ws_module.loop.call_soon_threadsafe(self._inbox.put_nowait, payload)
+
+    async def resolve_endpoint(client) -> str:
+        if client.app_id == "app-stalled":
+            await stalled.wait()
+        return "wss://example.test/ws?device_id=device&service_id=1"
+
+    monkeypatch.setattr(lark.ws, "Client", _SdkClient)
+    first_ready = threading.Event()
+    second_error = threading.Event()
+    first = _LarkWebSocketSession(
+        app_id="app-ready",
+        app_secret="secret-1",
+        domain="https://open.feishu.cn",
+        event_handler=lambda _payload: received.set(),
+        endpoint_resolver=resolve_endpoint,
+        connect_timeout_seconds=0.2,
+    )
+    second = _LarkWebSocketSession(
+        app_id="app-stalled",
+        app_secret="secret-2",
+        domain="https://open.feishu.cn",
+        event_handler=lambda _payload: None,
+        endpoint_resolver=resolve_endpoint,
+        connect_timeout_seconds=0.05,
+    )
+    first_thread = threading.Thread(
+        target=first.run,
+        kwargs={"on_ready": first_ready.set, "on_error": lambda _detail: None},
+    )
+    second_thread = threading.Thread(
+        target=second.run,
+        kwargs={"on_ready": lambda: None, "on_error": lambda _detail: second_error.set()},
+    )
+    first_thread.start()
+    second_thread.start()
+    try:
+        assert first_ready.wait(1.0)
+        assert first_pinged.wait(1.0)
+        clients["app-ready"].deliver("still-responsive")
+        assert received.wait(1.0)
+        assert second_error.wait(1.0)
+        second_thread.join(1.0)
+        assert not second_thread.is_alive()
+        assert first_thread.is_alive()
+    finally:
+        second.stop(timeout_seconds=1.0)
+        first.stop(timeout_seconds=1.0)
+        first_thread.join(1.0)
+        second_thread.join(1.0)
