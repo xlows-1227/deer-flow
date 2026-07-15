@@ -3,7 +3,9 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
+import { getAPIClient } from "@/core/api";
 import { useThreads } from "@/core/threads/hooks";
+import type { AgentThreadState } from "@/core/threads/types";
 import { listUploadedFiles } from "@/core/uploads/api";
 
 import {
@@ -115,6 +117,9 @@ const MAX_THREADS_TO_SCAN = 50;
 const threadUploadsQueryKey = (threadId: string) =>
   ["uploads", "list", threadId] as const;
 
+const threadStateQueryKey = (threadId: string) =>
+  ["threads", "state", threadId] as const;
+
 /**
  * Data source for the file-management page. The normal view returns library
  * files only. Selecting a locked conversation folder switches the hook to
@@ -122,8 +127,9 @@ const threadUploadsQueryKey = (threadId: string) =>
  * shared {@link FileItem} shape.
  *
  * Upload discovery intentionally stays client-side: it fans out N small
- * `listUploadedFiles` calls via `useQueries`. Generated artifacts already live
- * in thread state and do not need extra requests.
+ * `listUploadedFiles` calls via `useQueries`. Thread search only returns the
+ * display title in `values`, so generated artifacts are loaded from each
+ * thread's latest checkpoint state with a second bounded fan-out.
  */
 export function useAllUserFiles(
   params: ListFilesParams = {},
@@ -157,6 +163,22 @@ export function useAllUserFiles(
         : [],
   });
 
+  const threadStates = useQueries({
+    queries:
+      conversationSource === "generated"
+        ? (threads.data ?? []).map((thread) => ({
+            queryKey: threadStateQueryKey(thread.thread_id),
+            queryFn: () =>
+              getAPIClient().threads.getState<AgentThreadState>(
+                thread.thread_id,
+              ),
+            // A deleted or inaccessible thread must not hide other artifacts.
+            enabled: enabled && !!threads.data,
+            retry: false,
+          }))
+        : [],
+  });
+
   const files = useMemo<FileItem[]>(() => {
     if (!showingConversationFiles) {
       return library.files;
@@ -171,9 +193,10 @@ export function useAllUserFiles(
 
     if (conversationSource === "generated") {
       const generatedItems: FileItem[] = [];
-      for (const thread of threads.data ?? []) {
+      (threads.data ?? []).forEach((thread, index) => {
+        const state = threadStates[index]?.data;
         const title = threadTitleById.get(thread.thread_id);
-        for (const artifact of thread.values?.artifacts ?? []) {
+        for (const artifact of state?.values?.artifacts ?? []) {
           generatedItems.push(
             threadArtifactToFileItem(
               artifact,
@@ -183,7 +206,7 @@ export function useAllUserFiles(
             ),
           );
         }
-      }
+      });
       return generatedItems;
     }
 
@@ -205,24 +228,30 @@ export function useAllUserFiles(
     library.files,
     showingConversationFiles,
     threads.data,
+    threadStates,
     threadUploads,
   ]);
 
   const threadUploadsLoading =
     conversationSource === "uploaded" &&
     threadUploads.some((query) => query.isLoading);
+  const threadStatesLoading =
+    conversationSource === "generated" &&
+    threadStates.some((query) => query.isLoading);
 
   return {
     files,
     isLoading: enabled
       ? showingConversationFiles
-        ? threads.isLoading || threadUploadsLoading
+        ? threads.isLoading || threadUploadsLoading || threadStatesLoading
         : library.isLoading
       : false,
     isFetching:
       enabled &&
       (showingConversationFiles
-        ? threads.isFetching || threadUploads.some((query) => query.isFetching)
+        ? threads.isFetching ||
+          threadUploads.some((query) => query.isFetching) ||
+          threadStates.some((query) => query.isFetching)
         : library.isFetching),
     error: showingConversationFiles ? threads.error : library.error,
     /**
@@ -239,6 +268,10 @@ export function useAllUserFiles(
       if (conversationSource === "uploaded") {
         await queryClient.invalidateQueries({
           queryKey: ["uploads", "list"],
+        });
+      } else if (conversationSource === "generated") {
+        await queryClient.invalidateQueries({
+          queryKey: ["threads", "state"],
         });
       }
     },
