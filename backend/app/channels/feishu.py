@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hmac
 import json
 import logging
@@ -16,16 +17,29 @@ from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.persistence.channel_mapping import SYSTEM_CHANNEL_MAPPING_SCOPE
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
+FEISHU_INBOUND_FILE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _read_inbound_resource(stream: Any) -> bytes:
+    """Read one provider resource without buffering beyond the input limit."""
+    content = stream.read(FEISHU_INBOUND_FILE_MAX_BYTES + 1)
+    if not isinstance(content, (bytes, bytearray)):
+        raise ValueError("Feishu inbound resource did not contain bytes")
+    if len(content) > FEISHU_INBOUND_FILE_MAX_BYTES:
+        raise ValueError("Feishu inbound resource exceeds size limit")
+    return bytes(content)
+
 
 class FeishuEventDeduplicator(Protocol):
     """Atomic event-claim seam used before dispatching inbound work."""
 
-    async def claim(self, binding_id: str, event_id: str) -> bool: ...
+    async def claim(self, binding_id: str, event_id: str, *, system_scope: object) -> bool: ...
 
 
 class FeishuEventVerifier:
@@ -113,8 +127,88 @@ class WebSocketSessionFactory(Protocol):
 RuntimeErrorCallback = Callable[[str], Awaitable[None]]
 
 
+class _LarkSdkRuntime:
+    """Own the single event loop referenced by lark-oapi's module global."""
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._started = threading.Event()
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="feishu-lark-sdk-loop",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._started.wait(5.0):
+            raise RuntimeError("Feishu SDK event loop failed to start")
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("Feishu SDK event loop is unavailable")
+        return loop
+
+    def _run(self) -> None:
+        import lark_oapi.ws.client as ws_client_module
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        # lark-oapi 1.x schedules receive work through this module global.
+        # Assign it exactly once to a process-owned loop shared by all clients.
+        ws_client_module.loop = loop
+        self._started.set()
+        try:
+            loop.run_forever()
+        finally:
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+            self._stopped.set()
+
+    def submit(self, coroutine: Awaitable[Any]) -> concurrent.futures.Future[Any]:
+        return asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+
+    def shutdown(self, *, timeout_seconds: float = 5.0) -> bool:
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        self._thread.join(timeout_seconds)
+        return self._stopped.is_set()
+
+
+_lark_sdk_runtime: _LarkSdkRuntime | None = None
+_lark_sdk_runtime_lock = threading.Lock()
+
+
+def _get_lark_sdk_runtime() -> _LarkSdkRuntime:
+    global _lark_sdk_runtime
+    with _lark_sdk_runtime_lock:
+        if _lark_sdk_runtime is None:
+            _lark_sdk_runtime = _LarkSdkRuntime()
+        return _lark_sdk_runtime
+
+
+def shutdown_lark_sdk_runtime(*, timeout_seconds: float = 5.0) -> bool:
+    """Stop the process-owned lark-oapi loop after all bindings have stopped."""
+    global _lark_sdk_runtime
+    with _lark_sdk_runtime_lock:
+        runtime = _lark_sdk_runtime
+        if runtime is None:
+            return True
+        stopped = runtime.shutdown(timeout_seconds=timeout_seconds)
+        if stopped:
+            _lark_sdk_runtime = None
+        return stopped
+
+
 class _LarkWebSocketSession:
-    """Terminable adapter around lark-oapi's blocking WebSocket client."""
+    """One binding connection scheduled on the process-owned SDK loop."""
 
     def __init__(
         self,
@@ -128,24 +222,31 @@ class _LarkWebSocketSession:
         self._app_secret = app_secret
         self._domain = domain
         self._event_handler = event_handler
+        self._runtime: _LarkSdkRuntime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: object | None = None
+        self._run_future: concurrent.futures.Future[Any] | None = None
+        self._stop_waiter: asyncio.Future[None] | None = None
+        self._owned_tasks: set[asyncio.Task[Any]] = set()
         self._stopping = threading.Event()
         self._exited = threading.Event()
 
-    def run(
+    @staticmethod
+    def _belongs_to_client(task: asyncio.Task[Any], client: object) -> bool:
+        coroutine = task.get_coro()
+        frame = getattr(coroutine, "cr_frame", None)
+        return frame is not None and frame.f_locals.get("self") is client
+
+    async def _run_client(
         self,
         *,
         on_ready: Callable[[], None],
         on_error: Callable[[str], None],
     ) -> None:
         import lark_oapi as lark
-        import lark_oapi.ws.client as ws_client_module
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        loop = asyncio.get_running_loop()
         self._loop = loop
-        ws_client_module.loop = loop
         client = lark.ws.Client(
             app_id=self._app_id,
             app_secret=self._app_secret,
@@ -156,72 +257,92 @@ class _LarkWebSocketSession:
         )
         self._client = client
 
-        def handle_loop_error(_loop: asyncio.AbstractEventLoop, _context: dict[str, object]) -> None:
-            if not self._stopping.is_set():
-                on_error("connection lost")
-                _loop.stop()
+        def handle_sdk_task_done(task: asyncio.Task[Any]) -> None:
+            if self._stopping.is_set() or task.cancelled():
+                return
+            try:
+                task.exception()
+            except asyncio.CancelledError:
+                return
+            on_error("connection lost")
+            waiter = self._stop_waiter
+            if waiter is not None and not waiter.done():
+                waiter.set_result(None)
 
-        loop.set_exception_handler(handle_loop_error)
         try:
-            loop.run_until_complete(client._connect())
+            await client._connect()
+            self._owned_tasks.update(task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and self._belongs_to_client(task, client))
             if client._conn is None:
                 raise RuntimeError("Feishu WebSocket connection was not established")
-
-            # The SDK starts its receive loop as an unreferenced task inside
-            # ``_connect``. Attach an explicit observer so a late connection
-            # failure reaches Supervisor immediately instead of waiting for
-            # asyncio's task finalizer to report an unretrieved exception.
-            def handle_sdk_task_done(task: asyncio.Task[object]) -> None:
-                if self._stopping.is_set() or task.cancelled():
-                    return
-                try:
-                    error = task.exception()
-                except asyncio.CancelledError:
-                    return
-                if error is not None:
-                    on_error("connection lost")
-                    loop.stop()
-
-            for task in asyncio.all_tasks(loop):
-                if not task.done():
-                    task.add_done_callback(handle_sdk_task_done)
-            loop.create_task(client._ping_loop())
+            ping_task = loop.create_task(client._ping_loop())
+            self._owned_tasks.add(ping_task)
+            for task in self._owned_tasks:
+                task.add_done_callback(handle_sdk_task_done)
+            if self._stopping.is_set():
+                return
+            self._stop_waiter = loop.create_future()
             on_ready()
-            loop.run_forever()
+            await self._stop_waiter
+        finally:
+            self._owned_tasks.update(task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and self._belongs_to_client(task, client))
+            try:
+                if client._conn is not None:
+                    await client._disconnect()
+            except Exception:
+                logger.warning("Feishu WebSocket disconnect failed", exc_info=True)
+            owned_tasks = [task for task in self._owned_tasks if not task.done()]
+            for task in owned_tasks:
+                task.cancel()
+            if owned_tasks:
+                await asyncio.gather(*owned_tasks, return_exceptions=True)
+            self._owned_tasks.clear()
+            self._stop_waiter = None
+            self._client = None
+
+    def run(
+        self,
+        *,
+        on_ready: Callable[[], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        self._runtime = _get_lark_sdk_runtime()
+        try:
+            future = self._runtime.submit(self._run_client(on_ready=on_ready, on_error=on_error))
+            self._run_future = future
+            future.result()
+        except concurrent.futures.CancelledError:
+            pass
         except Exception:
             if not self._stopping.is_set():
                 on_error("connection failed")
         finally:
-            try:
-                if client._conn is not None:
-                    loop.run_until_complete(client._disconnect())
-            except Exception:
-                logger.warning("Feishu WebSocket disconnect failed", exc_info=True)
-            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            loop.close()
+            self._run_future = None
             self._exited.set()
 
     def stop(self, *, timeout_seconds: float) -> bool:
         """Close the SDK connection and confirm its worker loop has exited."""
         self._stopping.set()
-        loop = self._loop
-        client = self._client
-        if loop is not None and loop.is_running():
+        runtime = self._runtime
+        if runtime is not None:
 
-            async def disconnect_and_stop() -> None:
-                if client is not None and getattr(client, "_conn", None) is not None:
-                    await client._disconnect()
-                loop.stop()
+            async def request_stop() -> bool:
+                waiter = self._stop_waiter
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(None)
+                    return True
+                return False
 
             try:
-                future = asyncio.run_coroutine_threadsafe(disconnect_and_stop(), loop)
-                future.result(timeout=timeout_seconds)
+                future = runtime.submit(request_stop())
+                signaled = future.result(timeout=timeout_seconds)
+                if not signaled:
+                    run_future = self._run_future
+                    if run_future is not None:
+                        run_future.cancel()
             except Exception:
-                loop.call_soon_threadsafe(loop.stop)
+                run_future = self._run_future
+                if run_future is not None:
+                    run_future.cancel()
         return self._exited.wait(timeout_seconds)
 
 
@@ -643,7 +764,15 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         try:
-            content: bytes = await asyncio.to_thread(image_stream.read)
+            content = await asyncio.to_thread(_read_inbound_resource, image_stream)
+        except ValueError as exc:
+            logger.warning(
+                "[Feishu] rejected inbound resource: resource_key=%s, type=%s, reason=%s",
+                file_key,
+                type,
+                exc,
+            )
+            return f"Failed to obtain the [{type}]"
         except Exception:
             logger.exception("[Feishu] failed to read resource stream: resource_key=%s, type=%s", file_key, type)
             return f"Failed to obtain the [{type}]"
@@ -893,7 +1022,11 @@ class FeishuChannel(Channel):
                     extra={"binding_id": self.binding_id},
                 )
                 return
-            if not await self._event_deduplicator.claim(self.binding_id, event_id):
+            if not await self._event_deduplicator.claim(
+                self.binding_id,
+                event_id,
+                system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
+            ):
                 logger.info(
                     "[Feishu] duplicate event dropped",
                     extra={"binding_id": self.binding_id, "event_id": event_id},

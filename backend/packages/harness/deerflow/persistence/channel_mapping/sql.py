@@ -181,14 +181,35 @@ class ChannelEventRepository:
         self._sf = session_factory
         self._retention = timedelta(hours=retention_hours)
 
-    async def claim(self, binding_id: str, event_id: str, *, now: datetime | None = None) -> bool:
-        """Claim ``(binding_id, event_id)`` once, before quota or execution."""
+    async def claim(
+        self,
+        binding_id: str,
+        event_id: str,
+        *,
+        system_scope: object,
+        now: datetime | None = None,
+    ) -> bool:
+        """Claim an event only for a trusted, persisted Feishu binding."""
+        if system_scope is not SYSTEM_CHANNEL_MAPPING_SCOPE:
+            raise PermissionError("system channel mapping scope required")
         binding_id = _require(binding_id, "binding_id")
         event_id = _require(event_id, "event_id")
         claimed_at = now or _now()
         values = {"binding_id": binding_id, "event_id": event_id, "created_at": claimed_at}
 
         async with self._sf() as session:
+            persisted_binding = (
+                await session.execute(
+                    select(AgentChannelRow.id)
+                    .join(PublishedAgentRow, PublishedAgentRow.id == AgentChannelRow.agent_id)
+                    .where(
+                        AgentChannelRow.id == binding_id,
+                        AgentChannelRow.channel_type == "feishu",
+                    )
+                )
+            ).scalar_one_or_none()
+            if persisted_binding is None:
+                raise MappingScopeConflictError("event claim requires a valid Feishu binding")
             await session.execute(delete(ChannelEventDedupRow).where(ChannelEventDedupRow.created_at < claimed_at - self._retention))
             dialect = session.bind.dialect.name if session.bind is not None else ""
             if dialect == "sqlite":

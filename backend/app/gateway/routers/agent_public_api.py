@@ -431,9 +431,10 @@ async def recover_pending_quota_settlements(app: Any) -> int:
                         extra={"reservation_id": reservation["id"], "run_id": run_id},
                     )
                     continue
-            if await ledger.release(
+            if await ledger.release_unstarted(
                 str(reservation["id"]),
                 owner_user_id=owner_user_id,
+                run_id=run_id,
             ):
                 recovered += 1
                 logger.warning(
@@ -725,9 +726,10 @@ async def _start_public_run(
         )
     except asyncio.CancelledError:
         cleanup = [
-            quota_ledger.release(
+            quota_ledger.release_unstarted(
                 reservation.id,
                 owner_user_id=context.owner_user_id,
+                run_id=run_id,
             )
         ]
         if claimed and idempotency_key is not None:
@@ -747,7 +749,11 @@ async def _start_public_run(
                 logger.error("Cancelled published Run startup cleanup failed", exc_info=result)
         raise
     except HTTPException as exc:
-        await quota_ledger.release(reservation.id, owner_user_id=context.owner_user_id)
+        await quota_ledger.release_unstarted(
+            reservation.id,
+            owner_user_id=context.owner_user_id,
+            run_id=run_id,
+        )
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),
@@ -757,7 +763,11 @@ async def _start_public_run(
             raise HTTPException(status_code=409, detail={"code": "conversation_busy"}) from exc
         raise
     except Exception:
-        await quota_ledger.release(reservation.id, owner_user_id=context.owner_user_id)
+        await quota_ledger.release_unstarted(
+            reservation.id,
+            owner_user_id=context.owner_user_id,
+            run_id=run_id,
+        )
         if claimed and idempotency_key is not None:
             await idempotency.release(
                 api_key_id=_credential_id(request),

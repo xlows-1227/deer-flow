@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING, Any
@@ -138,6 +139,12 @@ class ChannelService:
             except Exception:
                 logger.exception("Error stopping channel %s", name)
         self._channels.clear()
+
+        from app.channels.feishu import shutdown_lark_sdk_runtime
+
+        stopped = await asyncio.to_thread(shutdown_lark_sdk_runtime)
+        if not stopped:
+            logger.error("Feishu SDK event loop did not stop cleanly")
 
         await self.manager.stop()
         self._running = False

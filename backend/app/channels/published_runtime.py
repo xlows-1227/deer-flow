@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -35,6 +36,10 @@ class PublishedChannelBusyError(RuntimeError):
     """The binding's effective quota rejected this inbound attempt."""
 
 
+class PublishedRunDetachedError(RuntimeError):
+    """A started Run could not be joined; its reservation remains recoverable."""
+
+
 @dataclass(frozen=True)
 class PublishedChannelExecution:
     """Safe terminal result returned by a published runtime executor."""
@@ -47,9 +52,17 @@ class PublishedChannelExecution:
     output_tokens: int
     total_tokens: int
     latency_ms: int
+    artifacts: tuple[str, ...] = ()
+
+
+PublishedInboundPreparer = Callable[[InboundMessage, str], Awaitable[InboundMessage]]
+PublishedProgressCallback = Callable[[str, str], Awaitable[None]]
+ExecutorProgressCallback = Callable[[str], Awaitable[None]]
 
 
 class MappingStoreLike(Protocol):
+    """Persist stable channel-to-thread mappings behind a trusted scope."""
+
     async def get_or_create_thread(
         self,
         *,
@@ -60,10 +73,26 @@ class MappingStoreLike(Protocol):
         chat_type: Literal["p2p", "group"],
         topic_id: str | None,
         system_scope: object,
-    ) -> str: ...
+    ) -> str:
+        """Resolve one stable conversation thread for a persisted binding.
+
+        Args:
+            system_scope: Unforgeable system authority for cross-owner ingress.
+
+        Returns:
+            The existing or atomically created runtime thread ID.
+
+        Raises:
+            PermissionError: The caller does not hold system authority.
+            MappingScopeConflictError: The binding is absent or assigned to a
+                different Agent.
+        """
+        ...
 
 
 class ResolverLike(Protocol):
+    """Resolve immutable Published-Agent execution context for one ingress."""
+
     async def resolve(
         self,
         agent_id: str,
@@ -74,17 +103,37 @@ class ResolverLike(Protocol):
         conversation_scope: str,
         correlation_id: str,
         idempotency_key: str | None = None,
-    ) -> PublishedAgentContext: ...
+    ) -> PublishedAgentContext:
+        """Authorize the binding and pin its currently published Release.
+
+        Returns:
+            An owner-scoped, memory-disabled context containing the effective
+            quota and immutable release capabilities.
+
+        Raises:
+            AgentNotAvailableError: The Agent has no runnable Release.
+            AgentSuspendedError: The Agent or Release is suspended.
+        """
+        ...
 
 
 class QuotaLedgerLike(Protocol):
+    """Manage reservation lifecycle and exactly-once terminal usage."""
+
     async def reserve(
         self,
         context: PublishedAgentContext,
         *,
         request_key: str,
         run_id: str | None = None,
-    ) -> Reservation: ...
+    ) -> Reservation:
+        """Acquire quota once for a deterministic request and optional Run ID.
+
+        Raises:
+            QuotaExceededError: An effective concurrency, rate, run, or token
+                limit rejects the request.
+        """
+        ...
 
     async def settle(
         self,
@@ -95,12 +144,33 @@ class QuotaLedgerLike(Protocol):
         status: str,
         run_id: str | None = None,
         usage: dict[str, object] | None = None,
-    ) -> bool: ...
+    ) -> bool:
+        """Settle one Run-bound reservation and write one terminal usage row.
 
-    async def release(self, reservation_id: str, *, owner_user_id: str) -> bool: ...
+        Returns:
+            ``True`` when this call performs settlement; ``False`` for an
+            already-settled idempotent replay.
+        """
+        ...
+
+    async def release(self, reservation_id: str, *, owner_user_id: str) -> bool:
+        """Release only an unbound reservation that has no durable Run."""
+        ...
+
+    async def release_unstarted(
+        self,
+        reservation_id: str,
+        *,
+        owner_user_id: str,
+        run_id: str,
+    ) -> bool:
+        """Release a pre-bound reservation after proving its Run never started."""
+        ...
 
 
 class PublishedRunExecutor(Protocol):
+    """Run one pinned Release and return a terminal, account-ready result."""
+
     async def execute(
         self,
         *,
@@ -109,7 +179,18 @@ class PublishedRunExecutor(Protocol):
         message: str,
         context: PublishedAgentContext,
         reservation: Reservation,
-    ) -> PublishedChannelExecution: ...
+        on_progress: ExecutorProgressCallback | None = None,
+    ) -> PublishedChannelExecution:
+        """Execute the Run, forwarding throttled text snapshots when requested.
+
+        The executor owns a started Run until it reaches terminal state. If its
+        dispatcher is cancelled, it must cancel and join the Run, or raise
+        ``PublishedRunDetachedError`` so the reservation remains recoverable.
+
+        Returns:
+            Terminal text, artifacts, token counts, status, and latency.
+        """
+        ...
 
 
 class GatewayRunStarter(Protocol):
@@ -123,7 +204,9 @@ class GatewayRunStarter(Protocol):
         *,
         published_context: PublishedAgentContext | None = None,
         run_id: str | None = None,
-    ) -> RunRecord: ...
+    ) -> RunRecord:
+        """Create a Gateway Run using pre-authorized published context."""
+        ...
 
 
 class PublishedChannelRuntime:
@@ -189,7 +272,13 @@ class PublishedChannelRuntime:
                 )
                 await asyncio.sleep(_SETTLEMENT_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)))
 
-    async def run(self, message: InboundMessage) -> PublishedChannelExecution:
+    async def run(
+        self,
+        message: InboundMessage,
+        *,
+        prepare_inbound: PublishedInboundPreparer | None = None,
+        on_progress: PublishedProgressCallback | None = None,
+    ) -> PublishedChannelExecution:
         """Execute one verified and deduplicated binding message exactly once."""
         binding_id = self._metadata_value(message, "binding_id")
         agent_id = self._metadata_value(message, "agent_id")
@@ -208,6 +297,8 @@ class PublishedChannelRuntime:
             topic_id=message.topic_id,
             system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
         )
+        if prepare_inbound is not None:
+            message = await prepare_inbound(message, thread_id)
         try:
             context = await self._resolver.resolve(
                 agent_id,
@@ -235,17 +326,28 @@ class PublishedChannelRuntime:
             raise PublishedChannelBusyError(exc.code) from exc
 
         try:
+
+            async def publish_progress(text: str) -> None:
+                if on_progress is not None:
+                    await on_progress(thread_id, text)
+
             execution = await self._executor.execute(
                 run_id=run_id,
                 thread_id=thread_id,
                 message=message.text,
                 context=context,
                 reservation=reservation,
+                on_progress=publish_progress if on_progress is not None else None,
             )
+        except PublishedRunDetachedError:
+            # The Run exists and may still consume tokens. Keep its reservation
+            # pending so the durable settlement recovery can reconcile it.
+            raise
         except BaseException:
-            await self._quota.release(
+            await self._quota.release_unstarted(
                 reservation.id,
                 owner_user_id=context.owner_user_id,
+                run_id=run_id,
             )
             raise
 
@@ -319,6 +421,7 @@ class GatewayPublishedRunExecutor:
         message: str,
         context: PublishedAgentContext,
         reservation: Reservation,
+        on_progress: ExecutorProgressCallback | None = None,
     ) -> PublishedChannelExecution:
         """Start, await and safely serialize one memory-free published Run."""
         from app.gateway.routers.thread_runs import RunCreateRequest
@@ -360,6 +463,52 @@ class GatewayPublishedRunExecutor:
             published_context=context,
             run_id=run_id,
         )
+        last_values: dict[str, object] | list[object] | None = None
+        stream_task: asyncio.Task[None] | None = None
+        bridge = getattr(self._app.state, "stream_bridge", None)
+        if bridge is not None:
+            from app.channels.manager import _accumulate_stream_text, _extract_response_text
+
+            async def consume_stream() -> None:
+                nonlocal last_values
+                buffers: dict[str, str] = {}
+                current_message_id: str | None = None
+                latest_text = ""
+                last_published_text = ""
+                last_publish_at = 0.0
+                async for event in bridge.subscribe(record.run_id):
+                    if event.event == "messages-tuple":
+                        accumulated_text, current_message_id = _accumulate_stream_text(
+                            buffers,
+                            current_message_id,
+                            event.data,
+                        )
+                        if accumulated_text:
+                            latest_text = accumulated_text
+                    elif event.event == "values" and isinstance(event.data, (dict, list)):
+                        last_values = event.data
+                        snapshot_text = _extract_response_text(event.data)
+                        if snapshot_text:
+                            latest_text = snapshot_text
+                    elif event.event == "__end__":
+                        return
+
+                    if on_progress is None or not latest_text or latest_text == last_published_text:
+                        continue
+                    now = time.monotonic()
+                    if last_published_text and now - last_publish_at < 0.35:
+                        continue
+                    try:
+                        await on_progress(latest_text)
+                    except Exception:
+                        logger.exception(
+                            "Published Feishu progress callback failed",
+                            extra={"run_id": record.run_id},
+                        )
+                    last_published_text = latest_text
+                    last_publish_at = now
+
+            stream_task = asyncio.create_task(consume_stream())
         timed_out = False
         if record.task is not None:
             try:
@@ -380,11 +529,47 @@ class GatewayPublishedRunExecutor:
             except asyncio.CancelledError:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
-                    raise
-                # The Run task itself was interrupted while this dispatcher
-                # remains live. Preserve its terminal status for settlement.
+                    try:
+                        await self._app.state.run_manager.cancel(record.run_id)
+                        if record.task is not None:
+                            try:
+                                await record.task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception:
+                                pass
+                    except asyncio.CancelledError as exc:
+                        raise PublishedRunDetachedError("dispatcher cancellation interrupted Run cleanup") from exc
+                    except Exception as exc:
+                        raise PublishedRunDetachedError("started Run could not be cancelled") from exc
+                # Otherwise the Run task itself was interrupted while this
+                # dispatcher remains live; preserve its terminal status below.
             except Exception:
                 pass
+
+        if stream_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(stream_task), timeout=1.0)
+            except asyncio.CancelledError as exc:
+                if not stream_task.cancelled():
+                    raise PublishedRunDetachedError("dispatcher cancellation interrupted stream cleanup") from exc
+                logger.warning(
+                    "Published Feishu stream consumer was cancelled",
+                    extra={"run_id": record.run_id},
+                )
+            except TimeoutError:
+                stream_task.cancel()
+                await asyncio.gather(stream_task, return_exceptions=True)
+                logger.warning(
+                    "Published Feishu stream did not terminate after Run completion",
+                    extra={"run_id": record.run_id},
+                )
+            except Exception:
+                logger.warning(
+                    "Published Feishu stream consumer failed",
+                    extra={"run_id": record.run_id},
+                    exc_info=True,
+                )
 
         if timed_out or record.status == RunStatus.timeout:
             status: Literal["success", "cancelled", "timeout", "failed"] = "timeout"
@@ -398,6 +583,11 @@ class GatewayPublishedRunExecutor:
         else:
             status = "failed"
             text = "The agent could not complete the request. Please try again."
+        artifacts: tuple[str, ...] = ()
+        if last_values is not None:
+            from app.channels.manager import _extract_artifacts
+
+            artifacts = tuple(_extract_artifacts(last_values))
         return PublishedChannelExecution(
             run_id=record.run_id,
             thread_id=thread_id,
@@ -407,6 +597,7 @@ class GatewayPublishedRunExecutor:
             output_tokens=int(record.total_output_tokens or 0),
             total_tokens=int(record.total_tokens or 0),
             latency_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            artifacts=artifacts,
         )
 
 

@@ -1,11 +1,12 @@
 import asyncio
+import io
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.feishu import FeishuChannel
+from app.channels.feishu import FEISHU_INBOUND_FILE_MAX_BYTES, FeishuChannel, _read_inbound_resource
 from app.channels.message_bus import InboundMessage, MessageBus
 
 
@@ -101,6 +102,14 @@ def test_feishu_receive_file_replaces_placeholders_in_order():
         assert result.text == "before /mnt/user-data/uploads/a.png middle /mnt/user-data/uploads/b.pdf after"
 
     _run(go())
+
+
+def test_feishu_inbound_resource_reader_enforces_size_limit():
+    allowed = b"a" * FEISHU_INBOUND_FILE_MAX_BYTES
+    assert _read_inbound_resource(io.BytesIO(allowed)) == allowed
+
+    with pytest.raises(ValueError, match="size limit"):
+        _read_inbound_resource(io.BytesIO(allowed + b"b"))
 
 
 def test_feishu_on_message_extracts_image_and_file_keys():

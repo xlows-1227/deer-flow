@@ -439,7 +439,11 @@ async def test_cancelled_start_releases_quota_and_idempotency_claim(monkeypatch)
             quota_ledger=ledger,
         )
 
-    ledger.release.assert_awaited_once_with("qres-cancel", owner_user_id="owner-1")
+    ledger.release_unstarted.assert_awaited_once_with(
+        "qres-cancel",
+        owner_user_id="owner-1",
+        run_id="run-cancel",
+    )
     idempotency.release.assert_awaited_once_with(
         api_key_id="key_1",
         idempotency_key="cancel-key",

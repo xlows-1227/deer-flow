@@ -503,8 +503,8 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
 - `store.py` - legacy JSON mapping plus `DbMappingStore`; DB mapping scopes p2p by `(binding, chat, user)` and groups by `(binding, chat, topic)`
 - `manager.py` - Core dispatcher: routes trusted `binding_id` metadata to `PublishedChannelRuntime`; other messages retain legacy SDK behavior
-- `published_runtime.py` - trusted mapping/resolver/quota/Run/usage composition for dynamic bindings
-- `supervisor.py` - one ready/error-handshaked Feishu WebSocket lifecycle per active DB binding; stop/restart waits for confirmed SDK exit
+- `published_runtime.py` - trusted mapping/resolver/quota/Run/usage composition for dynamic bindings, including Gateway stream consumption and last-turn artifact extraction
+- `supervisor.py` - one ready/error-handshaked Feishu WebSocket lifecycle per active DB binding; all SDK clients share one process-owned loop, while stop/restart joins only the selected binding
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
 - `slack.py` / `feishu.py` / `telegram.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured)
@@ -524,7 +524,9 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - Set one stable `DEER_FLOW_SECRET_STORE_KEY` on every Gateway replica. Generate it with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Ciphertext lives at `${DEER_FLOW_HOME:-.deer-flow}/secret-store/feishu/`; the database stores opaque refs only. Never log or return the decrypted `app_secret`, `verification_token`, or `encrypt_key`.
 - Owner/session + CSRF routes are `/api/published-agents/{agent_id}/channels`: `POST/GET`, `POST /{binding_id}/{test|start|stop|restart}`, `PATCH /{binding_id}`, and `DELETE /{binding_id}`. Create and rotate carry the entire encrypted credential bundle; active rotation restarts only after the old connection exits.
 - Desired state and redacted health live in `agent_channels`. Ready is persisted healthy only after the SDK connection handshake; late failure marks that binding unhealthy. Missing/invalid deployment key logs `Published Feishu Supervisor unavailable` and disables only DB bindings, not publication or legacy channels.
-- Conversation mappings and event claims live in `channel_conversation_mappings` and `channel_event_dedup`. Inbound cross-owner access requires the unforgeable system scope and still validates binding → Agent; owner listing joins through `published_agents.owner_user_id`.
+- Conversation mappings and event claims live in `channel_conversation_mappings` and `channel_event_dedup`. Both inbound repositories require the unforgeable system scope; mapping validates binding-to-Agent ownership and event claim validates a persisted Feishu binding before insertion. Owner listing joins through `published_agents.owner_user_id`.
+- Dynamic Runs consume `StreamBridge` values/messages for throttled in-place cards, resolve last-turn `present_files` outputs into Feishu attachments, and download inbound image/file resources (maximum 50 MiB each) into the mapped thread before resolver input-size checks and execution.
+- A Run-bound quota reservation cannot use ordinary release. Dispatcher cancellation cancels and joins the started Run before terminal settlement; if joining cannot be confirmed, the reservation remains pending for durable recovery. `release_unstarted` is limited to the exact pre-bound Run ID when Run creation failed.
 - Gateway startup auto-applies Alembic `2026_07_14_agent_channels → 2026_07_14_channel_mappings`. When diagnosing, inspect the redacted `health`/`health_detail`, call the `test` route, verify the deployment key is mounted consistently, and look for ready/stop/runtime-loss log events.
 
 M3 focused regression:

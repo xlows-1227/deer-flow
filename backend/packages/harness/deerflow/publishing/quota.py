@@ -161,6 +161,14 @@ class UsageRepoLike(Protocol):
 
     async def release_reservation(self, reservation_id: str, *, owner_user_id: str) -> bool: ...
 
+    async def release_unstarted_reservation(
+        self,
+        reservation_id: str,
+        *,
+        owner_user_id: str,
+        run_id: str,
+    ) -> bool: ...
+
 
 class QuotaLedger:
     """Quota policy facade over the atomic SQL reservation repository."""
@@ -227,8 +235,22 @@ class QuotaLedger:
         return changed
 
     async def release(self, reservation_id: str, *, owner_user_id: str) -> bool:
-        """Release a reservation that never reached a running Run."""
+        """Release a reservation that was never bound to a Run id."""
         return await self._repository.release_reservation(reservation_id, owner_user_id=owner_user_id)
+
+    async def release_unstarted(
+        self,
+        reservation_id: str,
+        *,
+        owner_user_id: str,
+        run_id: str,
+    ) -> bool:
+        """Release a pre-bound reservation only for its exact unstarted Run."""
+        return await self._repository.release_unstarted_reservation(
+            reservation_id,
+            owner_user_id=owner_user_id,
+            run_id=run_id,
+        )
 
 
 __all__ = [

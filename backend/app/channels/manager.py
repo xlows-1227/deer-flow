@@ -916,21 +916,63 @@ class ChannelManager:
         if runtime is None:
             await self._send_error(msg, "This agent is temporarily unavailable.")
             return
+
+        async def prepare_inbound(message: InboundMessage, thread_id: str) -> InboundMessage:
+            if message.files:
+                from .service import get_channel_service
+
+                service = get_channel_service()
+                channel = service.get_channel(message.channel_name) if service else None
+                if channel is not None:
+                    message = await channel.receive_file(message, thread_id)
+            uploaded = await _ingest_inbound_files(thread_id, message)
+            if uploaded:
+                message.text = f"{_format_uploaded_files_block(uploaded)}\n\n{message.text}".strip()
+            return message
+
+        async def publish_progress(thread_id: str, text: str) -> None:
+            if not text:
+                return
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel_name=msg.channel_name,
+                    chat_id=msg.chat_id,
+                    thread_id=thread_id,
+                    text=text,
+                    is_final=False,
+                    thread_ts=msg.thread_ts,
+                    metadata=_slim_metadata(msg.metadata),
+                )
+            )
+
         try:
-            execution = await runtime.run(msg)
+            execution = await runtime.run(
+                msg,
+                prepare_inbound=prepare_inbound,
+                on_progress=publish_progress,
+            )
         except PublishedChannelBusyError:
             await self._send_error(msg, "This agent is busy. Please try again later.")
             return
         except PublishedChannelUnavailableError:
             await self._send_error(msg, "This agent is currently unavailable.")
             return
-        text = execution.text or "(No response from agent)"
+        artifacts = list(execution.artifacts)
+        text, attachments = _prepare_artifact_delivery(
+            execution.thread_id,
+            execution.text,
+            artifacts,
+        )
+        if not text:
+            text = _format_artifact_text(artifacts) if artifacts else "(No response from agent)"
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel_name=msg.channel_name,
                 chat_id=msg.chat_id,
                 thread_id=execution.thread_id,
                 text=text,
+                artifacts=artifacts,
+                attachments=attachments,
                 thread_ts=msg.thread_ts,
                 metadata=_slim_metadata(msg.metadata),
             )

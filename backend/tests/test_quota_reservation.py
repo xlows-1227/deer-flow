@@ -263,6 +263,31 @@ async def test_bound_pending_reservation_is_a_durable_settlement_outbox(quota_re
 
 
 @pytest.mark.asyncio
+async def test_bound_reservation_requires_explicit_unstarted_release(quota_repo):
+    ledger = QuotaLedger(quota_repo)
+    context = _context(agent_id="pa-bound-release")
+    reservation = await ledger.reserve(
+        context,
+        request_key="bound-release-request",
+        run_id="run-bound-release",
+    )
+
+    assert not await ledger.release(reservation.id, owner_user_id="owner-1")
+    row = await quota_repo.get_reservation(reservation.id, owner_user_id="owner-1")
+    assert row["status"] == "pending"
+    assert not await ledger.release_unstarted(
+        reservation.id,
+        owner_user_id="owner-1",
+        run_id="wrong-run",
+    )
+    assert await ledger.release_unstarted(
+        reservation.id,
+        owner_user_id="owner-1",
+        run_id="run-bound-release",
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("run_status", "expected"),
     [

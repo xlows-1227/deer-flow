@@ -24,7 +24,13 @@ ConnectionTester = Callable[[str, str], Awaitable[tuple[bool, str]]]
 class EventDeduplicator(Protocol):
     """Durably claim a provider event before binding execution."""
 
-    async def claim(self, binding_id: str, event_id: str) -> bool: ...
+    async def claim(
+        self,
+        binding_id: str,
+        event_id: str,
+        *,
+        system_scope: object,
+    ) -> bool: ...
 
 
 class ChannelFactory(Protocol):

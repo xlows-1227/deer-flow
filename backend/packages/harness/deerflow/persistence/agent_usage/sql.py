@@ -425,7 +425,7 @@ class AgentUsageRepository:
         }
 
     async def release_reservation(self, reservation_id: str, *, owner_user_id: str) -> bool:
-        """Release a pending reservation idempotently."""
+        """Release only an unbound pending reservation idempotently."""
         async with self._sf() as session:
             result = await session.execute(
                 update(AgentQuotaReservationRow)
@@ -433,10 +433,39 @@ class AgentUsageRepository:
                     AgentQuotaReservationRow.id == reservation_id,
                     AgentQuotaReservationRow.owner_user_id == owner_user_id,
                     AgentQuotaReservationRow.status == "pending",
+                    AgentQuotaReservationRow.run_id.is_(None),
                 )
                 .values(
                     status="released",
                     terminal_status="released",
+                    settled_at=self._now(),
+                )
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def release_unstarted_reservation(
+        self,
+        reservation_id: str,
+        *,
+        owner_user_id: str,
+        run_id: str,
+    ) -> bool:
+        """Release a pre-bound reservation after its exact Run failed to start."""
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        async with self._sf() as session:
+            result = await session.execute(
+                update(AgentQuotaReservationRow)
+                .where(
+                    AgentQuotaReservationRow.id == reservation_id,
+                    AgentQuotaReservationRow.owner_user_id == owner_user_id,
+                    AgentQuotaReservationRow.status == "pending",
+                    AgentQuotaReservationRow.run_id == run_id,
+                )
+                .values(
+                    status="released",
+                    terminal_status="unstarted",
                     settled_at=self._now(),
                 )
             )

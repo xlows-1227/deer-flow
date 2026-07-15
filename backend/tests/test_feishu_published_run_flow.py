@@ -25,7 +25,7 @@ from deerflow.persistence.published_agent import PublishedAgentRow
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.quota import EffectiveQuota, QuotaExceededError, Reservation
 from deerflow.publishing.resolver import AgentNotAvailableError
-from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunRecord, RunStatus
 
 
 def _quota() -> EffectiveQuota:
@@ -104,6 +104,16 @@ class _Ledger:
         return True
 
     async def release(self, reservation_id: str, *, owner_user_id: str) -> bool:
+        self.released.append(reservation_id)
+        return True
+
+    async def release_unstarted(
+        self,
+        reservation_id: str,
+        *,
+        owner_user_id: str,
+        run_id: str,
+    ) -> bool:
         self.released.append(reservation_id)
         return True
 
@@ -420,3 +430,223 @@ async def test_gateway_executor_starts_memory_free_published_run_with_feishu_aut
     assert body.metadata["published_source"] == "feishu"
     assert body.metadata["published_credential_id"] == "binding-1"
     assert body.metadata["published_quota_reservation_id"] == "reservation-1"
+
+
+@pytest.mark.asyncio
+async def test_gateway_executor_forwards_stream_progress_and_last_turn_artifacts() -> None:
+    context = await _Resolver([]).resolve(
+        "agent-1",
+        source="feishu",
+        credential_id="binding-1",
+        external_actor="feishu:user-1",
+        conversation_scope="thread-1",
+        correlation_id="event-1",
+    )
+    reservation = Reservation(
+        id="reservation-1",
+        request_key="request-1",
+        agent_id="agent-1",
+        credential_id="binding-1",
+        reserved_tokens=2_000,
+        status="reserved",
+    )
+    bridge = MemoryStreamBridge()
+    app = FastAPI()
+    app.state.stream_bridge = bridge
+
+    async def start_run(body, thread_id, request, *, published_context=None, run_id=None) -> RunRecord:
+        record = RunRecord(
+            run_id=str(run_id),
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+
+        async def worker() -> None:
+            await bridge.publish(
+                record.run_id,
+                "messages-tuple",
+                [{"type": "ai", "id": "answer-1", "content": "working"}, {}],
+            )
+            await bridge.publish(
+                record.run_id,
+                "values",
+                {
+                    "messages": [
+                        {"type": "human", "content": "hello"},
+                        {
+                            "type": "ai",
+                            "content": "gateway answer",
+                            "tool_calls": [
+                                {
+                                    "name": "present_files",
+                                    "args": {"filepaths": ["/mnt/user-data/outputs/report.txt"]},
+                                }
+                            ],
+                        },
+                    ]
+                },
+            )
+            record.last_ai_message = "gateway answer"
+            record.status = RunStatus.success
+            await bridge.publish_end(record.run_id)
+
+        record.task = asyncio.create_task(worker())
+        return record
+
+    progress: list[str] = []
+
+    async def capture_progress(text: str) -> None:
+        progress.append(text)
+
+    result = await GatewayPublishedRunExecutor(app, run_starter=start_run).execute(
+        run_id="run-stream",
+        thread_id="thread-1",
+        message="hello",
+        context=context,
+        reservation=reservation,
+        on_progress=capture_progress,
+    )
+
+    assert progress == ["working"]
+    assert result.artifacts == ("/mnt/user-data/outputs/report.txt",)
+
+
+@pytest.mark.asyncio
+async def test_published_manager_emits_progress_and_resolves_final_attachment(tmp_path, monkeypatch) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    report_path = output_dir / "report.txt"
+    report_path.write_text("report", encoding="utf-8")
+
+    class _Paths:
+        def sandbox_outputs_dir(self, thread_id: str, *, user_id: str):
+            assert thread_id == "thread-1"
+            return output_dir
+
+        def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str):
+            assert thread_id == "thread-1"
+            assert virtual_path == "/mnt/user-data/outputs/report.txt"
+            return report_path
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: _Paths())
+
+    class _StreamingRuntime:
+        async def run(self, message, *, prepare_inbound=None, on_progress=None):
+            assert on_progress is not None
+            await on_progress("thread-1", "working")
+            return PublishedChannelExecution(
+                run_id="run-1",
+                thread_id="thread-1",
+                text="done",
+                status="success",
+                input_tokens=1,
+                output_tokens=1,
+                total_tokens=2,
+                latency_ms=1,
+                artifacts=("/mnt/user-data/outputs/report.txt",),
+            )
+
+    bus = MessageBus()
+    manager = ChannelManager(bus, ChannelStore(tmp_path / "legacy.json"), published_runtime=_StreamingRuntime())
+    messages = []
+
+    async def capture(message) -> None:
+        messages.append(message)
+
+    bus.subscribe_outbound(capture)
+    await manager._handle_published_chat(_inbound())
+
+    assert [message.is_final for message in messages] == [False, True]
+    assert messages[0].text == "working"
+    assert messages[-1].text.startswith("done\n\nCreated File:")
+    assert "report.txt" in messages[-1].text
+    assert messages[-1].artifacts == ["/mnt/user-data/outputs/report.txt"]
+    assert [attachment.filename for attachment in messages[-1].attachments] == ["report.txt"]
+
+
+@pytest.mark.asyncio
+async def test_published_manager_prepares_dynamic_feishu_inbound_file_before_execution(tmp_path, monkeypatch) -> None:
+    order: list[str] = []
+    executor = _Executor(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_Resolver(order),
+        quota_ledger=_Ledger(order),
+        executor=executor,
+    )
+
+    class _DynamicChannel:
+        async def receive_file(self, message, thread_id: str):
+            assert thread_id == "thread-1"
+            message.text = message.text.replace("[file]", "/mnt/user-data/uploads/input.txt")
+            return message
+
+    class _Service:
+        def get_channel(self, name: str):
+            assert name == "feishu:binding-1"
+            return _DynamicChannel()
+
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: _Service())
+    manager = ChannelManager(MessageBus(), ChannelStore(tmp_path / "legacy.json"), published_runtime=runtime)
+    inbound = _inbound(text="review [file]")
+    inbound.thread_ts = "message-1"
+    inbound.files = [{"file_key": "file-1", "filename": "input.txt"}]
+
+    await manager._handle_published_chat(inbound)
+
+    assert executor.calls[0]["message"] == "review /mnt/user-data/uploads/input.txt"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_cancellation_cancels_started_run_and_settles_once() -> None:
+    started = asyncio.Event()
+    record_holder: list[RunRecord] = []
+
+    async def start_run(body, thread_id, request, *, published_context=None, run_id=None) -> RunRecord:
+        async def run_worker() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        record = RunRecord(
+            run_id=str(run_id),
+            thread_id=thread_id,
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+        )
+        record.task = asyncio.create_task(run_worker())
+        record_holder.append(record)
+        return record
+
+    class _RunManager:
+        async def cancel(self, run_id: str) -> bool:
+            record = record_holder[0]
+            assert record.run_id == run_id
+            record.status = RunStatus.interrupted
+            if record.task is not None:
+                record.task.cancel()
+            return True
+
+    app = FastAPI()
+    app.state.run_manager = _RunManager()
+    order: list[str] = []
+    ledger = _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_Resolver(order),
+        quota_ledger=ledger,
+        executor=GatewayPublishedRunExecutor(app, run_starter=start_run),
+    )
+
+    dispatcher = asyncio.create_task(runtime.run(_inbound()))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    dispatcher.cancel()
+    execution = await dispatcher
+
+    assert execution.status == "cancelled"
+    assert record_holder[0].task is not None and record_holder[0].task.done()
+    assert ledger.released == []
+    assert len(ledger.settled_usage) == 1
+    assert ledger.settled_usage[0]["status"] == "cancelled"

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import threading
 
+import lark_oapi as lark
+import lark_oapi.ws.client as lark_ws_module
 import pytest
 
-from app.channels.feishu import FeishuChannel
+from app.channels.feishu import FeishuChannel, _LarkWebSocketSession
 from app.channels.message_bus import MessageBus
 
 
@@ -37,7 +39,7 @@ class _FailingSession:
 
 
 class _Deduplicator:
-    async def claim(self, binding_id: str, event_id: str) -> bool:
+    async def claim(self, binding_id: str, event_id: str, *, system_scope: object) -> bool:
         return True
 
 
@@ -123,3 +125,106 @@ async def test_error_after_ready_notifies_runtime_health_callback() -> None:
     assert await asyncio.wait_for(reported.wait(), timeout=1.0) is True
     assert details == ["Feishu WebSocket connection lost"]
     assert channel.is_running is False
+
+
+def test_two_sdk_sessions_share_one_owned_loop_and_stop_independently(monkeypatch) -> None:
+    clients: dict[str, object] = {}
+    received: list[tuple[str, str, asyncio.AbstractEventLoop]] = []
+
+    class _Connection:
+        async def close(self) -> None:
+            return None
+
+    class _SdkClient:
+        def __init__(self, *, app_id, event_handler, **_kwargs) -> None:
+            self.app_id = app_id
+            self.event_handler = event_handler
+            self._conn = None
+            self._inbox: asyncio.Queue[str] | None = None
+            self.loop: asyncio.AbstractEventLoop | None = None
+            clients[app_id] = self
+
+        async def _connect(self) -> None:
+            self.loop = asyncio.get_running_loop()
+            self._inbox = asyncio.Queue()
+            self._conn = _Connection()
+            lark_ws_module.loop.create_task(self._receive_message_loop())
+
+        async def _receive_message_loop(self) -> None:
+            assert self._inbox is not None
+            while True:
+                payload = await self._inbox.get()
+                lark_ws_module.loop.call_soon(self.event_handler, payload)
+
+        async def _ping_loop(self) -> None:
+            await asyncio.Event().wait()
+
+        async def _disconnect(self) -> None:
+            if self._conn is not None:
+                await self._conn.close()
+            self._conn = None
+
+        def deliver(self, payload: str) -> None:
+            assert self.loop is not None and self._inbox is not None
+            self.loop.call_soon_threadsafe(self._inbox.put_nowait, payload)
+
+    monkeypatch.setattr(lark.ws, "Client", _SdkClient)
+    first_ready = threading.Event()
+    second_ready = threading.Event()
+    first = _LarkWebSocketSession(
+        app_id="app-1",
+        app_secret="secret-1",
+        domain="https://open.feishu.cn",
+        event_handler=lambda payload: received.append(("app-1", payload, asyncio.get_running_loop())),
+    )
+    second = _LarkWebSocketSession(
+        app_id="app-2",
+        app_secret="secret-2",
+        domain="https://open.feishu.cn",
+        event_handler=lambda payload: received.append(("app-2", payload, asyncio.get_running_loop())),
+    )
+    first_thread = threading.Thread(
+        target=first.run,
+        kwargs={"on_ready": first_ready.set, "on_error": lambda _detail: None},
+    )
+    second_thread = threading.Thread(
+        target=second.run,
+        kwargs={"on_ready": second_ready.set, "on_error": lambda _detail: None},
+    )
+    first_thread.start()
+    second_thread.start()
+    try:
+        assert first_ready.wait(2.0)
+        assert second_ready.wait(2.0)
+        first_client = clients["app-1"]
+        second_client = clients["app-2"]
+        assert first_client.loop is second_client.loop
+        assert lark_ws_module.loop is first_client.loop
+
+        first_client.deliver("first-message")
+        second_client.deliver("second-message")
+        for _ in range(100):
+            if len(received) == 2:
+                break
+            threading.Event().wait(0.01)
+        assert {(app_id, payload) for app_id, payload, _loop in received} == {
+            ("app-1", "first-message"),
+            ("app-2", "second-message"),
+        }
+        assert all(loop is first_client.loop for _app_id, _payload, loop in received)
+
+        assert first.stop(timeout_seconds=2.0)
+        first_thread.join(2.0)
+        assert not first_thread.is_alive()
+        second_client.deliver("still-running")
+        for _ in range(100):
+            if len(received) == 3:
+                break
+            threading.Event().wait(0.01)
+        assert received[-1][:2] == ("app-2", "still-running")
+        assert second_thread.is_alive()
+    finally:
+        second.stop(timeout_seconds=2.0)
+        first.stop(timeout_seconds=2.0)
+        first_thread.join(2.0)
+        second_thread.join(2.0)

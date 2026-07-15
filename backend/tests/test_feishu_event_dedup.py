@@ -12,8 +12,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import MessageBus
+from deerflow.persistence.agent_channel.model import AgentChannelRow
 from deerflow.persistence.base import Base
-from deerflow.persistence.channel_mapping import ChannelEventRepository
+from deerflow.persistence.channel_mapping import (
+    SYSTEM_CHANNEL_MAPPING_SCOPE,
+    ChannelEventRepository,
+    MappingScopeConflictError,
+)
+from deerflow.persistence.published_agent.model import PublishedAgentRow
 
 
 def _event(
@@ -51,7 +57,35 @@ async def event_repository(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    repository = ChannelEventRepository(async_sessionmaker(engine, expire_on_commit=False))
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                PublishedAgentRow(
+                    id="agent-1",
+                    owner_user_id="owner-1",
+                    slug="agent-one",
+                    display_name="Agent One",
+                    status="published",
+                ),
+                AgentChannelRow(
+                    id="binding-1",
+                    agent_id="agent-1",
+                    app_id="app-1",
+                    secret_ref="secret-1",
+                    status="active",
+                ),
+                AgentChannelRow(
+                    id="binding-2",
+                    agent_id="agent-1",
+                    app_id="app-2",
+                    secret_ref="secret-2",
+                    status="inactive",
+                ),
+            ]
+        )
+        await session.commit()
+    repository = ChannelEventRepository(session_factory)
     yield repository
     await engine.dispose()
 
@@ -82,9 +116,38 @@ async def test_duplicate_event_is_dropped_before_bus_dispatch(event_repository: 
 
 @pytest.mark.asyncio
 async def test_event_id_is_isolated_by_binding(event_repository: ChannelEventRepository) -> None:
-    assert await event_repository.claim("binding-1", "event-1") is True
-    assert await event_repository.claim("binding-1", "event-1") is False
-    assert await event_repository.claim("binding-2", "event-1") is True
+    assert await event_repository.claim("binding-1", "event-1", system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE) is True
+    assert await event_repository.claim("binding-1", "event-1", system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE) is False
+    assert await event_repository.claim("binding-2", "event-1", system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE) is True
+
+
+@pytest.mark.asyncio
+async def test_event_claim_requires_system_scope_and_persisted_binding(event_repository: ChannelEventRepository) -> None:
+    with pytest.raises(TypeError, match="system_scope"):
+        await event_repository.claim("binding-1", "event-2")
+
+    with pytest.raises(PermissionError, match="system channel mapping scope required"):
+        await event_repository.claim("binding-1", "event-2", system_scope=object())
+
+    with pytest.raises(MappingScopeConflictError, match="valid Feishu binding"):
+        await event_repository.claim("forged-binding", "event-2", system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_event_claim_has_one_winner(event_repository: ChannelEventRepository) -> None:
+    outcomes = await asyncio.gather(
+        *(
+            event_repository.claim(
+                "binding-1",
+                "event-concurrent",
+                system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
+            )
+            for _ in range(4)
+        )
+    )
+
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == 3
 
 
 def test_tampered_verification_token_is_rejected_before_dispatch() -> None:
