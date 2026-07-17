@@ -53,6 +53,113 @@ async def test_start_run_cancellation_during_thread_upsert_discards_pending_run(
     assert await run_store.list_pending() == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.no_auto_user
+async def test_published_start_run_scopes_sql_persistence_and_owner_model(tmp_path, monkeypatch):
+    from app.gateway import services
+    from deerflow.config import effective_config as effective_config_module
+    from deerflow.config.app_config import get_app_config
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.publishing.context import PublishedAgentContext
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.user_context import get_current_user
+
+    await init_engine(
+        "sqlite",
+        url=f"sqlite+aiosqlite:///{tmp_path / 'published-start-run.db'}",
+        sqlite_dir=str(tmp_path),
+    )
+    worker_started = asyncio.Event()
+    release_worker = asyncio.Event()
+    owner_config = SimpleNamespace(
+        get_model_config=lambda name: object() if name == "owner-custom-model" else None,
+    )
+
+    async def build_owner_config(*, user_id):
+        assert user_id == "owner-a"
+        return owner_config
+
+    async def run_agent_in_owner_scope(*_args, **_kwargs):
+        current_user = get_current_user()
+        assert current_user is not None
+        assert current_user.id == "owner-a"
+        assert get_app_config() is owner_config
+        worker_started.set()
+        await release_worker.wait()
+
+    try:
+        session_factory = get_session_factory()
+        assert session_factory is not None
+        run_repo = RunRepository(session_factory)
+        thread_repo = ThreadMetaRepository(session_factory)
+        manager = RunManager(store=run_repo)
+        run_context = SimpleNamespace(thread_store=thread_repo)
+        monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
+        monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+        monkeypatch.setattr(services, "get_run_context", lambda _request: run_context)
+        monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant_id: object())
+        monkeypatch.setattr(services, "run_agent", run_agent_in_owner_scope)
+        monkeypatch.setattr(effective_config_module, "build_effective_app_config", build_owner_config)
+
+        body = SimpleNamespace(
+            on_disconnect="continue",
+            context=None,
+            assistant_id="lead_agent",
+            metadata={"published_agent": True},
+            input={"messages": [{"role": "user", "content": "hello"}]},
+            config={},
+            multitask_strategy="reject",
+            stream_mode=["values"],
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        published_context = PublishedAgentContext(
+            owner_user_id="owner-a",
+            agent_id="agent-1",
+            release_id="release-1",
+            source="feishu",
+            credential_id="binding-1",
+            external_actor="feishu-user-1",
+            conversation_scope="chat-1",
+            skill_revision_ids=(),
+            connector_capabilities=(),
+            tool_groups=(),
+            model_name="owner-custom-model",
+            instructions="Be helpful.",
+            effective_quota=SimpleNamespace(),
+            correlation_id="request-1",
+            idempotency_key=None,
+        )
+
+        record = await services.start_run(
+            body,
+            "thread-owner-a",
+            SimpleNamespace(),
+            published_context=published_context,
+            run_id="run-owner-a",
+        )
+        await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+
+        assert get_current_user() is None
+        run_row = await run_repo.get(record.run_id, user_id=None)
+        thread_row = await thread_repo.get("thread-owner-a", user_id=None)
+        assert run_row is not None
+        assert run_row["user_id"] == "owner-a"
+        assert thread_row is not None
+        assert thread_row["user_id"] == "owner-a"
+
+        record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+        assert get_current_user() is None
+    finally:
+        release_worker.set()
+        await close_engine()
+
+
 def test_format_sse_with_event_id():
     from app.gateway.services import format_sse
 

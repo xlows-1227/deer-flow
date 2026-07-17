@@ -311,6 +311,11 @@ async def start_run(
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
+    Published execution establishes its trusted owner and effective config
+    before any model validation or Run/Thread persistence. The child worker
+    inherits those ContextVars when it is created, while the caller's ambient
+    context is restored before this function returns.
+
     Parameters
     ----------
     body : RunCreateRequest
@@ -326,6 +331,35 @@ async def start_run(
         Optional preallocated Run id used to bind an idempotency claim before
         execution starts.
     """
+    if published_context is not None:
+        owner_user_id = published_context.owner_user_id
+        with runtime_user_scope(owner_user_id):
+            async with effective_app_config_scope(owner_user_id):
+                return await _start_run_scoped(
+                    body,
+                    thread_id,
+                    request,
+                    published_context=published_context,
+                    run_id=run_id,
+                )
+    return await _start_run_scoped(
+        body,
+        thread_id,
+        request,
+        published_context=None,
+        run_id=run_id,
+    )
+
+
+async def _start_run_scoped(
+    body: Any,
+    thread_id: str,
+    request: Request,
+    *,
+    published_context: PublishedAgentContext | None,
+    run_id: str | None,
+) -> RunRecord:
+    """Run the lifecycle after any trusted Published owner scope is active."""
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)

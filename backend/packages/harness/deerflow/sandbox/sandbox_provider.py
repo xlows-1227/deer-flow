@@ -1,9 +1,22 @@
 import asyncio
+import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.sandbox import Sandbox
+
+
+@dataclass(frozen=True)
+class SandboxAcquisition:
+    """Provider-issued handle for accepting or safely abandoning an acquire."""
+
+    sandbox_id: str
+    acquisition_token: str
+    thread_id: str | None
+    release_on_abandon: bool = False
+    observed_use_version: int = 0
 
 
 class SandboxProvider(ABC):
@@ -37,6 +50,31 @@ class SandboxProvider(ABC):
         if user_id is None:
             return await asyncio.to_thread(self.acquire, thread_id)
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
+
+    async def acquire_with_lease_async(
+        self,
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> SandboxAcquisition:
+        """Acquire with an explicit operation handle for timeout compensation.
+
+        The conservative default never releases on abandon because a generic
+        provider cannot prove that the returned ID was not shared. Providers
+        with ownership tracking may override this contract.
+        """
+        sandbox_id = await self.acquire_async(thread_id, user_id=user_id)
+        return SandboxAcquisition(
+            sandbox_id=sandbox_id,
+            acquisition_token=uuid.uuid4().hex,
+            thread_id=thread_id,
+        )
+
+    def accept_acquisition(self, acquisition: SandboxAcquisition) -> None:
+        """Mark a managed acquisition as accepted by its caller."""
+
+    def abandon_acquisition(self, acquisition: SandboxAcquisition) -> None:
+        """Safely compensate a managed acquisition that finished too late."""
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:

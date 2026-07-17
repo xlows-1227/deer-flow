@@ -13,6 +13,7 @@ from app.channels.base import Channel
 from app.channels.message_bus import MessageBus, OutboundMessage
 from app.channels.supervisor import FeishuSupervisor
 from app.gateway.routers import published_agent_channels
+from deerflow.config.paths import Paths
 from deerflow.persistence.agent_channel import AgentChannelRepository
 from deerflow.persistence.base import Base
 from deerflow.persistence.published_agent import PublishedAgentRow
@@ -32,6 +33,7 @@ class _FakeFeishuChannel(Channel):
         binding_id,
         agent_id,
         runtime_error_callback,
+        runtime_health_callback=None,
     ) -> None:
         super().__init__(name=f"feishu:{binding_id}", bus=bus, config={})
         self.app_id = app_id
@@ -40,6 +42,7 @@ class _FakeFeishuChannel(Channel):
         self.encrypt_key = encrypt_key
         self.agent_id = agent_id
         self.runtime_error_callback = runtime_error_callback
+        self.runtime_health_callback = runtime_health_callback
 
     async def start(self) -> None:
         self._running = True
@@ -66,6 +69,7 @@ class _Factory:
         binding_id,
         agent_id,
         runtime_error_callback,
+        runtime_health_callback=None,
     ):
         channel = _FakeFeishuChannel(
             bus,
@@ -76,6 +80,7 @@ class _Factory:
             binding_id=binding_id,
             agent_id=agent_id,
             runtime_error_callback=runtime_error_callback,
+            runtime_health_callback=runtime_health_callback,
         )
         self.instances.append(channel)
         return channel
@@ -87,7 +92,10 @@ def anyio_backend():
 
 
 @pytest.mark.anyio
-async def test_owner_channel_api_never_returns_secret_and_supports_lifecycle(tmp_path) -> None:
+async def test_owner_channel_api_never_returns_secret_and_supports_lifecycle(tmp_path, monkeypatch) -> None:
+    import deerflow.config.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "runtime"))
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -164,6 +172,33 @@ async def test_owner_channel_api_never_returns_secret_and_supports_lifecycle(tmp
         assert stopped.status_code == 200
         assert stopped.json()["status"] == "inactive"
 
+        outbox_path = tmp_path / "runtime" / "published-attachment-cleanup" / "pending-delete.json"
+        outbox_path.parent.mkdir(parents=True, exist_ok=True)
+        outbox_path.write_text(
+            json.dumps(
+                {
+                    "job_id": "pending-delete",
+                    "binding_id": binding_id,
+                    "thread_id": "thread-pending-delete",
+                    "owner_user_id": "owner-a",
+                    "virtual_paths": ["/mnt/user-data/uploads/input.bin"],
+                    "phase": "ready_to_delete",
+                    "producer_token": None,
+                    "producer_lease_expires_at": None,
+                    "claim_token": None,
+                    "claim_lease_expires_at": None,
+                    "version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        blocked_delete = await client.delete(f"/api/published-agents/pa_1/channels/{binding_id}")
+        assert blocked_delete.status_code == 409
+        retained = await repository.get("pa_1", binding_id, owner_user_id="owner-a")
+        assert retained is not None
+        assert await secrets.get(retained["secret_ref"]) is not None
+
+        outbox_path.unlink()
         deleted = await client.delete(f"/api/published-agents/pa_1/channels/{binding_id}")
         assert deleted.status_code == 200
         assert deleted.json() == {"deleted": True}

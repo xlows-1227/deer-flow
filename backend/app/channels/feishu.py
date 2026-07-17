@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import hmac
 import json
 import logging
 import re
 import threading
 import time
+import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.message import Message
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
 
 import httpx
+from filelock import FileLock
 
 from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
@@ -26,7 +29,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.persistence.channel_mapping import SYSTEM_CHANNEL_MAPPING_SCOPE
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import SandboxAcquisition, get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,51 @@ FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 15.0
 FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS = 5.0
 FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS = 10.0
 FEISHU_PUBLISHED_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+FEISHU_SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 15.0
+FEISHU_SANDBOX_LATE_ACQUIRE_TIMEOUT_SECONDS = 30.0
+FEISHU_SANDBOX_LATE_ACQUIRE_CANCEL_DRAIN_SECONDS = 0.5
+FEISHU_SANDBOX_SYNC_FILE_TIMEOUT_SECONDS = 60.0
+FEISHU_SANDBOX_SYNC_BATCH_TIMEOUT_SECONDS = 120.0
 FEISHU_SANDBOX_SYNC_CLEANUP_TIMEOUT_SECONDS = 2.0
+FEISHU_ATTACHMENT_CLEANUP_DRAIN_TIMEOUT_SECONDS = 2.0
+FEISHU_ATTACHMENT_DELETE_MAX_ATTEMPTS = 3
+FEISHU_ATTACHMENT_DELETE_RETRY_SECONDS = 0.05
+FEISHU_ATTACHMENT_CLEANUP_RETRY_INTERVAL_SECONDS = 30.0
+FEISHU_ATTACHMENT_PRODUCER_LEASE_SECONDS = 30.0
+FEISHU_ATTACHMENT_PRODUCER_HEARTBEAT_SECONDS = 5.0
+FEISHU_ATTACHMENT_RECOVERY_MAX_JOBS = 25
+FEISHU_ATTACHMENT_RECOVERY_MAX_CONCURRENCY = 4
+FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS = 10.0
+FEISHU_ATTACHMENT_DELETE_TIMEOUT_SECONDS = 2.0
+FEISHU_ATTACHMENT_CLAIM_LEASE_SECONDS = 15.0
+
+_ACTIVE_ATTACHMENT_PRODUCERS: set[str] = set()
+_ACTIVE_ATTACHMENT_CLAIMS: set[str] = set()
+
+
+def _cleanup_store_generation_path(outbox_dir: Path) -> Path:
+    return outbox_dir / ".store-generation"
+
+
+def _read_cleanup_store_generation(outbox_dir: Path) -> str:
+    if not outbox_dir.exists():
+        return ""
+    generation_path = _cleanup_store_generation_path(outbox_dir)
+    with FileLock(str(generation_path.with_suffix(".lock")), timeout=2.0):
+        try:
+            return generation_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+
+def _bump_cleanup_store_generation_locked(outbox_dir: Path) -> None:
+    generation_path = _cleanup_store_generation_path(outbox_dir)
+    temp_path = generation_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(uuid.uuid4().hex, encoding="utf-8")
+        temp_path.replace(generation_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _read_inbound_resource(stream: Any) -> bytes:
@@ -54,6 +101,278 @@ class _MaterializedInboundFile:
     virtual_path: str
     actual_path: Path
     size: int
+
+
+@dataclass(frozen=True)
+class _PublishedAttachmentCleanupJob:
+    """Durable instructions for removing one rejected sandbox file batch."""
+
+    job_id: str
+    binding_id: str
+    thread_id: str
+    owner_user_id: str
+    virtual_paths: tuple[str, ...]
+    phase: Literal["producer_pending", "ready_to_delete", "deleting"] = "ready_to_delete"
+    producer_token: str | None = None
+    producer_lease_expires_at: float | None = None
+    claim_token: str | None = None
+    claim_lease_expires_at: float | None = None
+    version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "binding_id": self.binding_id,
+            "thread_id": self.thread_id,
+            "owner_user_id": self.owner_user_id,
+            "virtual_paths": list(self.virtual_paths),
+            "phase": self.phase,
+            "producer_token": self.producer_token,
+            "producer_lease_expires_at": self.producer_lease_expires_at,
+            "claim_token": self.claim_token,
+            "claim_lease_expires_at": self.claim_lease_expires_at,
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> _PublishedAttachmentCleanupJob:
+        job_id = payload.get("job_id")
+        binding_id = payload.get("binding_id")
+        thread_id = payload.get("thread_id")
+        owner_user_id = payload.get("owner_user_id")
+        virtual_paths = payload.get("virtual_paths")
+        phase = payload.get("phase", "ready_to_delete")
+        producer_token = payload.get("producer_token")
+        producer_lease_expires_at = payload.get("producer_lease_expires_at")
+        claim_token = payload.get("claim_token")
+        claim_lease_expires_at = payload.get("claim_lease_expires_at")
+        version = payload.get("version", 1)
+        if not all(isinstance(value, str) for value in (job_id, binding_id, thread_id, owner_user_id)):
+            raise ValueError("attachment cleanup job identifiers are invalid")
+        if not job_id or not thread_id or not owner_user_id:
+            raise ValueError("attachment cleanup job identifiers are empty")
+        if not isinstance(virtual_paths, list) or not virtual_paths:
+            raise ValueError("attachment cleanup job has no files")
+        if phase not in {"producer_pending", "ready_to_delete", "deleting"}:
+            raise ValueError("attachment cleanup job phase is invalid")
+        if producer_token is not None and not isinstance(producer_token, str):
+            raise ValueError("attachment cleanup producer token is invalid")
+        if producer_lease_expires_at is not None and not isinstance(producer_lease_expires_at, (int, float)):
+            raise ValueError("attachment cleanup producer lease is invalid")
+        if claim_token is not None and not isinstance(claim_token, str):
+            raise ValueError("attachment cleanup claim token is invalid")
+        if claim_lease_expires_at is not None and not isinstance(claim_lease_expires_at, (int, float)):
+            raise ValueError("attachment cleanup claim lease is invalid")
+        if not isinstance(version, int) or version < 1:
+            raise ValueError("attachment cleanup job version is invalid")
+        if phase == "producer_pending" and (not producer_token or producer_lease_expires_at is None):
+            raise ValueError("pending attachment cleanup job has no producer lease")
+        if phase == "deleting" and (not claim_token or claim_lease_expires_at is None):
+            raise ValueError("deleting attachment cleanup job has no claim lease")
+        normalized_paths: list[str] = []
+        for virtual_path in virtual_paths:
+            if not isinstance(virtual_path, str) or not virtual_path.startswith(f"{VIRTUAL_PATH_PREFIX}/uploads/"):
+                raise ValueError("attachment cleanup job path is outside uploads")
+            normalized_paths.append(virtual_path)
+        return cls(
+            job_id=job_id,
+            binding_id=binding_id,
+            thread_id=thread_id,
+            owner_user_id=owner_user_id,
+            virtual_paths=tuple(normalized_paths),
+            phase=phase,
+            producer_token=producer_token,
+            producer_lease_expires_at=float(producer_lease_expires_at) if producer_lease_expires_at is not None else None,
+            claim_token=claim_token,
+            claim_lease_expires_at=float(claim_lease_expires_at) if claim_lease_expires_at is not None else None,
+            version=version,
+        )
+
+
+def has_published_attachment_cleanup_backlog(binding_id: str) -> bool:
+    """Return whether durable attachment work still references a binding."""
+    outbox_dir = get_paths().base_dir / "published-attachment-cleanup"
+    if not outbox_dir.exists():
+        return False
+    for path in outbox_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return True
+            job = _PublishedAttachmentCleanupJob.from_dict(payload)
+            if path.stem != job.job_id:
+                return True
+            if job.binding_id == binding_id:
+                return True
+        except Exception:
+            # Invalid durable state must fail closed: deleting an arbitrary
+            # binding could otherwise remove the last recovery owner.
+            return True
+    return False
+
+
+def _published_attachment_cleanup_binding_ids() -> set[str]:
+    outbox_dir = get_paths().base_dir / "published-attachment-cleanup"
+    if not outbox_dir.exists():
+        return set()
+    binding_ids: set[str] = set()
+    for path in outbox_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                continue
+            binding_id = payload.get("binding_id")
+            if isinstance(binding_id, str) and binding_id:
+                binding_ids.add(binding_id)
+        except Exception:
+            logger.error("[Feishu] invalid cleanup job cannot be assigned to the global janitor: %s", path, exc_info=True)
+    return binding_ids
+
+
+def _cleanup_job_priority(
+    job: _PublishedAttachmentCleanupJob,
+    *,
+    now: float,
+) -> int | None:
+    if job.phase == "ready_to_delete":
+        return 0
+    if job.phase == "deleting":
+        if job.claim_token in _ACTIVE_ATTACHMENT_CLAIMS:
+            return None
+        if job.claim_lease_expires_at is not None and job.claim_lease_expires_at > now:
+            return None
+        return 1
+    if job.producer_token in _ACTIVE_ATTACHMENT_PRODUCERS:
+        return None
+    if job.producer_lease_expires_at is not None and job.producer_lease_expires_at > now:
+        return None
+    return 2
+
+
+def _select_cleanup_jobs(
+    jobs: list[_PublishedAttachmentCleanupJob],
+    *,
+    cursor_scope: str,
+    limit: int,
+) -> list[_PublishedAttachmentCleanupJob]:
+    """Choose claimable work fairly without letting live leases occupy slots."""
+    now = time.time()
+    claimable = [(priority, job) for job in jobs if (priority := _cleanup_job_priority(job, now=now)) is not None]
+    claimable.sort(key=lambda item: (item[0], item[1].job_id))
+    if not claimable:
+        return []
+    outbox_dir = get_paths().base_dir / "published-attachment-cleanup"
+    cursor_name = hashlib.sha256(cursor_scope.encode("utf-8")).hexdigest()[:24]
+    cursor_path = outbox_dir / f".recovery-cursor-{cursor_name}"
+    cursor_lock = FileLock(str(cursor_path.with_suffix(".lock")), timeout=2.0)
+    with cursor_lock:
+        cursor = cursor_path.read_text(encoding="utf-8").strip() if cursor_path.exists() else ""
+        start_index = next(
+            (index + 1 for index, (_priority, job) in enumerate(claimable) if job.job_id == cursor),
+            0,
+        )
+        rotated = claimable[start_index:] + claimable[:start_index]
+        selected = [job for _priority, job in rotated[:limit]]
+        if selected:
+            cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            cursor_path.write_text(selected[-1].job_id, encoding="utf-8")
+        return selected
+
+
+def _scan_all_cleanup_jobs(
+    *,
+    deadline: float,
+) -> tuple[list[_PublishedAttachmentCleanupJob], bool, bool]:
+    """Parse every candidate at most once until the global pass deadline."""
+    outbox_dir = get_paths().base_dir / "published-attachment-cleanup"
+    if not outbox_dir.exists():
+        return [], False, False
+    jobs: list[_PublishedAttachmentCleanupJob] = []
+    invalid = False
+    for path in outbox_dir.glob("*.json"):
+        if time.monotonic() >= deadline:
+            return jobs, invalid, True
+        try:
+            jobs.append(FeishuChannel._read_attachment_cleanup_job(path))
+        except FileNotFoundError:
+            continue
+        except Exception:
+            invalid = True
+            logger.error("[Feishu] invalid cleanup job cannot be recovered by the global janitor: %s", path, exc_info=True)
+    return jobs, invalid, False
+
+
+async def recover_all_published_attachment_cleanups() -> int:
+    """Recover one globally bounded, fair batch without rows or secrets."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS
+    try:
+        jobs, invalid, scan_timed_out = await asyncio.wait_for(
+            asyncio.to_thread(
+                _scan_all_cleanup_jobs,
+                deadline=time.monotonic() + FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS,
+            ),
+            timeout=FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.error("[Feishu] global attachment cleanup discovery exceeded its total deadline")
+        return 0
+    if invalid or scan_timed_out:
+        logger.warning("[Feishu] global attachment cleanup scan was incomplete or contained invalid state")
+    remaining_seconds = deadline - loop.time()
+    if remaining_seconds <= 0 or not jobs:
+        return 0
+    try:
+        selected = await asyncio.wait_for(
+            asyncio.to_thread(
+                _select_cleanup_jobs,
+                jobs,
+                cursor_scope="global",
+                limit=FEISHU_ATTACHMENT_RECOVERY_MAX_JOBS,
+            ),
+            timeout=remaining_seconds,
+        )
+    except TimeoutError:
+        logger.error("[Feishu] global attachment cleanup scheduling exceeded its total deadline")
+        return 0
+    if not selected:
+        return 0
+    try:
+        sandbox_provider = get_sandbox_provider()
+    except Exception:
+        logger.error("[Feishu] global attachment cleanup could not load the sandbox provider", exc_info=True)
+        return 0
+    semaphore = asyncio.Semaphore(FEISHU_ATTACHMENT_RECOVERY_MAX_CONCURRENCY)
+
+    async def recover_job(job: _PublishedAttachmentCleanupJob) -> bool:
+        async with semaphore:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            coordinator = FeishuChannel(MessageBus(), binding_id=job.binding_id)
+            try:
+                return await asyncio.wait_for(
+                    coordinator._recover_attachment_cleanup_job(
+                        job,
+                        sandbox_provider,
+                        acquire_timeout_seconds=min(
+                            FEISHU_SANDBOX_ACQUIRE_TIMEOUT_SECONDS,
+                            remaining,
+                        ),
+                        refresh_health=False,
+                    ),
+                    timeout=remaining,
+                )
+            except Exception:
+                logger.error(
+                    "[Feishu] global attachment cleanup failed for job %s",
+                    job.job_id,
+                    exc_info=True,
+                )
+                return False
+
+    results = await asyncio.gather(*(recover_job(job) for job in selected))
+    return sum(results)
 
 
 class FeishuEventVerifier:
@@ -139,6 +458,7 @@ class WebSocketSessionFactory(Protocol):
 
 
 RuntimeErrorCallback = Callable[[str], Awaitable[None]]
+RuntimeHealthCallback = Callable[[bool, str | None], Awaitable[None]]
 LarkEndpointResolver = Callable[[object], Awaitable[str]]
 
 
@@ -472,6 +792,7 @@ class FeishuChannel(Channel):
         websocket_session_factory: WebSocketSessionFactory | None = None,
         startup_timeout_seconds: float = 15.0,
         runtime_error_callback: RuntimeErrorCallback | None = None,
+        runtime_health_callback: RuntimeHealthCallback | None = None,
         published_http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         resolved_config = dict(config or {})
@@ -494,6 +815,7 @@ class FeishuChannel(Channel):
         self._websocket_session_factory = websocket_session_factory or _default_websocket_session_factory
         self._startup_timeout_seconds = startup_timeout_seconds
         self._runtime_error_callback = runtime_error_callback
+        self._runtime_health_callback = runtime_health_callback
         self._published_http_client_factory = published_http_client_factory or self._new_published_http_client
         self._ws_session: FeishuWebSocketSession | None = None
         self._startup_event = threading.Event()
@@ -517,6 +839,10 @@ class FeishuChannel(Channel):
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
+        self._cleanup_tasks: set[asyncio.Task] = set()
+        self._attachment_cleanup_state_lock = threading.Lock()
+        self._attachment_cleanup_generation = 0
+        self._attachment_cleanup_unhealthy = False
 
     def _new_published_http_client(self) -> httpx.AsyncClient:
         """Build the bounded client used for authenticated resource streaming."""
@@ -537,6 +863,37 @@ class FeishuChannel(Channel):
     def websocket_thread_alive(self) -> bool:
         """Return whether this binding still owns a live SDK worker thread."""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def attachment_cleanup_healthy(self) -> bool:
+        """Return whether this binding has no known durable cleanup backlog."""
+        with self._attachment_cleanup_state_lock:
+            return not self._attachment_cleanup_unhealthy
+
+    def _mark_attachment_cleanup_unhealthy(self) -> int:
+        """Record a new dirty generation and return it."""
+        with self._attachment_cleanup_state_lock:
+            self._attachment_cleanup_generation += 1
+            self._attachment_cleanup_unhealthy = True
+            return self._attachment_cleanup_generation
+
+    def _attachment_cleanup_generation_snapshot(self) -> int:
+        with self._attachment_cleanup_state_lock:
+            return self._attachment_cleanup_generation
+
+    def _commit_attachment_cleanup_health(
+        self,
+        generation: int,
+        *,
+        healthy: bool,
+    ) -> bool:
+        """Publish healthy only if no newer durable producer dirtied the state."""
+        with self._attachment_cleanup_state_lock:
+            if healthy and self._attachment_cleanup_generation == generation:
+                self._attachment_cleanup_unhealthy = False
+            else:
+                self._attachment_cleanup_unhealthy = True
+            return not self._attachment_cleanup_unhealthy
 
     async def start(self) -> None:
         if self._running:
@@ -591,6 +948,14 @@ class FeishuChannel(Channel):
         if self.binding_id and self._event_deduplicator is None:
             raise RuntimeError("Dynamic Feishu binding requires durable event deduplication")
 
+        if self.binding_id:
+            # Startup only projects the local outbox state. Network/sandbox
+            # recovery begins after the WebSocket ready handshake so one
+            # binding's backlog cannot delay another binding's lifecycle.
+            pending_jobs = await asyncio.to_thread(self._read_attachment_cleanup_jobs)
+            if pending_jobs:
+                self._mark_attachment_cleanup_unhealthy()
+
         self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
         logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
@@ -615,6 +980,13 @@ class FeishuChannel(Channel):
             raise self._startup_error or RuntimeError("Feishu WebSocket failed to connect")
         self._startup_acknowledged = True
         self.bus.subscribe_outbound(self._on_outbound)
+        if self.binding_id:
+            retry_task = asyncio.create_task(self._retry_published_attachment_cleanups())
+            self._track_background_task(
+                retry_task,
+                name="published_attachment_cleanup_recovery",
+                msg_id=self.binding_id,
+            )
         logger.info("Feishu channel started")
 
     def _run_ws(self, app_id: str, app_secret: str, domain: str) -> None:
@@ -671,9 +1043,26 @@ class FeishuChannel(Channel):
         self._stop_requested = True
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
-        for task in list(self._background_tasks):
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
             task.cancel()
         self._background_tasks.clear()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        cleanup_tasks = {task for task in self._cleanup_tasks if not task.done()}
+        if cleanup_tasks:
+            done, pending = await asyncio.wait(
+                cleanup_tasks,
+                timeout=FEISHU_ATTACHMENT_CLEANUP_DRAIN_TIMEOUT_SECONDS,
+            )
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            if pending:
+                self._mark_attachment_cleanup_unhealthy()
+                logger.warning(
+                    "[Feishu] %d durable attachment cleanup task(s) still pending during stop",
+                    len(pending),
+                )
         for task in list(self._running_card_tasks.values()):
             task.cancel()
         self._running_card_tasks.clear()
@@ -1008,37 +1397,807 @@ class FeishuChannel(Channel):
             size=total_bytes,
         )
 
+    def _attachment_cleanup_outbox_dir(self) -> Path:
+        return get_paths().base_dir / "published-attachment-cleanup"
+
+    def _attachment_cleanup_job_path(self, job_id: str) -> Path:
+        return self._attachment_cleanup_outbox_dir() / f"{job_id}.json"
+
     @staticmethod
-    async def _delete_published_sandbox_files(sandbox: Any, files: list[_MaterializedInboundFile]) -> None:
-        """Best-effort removal of files copied into a non-mounted sandbox."""
+    def _write_attachment_cleanup_job(path: Path, job: _PublishedAttachmentCleanupJob) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        generation_path = _cleanup_store_generation_path(path.parent)
+        with FileLock(str(generation_path.with_suffix(".lock")), timeout=2.0):
+            try:
+                temp_path.write_text(json.dumps(job.to_dict(), ensure_ascii=False, sort_keys=True), encoding="utf-8")
+                temp_path.replace(path)
+                _bump_cleanup_store_generation_locked(path.parent)
+            finally:
+                temp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _read_attachment_cleanup_job(path: Path) -> _PublishedAttachmentCleanupJob:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("attachment cleanup job is not an object")
+        job = _PublishedAttachmentCleanupJob.from_dict(payload)
+        if path.stem != job.job_id:
+            raise ValueError("attachment cleanup job id does not match its filename")
+        return job
+
+    @classmethod
+    def _renew_attachment_cleanup_producer_lease(
+        cls,
+        path: Path,
+        producer_token: str,
+    ) -> _PublishedAttachmentCleanupJob | None:
+        with FileLock(str(path.with_suffix(".lock")), timeout=2.0):
+            if not path.exists():
+                return None
+            current = cls._read_attachment_cleanup_job(path)
+            if current.phase != "producer_pending" or current.producer_token != producer_token:
+                return None
+            updated = replace(
+                current,
+                producer_lease_expires_at=time.time() + FEISHU_ATTACHMENT_PRODUCER_LEASE_SECONDS,
+                version=current.version + 1,
+            )
+            cls._write_attachment_cleanup_job(path, updated)
+            return updated
+
+    @classmethod
+    def _mark_attachment_cleanup_ready(
+        cls,
+        path: Path,
+        *,
+        producer_token: str | None,
+        now: float | None = None,
+    ) -> _PublishedAttachmentCleanupJob | None:
+        with FileLock(str(path.with_suffix(".lock")), timeout=2.0):
+            if not path.exists():
+                return None
+            current = cls._read_attachment_cleanup_job(path)
+            if current.phase != "producer_pending":
+                return current
+            if producer_token is not None:
+                if current.producer_token != producer_token:
+                    return None
+            elif current.producer_lease_expires_at is None or current.producer_lease_expires_at > (now or time.time()):
+                return None
+            updated = replace(
+                current,
+                phase="ready_to_delete",
+                producer_token=None,
+                producer_lease_expires_at=None,
+                version=current.version + 1,
+            )
+            cls._write_attachment_cleanup_job(path, updated)
+            return updated
+
+    @classmethod
+    def _claim_attachment_cleanup_job(
+        cls,
+        path: Path,
+        claim_token: str,
+        *,
+        now: float | None = None,
+    ) -> _PublishedAttachmentCleanupJob | None:
+        current_time = now or time.time()
+        with FileLock(str(path.with_suffix(".lock")), timeout=2.0):
+            if not path.exists():
+                return None
+            current = cls._read_attachment_cleanup_job(path)
+            claimable = current.phase == "ready_to_delete" or (current.phase == "deleting" and current.claim_lease_expires_at is not None and current.claim_lease_expires_at <= current_time)
+            if not claimable:
+                return None
+            updated = replace(
+                current,
+                phase="deleting",
+                claim_token=claim_token,
+                claim_lease_expires_at=current_time + FEISHU_ATTACHMENT_CLAIM_LEASE_SECONDS,
+                version=current.version + 1,
+            )
+            cls._write_attachment_cleanup_job(path, updated)
+            return updated
+
+    @classmethod
+    def _release_attachment_cleanup_claim(
+        cls,
+        path: Path,
+        claim_token: str,
+    ) -> _PublishedAttachmentCleanupJob | None:
+        with FileLock(str(path.with_suffix(".lock")), timeout=2.0):
+            if not path.exists():
+                return None
+            current = cls._read_attachment_cleanup_job(path)
+            if current.phase != "deleting" or current.claim_token != claim_token:
+                return current
+            updated = replace(
+                current,
+                phase="ready_to_delete",
+                claim_token=None,
+                claim_lease_expires_at=None,
+                version=current.version + 1,
+            )
+            cls._write_attachment_cleanup_job(path, updated)
+            return updated
+
+    async def _persist_attachment_cleanup_job(
+        self,
+        *,
+        thread_id: str,
+        owner_user_id: str,
+        files: list[_MaterializedInboundFile],
+        producer_pending: bool = False,
+    ) -> _PublishedAttachmentCleanupJob:
+        virtual_paths = tuple(dict.fromkeys(materialized.virtual_path for materialized in files))
+        producer_token = uuid.uuid4().hex if producer_pending else None
+        job = _PublishedAttachmentCleanupJob(
+            job_id=uuid.uuid4().hex,
+            binding_id=self.binding_id or "",
+            thread_id=thread_id,
+            owner_user_id=owner_user_id,
+            virtual_paths=virtual_paths,
+            phase="producer_pending" if producer_pending else "ready_to_delete",
+            producer_token=producer_token,
+            producer_lease_expires_at=(time.time() + FEISHU_ATTACHMENT_PRODUCER_LEASE_SECONDS if producer_pending else None),
+        )
+        if producer_token is not None:
+            _ACTIVE_ATTACHMENT_PRODUCERS.add(producer_token)
+        self._mark_attachment_cleanup_unhealthy()
+        try:
+            await asyncio.to_thread(
+                self._write_attachment_cleanup_job,
+                self._attachment_cleanup_job_path(job.job_id),
+                job,
+            )
+        except Exception:
+            # Keep the in-process cleanup alive even when the durable recovery
+            # medium is unavailable. The unhealthy flag and critical log make
+            # the loss of restart recovery visible to operators.
+            logger.critical(
+                "[Feishu] attachment cleanup outbox write failed: job=%s",
+                job.job_id,
+                exc_info=True,
+            )
+            self._schedule_attachment_cleanup_health_update(False)
+        return job
+
+    async def _complete_attachment_cleanup_job(self, job: _PublishedAttachmentCleanupJob) -> bool:
+        path = self._attachment_cleanup_job_path(job.job_id)
+
+        def remove() -> bool:
+            with FileLock(str(path.with_suffix(".lock")), timeout=2.0):
+                if not path.exists():
+                    return True
+                current = self._read_attachment_cleanup_job(path)
+                if current.phase != "deleting" or current.claim_token != job.claim_token:
+                    return False
+                generation_path = _cleanup_store_generation_path(path.parent)
+                with FileLock(str(generation_path.with_suffix(".lock")), timeout=2.0):
+                    path.unlink(missing_ok=True)
+                    _bump_cleanup_store_generation_locked(path.parent)
+            return True
+
+        completed = await asyncio.to_thread(remove)
+        if completed and job.claim_token is not None:
+            _ACTIVE_ATTACHMENT_CLAIMS.discard(job.claim_token)
+        return completed
+
+    def _read_attachment_cleanup_jobs(self) -> list[_PublishedAttachmentCleanupJob]:
+        outbox_dir = self._attachment_cleanup_outbox_dir()
+        if not outbox_dir.exists():
+            return []
+        jobs: list[_PublishedAttachmentCleanupJob] = []
+        for path in outbox_dir.glob("*.json"):
+            try:
+                job = self._read_attachment_cleanup_job(path)
+                if job.binding_id == (self.binding_id or ""):
+                    jobs.append(job)
+            except FileNotFoundError:
+                # Another fenced recovery worker completed this job after the
+                # directory snapshot; disappearance is successful progress.
+                continue
+            except Exception:
+                self._mark_attachment_cleanup_unhealthy()
+                logger.error("[Feishu] invalid durable attachment cleanup job: %s", path, exc_info=True)
+        return jobs
+
+    async def _refresh_attachment_cleanup_health(self) -> bool:
+        generation = self._attachment_cleanup_generation_snapshot()
+        outbox_dir = self._attachment_cleanup_outbox_dir()
+        store_generation = await asyncio.to_thread(
+            _read_cleanup_store_generation,
+            outbox_dir,
+        )
+        jobs = await asyncio.to_thread(self._read_attachment_cleanup_jobs)
+        store_stable = store_generation == await asyncio.to_thread(
+            _read_cleanup_store_generation,
+            outbox_dir,
+        )
+        return self._commit_attachment_cleanup_health(
+            generation,
+            healthy=not jobs and store_stable,
+        )
+
+    async def _acquire_published_sandbox(
+        self,
+        sandbox_provider: Any,
+        thread_id: str,
+        *,
+        owner_user_id: str,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        managed_acquire = getattr(sandbox_provider, "acquire_with_lease_async", None)
+        acquire_async = getattr(sandbox_provider, "acquire_async", None)
+        if callable(managed_acquire):
+            acquire_task = asyncio.create_task(managed_acquire(thread_id, user_id=owner_user_id))
+        elif callable(acquire_async):
+            acquire_task = asyncio.create_task(acquire_async(thread_id, user_id=owner_user_id))
+        else:
+            acquire_task = asyncio.create_task(
+                asyncio.to_thread(
+                    sandbox_provider.acquire,
+                    thread_id,
+                    user_id=owner_user_id,
+                )
+            )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(acquire_task),
+                timeout=timeout_seconds or FEISHU_SANDBOX_ACQUIRE_TIMEOUT_SECONDS,
+            )
+            if isinstance(result, SandboxAcquisition):
+                try:
+                    await asyncio.to_thread(sandbox_provider.accept_acquisition, result)
+                except BaseException:
+                    await asyncio.to_thread(sandbox_provider.abandon_acquisition, result)
+                    raise
+                return result.sandbox_id
+            if isinstance(result, str):
+                return result
+            raise TypeError("sandbox provider returned an invalid acquisition result")
+        except asyncio.CancelledError:
+            self._track_late_sandbox_acquisition(
+                acquire_task,
+                sandbox_provider,
+                thread_id=thread_id,
+            )
+            raise
+        except TimeoutError as exc:
+            self._track_late_sandbox_acquisition(
+                acquire_task,
+                sandbox_provider,
+                thread_id=thread_id,
+            )
+            raise TimeoutError("Feishu sandbox acquisition exceeded the admission deadline") from exc
+
+    def _track_late_sandbox_acquisition(
+        self,
+        acquire_task: asyncio.Task[Any],
+        sandbox_provider: Any,
+        *,
+        thread_id: str,
+    ) -> None:
+        cleanup_task = asyncio.create_task(self._release_late_sandbox_acquisition(acquire_task, sandbox_provider))
+        self._track_cleanup_task(
+            cleanup_task,
+            name="published_sandbox_acquisition_cleanup",
+            msg_id=thread_id,
+        )
+
+    async def _release_late_sandbox_acquisition(
+        self,
+        acquire_task: asyncio.Task[Any],
+        sandbox_provider: Any,
+    ) -> None:
+        """Bound late waiting and let the provider compensate owned capacity."""
+        try:
+            acquisition = await asyncio.wait_for(
+                asyncio.shield(acquire_task),
+                timeout=FEISHU_SANDBOX_LATE_ACQUIRE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            acquire_task.cancel()
+            raise
+        except TimeoutError:
+            acquire_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(acquire_task, return_exceptions=True),
+                    timeout=FEISHU_SANDBOX_LATE_ACQUIRE_CANCEL_DRAIN_SECONDS,
+                )
+            except TimeoutError:
+                pass
+            self._mark_attachment_cleanup_unhealthy()
+            self._schedule_attachment_cleanup_health_update(False)
+            logger.error("[Feishu] sandbox acquisition did not terminate after its compensation deadline")
+            return
+        except Exception:
+            return
+        if not isinstance(acquisition, SandboxAcquisition):
+            logger.warning("[Feishu] legacy sandbox provider returned a late naked ID; skipping unsafe release")
+            return
+        try:
+            await asyncio.to_thread(sandbox_provider.abandon_acquisition, acquisition)
+        except Exception:
+            logger.warning(
+                "[Feishu] failed to abandon sandbox acquisition: %s",
+                acquisition.acquisition_token,
+                exc_info=True,
+            )
+
+    @staticmethod
+    async def _delete_published_sandbox_files(
+        sandbox: Any,
+        files: list[_MaterializedInboundFile],
+    ) -> list[_MaterializedInboundFile]:
+        """Delete remote files with bounded retry and return unconfirmed files."""
+        pending = list(dict.fromkeys(files))
+        for attempt in range(1, FEISHU_ATTACHMENT_DELETE_MAX_ATTEMPTS + 1):
+            failed: list[_MaterializedInboundFile] = []
+            for materialized in pending:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(sandbox.delete_file, materialized.virtual_path),
+                        timeout=FEISHU_ATTACHMENT_DELETE_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    failed.append(materialized)
+                    logger.warning(
+                        "[Feishu] failed to clean sandbox attachment %s (attempt %d/%d)",
+                        materialized.virtual_path,
+                        attempt,
+                        FEISHU_ATTACHMENT_DELETE_MAX_ATTEMPTS,
+                        exc_info=True,
+                    )
+            if not failed:
+                return []
+            pending = failed
+            if attempt < FEISHU_ATTACHMENT_DELETE_MAX_ATTEMPTS:
+                await asyncio.sleep(FEISHU_ATTACHMENT_DELETE_RETRY_SECONDS * (2 ** (attempt - 1)))
+        return pending
+
+    @staticmethod
+    async def _delete_published_host_files(files: list[_MaterializedInboundFile]) -> bool:
+        success = True
         for materialized in files:
             try:
-                await asyncio.to_thread(sandbox.delete_file, materialized.virtual_path)
-            except Exception:
+                await asyncio.wait_for(
+                    asyncio.to_thread(materialized.actual_path.unlink, missing_ok=True),
+                    timeout=FEISHU_ATTACHMENT_DELETE_TIMEOUT_SECONDS,
+                )
+            except (OSError, TimeoutError):
+                success = False
                 logger.warning(
-                    "[Feishu] failed to clean sandbox attachment: %s",
-                    materialized.virtual_path,
+                    "[Feishu] failed to clean host attachment: %s",
+                    materialized.actual_path,
                     exc_info=True,
                 )
+        return success
+
+    async def _claim_cleanup_for_execution(
+        self,
+        job: _PublishedAttachmentCleanupJob,
+    ) -> _PublishedAttachmentCleanupJob | None:
+        if job.phase == "deleting" and job.claim_token in _ACTIVE_ATTACHMENT_CLAIMS:
+            return job
+        claim_token = uuid.uuid4().hex
+        path = self._attachment_cleanup_job_path(job.job_id)
+        claimed = await asyncio.to_thread(
+            self._claim_attachment_cleanup_job,
+            path,
+            claim_token,
+        )
+        if claimed is not None:
+            _ACTIVE_ATTACHMENT_CLAIMS.add(claim_token)
+            return claimed
+        if not path.exists():
+            # Preserve best-effort in-memory cleanup if writing the durable
+            # outbox failed before execution began.
+            claimed = replace(
+                job,
+                phase="deleting",
+                claim_token=claim_token,
+                claim_lease_expires_at=time.time() + FEISHU_ATTACHMENT_CLAIM_LEASE_SECONDS,
+            )
+            _ACTIVE_ATTACHMENT_CLAIMS.add(claim_token)
+            return claimed
+        return None
+
+    async def _release_cleanup_claim(self, job: _PublishedAttachmentCleanupJob) -> None:
+        if job.claim_token is None:
+            return
+        await asyncio.to_thread(
+            self._release_attachment_cleanup_claim,
+            self._attachment_cleanup_job_path(job.job_id),
+            job.claim_token,
+        )
+        _ACTIVE_ATTACHMENT_CLAIMS.discard(job.claim_token)
+
+    async def _execute_attachment_cleanup_job(
+        self,
+        job: _PublishedAttachmentCleanupJob,
+        sandbox: Any,
+        files: list[_MaterializedInboundFile],
+        *,
+        refresh_health: bool = True,
+    ) -> bool:
+        claimed_job = await self._claim_cleanup_for_execution(job)
+        if claimed_job is None:
+            self._mark_attachment_cleanup_unhealthy()
+            return False
+        completed = False
+        try:
+            unconfirmed = await self._delete_published_sandbox_files(sandbox, files)
+            if unconfirmed:
+                self._mark_attachment_cleanup_unhealthy()
+                logger.error(
+                    "[Feishu] durable attachment cleanup remains pending after retries: job=%s files=%s",
+                    job.job_id,
+                    [item.virtual_path for item in unconfirmed],
+                )
+                self._schedule_attachment_cleanup_health_update(False)
+                return False
+            if not await self._delete_published_host_files(files):
+                self._mark_attachment_cleanup_unhealthy()
+                self._schedule_attachment_cleanup_health_update(False)
+                return False
+            completed = await self._complete_attachment_cleanup_job(claimed_job)
+            if not completed:
+                self._mark_attachment_cleanup_unhealthy()
+                return False
+            if refresh_health:
+                await self._refresh_attachment_cleanup_health()
+            return True
+        finally:
+            if not completed:
+                await self._release_cleanup_claim(claimed_job)
+
+    def _materialized_files_from_cleanup_job(
+        self,
+        job: _PublishedAttachmentCleanupJob,
+    ) -> list[_MaterializedInboundFile]:
+        paths = get_paths()
+        return [
+            _MaterializedInboundFile(
+                virtual_path=virtual_path,
+                actual_path=paths.resolve_virtual_path(
+                    job.thread_id,
+                    virtual_path,
+                    user_id=job.owner_user_id,
+                ),
+                size=0,
+            )
+            for virtual_path in job.virtual_paths
+        ]
+
+    async def _recover_attachment_cleanup_job(
+        self,
+        job: _PublishedAttachmentCleanupJob,
+        sandbox_provider: Any,
+        *,
+        acquire_timeout_seconds: float,
+        refresh_health: bool = True,
+    ) -> bool:
+        if job.phase == "producer_pending":
+            producer_active = job.producer_token in _ACTIVE_ATTACHMENT_PRODUCERS
+            lease_active = job.producer_lease_expires_at is not None and job.producer_lease_expires_at > time.time()
+            if producer_active or lease_active:
+                self._mark_attachment_cleanup_unhealthy()
+                return False
+            promoted = await asyncio.to_thread(
+                self._mark_attachment_cleanup_ready,
+                self._attachment_cleanup_job_path(job.job_id),
+                producer_token=None,
+            )
+            if promoted is None:
+                self._mark_attachment_cleanup_unhealthy()
+                return False
+            job = promoted
+        if job.phase == "deleting" and job.claim_token not in _ACTIVE_ATTACHMENT_CLAIMS and job.claim_lease_expires_at is not None and job.claim_lease_expires_at > time.time():
+            self._mark_attachment_cleanup_unhealthy()
+            return False
+        files = self._materialized_files_from_cleanup_job(job)
+        sandbox_id = await self._acquire_published_sandbox(
+            sandbox_provider,
+            job.thread_id,
+            owner_user_id=job.owner_user_id,
+            timeout_seconds=acquire_timeout_seconds,
+        )
+        if sandbox_id == "local" or sandbox_provider.uses_thread_data_mounts:
+            claimed_job = await self._claim_cleanup_for_execution(job)
+            if claimed_job is None:
+                self._mark_attachment_cleanup_unhealthy()
+                return False
+            mounted_completed = False
+            try:
+                if await self._delete_published_host_files(files):
+                    mounted_completed = await self._complete_attachment_cleanup_job(claimed_job)
+                if not mounted_completed:
+                    self._mark_attachment_cleanup_unhealthy()
+                elif refresh_health:
+                    await self._refresh_attachment_cleanup_health()
+                return mounted_completed
+            finally:
+                if not mounted_completed:
+                    await self._release_cleanup_claim(claimed_job)
+        sandbox = sandbox_provider.get(sandbox_id)
+        if sandbox is None:
+            raise RuntimeError(f"Sandbox not found for attachment cleanup thread {job.thread_id}")
+        return await self._execute_attachment_cleanup_job(
+            job,
+            sandbox,
+            files,
+            refresh_health=refresh_health,
+        )
+
+    async def recover_published_attachment_cleanups(self) -> int:
+        """Retry durable attachment cleanups owned by this Feishu binding."""
+        loop = asyncio.get_running_loop()
+        recovery_deadline = loop.time() + FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS
+        generation = self._attachment_cleanup_generation_snapshot()
+        outbox_dir = self._attachment_cleanup_outbox_dir()
+        try:
+            store_generation = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _read_cleanup_store_generation,
+                    outbox_dir,
+                ),
+                timeout=max(0.0, recovery_deadline - loop.time()),
+            )
+            jobs = await asyncio.wait_for(
+                asyncio.to_thread(self._read_attachment_cleanup_jobs),
+                timeout=max(0.0, recovery_deadline - loop.time()),
+            )
+        except TimeoutError:
+            self._mark_attachment_cleanup_unhealthy()
+            logger.error("[Feishu] attachment cleanup discovery exceeded the recovery deadline")
+            return 0
+        try:
+            store_stable = store_generation == await asyncio.wait_for(
+                asyncio.to_thread(
+                    _read_cleanup_store_generation,
+                    outbox_dir,
+                ),
+                timeout=max(0.0, recovery_deadline - loop.time()),
+            )
+        except TimeoutError:
+            self._mark_attachment_cleanup_unhealthy()
+            logger.error("[Feishu] attachment cleanup generation check exceeded the recovery deadline")
+            return 0
+        if not jobs:
+            self._commit_attachment_cleanup_health(
+                generation,
+                healthy=store_stable,
+            )
+            return 0
+
+        try:
+            selected_jobs = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _select_cleanup_jobs,
+                    jobs,
+                    cursor_scope=self.binding_id or "unbound",
+                    limit=FEISHU_ATTACHMENT_RECOVERY_MAX_JOBS,
+                ),
+                timeout=max(0.0, recovery_deadline - loop.time()),
+            )
+        except TimeoutError:
+            self._mark_attachment_cleanup_unhealthy()
+            logger.error("[Feishu] attachment cleanup scheduling exceeded the recovery deadline")
+            return 0
+        if not selected_jobs:
+            self._commit_attachment_cleanup_health(generation, healthy=False)
+            return 0
+
+        completed = 0
+        try:
+            sandbox_provider = get_sandbox_provider()
+        except Exception:
+            self._mark_attachment_cleanup_unhealthy()
+            logger.error("[Feishu] attachment cleanup recovery could not load the sandbox provider", exc_info=True)
+            return 0
+        for job in selected_jobs:
+            try:
+                remaining_seconds = recovery_deadline - loop.time()
+                if remaining_seconds <= 0:
+                    self._mark_attachment_cleanup_unhealthy()
+                    break
+                if await asyncio.wait_for(
+                    self._recover_attachment_cleanup_job(
+                        job,
+                        sandbox_provider,
+                        acquire_timeout_seconds=min(
+                            FEISHU_SANDBOX_ACQUIRE_TIMEOUT_SECONDS,
+                            remaining_seconds,
+                        ),
+                        refresh_health=False,
+                    ),
+                    timeout=remaining_seconds,
+                ):
+                    completed += 1
+            except Exception:
+                self._mark_attachment_cleanup_unhealthy()
+                logger.error(
+                    "[Feishu] durable attachment cleanup recovery failed: job=%s",
+                    job.job_id,
+                    exc_info=True,
+                )
+        if completed == len(jobs) and store_stable:
+            try:
+                await asyncio.wait_for(
+                    self._refresh_attachment_cleanup_health(),
+                    timeout=max(0.0, recovery_deadline - loop.time()),
+                )
+            except TimeoutError:
+                self._mark_attachment_cleanup_unhealthy()
+                logger.error("[Feishu] attachment cleanup health refresh exceeded the recovery deadline")
+        else:
+            self._commit_attachment_cleanup_health(generation, healthy=False)
+        return completed
+
+    async def _retry_published_attachment_cleanups(self) -> None:
+        """Periodically retry the durable cleanup outbox while the binding runs."""
+        while not self._stop_requested:
+            try:
+                await self.recover_published_attachment_cleanups()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._mark_attachment_cleanup_unhealthy()
+                logger.exception("[Feishu] periodic attachment cleanup recovery failed")
+            if self._runtime_health_callback is not None:
+                try:
+                    await self._runtime_health_callback(
+                        self.attachment_cleanup_healthy,
+                        None if self.attachment_cleanup_healthy else "Attachment cleanup recovery is pending",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Health is a projection. A transient repository failure
+                    # must not terminate the cleanup coordinator; the next
+                    # pass retries both cleanup and the dirty projection.
+                    logger.exception("[Feishu] attachment cleanup health projection failed")
+            await asyncio.sleep(FEISHU_ATTACHMENT_CLEANUP_RETRY_INTERVAL_SECONDS)
+
+    def _schedule_attachment_cleanup_health_update(self, healthy: bool) -> None:
+        """Report cleanup health without making critical cleanup wait on Supervisor."""
+        if self._runtime_health_callback is None:
+            return
+        task = asyncio.create_task(
+            self._runtime_health_callback(
+                healthy,
+                None if healthy else "Attachment cleanup recovery is pending",
+            )
+        )
+        self._track_background_task(
+            task,
+            name="published_attachment_cleanup_health",
+            msg_id=self.binding_id or "unknown",
+        )
 
     async def _finish_cancelled_sandbox_sync(
         self,
         sync_task: asyncio.Task[object],
         sandbox: Any,
         materialized_files: list[_MaterializedInboundFile],
+        cleanup_job: _PublishedAttachmentCleanupJob,
     ) -> None:
         """Finish an uncancellable worker and remove every possible residue."""
-        await asyncio.gather(sync_task, return_exceptions=True)
-        await self._delete_published_sandbox_files(sandbox, materialized_files)
-        for materialized in materialized_files:
-            try:
-                materialized.actual_path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(
-                    "[Feishu] failed to clean host attachment after sandbox sync: %s",
-                    materialized.actual_path,
-                    exc_info=True,
+        cleanup_job = await self._wait_for_attachment_producer(sync_task, cleanup_job)
+        await self._execute_attachment_cleanup_job(
+            cleanup_job,
+            sandbox,
+            materialized_files,
+        )
+
+    async def _wait_for_attachment_producer(
+        self,
+        sync_task: asyncio.Task[object],
+        cleanup_job: _PublishedAttachmentCleanupJob,
+    ) -> _PublishedAttachmentCleanupJob:
+        """Keep the durable producer lease alive until the worker really exits."""
+        producer_token = cleanup_job.producer_token
+        if cleanup_job.phase != "producer_pending" or producer_token is None:
+            await asyncio.gather(sync_task, return_exceptions=True)
+            return cleanup_job
+        path = self._attachment_cleanup_job_path(cleanup_job.job_id)
+        current = cleanup_job
+        try:
+            while not sync_task.done():
+                done, _pending = await asyncio.wait(
+                    {sync_task},
+                    timeout=FEISHU_ATTACHMENT_PRODUCER_HEARTBEAT_SECONDS,
                 )
+                if done:
+                    break
+                renewed = await asyncio.to_thread(
+                    self._renew_attachment_cleanup_producer_lease,
+                    path,
+                    producer_token,
+                )
+                if renewed is not None:
+                    current = renewed
+            await asyncio.gather(sync_task, return_exceptions=True)
+            ready = await asyncio.to_thread(
+                self._mark_attachment_cleanup_ready,
+                path,
+                producer_token=producer_token,
+            )
+            return ready or replace(
+                current,
+                phase="ready_to_delete",
+                producer_token=None,
+                producer_lease_expires_at=None,
+            )
+        finally:
+            _ACTIVE_ATTACHMENT_PRODUCERS.discard(producer_token)
+
+    async def _arrange_published_sandbox_cleanup(
+        self,
+        sync_task: asyncio.Task[object],
+        sandbox: Any,
+        materialized_files: list[_MaterializedInboundFile],
+        *,
+        thread_id: str,
+        owner_user_id: str,
+        message_id: str,
+    ) -> None:
+        cleanup_job = await self._persist_attachment_cleanup_job(
+            thread_id=thread_id,
+            owner_user_id=owner_user_id,
+            files=materialized_files,
+            producer_pending=True,
+        )
+        done, _pending = await asyncio.wait(
+            {sync_task},
+            timeout=FEISHU_SANDBOX_SYNC_CLEANUP_TIMEOUT_SECONDS,
+        )
+        if done:
+            cleanup_job = await self._wait_for_attachment_producer(sync_task, cleanup_job)
+            await self._execute_attachment_cleanup_job(
+                cleanup_job,
+                sandbox,
+                materialized_files,
+            )
+            return
+        cleanup_task = asyncio.create_task(
+            self._finish_cancelled_sandbox_sync(
+                sync_task,
+                sandbox,
+                materialized_files,
+                cleanup_job,
+            )
+        )
+        self._track_cleanup_task(
+            cleanup_task,
+            name="published_attachment_cleanup",
+            msg_id=message_id,
+        )
+
+    async def _cleanup_published_sandbox_files(
+        self,
+        sandbox: Any,
+        materialized_files: list[_MaterializedInboundFile],
+        *,
+        thread_id: str,
+        owner_user_id: str,
+    ) -> None:
+        if not materialized_files:
+            return
+        cleanup_job = await self._persist_attachment_cleanup_job(
+            thread_id=thread_id,
+            owner_user_id=owner_user_id,
+            files=materialized_files,
+        )
+        await self._execute_attachment_cleanup_job(
+            cleanup_job,
+            sandbox,
+            materialized_files,
+        )
 
     async def _sync_published_files(
         self,
@@ -1052,7 +2211,11 @@ class FeishuChannel(Channel):
         if not materialized_files:
             return
         sandbox_provider = get_sandbox_provider()
-        sandbox_id = sandbox_provider.acquire(thread_id, user_id=owner_user_id)
+        sandbox_id = await self._acquire_published_sandbox(
+            sandbox_provider,
+            thread_id,
+            owner_user_id=owner_user_id,
+        )
         if sandbox_id == "local" or sandbox_provider.uses_thread_data_mounts:
             return
         sandbox = sandbox_provider.get(sandbox_id)
@@ -1060,7 +2223,17 @@ class FeishuChannel(Channel):
             raise RuntimeError(f"Sandbox not found for thread {thread_id}")
 
         synced_files: list[_MaterializedInboundFile] = []
+        batch_deadline = asyncio.get_running_loop().time() + FEISHU_SANDBOX_SYNC_BATCH_TIMEOUT_SECONDS
         for materialized in materialized_files:
+            remaining_batch_seconds = batch_deadline - asyncio.get_running_loop().time()
+            if remaining_batch_seconds <= 0:
+                await self._cleanup_published_sandbox_files(
+                    sandbox,
+                    synced_files,
+                    thread_id=thread_id,
+                    owner_user_id=owner_user_id,
+                )
+                raise TimeoutError("Feishu sandbox sync exceeded the admission deadline")
             sync_task = asyncio.create_task(
                 asyncio.to_thread(
                     sandbox.update_file_from_path,
@@ -1069,35 +2242,40 @@ class FeishuChannel(Channel):
                 )
             )
             try:
-                await asyncio.shield(sync_task)
+                await asyncio.wait_for(
+                    asyncio.shield(sync_task),
+                    timeout=min(
+                        FEISHU_SANDBOX_SYNC_FILE_TIMEOUT_SECONDS,
+                        remaining_batch_seconds,
+                    ),
+                )
                 synced_files.append(materialized)
             except asyncio.CancelledError:
-                done, _pending = await asyncio.wait(
-                    {sync_task},
-                    timeout=FEISHU_SANDBOX_SYNC_CLEANUP_TIMEOUT_SECONDS,
-                )
-                cleanup_files = [*synced_files, materialized]
-                if done:
-                    await asyncio.gather(sync_task, return_exceptions=True)
-                    await self._delete_published_sandbox_files(sandbox, cleanup_files)
-                else:
-                    cleanup_task = asyncio.create_task(
-                        self._finish_cancelled_sandbox_sync(
-                            sync_task,
-                            sandbox,
-                            cleanup_files,
-                        )
-                    )
-                    self._track_background_task(
-                        cleanup_task,
-                        name="published_attachment_cleanup",
-                        msg_id=message_id,
-                    )
-                raise
-            except BaseException:
-                await self._delete_published_sandbox_files(
+                await self._arrange_published_sandbox_cleanup(
+                    sync_task,
                     sandbox,
                     [*synced_files, materialized],
+                    thread_id=thread_id,
+                    owner_user_id=owner_user_id,
+                    message_id=message_id,
+                )
+                raise
+            except TimeoutError as exc:
+                await self._arrange_published_sandbox_cleanup(
+                    sync_task,
+                    sandbox,
+                    [*synced_files, materialized],
+                    thread_id=thread_id,
+                    owner_user_id=owner_user_id,
+                    message_id=message_id,
+                )
+                raise TimeoutError("Feishu sandbox sync exceeded the admission deadline") from exc
+            except BaseException:
+                await self._cleanup_published_sandbox_files(
+                    sandbox,
+                    [*synced_files, materialized],
+                    thread_id=thread_id,
+                    owner_user_id=owner_user_id,
                 )
                 raise
 
@@ -1255,8 +2433,17 @@ class FeishuChannel(Channel):
         self._background_tasks.add(task)
         task.add_done_callback(lambda done_task, task_name=name, mid=msg_id: self._finalize_background_task(done_task, task_name, mid))
 
+    def _track_cleanup_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
+        """Track durable cleanup separately so channel stop cannot cancel it."""
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(lambda done_task, task_name=name, mid=msg_id: self._finalize_cleanup_task(done_task, task_name, mid))
+
     def _finalize_background_task(self, task: asyncio.Task, name: str, msg_id: str) -> None:
         self._background_tasks.discard(task)
+        self._log_task_error(task, name, msg_id)
+
+    def _finalize_cleanup_task(self, task: asyncio.Task, name: str, msg_id: str) -> None:
+        self._cleanup_tasks.discard(task)
         self._log_task_error(task, name, msg_id)
 
     async def _create_running_card(self, source_message_id: str, text: str) -> str | None:

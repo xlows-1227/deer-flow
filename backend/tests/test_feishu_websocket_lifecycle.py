@@ -89,6 +89,34 @@ async def test_start_waits_for_connection_ready_and_stop_joins_worker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_reports_ready_before_attachment_recovery_finishes() -> None:
+    session = _BlockingSession()
+    channel = _channel(session)
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def blocked_recovery() -> int:
+        recovery_started.set()
+        await release_recovery.wait()
+        return 0
+
+    channel.recover_published_attachment_cleanups = blocked_recovery
+    start_task = asyncio.create_task(channel.start())
+    try:
+        assert await asyncio.to_thread(session.started.wait, 1.0)
+        session.allow_ready.set()
+        await asyncio.wait_for(start_task, timeout=0.2)
+        await asyncio.wait_for(recovery_started.wait(), timeout=0.2)
+        assert channel.is_running is True
+    finally:
+        release_recovery.set()
+        session.allow_ready.set()
+        if not start_task.done():
+            await start_task
+        await channel.stop()
+
+
+@pytest.mark.asyncio
 async def test_start_fails_when_websocket_reports_error_before_ready() -> None:
     channel = _channel(_FailingSession())
 

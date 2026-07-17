@@ -8,7 +8,7 @@ from typing import Any, Self
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from app.channels.supervisor import BindingNotFoundError, FeishuSupervisor
+from app.channels.supervisor import BindingCleanupPendingError, BindingNotFoundError, FeishuSupervisor
 from deerflow.persistence.agent_channel import ActiveAgentChannelConflictError, AgentChannelRepository
 from deerflow.publishing.feishu_credentials import FeishuCredentials, encode_feishu_credentials
 from deerflow.publishing.secret_store import SecretStore
@@ -260,41 +260,22 @@ async def rotate_agent_channel_credentials(
             encrypt_key=body.encrypt_key,
         )
     )
-    credentials_updated = False
     try:
-        updated = await repository.update_credentials(
+        previous = await _supervisor(request).rotate_binding_credentials(
             agent_id,
             binding_id,
             owner_user_id=owner_user_id,
             app_id=body.app_id or str(current["app_id"]),
             secret_ref=new_ref,
         )
-        if updated is None:
-            raise HTTPException(status_code=404, detail="Channel binding not found")
-        credentials_updated = True
-        if current["status"] == "active":
-            await _supervisor(request).restart_binding(binding_id)
+    except BindingNotFoundError as exc:
+        await secrets.delete(new_ref)
+        raise HTTPException(status_code=404, detail="Channel binding not found") from exc
     except BaseException:
-        if credentials_updated:
-            try:
-                await repository.update_credentials(
-                    agent_id,
-                    binding_id,
-                    owner_user_id=owner_user_id,
-                    app_id=str(current["app_id"]),
-                    secret_ref=str(current["secret_ref"]),
-                )
-                if current["status"] == "active":
-                    await _supervisor(request).restart_binding(binding_id)
-            except BaseException as rollback_error:
-                logger.error(
-                    "Failed to roll back Feishu credential rotation",
-                    extra={"binding_id": binding_id, "error_class": type(rollback_error).__name__},
-                )
         await secrets.delete(new_ref)
         raise
     try:
-        await secrets.delete(str(current["secret_ref"]))
+        await secrets.delete(str(previous["secret_ref"]))
     except Exception:
         logger.warning("Failed to delete superseded Feishu credential", extra={"binding_id": binding_id})
     return _safe_binding(await _binding_or_404(repository, agent_id, binding_id, owner_user_id))
@@ -306,11 +287,19 @@ async def delete_agent_channel(agent_id: str, binding_id: str, request: Request)
     repository = _repository(request)
     secrets = _secret_store(request)
     owner_user_id = _owner_id(request)
-    current = await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
-    if current["status"] == "active":
-        await _supervisor(request).stop_binding(binding_id)
-    deleted = await repository.delete(agent_id, binding_id, owner_user_id=owner_user_id)
-    if deleted is None:
-        raise HTTPException(status_code=404, detail="Channel binding not found")
-    await secrets.delete(str(current["secret_ref"]))
+    await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
+    try:
+        deleted = await _supervisor(request).delete_binding(
+            agent_id,
+            binding_id,
+            owner_user_id=owner_user_id,
+        )
+    except BindingCleanupPendingError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Channel attachment cleanup is still pending",
+        ) from exc
+    except BindingNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Channel binding not found") from exc
+    await secrets.delete(str(deleted["secret_ref"]))
     return {"deleted": True}

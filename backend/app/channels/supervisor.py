@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -20,6 +21,7 @@ from deerflow.publishing.secret_store import SecretStore
 logger = logging.getLogger(__name__)
 
 ConnectionTester = Callable[[str, str], Awaitable[tuple[bool, str]]]
+RuntimeHealthCallback = Callable[[bool, str | None], Awaitable[None]]
 
 
 class ChannelFactory(Protocol):
@@ -37,6 +39,7 @@ class ChannelFactory(Protocol):
         agent_id: str,
         event_deduplicator: EventDeduplicator | None = None,
         runtime_error_callback: Callable[[str], Awaitable[None]] | None = None,
+        runtime_health_callback: RuntimeHealthCallback | None = None,
     ) -> Channel: ...
 
 
@@ -50,6 +53,10 @@ class DynamicChannelRegistry(Protocol):
 
 class BindingNotFoundError(LookupError):
     """Raised when a binding disappears before a lifecycle operation."""
+
+
+class BindingCleanupPendingError(RuntimeError):
+    """Raised when durable attachment work prevents physical binding deletion."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,13 @@ class _RunningChannel:
     generation: object
 
 
+@dataclass
+class _BindingLockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+    retired: bool = False
+
+
 def _default_channel_factory(
     bus: MessageBus,
     *,
@@ -82,6 +96,7 @@ def _default_channel_factory(
     agent_id: str,
     event_deduplicator: EventDeduplicator | None = None,
     runtime_error_callback: Callable[[str], Awaitable[None]] | None = None,
+    runtime_health_callback: RuntimeHealthCallback | None = None,
 ) -> Channel:
     from app.channels.feishu import FeishuChannel
 
@@ -95,6 +110,7 @@ def _default_channel_factory(
         agent_id=agent_id,
         event_deduplicator=event_deduplicator,
         runtime_error_callback=runtime_error_callback,
+        runtime_health_callback=runtime_health_callback,
     )
 
 
@@ -136,7 +152,24 @@ class FeishuSupervisor:
         self._event_deduplicator = event_deduplicator
         self._running: dict[str, _RunningChannel] = {}
         self._health: dict[str, BindingHealth] = {}
-        self._lifecycle_lock = asyncio.Lock()
+        self._binding_locks: dict[str, _BindingLockEntry] = {}
+        self._cleanup_janitor_task: asyncio.Task[None] | None = None
+
+    @asynccontextmanager
+    async def _binding_lifecycle(self, binding_id: str) -> AsyncIterator[_BindingLockEntry]:
+        """Serialize one binding and reclaim retired locks after all waiters exit."""
+        entry = self._binding_locks.get(binding_id)
+        if entry is None:
+            entry = _BindingLockEntry(lock=asyncio.Lock())
+            self._binding_locks[binding_id] = entry
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield entry
+        finally:
+            entry.users -= 1
+            if entry.retired and entry.users == 0 and self._binding_locks.get(binding_id) is entry:
+                self._binding_locks.pop(binding_id, None)
 
     @property
     def running_binding_ids(self) -> tuple[str, ...]:
@@ -186,7 +219,13 @@ class FeishuSupervisor:
         binding_id = str(row["id"])
         existing = self._running.get(binding_id)
         if existing is not None and existing.channel.is_running:
-            return await self._record_health(row, health="healthy", detail=None, running=True)
+            cleanup_pending = getattr(existing.channel, "attachment_cleanup_healthy", True) is False
+            return await self._record_health(
+                row,
+                health="unhealthy" if cleanup_pending else "healthy",
+                detail="Attachment cleanup recovery is pending" if cleanup_pending else None,
+                running=True,
+            )
 
         channel: Channel | None = None
         generation = object()
@@ -201,6 +240,12 @@ class FeishuSupervisor:
                 "agent_id": str(row["agent_id"]),
                 "runtime_error_callback": lambda detail: self._handle_runtime_error(
                     binding_id,
+                    detail,
+                    generation=generation,
+                ),
+                "runtime_health_callback": lambda healthy, detail: self._handle_runtime_health(
+                    binding_id,
+                    healthy,
                     detail,
                     generation=generation,
                 ),
@@ -223,7 +268,13 @@ class FeishuSupervisor:
                 "Published Feishu binding started",
                 extra={"binding_id": binding_id, "agent_id": row["agent_id"]},
             )
-            return await self._record_health(row, health="healthy", detail=None, running=True)
+            cleanup_pending = getattr(channel, "attachment_cleanup_healthy", True) is False
+            return await self._record_health(
+                row,
+                health="unhealthy" if cleanup_pending else "healthy",
+                detail="Attachment cleanup recovery is pending" if cleanup_pending else None,
+                running=True,
+            )
         except asyncio.CancelledError:
             if channel is not None:
                 await channel.stop()
@@ -254,7 +305,7 @@ class FeishuSupervisor:
 
     async def start_binding(self, binding_id: str) -> BindingHealth:
         """Activate and start one binding after its connection reports ready."""
-        async with self._lifecycle_lock:
+        async with self._binding_lifecycle(binding_id):
             row = await self._binding(binding_id)
             if row["status"] != "active":
                 activated = await self._repository.activate(
@@ -294,7 +345,7 @@ class FeishuSupervisor:
         generation: object,
     ) -> None:
         """Remove one failed runtime and persist unhealthy without touching peers."""
-        async with self._lifecycle_lock:
+        async with self._binding_lifecycle(binding_id):
             current = self._running.get(binding_id)
             if current is None or current.generation is not generation:
                 logger.info(
@@ -313,9 +364,34 @@ class FeishuSupervisor:
                 running=False,
             )
 
+    async def _handle_runtime_health(
+        self,
+        binding_id: str,
+        healthy: bool,
+        detail: str | None,
+        *,
+        generation: object,
+    ) -> None:
+        """Persist a redacted cleanup-health transition without stopping I/O."""
+        async with self._binding_lifecycle(binding_id):
+            current = self._running.get(binding_id)
+            if current is None or current.generation is not generation:
+                logger.info(
+                    "Ignoring stale Feishu runtime health update",
+                    extra={"binding_id": binding_id},
+                )
+                return
+            row = await self._binding(binding_id)
+            await self._record_health(
+                row,
+                health="healthy" if healthy else "unhealthy",
+                detail=None if healthy else (detail or "Attachment cleanup recovery is pending"),
+                running=current.channel.is_running,
+            )
+
     async def stop_binding(self, binding_id: str) -> BindingHealth:
         """Stop one confirmed runtime before persisting its inactive state."""
-        async with self._lifecycle_lock:
+        async with self._binding_lifecycle(binding_id):
             row = await self._binding(binding_id)
             await self._stop_runtime(binding_id)
             stopped = await self._repository.deactivate(
@@ -331,7 +407,7 @@ class FeishuSupervisor:
 
     async def restart_binding(self, binding_id: str) -> BindingHealth:
         """Replace one binding only after its previous runtime fully exits."""
-        async with self._lifecycle_lock:
+        async with self._binding_lifecycle(binding_id):
             row = await self._binding(binding_id)
             if row["status"] != "active":
                 activated = await self._repository.activate(
@@ -344,14 +420,131 @@ class FeishuSupervisor:
             await self._stop_runtime(binding_id)
             return await self._start_row(await self._binding(binding_id))
 
+    async def rotate_binding_credentials(
+        self,
+        agent_id: str,
+        binding_id: str,
+        *,
+        owner_user_id: str,
+        app_id: str,
+        secret_ref: str,
+    ) -> dict[str, Any]:
+        """Persist and apply credentials under the binding lifecycle lock."""
+        async with self._binding_lifecycle(binding_id):
+            previous = await self._binding(binding_id)
+            if str(previous["agent_id"]) != agent_id or str(previous["owner_user_id"]) != owner_user_id:
+                raise BindingNotFoundError(binding_id)
+            updated = await self._repository.update_credentials(
+                agent_id,
+                binding_id,
+                owner_user_id=owner_user_id,
+                app_id=app_id,
+                secret_ref=secret_ref,
+            )
+            if updated is None:
+                raise BindingNotFoundError(binding_id)
+            try:
+                if previous["status"] == "active":
+                    await self._stop_runtime(binding_id)
+                    await self._start_row(await self._binding(binding_id))
+            except BaseException:
+                rolled_back = await self._repository.update_credentials(
+                    agent_id,
+                    binding_id,
+                    owner_user_id=owner_user_id,
+                    app_id=str(previous["app_id"]),
+                    secret_ref=str(previous["secret_ref"]),
+                )
+                if rolled_back is not None and previous["status"] == "active":
+                    try:
+                        await self._stop_runtime(binding_id)
+                        await self._start_row(await self._binding(binding_id))
+                    except BaseException as rollback_error:
+                        logger.error(
+                            "Failed to restore Feishu runtime after credential rotation rollback",
+                            extra={
+                                "binding_id": binding_id,
+                                "error_class": type(rollback_error).__name__,
+                            },
+                        )
+                raise
+            return previous
+
+    async def delete_binding(
+        self,
+        agent_id: str,
+        binding_id: str,
+        *,
+        owner_user_id: str,
+    ) -> dict[str, Any]:
+        """Quiesce and delete one binding in a single lifecycle critical section."""
+        from app.channels.feishu import has_published_attachment_cleanup_backlog
+
+        async with self._binding_lifecycle(binding_id) as lock_entry:
+            row = await self._binding(binding_id)
+            if str(row["agent_id"]) != agent_id or str(row["owner_user_id"]) != owner_user_id:
+                raise BindingNotFoundError(binding_id)
+            if await asyncio.to_thread(has_published_attachment_cleanup_backlog, binding_id):
+                raise BindingCleanupPendingError(binding_id)
+            was_running = binding_id in self._running
+            await self._stop_runtime(binding_id)
+            if await asyncio.to_thread(has_published_attachment_cleanup_backlog, binding_id):
+                # A final in-flight producer may have persisted work while the
+                # runtime was stopping. Restore desired-active recovery before
+                # returning a conflict so the retained row remains recoverable.
+                if was_running and row["status"] == "active":
+                    await self._start_row(row)
+                raise BindingCleanupPendingError(binding_id)
+            deleted = await self._repository.delete(
+                agent_id,
+                binding_id,
+                owner_user_id=owner_user_id,
+            )
+            if deleted is None:
+                raise BindingNotFoundError(binding_id)
+            self._health.pop(binding_id, None)
+            lock_entry.retired = True
+            return deleted
+
     async def load_active_bindings(self) -> None:
         """Start all desired-active bindings while isolating per-binding failures."""
+        self._ensure_cleanup_janitor()
         rows = await self._repository.list_active(
             supervisor_scope=SYSTEM_CHANNEL_SUPERVISOR_SCOPE,
         )
-        for row in rows:
-            async with self._lifecycle_lock:
-                await self._start_row(row)
+
+        async def start_row(row: dict[str, Any]) -> None:
+            binding_id = str(row["id"])
+            async with self._binding_lifecycle(binding_id):
+                try:
+                    current = await self._binding(binding_id)
+                except BindingNotFoundError:
+                    return
+                if current["status"] == "active":
+                    await self._start_row(current)
+
+        await asyncio.gather(*(start_row(row) for row in rows))
+
+    def _ensure_cleanup_janitor(self) -> None:
+        if self._cleanup_janitor_task is not None and not self._cleanup_janitor_task.done():
+            return
+        self._cleanup_janitor_task = asyncio.create_task(self._run_cleanup_janitor())
+
+    async def _run_cleanup_janitor(self) -> None:
+        """Recover attachment jobs independently of binding rows and secrets."""
+        from app.channels.feishu import (
+            FEISHU_ATTACHMENT_CLEANUP_RETRY_INTERVAL_SECONDS,
+            recover_all_published_attachment_cleanups,
+        )
+
+        while True:
+            try:
+                await recover_all_published_attachment_cleanups()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Published attachment cleanup janitor pass failed")
+            await asyncio.sleep(FEISHU_ATTACHMENT_CLEANUP_RETRY_INTERVAL_SECONDS)
 
     async def test_binding(self, binding_id: str) -> BindingHealth:
         """Test credentials and persist only a redacted health result."""
@@ -382,15 +575,28 @@ class FeishuSupervisor:
 
     async def shutdown(self) -> None:
         """Stop process-local instances while preserving desired DB status."""
-        async with self._lifecycle_lock:
-            for binding_id in list(self._running):
+        janitor_task = self._cleanup_janitor_task
+        self._cleanup_janitor_task = None
+        if janitor_task is not None:
+            janitor_task.cancel()
+            await asyncio.gather(janitor_task, return_exceptions=True)
+
+        async def stop_one(binding_id: str) -> None:
+            async with self._binding_lifecycle(binding_id):
                 try:
                     await self._stop_runtime(binding_id)
                 except Exception:
                     logger.exception("Failed to stop Feishu binding during shutdown", extra={"binding_id": binding_id})
 
+        await asyncio.gather(*(stop_one(binding_id) for binding_id in list(self._running)))
+        for binding_id, entry in list(self._binding_locks.items()):
+            entry.retired = True
+            if entry.users == 0 and self._binding_locks.get(binding_id) is entry:
+                self._binding_locks.pop(binding_id, None)
+
 
 __all__ = [
+    "BindingCleanupPendingError",
     "BindingHealth",
     "BindingNotFoundError",
     "FeishuSupervisor",
