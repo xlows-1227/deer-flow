@@ -117,6 +117,35 @@ async def test_start_reports_ready_before_attachment_recovery_finishes() -> None
 
 
 @pytest.mark.asyncio
+async def test_start_does_not_wait_for_unbounded_binding_index_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    session = _BlockingSession()
+    channel = _channel(session)
+    release_projection = threading.Event()
+
+    def blocked_projection(*_args, **_kwargs) -> tuple[bool, bool]:
+        release_projection.wait()
+        return False, False
+
+    monkeypatch.setattr(feishu_module, "_binding_cleanup_index_has_backlog", blocked_projection)
+    start_task = asyncio.create_task(channel.start())
+    try:
+        assert await asyncio.to_thread(session.started.wait, 0.2)
+        session.allow_ready.set()
+        await asyncio.wait_for(start_task, timeout=0.5)
+        assert channel.is_running is True
+    finally:
+        release_projection.set()
+        session.allow_ready.set()
+        if not start_task.done():
+            await start_task
+        await channel.stop()
+
+
+@pytest.mark.asyncio
 async def test_start_fails_when_websocket_reports_error_before_ready() -> None:
     channel = _channel(_FailingSession())
 

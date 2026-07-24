@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import multiprocessing
 import re
 import threading
 import time
@@ -56,19 +57,117 @@ FEISHU_ATTACHMENT_RECOVERY_MAX_CONCURRENCY = 4
 FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS = 10.0
 FEISHU_ATTACHMENT_DELETE_TIMEOUT_SECONDS = 2.0
 FEISHU_ATTACHMENT_CLAIM_LEASE_SECONDS = 15.0
+FEISHU_ATTACHMENT_CLEANUP_JOB_MAX_BYTES = 1024 * 1024
+FEISHU_ATTACHMENT_BACKLOG_SCAN_TIMEOUT_SECONDS = 2.0
+FEISHU_ATTACHMENT_BACKLOG_SCANNER_WORKERS = 2
+FEISHU_ATTACHMENT_BACKLOG_SCANNER_MAINTENANCE_SECONDS = 1.0
+FEISHU_ATTACHMENT_BACKLOG_SCANNER_RETRY_SECONDS = 0.1
+FEISHU_ATTACHMENT_BACKLOG_SCANNER_MAX_RETRY_SECONDS = 5.0
+FEISHU_ATTACHMENT_BACKLOG_SCANNER_READY_POLL_SECONDS = 0.05
+FEISHU_ATTACHMENT_BACKLOG_SCANNER_SHUTDOWN_SECONDS = 2.0
+FEISHU_ATTACHMENT_CURSOR_REPLACE_RETRY_SECONDS = 0.01
 
 _ACTIVE_ATTACHMENT_PRODUCERS: set[str] = set()
 _ACTIVE_ATTACHMENT_CLAIMS: set[str] = set()
+_ATTACHMENT_CLEANUP_SCAN_LOCK = threading.Lock()
+_ATTACHMENT_CLEANUP_READ_SLOTS = threading.BoundedSemaphore(2)
+_ATTACHMENT_CLEANUP_READ_STATE_LOCK = threading.Lock()
+_ATTACHMENT_CLEANUP_QUARANTINED_READS: dict[str, concurrent.futures.Future[_PublishedAttachmentCleanupJob]] = {}
+_ATTACHMENT_CLEANUP_MAX_QUARANTINED_READERS = 8
+_ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS = 0
 
 
-def _cleanup_store_generation_path(outbox_dir: Path) -> Path:
-    return outbox_dir / ".store-generation"
+def _replace_cleanup_state_with_deadline(
+    source: Path,
+    target: Path,
+    *,
+    deadline: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Retry transient Windows sharing violations without exceeding the caller's budget."""
+    initial_remaining = deadline - clock()
+    if initial_remaining <= 0:
+        raise TimeoutError("Cleanup cursor replacement deadline expired")
+    wall_deadline = time.monotonic() + initial_remaining
+    last_replace_error: PermissionError | None = None
+    while True:
+        remaining = min(
+            deadline - clock(),
+            wall_deadline - time.monotonic(),
+        )
+        if remaining <= 0:
+            if last_replace_error is not None:
+                raise last_replace_error
+            raise TimeoutError("Cleanup cursor replacement deadline expired")
+        try:
+            source.replace(target)
+            return
+        except PermissionError as exc:
+            last_replace_error = exc
+            remaining = min(
+                deadline - clock(),
+                wall_deadline - time.monotonic(),
+            )
+            if remaining <= 0:
+                raise
+            time.sleep(
+                min(
+                    FEISHU_ATTACHMENT_CURSOR_REPLACE_RETRY_SECONDS,
+                    remaining,
+                )
+            )
 
 
-def _read_cleanup_store_generation(outbox_dir: Path) -> str:
+def _cleanup_binding_generation_path(outbox_dir: Path, binding_id: str) -> Path:
+    binding_key = hashlib.sha256(binding_id.encode("utf-8")).hexdigest()[:24]
+    return outbox_dir / f".store-generation-{binding_key}"
+
+
+def _cleanup_binding_index_dir(outbox_dir: Path, binding_id: str) -> Path:
+    binding_key = hashlib.sha256(binding_id.encode("utf-8")).hexdigest()[:24]
+    return outbox_dir / ".binding-index" / binding_key
+
+
+def _write_cleanup_binding_index(outbox_dir: Path, job: _PublishedAttachmentCleanupJob) -> None:
+    index_dir = _cleanup_binding_index_dir(outbox_dir, job.binding_id)
+    index_dir.mkdir(parents=True, exist_ok=True)
+    target = index_dir / f"{job.job_id}.ref"
+    temp_path = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(f"{job.job_id}.json", encoding="utf-8")
+        temp_path.replace(target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _remove_cleanup_binding_index(outbox_dir: Path, binding_id: str, job_id: str) -> None:
+    (_cleanup_binding_index_dir(outbox_dir, binding_id) / f"{job_id}.ref").unlink(missing_ok=True)
+
+
+def _binding_cleanup_index_has_backlog(outbox_dir: Path, binding_id: str) -> tuple[bool, bool]:
+    """Read only one binding's durable index; unknown global corruption stays global."""
+    index_dir = _cleanup_binding_index_dir(outbox_dir, binding_id)
+    if not index_dir.exists():
+        return False, False
+    invalid = False
+    for index_path in index_dir.glob("*.ref"):
+        try:
+            filename = index_path.read_text(encoding="utf-8").strip()
+            if not filename or Path(filename).name != filename or not filename.endswith(".json"):
+                invalid = True
+                continue
+            if (outbox_dir / filename).exists():
+                return True, invalid
+            index_path.unlink(missing_ok=True)
+        except OSError:
+            invalid = True
+    return False, invalid
+
+
+def _read_cleanup_binding_generation(outbox_dir: Path, binding_id: str) -> str:
     if not outbox_dir.exists():
         return ""
-    generation_path = _cleanup_store_generation_path(outbox_dir)
+    generation_path = _cleanup_binding_generation_path(outbox_dir, binding_id)
     with FileLock(str(generation_path.with_suffix(".lock")), timeout=2.0):
         try:
             return generation_path.read_text(encoding="utf-8").strip()
@@ -76,8 +175,8 @@ def _read_cleanup_store_generation(outbox_dir: Path) -> str:
             return ""
 
 
-def _bump_cleanup_store_generation_locked(outbox_dir: Path) -> None:
-    generation_path = _cleanup_store_generation_path(outbox_dir)
+def _bump_cleanup_binding_generation_locked(outbox_dir: Path, binding_id: str) -> None:
+    generation_path = _cleanup_binding_generation_path(outbox_dir, binding_id)
     temp_path = generation_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     try:
         temp_path.write_text(uuid.uuid4().hex, encoding="utf-8")
@@ -189,26 +288,338 @@ class _PublishedAttachmentCleanupJob:
         )
 
 
-def has_published_attachment_cleanup_backlog(binding_id: str) -> bool:
-    """Return whether durable attachment work still references a binding."""
-    outbox_dir = get_paths().base_dir / "published-attachment-cleanup"
+def _scan_published_attachment_cleanup_backlog(outbox_value: str, binding_id: str) -> bool:
+    """Enumerate, stat, read and parse entirely inside a disposable worker."""
+    outbox_dir = Path(outbox_value)
     if not outbox_dir.exists():
         return False
-    for path in outbox_dir.glob("*.json"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
+    try:
+        paths = outbox_dir.glob("*.json")
+        for path in paths:
+            try:
+                job = FeishuChannel._read_attachment_cleanup_job(path)
+            except FileNotFoundError:
+                continue
+            except BaseException:
                 return True
-            job = _PublishedAttachmentCleanupJob.from_dict(payload)
-            if path.stem != job.job_id:
+            if path.stem != job.job_id or job.binding_id == binding_id:
                 return True
-            if job.binding_id == binding_id:
-                return True
-        except Exception:
-            # Invalid durable state must fail closed: deleting an arbitrary
-            # binding could otherwise remove the last recovery owner.
-            return True
+    except BaseException:
+        return True
     return False
+
+
+def _attachment_backlog_scanner_process(connection: Any) -> None:
+    """Serve whole-scan requests in a worker the parent may terminate."""
+    try:
+        connection.send(("ready",))
+        while True:
+            request = connection.recv()
+            if request == ("stop",):
+                return
+            if not isinstance(request, tuple) or len(request) != 4 or request[0] != "scan":
+                continue
+            _, request_id, outbox_value, binding_id = request
+            result = _scan_published_attachment_cleanup_backlog(str(outbox_value), str(binding_id))
+            connection.send(("ok", request_id, result))
+    except (EOFError, BrokenPipeError, OSError):
+        return
+    finally:
+        connection.close()
+
+
+@dataclass
+class _AttachmentBacklogScannerSlot:
+    process: Any
+    connection: Any
+
+
+class _AttachmentBacklogScannerStopping(RuntimeError):
+    """Internal signal used to unwind an in-flight replenish during shutdown."""
+
+
+class _PublishedAttachmentBacklogScanner:
+    """A prestarted pool keeping all filesystem work outside DELETE threads."""
+
+    def __init__(self, *, worker_count: int = FEISHU_ATTACHMENT_BACKLOG_SCANNER_WORKERS) -> None:
+        self._worker_count = worker_count
+        self._slots: list[_AttachmentBacklogScannerSlot] = []
+        self._lock = threading.Lock()
+        self._spawning = False
+        self._stopping = False
+        self._maintenance_stop = threading.Event()
+        self._replenish_needed = threading.Event()
+        self._maintenance_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Prestart workers and their non-request-path pool manager."""
+        with self._lock:
+            if self._maintenance_thread is not None and self._maintenance_thread.is_alive():
+                if self._stopping:
+                    raise RuntimeError("attachment backlog scanner is still stopping")
+                return
+            if self._stopping and any(self._process_liveness(slot) is not False for slot in self._slots):
+                raise RuntimeError("attachment backlog scanner is still stopping")
+            self._stopping = False
+            self._maintenance_stop.clear()
+        self._replenish()
+        with self._lock:
+            if self._maintenance_thread is not None and self._maintenance_thread.is_alive():
+                return
+            maintenance_thread = threading.Thread(
+                target=self._maintain,
+                name="feishu-attachment-backlog-scanner-manager",
+                daemon=True,
+            )
+            self._maintenance_thread = maintenance_thread
+            maintenance_thread.start()
+
+    def _replenish(self) -> None:
+        """Restore pool capacity without holding the request-facing lock while spawning."""
+        dead_slots: list[_AttachmentBacklogScannerSlot] = []
+        with self._lock:
+            if self._stopping or self._spawning:
+                return
+            live_slots: list[_AttachmentBacklogScannerSlot] = []
+            for slot in self._slots:
+                if self._process_liveness(slot) is True:
+                    live_slots.append(slot)
+                else:
+                    dead_slots.append(slot)
+            self._slots = live_slots
+            missing = self._worker_count - len(self._slots)
+            if missing <= 0:
+                return
+            self._spawning = True
+            start_index = len(self._slots)
+
+        new_slots: list[_AttachmentBacklogScannerSlot] = []
+        failure: BaseException | None = None
+        unconfirmed_slots: list[_AttachmentBacklogScannerSlot] = []
+        try:
+            for slot in dead_slots:
+                if not self._terminate_slot(slot):
+                    unconfirmed_slots.append(slot)
+            if unconfirmed_slots:
+                raise RuntimeError("attachment backlog scanner child worker did not stop")
+            context = multiprocessing.get_context("spawn")
+            for offset in range(missing):
+                parent, child = context.Pipe(duplex=True)
+                process = context.Process(
+                    target=_attachment_backlog_scanner_process,
+                    args=(child,),
+                    name=f"feishu-attachment-backlog-scanner-{start_index + offset}",
+                    daemon=True,
+                )
+                slot = _AttachmentBacklogScannerSlot(process=process, connection=parent)
+                try:
+                    process.start()
+                except BaseException:
+                    child.close()
+                    if self._process_liveness(slot) is not False:
+                        new_slots.append(slot)
+                    else:
+                        parent.close()
+                    raise
+                child.close()
+                new_slots.append(slot)
+                if self._maintenance_stop.is_set():
+                    raise _AttachmentBacklogScannerStopping
+                if not self._wait_for_ready(parent):
+                    raise RuntimeError("attachment backlog scanner failed to become ready")
+        except BaseException as exc:
+            failure = exc
+
+        with self._lock:
+            publish_slots = failure is None and not self._stopping
+            if publish_slots:
+                self._slots.extend(new_slots)
+                new_slots = []
+            self._spawning = False
+        stubborn_slots = list(unconfirmed_slots)
+        for slot in new_slots:
+            if not self._terminate_slot(slot):
+                stubborn_slots.append(slot)
+        if stubborn_slots:
+            with self._lock:
+                self._retain_unconfirmed_slots(stubborn_slots)
+            if failure is None:
+                failure = RuntimeError("attachment backlog scanner child worker did not stop")
+        if failure is not None:
+            raise failure
+
+    def _wait_for_ready(self, connection: Any) -> bool:
+        """Wait in stop-aware slices so shutdown can drain unpublished children."""
+        deadline = time.monotonic() + FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS
+        while not self._maintenance_stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if connection.poll(min(FEISHU_ATTACHMENT_BACKLOG_SCANNER_READY_POLL_SECONDS, remaining)):
+                return connection.recv() == ("ready",)
+        raise _AttachmentBacklogScannerStopping
+
+    def _maintain(self) -> None:
+        """Replenish failed slots with bounded backoff outside request threads."""
+        retry_delay = FEISHU_ATTACHMENT_BACKLOG_SCANNER_RETRY_SECONDS
+        try:
+            while not self._maintenance_stop.is_set():
+                self._replenish_needed.wait(FEISHU_ATTACHMENT_BACKLOG_SCANNER_MAINTENANCE_SECONDS)
+                self._replenish_needed.clear()
+                if self._maintenance_stop.is_set():
+                    return
+                try:
+                    self._replenish()
+                except _AttachmentBacklogScannerStopping:
+                    return
+                except Exception:
+                    logger.exception("Published attachment backlog scanner replenishment failed")
+                    if self._maintenance_stop.wait(retry_delay):
+                        return
+                    retry_delay = min(
+                        retry_delay * 2,
+                        FEISHU_ATTACHMENT_BACKLOG_SCANNER_MAX_RETRY_SECONDS,
+                    )
+                    self._replenish_needed.set()
+                else:
+                    retry_delay = FEISHU_ATTACHMENT_BACKLOG_SCANNER_RETRY_SECONDS
+        finally:
+            with self._lock:
+                if self._maintenance_thread is threading.current_thread():
+                    self._maintenance_thread = None
+
+    @staticmethod
+    def _process_liveness(slot: _AttachmentBacklogScannerSlot) -> bool | None:
+        """Return process liveness, treating API failure as unknown."""
+        try:
+            return bool(slot.process.is_alive())
+        except Exception:
+            logger.warning("Published attachment scanner child liveness check failed", exc_info=True)
+            return None
+
+    def _retain_unconfirmed_slots(self, slots: list[_AttachmentBacklogScannerSlot]) -> None:
+        """Retain ownership and fence restart for every unconfirmed child."""
+        for slot in slots:
+            if all(existing is not slot for existing in self._slots):
+                self._slots.append(slot)
+        self._stopping = True
+        self._maintenance_stop.set()
+
+    @classmethod
+    def _terminate_slot(cls, slot: _AttachmentBacklogScannerSlot) -> bool:
+        """Best-effort every process API and return only confirmed exit."""
+        try:
+            slot.connection.close()
+        except Exception:
+            logger.warning("Published attachment scanner connection close failed", exc_info=True)
+        if cls._process_liveness(slot) is not False:
+            try:
+                slot.process.terminate()
+            except Exception:
+                logger.warning("Published attachment scanner child terminate failed", exc_info=True)
+        try:
+            slot.process.join(timeout=0.5)
+        except Exception:
+            logger.warning("Published attachment scanner child join failed", exc_info=True)
+        if cls._process_liveness(slot) is not False:
+            try:
+                slot.process.kill()
+            except Exception:
+                logger.warning("Published attachment scanner child kill failed", exc_info=True)
+            try:
+                slot.process.join(timeout=0.5)
+            except Exception:
+                logger.warning("Published attachment scanner child post-kill join failed", exc_info=True)
+        return cls._process_liveness(slot) is False
+
+    def _fail_scan_slot(self, slot: _AttachmentBacklogScannerSlot) -> bool:
+        """Fail closed and retain ownership unless child exit is confirmed."""
+        if not self._terminate_slot(slot):
+            self._retain_unconfirmed_slots([slot])
+        return True
+
+    def scan(self, binding_id: str, *, timeout: float = FEISHU_ATTACHMENT_BACKLOG_SCAN_TIMEOUT_SECONDS) -> bool:
+        """Return fail-closed by a deadline; never start a worker in this call."""
+        if timeout <= 0 or self._stopping or not self._lock.acquire(blocking=False):
+            return True
+        try:
+            while self._slots:
+                slot = self._slots.pop(0)
+                liveness = self._process_liveness(slot)
+                if liveness is True:
+                    break
+                return self._fail_scan_slot(slot)
+            else:
+                return True
+            request_id = uuid.uuid4().hex
+            try:
+                slot.connection.send(
+                    (
+                        "scan",
+                        request_id,
+                        str(get_paths().base_dir / "published-attachment-cleanup"),
+                        binding_id,
+                    )
+                )
+                if not slot.connection.poll(timeout):
+                    return self._fail_scan_slot(slot)
+                response = slot.connection.recv()
+            except Exception:
+                logger.warning("Published attachment scanner request failed", exc_info=True)
+                return self._fail_scan_slot(slot)
+            if not isinstance(response, tuple) or response[:2] != ("ok", request_id) or len(response) != 3:
+                return self._fail_scan_slot(slot)
+            self._slots.append(slot)
+            return bool(response[2])
+        finally:
+            if len(self._slots) < self._worker_count:
+                self._replenish_needed.set()
+            self._lock.release()
+
+    def stop(self) -> None:
+        """Terminate all prestarted scanners during gateway shutdown."""
+        self._maintenance_stop.set()
+        self._replenish_needed.set()
+        with self._lock:
+            self._stopping = True
+            maintenance_thread = self._maintenance_thread
+        if maintenance_thread is not None and maintenance_thread is not threading.current_thread():
+            maintenance_thread.join(timeout=FEISHU_ATTACHMENT_BACKLOG_SCANNER_SHUTDOWN_SECONDS)
+        with self._lock:
+            slots = self._slots
+            stubborn_slots: list[_AttachmentBacklogScannerSlot] = []
+            for slot in slots:
+                try:
+                    slot.connection.send(("stop",))
+                except Exception:
+                    logger.warning("Published attachment scanner stop request failed", exc_info=True)
+                if not self._terminate_slot(slot):
+                    stubborn_slots.append(slot)
+            self._slots = stubborn_slots
+            if stubborn_slots:
+                self._retain_unconfirmed_slots(stubborn_slots)
+        if maintenance_thread is not None and maintenance_thread.is_alive():
+            raise RuntimeError("attachment backlog scanner manager did not stop")
+        if stubborn_slots:
+            raise RuntimeError("attachment backlog scanner child worker did not stop")
+
+
+_published_attachment_backlog_scanner = _PublishedAttachmentBacklogScanner()
+
+
+def start_published_attachment_backlog_scanner() -> None:
+    """Prepare bounded DELETE scanning before request admission."""
+    _published_attachment_backlog_scanner.start()
+
+
+def stop_published_attachment_backlog_scanner() -> None:
+    """Stop the process-owned DELETE scanning pool."""
+    _published_attachment_backlog_scanner.stop()
+
+
+def has_published_attachment_cleanup_backlog(binding_id: str) -> bool:
+    """Fail closed after one deadline-bound request to a prestarted worker."""
+    return _published_attachment_backlog_scanner.scan(binding_id)
 
 
 def _published_attachment_cleanup_binding_ids() -> set[str]:
@@ -282,24 +693,199 @@ def _select_cleanup_jobs(
 def _scan_all_cleanup_jobs(
     *,
     deadline: float,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[list[_PublishedAttachmentCleanupJob], bool, bool]:
     """Parse every candidate at most once until the global pass deadline."""
     outbox_dir = get_paths().base_dir / "published-attachment-cleanup"
     if not outbox_dir.exists():
         return [], False, False
-    jobs: list[_PublishedAttachmentCleanupJob] = []
-    invalid = False
-    for path in outbox_dir.glob("*.json"):
-        if time.monotonic() >= deadline:
-            return jobs, invalid, True
+    if not _ATTACHMENT_CLEANUP_SCAN_LOCK.acquire(blocking=False):
+        return [], False, True
+    try:
+        paths = sorted(outbox_dir.glob("*.json"), key=lambda path: path.name)
+        if not paths:
+            return [], False, False
+        cursor_path = outbox_dir / ".discovery-cursor-global"
+        cursor_lock = FileLock(str(cursor_path.with_suffix(".lock")), timeout=2.0)
+        with cursor_lock:
+            cursor = cursor_path.read_text(encoding="utf-8").strip() if cursor_path.exists() else ""
+            start_index = next((index for index, path in enumerate(paths) if path.name > cursor), 0)
+            ordered_paths = paths[start_index:] + paths[:start_index]
+            jobs: list[_PublishedAttachmentCleanupJob] = []
+            invalid = False
+            last_scanned = ""
+            timed_out = False
+            for path in ordered_paths:
+                if clock() >= deadline:
+                    timed_out = True
+                    break
+                last_scanned = path.name
+                temp_path = cursor_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+                try:
+                    # Persist discovery progress before parsing. A bounded pair
+                    # of daemon readers isolates uninterruptible filesystem I/O
+                    # without accumulating an unbounded worker backlog.
+                    temp_path.write_text(last_scanned, encoding="utf-8")
+                    _replace_cleanup_state_with_deadline(
+                        temp_path,
+                        cursor_path,
+                        deadline=deadline,
+                        clock=clock,
+                    )
+                finally:
+                    temp_path.unlink(missing_ok=True)
+                try:
+                    job = _read_cleanup_job_with_deadline(
+                        path,
+                        timeout=max(0.0, deadline - clock()),
+                    )
+                    jobs.append(job)
+                    _write_cleanup_binding_index(outbox_dir, job)
+                except TimeoutError:
+                    timed_out = True
+                    continue
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    invalid = True
+                    logger.error("[Feishu] invalid cleanup job cannot be recovered by the global janitor: %s", path, exc_info=True)
+            return jobs, invalid, timed_out
+    finally:
+        _ATTACHMENT_CLEANUP_SCAN_LOCK.release()
+
+
+def _attachment_cleanup_reader_process(path_value: str, connection: Any) -> None:
+    """Read one untrusted job in a process the parent can terminate."""
+    try:
+        job = FeishuChannel._read_attachment_cleanup_job(Path(path_value))
+        connection.send(("ok", job.to_dict()))
+    except BaseException as exc:
+        connection.send(("error", type(exc).__name__, str(exc)))
+    finally:
+        connection.close()
+
+
+def _read_attachment_cleanup_job_isolated(
+    path: Path,
+    *,
+    timeout: float,
+) -> _PublishedAttachmentCleanupJob:
+    """Parse one job in a killable child so a bad filesystem read cannot linger."""
+    if timeout <= 0:
+        raise TimeoutError("attachment cleanup job read deadline exceeded")
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_attachment_cleanup_reader_process,
+        args=(str(path), send),
+        name="feishu-cleanup-job-read-isolated",
+        daemon=True,
+    )
+    started = False
+    try:
+        process.start()
+        started = True
+        send.close()
+        if not receive.poll(timeout):
+            raise TimeoutError("attachment cleanup job isolated read deadline exceeded")
+        payload = receive.recv()
+        process.join(timeout=0.5)
+        if not isinstance(payload, tuple) or not payload:
+            raise ValueError("attachment cleanup job reader returned invalid state")
+        if payload[0] == "ok" and len(payload) == 2 and isinstance(payload[1], dict):
+            return _PublishedAttachmentCleanupJob.from_dict(payload[1])
+        if payload[0] == "error" and len(payload) == 3:
+            if payload[1] == "FileNotFoundError":
+                raise FileNotFoundError(payload[2])
+            raise ValueError(f"attachment cleanup job reader failed: {payload[1]}: {payload[2]}")
+        raise ValueError("attachment cleanup job reader returned invalid state")
+    finally:
+        receive.close()
+        send.close()
+        if started and process.is_alive():
+            process.terminate()
+        if started:
+            process.join(timeout=0.5)
+        if started and process.is_alive():
+            process.kill()
+            process.join(timeout=0.5)
+
+
+def _read_cleanup_job_with_deadline(
+    path: Path,
+    *,
+    timeout: float,
+) -> _PublishedAttachmentCleanupJob:
+    """Bound one parse with eight thread quarantines, then killable isolation."""
+    global _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS
+
+    path_key = str(path.resolve(strict=False))
+    with _ATTACHMENT_CLEANUP_READ_STATE_LOCK:
+        for stale_key, future in list(_ATTACHMENT_CLEANUP_QUARANTINED_READS.items()):
+            if future.done():
+                _ATTACHMENT_CLEANUP_QUARANTINED_READS.pop(stale_key, None)
+        quarantined = _ATTACHMENT_CLEANUP_QUARANTINED_READS.get(path_key)
+        if quarantined is not None:
+            if not quarantined.done():
+                raise TimeoutError("attachment cleanup job read is quarantined")
+            _ATTACHMENT_CLEANUP_QUARANTINED_READS.pop(path_key, None)
+            return quarantined.result()
+        use_isolated_reader = len(_ATTACHMENT_CLEANUP_QUARANTINED_READS) + _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS >= _ATTACHMENT_CLEANUP_MAX_QUARANTINED_READERS
+        if not use_isolated_reader:
+            _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS += 1
+
+    if timeout <= 0 or not _ATTACHMENT_CLEANUP_READ_SLOTS.acquire(blocking=False):
+        if not use_isolated_reader:
+            with _ATTACHMENT_CLEANUP_READ_STATE_LOCK:
+                _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS -= 1
+        raise TimeoutError("attachment cleanup job read deadline exceeded")
+
+    if use_isolated_reader:
         try:
-            jobs.append(FeishuChannel._read_attachment_cleanup_job(path))
-        except FileNotFoundError:
-            continue
-        except Exception:
-            invalid = True
-            logger.error("[Feishu] invalid cleanup job cannot be recovered by the global janitor: %s", path, exc_info=True)
-    return jobs, invalid, False
+            return _read_attachment_cleanup_job_isolated(path, timeout=timeout)
+        finally:
+            _ATTACHMENT_CLEANUP_READ_SLOTS.release()
+
+    result: concurrent.futures.Future[_PublishedAttachmentCleanupJob] = concurrent.futures.Future()
+    permit_lock = threading.Lock()
+    permit_held = True
+
+    def release_permit() -> None:
+        nonlocal permit_held
+        with permit_lock:
+            if not permit_held:
+                return
+            permit_held = False
+            _ATTACHMENT_CLEANUP_READ_SLOTS.release()
+
+    def read() -> None:
+        try:
+            result.set_result(FeishuChannel._read_attachment_cleanup_job(path))
+        except BaseException as exc:
+            result.set_exception(exc)
+        finally:
+            release_permit()
+
+    threading.Thread(
+        target=read,
+        name="feishu-cleanup-job-read",
+        daemon=True,
+    ).start()
+    try:
+        job = result.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        with _ATTACHMENT_CLEANUP_READ_STATE_LOCK:
+            _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS -= 1
+            _ATTACHMENT_CLEANUP_QUARANTINED_READS[path_key] = result
+        release_permit()
+        raise TimeoutError("attachment cleanup job read deadline exceeded") from exc
+    except BaseException:
+        with _ATTACHMENT_CLEANUP_READ_STATE_LOCK:
+            _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS -= 1
+        raise
+    with _ATTACHMENT_CLEANUP_READ_STATE_LOCK:
+        _ATTACHMENT_CLEANUP_THREAD_READ_RESERVATIONS -= 1
+    return job
 
 
 async def recover_all_published_attachment_cleanups() -> int:
@@ -843,6 +1429,7 @@ class FeishuChannel(Channel):
         self._attachment_cleanup_state_lock = threading.Lock()
         self._attachment_cleanup_generation = 0
         self._attachment_cleanup_unhealthy = False
+        self._attachment_cleanup_store_generation: str | None = None
 
     def _new_published_http_client(self) -> httpx.AsyncClient:
         """Build the bounded client used for authenticated resource streaming."""
@@ -866,9 +1453,11 @@ class FeishuChannel(Channel):
 
     @property
     def attachment_cleanup_healthy(self) -> bool:
-        """Return whether this binding has no known durable cleanup backlog."""
+        """Return the last asynchronously projected durable cleanup health."""
         with self._attachment_cleanup_state_lock:
-            return not self._attachment_cleanup_unhealthy
+            locally_healthy = not self._attachment_cleanup_unhealthy
+            projected = self._attachment_cleanup_store_generation is not None
+        return locally_healthy and (projected or not self.binding_id)
 
     def _mark_attachment_cleanup_unhealthy(self) -> int:
         """Record a new dirty generation and return it."""
@@ -949,11 +1538,10 @@ class FeishuChannel(Channel):
             raise RuntimeError("Dynamic Feishu binding requires durable event deduplication")
 
         if self.binding_id:
-            # Startup only projects the local outbox state. Network/sandbox
-            # recovery begins after the WebSocket ready handshake so one
-            # binding's backlog cannot delay another binding's lifecycle.
-            pending_jobs = await asyncio.to_thread(self._read_attachment_cleanup_jobs)
-            if pending_jobs:
+            # Startup projects cleanup health through the prestarted killable
+            # scanner.  Direct binding-index I/O remains available to runtime
+            # refreshes, but cannot hold request admission indefinitely.
+            if not await self._refresh_attachment_cleanup_health_for_startup():
                 self._mark_attachment_cleanup_unhealthy()
 
         self._api_client = lark.Client.builder().app_id(app_id).app_secret(app_secret).domain(domain).build()
@@ -1407,17 +1995,29 @@ class FeishuChannel(Channel):
     def _write_attachment_cleanup_job(path: Path, job: _PublishedAttachmentCleanupJob) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        generation_path = _cleanup_store_generation_path(path.parent)
+        generation_path = _cleanup_binding_generation_path(path.parent, job.binding_id)
         with FileLock(str(generation_path.with_suffix(".lock")), timeout=2.0):
             try:
                 temp_path.write_text(json.dumps(job.to_dict(), ensure_ascii=False, sort_keys=True), encoding="utf-8")
-                temp_path.replace(path)
-                _bump_cleanup_store_generation_locked(path.parent)
+                for attempt in range(5):
+                    try:
+                        temp_path.replace(path)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        # Windows denies replacement while a concurrent
+                        # bounded discovery reader still owns the file handle.
+                        time.sleep(0.01)
+                _bump_cleanup_binding_generation_locked(path.parent, job.binding_id)
+                _write_cleanup_binding_index(path.parent, job)
             finally:
                 temp_path.unlink(missing_ok=True)
 
     @staticmethod
     def _read_attachment_cleanup_job(path: Path) -> _PublishedAttachmentCleanupJob:
+        if path.stat().st_size > FEISHU_ATTACHMENT_CLEANUP_JOB_MAX_BYTES:
+            raise ValueError("attachment cleanup job exceeds size limit")
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("attachment cleanup job is not an object")
@@ -1574,10 +2174,11 @@ class FeishuChannel(Channel):
                 current = self._read_attachment_cleanup_job(path)
                 if current.phase != "deleting" or current.claim_token != job.claim_token:
                     return False
-                generation_path = _cleanup_store_generation_path(path.parent)
+                generation_path = _cleanup_binding_generation_path(path.parent, current.binding_id)
                 with FileLock(str(generation_path.with_suffix(".lock")), timeout=2.0):
                     path.unlink(missing_ok=True)
-                    _bump_cleanup_store_generation_locked(path.parent)
+                    _remove_cleanup_binding_index(path.parent, current.binding_id, current.job_id)
+                    _bump_cleanup_binding_generation_locked(path.parent, current.binding_id)
             return True
 
         completed = await asyncio.to_thread(remove)
@@ -1585,41 +2186,38 @@ class FeishuChannel(Channel):
             _ACTIVE_ATTACHMENT_CLAIMS.discard(job.claim_token)
         return completed
 
-    def _read_attachment_cleanup_jobs(self) -> list[_PublishedAttachmentCleanupJob]:
-        outbox_dir = self._attachment_cleanup_outbox_dir()
-        if not outbox_dir.exists():
-            return []
-        jobs: list[_PublishedAttachmentCleanupJob] = []
-        for path in outbox_dir.glob("*.json"):
-            try:
-                job = self._read_attachment_cleanup_job(path)
-                if job.binding_id == (self.binding_id or ""):
-                    jobs.append(job)
-            except FileNotFoundError:
-                # Another fenced recovery worker completed this job after the
-                # directory snapshot; disappearance is successful progress.
-                continue
-            except Exception:
-                self._mark_attachment_cleanup_unhealthy()
-                logger.error("[Feishu] invalid durable attachment cleanup job: %s", path, exc_info=True)
-        return jobs
-
     async def _refresh_attachment_cleanup_health(self) -> bool:
         generation = self._attachment_cleanup_generation_snapshot()
         outbox_dir = self._attachment_cleanup_outbox_dir()
-        store_generation = await asyncio.to_thread(
-            _read_cleanup_store_generation,
+        backlog, invalid = await asyncio.to_thread(
+            _binding_cleanup_index_has_backlog,
             outbox_dir,
+            self.binding_id or "",
         )
-        jobs = await asyncio.to_thread(self._read_attachment_cleanup_jobs)
-        store_stable = store_generation == await asyncio.to_thread(
-            _read_cleanup_store_generation,
-            outbox_dir,
+        healthy = not backlog and not invalid
+        projected = self._commit_attachment_cleanup_health(generation, healthy=healthy)
+        if projected:
+            stable_generation = await asyncio.to_thread(
+                _read_cleanup_binding_generation,
+                outbox_dir,
+                self.binding_id or "",
+            )
+            with self._attachment_cleanup_state_lock:
+                if self._attachment_cleanup_generation == generation:
+                    self._attachment_cleanup_store_generation = stable_generation
+                else:
+                    self._attachment_cleanup_unhealthy = True
+                    projected = False
+        return projected
+
+    async def _refresh_attachment_cleanup_health_for_startup(self) -> bool:
+        """Project startup cleanup health through the deadline-bound scanner pool."""
+        generation = self._attachment_cleanup_generation_snapshot()
+        backlog = await asyncio.to_thread(
+            has_published_attachment_cleanup_backlog,
+            self.binding_id or "",
         )
-        return self._commit_attachment_cleanup_health(
-            generation,
-            healthy=not jobs and store_stable,
-        )
+        return self._commit_attachment_cleanup_health(generation, healthy=not backlog)
 
     async def _acquire_published_sandbox(
         self,
@@ -1942,24 +2540,32 @@ class FeishuChannel(Channel):
         try:
             store_generation = await asyncio.wait_for(
                 asyncio.to_thread(
-                    _read_cleanup_store_generation,
+                    _read_cleanup_binding_generation,
                     outbox_dir,
+                    self.binding_id or "",
                 ),
                 timeout=max(0.0, recovery_deadline - loop.time()),
             )
-            jobs = await asyncio.wait_for(
-                asyncio.to_thread(self._read_attachment_cleanup_jobs),
+            scanned_jobs, invalid, discovery_timed_out = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _scan_all_cleanup_jobs,
+                    deadline=time.monotonic() + max(0.0, recovery_deadline - loop.time()),
+                ),
                 timeout=max(0.0, recovery_deadline - loop.time()),
             )
+            jobs = [job for job in scanned_jobs if job.binding_id == (self.binding_id or "")]
         except TimeoutError:
             self._mark_attachment_cleanup_unhealthy()
             logger.error("[Feishu] attachment cleanup discovery exceeded the recovery deadline")
             return 0
+        if invalid or discovery_timed_out:
+            self._mark_attachment_cleanup_unhealthy()
         try:
             store_stable = store_generation == await asyncio.wait_for(
                 asyncio.to_thread(
-                    _read_cleanup_store_generation,
+                    _read_cleanup_binding_generation,
                     outbox_dir,
+                    self.binding_id or "",
                 ),
                 timeout=max(0.0, recovery_deadline - loop.time()),
             )
@@ -1968,10 +2574,7 @@ class FeishuChannel(Channel):
             logger.error("[Feishu] attachment cleanup generation check exceeded the recovery deadline")
             return 0
         if not jobs:
-            self._commit_attachment_cleanup_health(
-                generation,
-                healthy=store_stable,
-            )
+            await self._refresh_attachment_cleanup_health()
             return 0
 
         try:

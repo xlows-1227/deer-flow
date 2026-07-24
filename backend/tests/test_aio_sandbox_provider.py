@@ -2,7 +2,10 @@
 
 import asyncio
 import importlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -54,6 +57,226 @@ def _make_provider(tmp_path):
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
     return provider
+
+
+def _make_lifecycle_provider(aio_mod: Any, backend: Any) -> Any:
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"replicas": 3}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._thread_owners = {}
+    provider._thread_locks = {}
+    provider._last_activity = {}
+    provider._sandbox_use_versions = {}
+    provider._late_create_cleanup_tasks = set()
+    provider._backend_create_operations = {}
+    provider._instance_id = aio_mod.uuid.uuid4().hex
+    provider._sandbox_lifecycle_paths = {}
+    provider._warm_pool = {}
+    provider._shutdown_called = False
+    provider._idle_checker_stop = aio_mod.threading.Event()
+    provider._idle_checker_thread = None
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = backend
+    return provider
+
+
+def test_periodic_reconcile_never_adopts_or_destroys_another_live_provider_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    info = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-live-owner",
+        sandbox_url="http://sandbox-live-owner",
+    )
+    backend = SimpleNamespace(list_running=lambda: [info], destroy=MagicMock())
+    owner = _make_lifecycle_provider(aio_mod, backend)
+    observer = _make_lifecycle_provider(aio_mod, backend)
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / "thread-live-owner" / f".{info.sandbox_id}.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": info.sandbox_id,
+                "thread_id": "thread-live-owner",
+                "owner_user_id": "owner-a",
+                "owner_instance_id": owner._instance_id,
+                "operation_token": "active-owner",
+                "generation": 1,
+                "state": "active",
+                "lease_expires_at": aio_mod.time.time() + 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observer._reconcile_orphans()
+    observer._cleanup_idle_sandboxes(0.0001)
+
+    assert observer._warm_pool == {}
+    backend.destroy.assert_not_called()
+    assert lifecycle_path.exists()
+
+
+def test_explicit_discovery_refuses_live_cross_provider_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    thread_id = "thread-live-discovery-owner"
+    sandbox_id = aio_mod.AioSandboxProvider._deterministic_sandbox_id(f"owner-a\0{thread_id}")
+    info = aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=f"http://{sandbox_id}")
+    backend = SimpleNamespace(discover=MagicMock(return_value=info), destroy=MagicMock())
+    owner = _make_lifecycle_provider(aio_mod, backend)
+    observer = _make_lifecycle_provider(aio_mod, backend)
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / thread_id / f".{sandbox_id}.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": sandbox_id,
+                "thread_id": thread_id,
+                "owner_user_id": "owner-a",
+                "owner_instance_id": owner._instance_id,
+                "operation_token": "live-owner",
+                "generation": 3,
+                "state": "active",
+                "lease_expires_at": aio_mod.time.time() + 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="owned by another live provider"):
+        observer._discover_or_create_with_lock(thread_id, sandbox_id, user_id="owner-a")
+
+    state = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    assert state["owner_instance_id"] == owner._instance_id
+    assert observer.get(sandbox_id) is None
+    backend.destroy.assert_not_called()
+
+
+def test_explicit_discovery_can_adopt_expired_cross_provider_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    thread_id = "thread-expired-discovery-owner"
+    sandbox_id = aio_mod.AioSandboxProvider._deterministic_sandbox_id(f"owner-a\0{thread_id}")
+    info = aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=f"http://{sandbox_id}")
+    backend = SimpleNamespace(discover=MagicMock(return_value=info), destroy=MagicMock())
+    observer = _make_lifecycle_provider(aio_mod, backend)
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / thread_id / f".{sandbox_id}.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": sandbox_id,
+                "thread_id": thread_id,
+                "owner_user_id": "owner-a",
+                "owner_instance_id": "expired-owner",
+                "operation_token": "expired-owner-token",
+                "generation": 4,
+                "state": "active",
+                "lease_expires_at": aio_mod.time.time() - 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert observer._discover_or_create_with_lock(thread_id, sandbox_id, user_id="owner-a") == sandbox_id
+    state = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    assert state["owner_instance_id"] == observer._instance_id
+    assert state["generation"] == 5
+
+
+def test_reconcile_reclaims_sandbox_from_expired_creating_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    info = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-dead-creator",
+        sandbox_url="http://sandbox-dead-creator",
+    )
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / "thread-dead-creator" / f".{info.sandbox_id}.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": info.sandbox_id,
+                "thread_id": "thread-dead-creator",
+                "owner_user_id": "owner-a",
+                "owner_instance_id": "dead-provider",
+                "operation_token": "dead-create",
+                "generation": 1,
+                "state": "creating",
+                "created_at": aio_mod.time.time() - 120,
+                "lease_expires_at": aio_mod.time.time() - 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = SimpleNamespace(list_running=lambda: [info], destroy=MagicMock())
+    observer = _make_lifecycle_provider(aio_mod, backend)
+
+    observer._reconcile_orphans()
+
+    backend.destroy.assert_called_once_with(info)
+    assert not lifecycle_path.exists()
+    assert observer._warm_pool == {}
+
+
+def test_idle_cleanup_cannot_destroy_sandbox_after_explicit_owner_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    info = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-transferred",
+        sandbox_url="http://sandbox-transferred",
+    )
+    backend = SimpleNamespace(list_running=lambda: [info], destroy=MagicMock())
+    old_owner = _make_lifecycle_provider(aio_mod, backend)
+    new_owner = _make_lifecycle_provider(aio_mod, backend)
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / "thread-transferred" / f".{info.sandbox_id}.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": info.sandbox_id,
+                "thread_id": "thread-transferred",
+                "owner_user_id": "owner-a",
+                "owner_instance_id": new_owner._instance_id,
+                "operation_token": "new-owner",
+                "generation": 2,
+                "state": "active",
+                "lease_expires_at": aio_mod.time.time() + 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_owner._sandbox_lifecycle_paths[info.sandbox_id] = lifecycle_path
+    old_owner._sandboxes[info.sandbox_id] = aio_mod.AioSandbox(
+        id=info.sandbox_id,
+        base_url=info.sandbox_url,
+    )
+    old_owner._sandbox_infos[info.sandbox_id] = info
+    old_owner._thread_sandboxes["thread-transferred"] = info.sandbox_id
+    old_owner._last_activity[info.sandbox_id] = 0
+
+    old_owner._cleanup_idle_sandboxes(0.001)
+
+    backend.destroy.assert_not_called()
+    assert old_owner._sandboxes == {}
+    assert lifecycle_path.exists()
 
 
 def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
@@ -410,7 +633,7 @@ async def test_cancelled_async_create_destroys_backend_capacity_that_arrives_lat
         sandbox_url="http://sandbox-late-create",
     )
 
-    def create(_thread_id, _sandbox_id, *, extra_mounts=None):
+    def create(_thread_id: str | None, _sandbox_id: str, *, extra_mounts: object | None = None) -> Any:
         assert extra_mounts is None
         create_started.set()
         release_create.wait()
@@ -432,11 +655,13 @@ async def test_cancelled_async_create_destroys_backend_capacity_that_arrives_lat
             user_id="owner-a",
         )
     )
-    assert await asyncio.to_thread(create_started.wait, 1.0)
-    creation.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await creation
-    release_create.set()
+    try:
+        assert await asyncio.to_thread(create_started.wait, 1.0)
+        creation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await creation
+    finally:
+        release_create.set()
 
     await asyncio.wait_for(destroyed.wait(), timeout=1.0)
     assert provider._sandboxes == {}
@@ -502,10 +727,331 @@ async def test_cancelled_old_create_does_not_destroy_successor_adopted_sandbox(
 
 
 @pytest.mark.anyio
+async def test_cancelled_create_does_not_destroy_sandbox_adopted_by_second_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", lambda *_args, **_kwargs: asyncio.sleep(0, result=True))
+    create_started = aio_mod.threading.Event()
+    release_create = aio_mod.threading.Event()
+    published: dict[str, object] = {}
+    thread_id = "thread-cross-provider-adoption"
+    sandbox_id = aio_mod.AioSandboxProvider._deterministic_sandbox_id(f"owner-a\0{thread_id}")
+    info = aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=f"http://{sandbox_id}")
+
+    def create(_thread_id: str | None, _sandbox_id: str, *, extra_mounts: object | None = None) -> Any:
+        published["info"] = info
+        create_started.set()
+        release_create.wait()
+        return info
+
+    backend = SimpleNamespace(
+        create=create,
+        discover=lambda requested_id: published.get("info") if requested_id == sandbox_id else None,
+        destroy=MagicMock(),
+    )
+    provider_a = _make_lifecycle_provider(aio_mod, backend)
+    provider_b = _make_lifecycle_provider(aio_mod, backend)
+    monkeypatch.setattr(provider_a, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider_b, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+
+    cancelled: asyncio.Task[str] | None = None
+    adoption: asyncio.Task[str] | None = None
+    try:
+        cancelled = asyncio.create_task(provider_a.acquire_async(thread_id, user_id="owner-a"))
+        assert await asyncio.to_thread(create_started.wait, 5.0)
+        assert published.get("info") is info
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        adoption = asyncio.create_task(provider_b.acquire_async(thread_id, user_id="owner-a"))
+        adopted_id = await asyncio.wait_for(asyncio.shield(adoption), timeout=5.0)
+        assert adopted_id == sandbox_id
+        assert provider_b.get(sandbox_id) is not None
+    finally:
+        # Never strand the backend worker if an assertion or watchdog fails.
+        release_create.set()
+        for task in (cancelled, adoption):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        cleanup_tasks = tuple(provider_a._late_create_cleanup_tasks)
+        if cleanup_tasks:
+            await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=5.0)
+
+    backend.destroy.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_async_create_completing_after_shutdown_is_destroyed_not_registered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", lambda *_args, **_kwargs: asyncio.sleep(0, result=True))
+    create_started = aio_mod.threading.Event()
+    release_create = aio_mod.threading.Event()
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-shutdown-create", sandbox_url="http://sandbox-shutdown-create")
+
+    def create(_thread_id: str | None, _sandbox_id: str, *, extra_mounts: object | None = None) -> Any:
+        create_started.set()
+        release_create.wait()
+        return info
+
+    backend = SimpleNamespace(create=create, destroy=MagicMock())
+    provider = _make_lifecycle_provider(aio_mod, backend)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    creation = asyncio.create_task(
+        provider._create_sandbox_async(
+            "thread-shutdown-create",
+            info.sandbox_id,
+            user_id="owner-a",
+        )
+    )
+    assert await asyncio.to_thread(create_started.wait, 1.0)
+
+    provider.shutdown()
+    release_create.set()
+    with pytest.raises(RuntimeError, match="shut down"):
+        await creation
+
+    backend.destroy.assert_called_once_with(info)
+    assert provider._sandboxes == {}
+    assert provider._thread_sandboxes == {}
+
+
+@pytest.mark.anyio
+async def test_cancelled_late_cleanup_hands_compensation_to_backend_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    create_started = aio_mod.threading.Event()
+    release_create = aio_mod.threading.Event()
+    destroyed = asyncio.Event()
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-worker-fallback", sandbox_url="http://sandbox-worker-fallback")
+    loop = asyncio.get_running_loop()
+
+    def create(_thread_id: str | None, _sandbox_id: str, *, extra_mounts: object | None = None) -> Any:
+        create_started.set()
+        release_create.wait()
+        return info
+
+    def destroy(received: Any) -> None:
+        assert received == info
+        loop.call_soon_threadsafe(destroyed.set)
+
+    provider = _make_lifecycle_provider(
+        aio_mod,
+        SimpleNamespace(create=create, destroy=destroy),
+    )
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    creation = asyncio.create_task(
+        provider._create_sandbox_async(
+            "thread-worker-fallback",
+            info.sandbox_id,
+            user_id="owner-a",
+        )
+    )
+    assert await asyncio.to_thread(create_started.wait, 1.0)
+    creation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await creation
+    cleanup_task = next(iter(provider._late_create_cleanup_tasks))
+    cleanup_task.cancel()
+    await asyncio.gather(cleanup_task, return_exceptions=True)
+
+    release_create.set()
+    await asyncio.wait_for(destroyed.wait(), timeout=1.0)
+    for _ in range(100):
+        if not provider._backend_create_operations:
+            break
+        await asyncio.sleep(0.01)
+    assert provider._backend_create_operations == {}
+
+
+@pytest.mark.anyio
+async def test_cleanup_cancelled_after_destroy_starts_keeps_single_fenced_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    create_started = aio_mod.threading.Event()
+    release_create = aio_mod.threading.Event()
+    destroy_started = aio_mod.threading.Event()
+    release_destroy = aio_mod.threading.Event()
+    destroy_calls: list[object] = []
+    info = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-fenced-destroy",
+        sandbox_url="http://sandbox-fenced-destroy",
+    )
+
+    def create(_thread_id: str | None, _sandbox_id: str, *, extra_mounts: object = None) -> object:
+        create_started.set()
+        release_create.wait()
+        return info
+
+    def destroy(received: object) -> None:
+        destroy_calls.append(received)
+        destroy_started.set()
+        release_destroy.wait()
+
+    provider = _make_lifecycle_provider(aio_mod, SimpleNamespace(create=create, destroy=destroy))
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    creation = asyncio.create_task(
+        provider._create_sandbox_async(
+            "thread-fenced-destroy",
+            info.sandbox_id,
+            user_id="owner-a",
+        )
+    )
+    assert await asyncio.to_thread(create_started.wait, 1.0)
+    creation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await creation
+    cleanup_task = next(iter(provider._late_create_cleanup_tasks))
+    release_create.set()
+    assert await asyncio.to_thread(destroy_started.wait, 1.0)
+
+    cleanup_task.cancel()
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / "thread-fenced-destroy" / f".{info.sandbox_id}.lifecycle.json"
+    try:
+        await asyncio.sleep(0.05)
+        assert destroy_calls == [info]
+        assert lifecycle_path.exists()
+    finally:
+        release_destroy.set()
+    await asyncio.wait_for(asyncio.gather(cleanup_task, return_exceptions=True), timeout=1.0)
+    assert destroy_calls == [info]
+    assert not lifecycle_path.exists()
+
+
+def test_startup_reconciles_durable_cancelled_create_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    thread_id = "thread-crashed-cleanup"
+    sandbox_id = "sandbox-crashed-cleanup"
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / thread_id / f".{sandbox_id}.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": sandbox_id,
+                "thread_id": thread_id,
+                "owner_user_id": "owner-a",
+                "operation_token": "dead-operation",
+                "generation": 1,
+                "state": "cleanup_pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    info = aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=f"http://{sandbox_id}")
+    backend = SimpleNamespace(list_running=lambda: [info], destroy=MagicMock())
+    provider = _make_lifecycle_provider(aio_mod, backend)
+
+    provider._reconcile_orphans()
+
+    backend.destroy.assert_called_once_with(info)
+    assert provider._warm_pool == {}
+    assert not lifecycle_path.exists()
+
+
+@pytest.mark.anyio
+async def test_destroy_failure_retains_durable_cleanup_for_next_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    create_started = aio_mod.threading.Event()
+    release_create = aio_mod.threading.Event()
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-retry-destroy", sandbox_url="http://sandbox-retry-destroy")
+
+    def create(_thread_id: str | None, _sandbox_id: str, *, extra_mounts: object | None = None) -> Any:
+        create_started.set()
+        release_create.wait()
+        return info
+
+    def fail_destroy(_info: Any) -> None:
+        raise RuntimeError("transient destroy failure")
+
+    provider = _make_lifecycle_provider(aio_mod, SimpleNamespace(create=create, destroy=fail_destroy))
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    creation = asyncio.create_task(provider._create_sandbox_async("thread-retry-destroy", info.sandbox_id, user_id="owner-a"))
+    assert await asyncio.to_thread(create_started.wait, 1.0)
+    creation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await creation
+    release_create.set()
+    await asyncio.wait_for(asyncio.gather(*provider._late_create_cleanup_tasks), timeout=1.0)
+
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / "thread-retry-destroy" / f".{info.sandbox_id}.lifecycle.json"
+    assert lifecycle_path.exists()
+    assert provider._backend_create_operations
+
+    recovery_backend = SimpleNamespace(list_running=lambda: [info], destroy=MagicMock())
+    restarted = _make_lifecycle_provider(aio_mod, recovery_backend)
+    restarted._reconcile_orphans()
+    recovery_backend.destroy.assert_called_once_with(info)
+    assert not lifecycle_path.exists()
+
+
+def test_startup_keeps_cleanup_intent_until_sandbox_materializes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    lifecycle_path = tmp_path / "users" / "owner-a" / "threads" / "thread-materializing" / ".sandbox-materializing.lifecycle.json"
+    lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_path.write_text(
+        json.dumps(
+            {
+                "sandbox_id": "sandbox-materializing",
+                "thread_id": "thread-materializing",
+                "owner_user_id": "owner-a",
+                "operation_token": "still-creating",
+                "generation": 1,
+                "state": "cleanup_pending",
+                "created_at": aio_mod.time.time(),
+                "cleanup_not_before": aio_mod.time.time() - 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    other = aio_mod.SandboxInfo(sandbox_id="sandbox-other", sandbox_url="http://sandbox-other")
+    materialized = aio_mod.SandboxInfo(sandbox_id="sandbox-materializing", sandbox_url="http://sandbox-materializing")
+    running = [other]
+    destroy = MagicMock()
+    provider = _make_lifecycle_provider(
+        aio_mod,
+        SimpleNamespace(list_running=lambda: list(running), destroy=destroy),
+    )
+
+    provider._reconcile_orphans()
+
+    assert lifecycle_path.exists()
+    running.append(materialized)
+    provider._reconcile_orphans()
+    destroy.assert_called_once_with(materialized)
+    assert not lifecycle_path.exists()
+
+
+@pytest.mark.anyio
 async def test_late_create_after_compensation_deadline_is_still_destroyed(
-    tmp_path,
-    monkeypatch,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setattr(aio_mod, "AIO_LATE_CREATE_COMPENSATION_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
@@ -534,7 +1080,7 @@ async def test_late_create_after_compensation_deadline_is_still_destroyed(
 
     loop = asyncio.get_running_loop()
 
-    def destroy(_info):
+    def destroy(_info: Any) -> None:
         loop.call_soon_threadsafe(destroyed.set)
 
     provider._backend = SimpleNamespace(create=create, destroy=destroy)
@@ -564,9 +1110,9 @@ async def test_late_create_after_compensation_deadline_is_still_destroyed(
 
 @pytest.mark.anyio
 async def test_cancelled_file_lock_waiter_releases_and_closes_only_after_worker_finishes(
-    tmp_path,
-    monkeypatch,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
     provider = _make_provider(tmp_path)

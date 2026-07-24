@@ -102,10 +102,10 @@ def test_csrf_exempts_register():
     assert is_auth_endpoint(req) is True
 
 
-def test_csrf_does_not_exempt_old_login_path():
-    """Old /api/v1/auth/login (without /local) should NOT be exempt."""
+def test_csrf_exempts_unified_login():
+    """Unified login is a first-call route and must be exempt from CSRF."""
     req = _FakeRequest("/api/v1/auth/login")
-    assert is_auth_endpoint(req) is False
+    assert is_auth_endpoint(req) is True
 
 
 def test_csrf_does_not_exempt_me():

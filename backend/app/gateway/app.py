@@ -313,11 +313,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         if feishu_supervisor is not None:
             try:
-                await asyncio.wait_for(feishu_supervisor.shutdown(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                from app.channels.supervisor import RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS
+
+                supervisor_shutdown_timeout = RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS + _SHUTDOWN_HOOK_TIMEOUT_SECONDS
+                await asyncio.wait_for(
+                    feishu_supervisor.shutdown(),
+                    timeout=supervisor_shutdown_timeout,
+                )
             except TimeoutError:
-                logger.warning("Published Feishu Supervisor shutdown exceeded %.1fs", _SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+                logger.warning(
+                    "Published Feishu Supervisor shutdown exceeded %.1fs",
+                    supervisor_shutdown_timeout,
+                )
             except Exception:
                 logger.exception("Failed to stop Published Feishu Supervisor")
+
+        try:
+            from app.channels.feishu import stop_published_attachment_backlog_scanner
+
+            await asyncio.to_thread(stop_published_attachment_backlog_scanner)
+        except Exception:
+            logger.exception("Failed to stop Published Feishu attachment backlog scanner")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:

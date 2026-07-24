@@ -1,8 +1,13 @@
 import asyncio
 import io
 import json
+import multiprocessing
+import pickle
 import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -708,7 +713,7 @@ async def test_cleanup_recovery_enforces_total_budget_on_stalled_remote_delete(
     import deerflow.config.paths as paths_module
 
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
-    monkeypatch.setattr("app.channels.feishu.FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr("app.channels.feishu.FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr("app.channels.feishu.FEISHU_ATTACHMENT_DELETE_TIMEOUT_SECONDS", 1.0)
     delete_started = threading.Event()
     release_delete = threading.Event()
@@ -752,11 +757,11 @@ async def test_cleanup_recovery_enforces_total_budget_on_stalled_remote_delete(
         assert (
             await asyncio.wait_for(
                 channel.recover_published_attachment_cleanups(),
-                timeout=0.4,
+                timeout=1.2,
             )
             == 0
         )
-        assert await asyncio.to_thread(delete_started.wait, 0.2)
+        assert await asyncio.to_thread(delete_started.wait, 0.5)
         assert channel.attachment_cleanup_healthy is False
         assert len(list((tmp_path / "published-attachment-cleanup").glob("*.json"))) == 1
     finally:
@@ -882,8 +887,897 @@ async def test_global_cleanup_pass_caps_total_jobs_across_bindings(
     assert list(outbox_dir.glob("*.json")) == []
 
 
+def test_global_cleanup_discovery_cursor_reaches_slow_directory_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+    from app.channels import feishu as feishu_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    outbox_dir = tmp_path / "published-attachment-cleanup"
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(20):
+        job_id = f"slow-job-{index:02d}"
+        (outbox_dir / f"{job_id}.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "binding_id": "binding-slow-scan",
+                    "thread_id": f"thread-{index:02d}",
+                    "owner_user_id": "owner-a",
+                    "virtual_paths": ["/mnt/user-data/uploads/input.bin"],
+                    "phase": "ready_to_delete",
+                    "producer_token": None,
+                    "producer_lease_expires_at": None,
+                    "claim_token": None,
+                    "claim_lease_expires_at": None,
+                    "version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    original_read = FeishuChannel._read_attachment_cleanup_job
+
+    logical_time = 0.0
+
+    def clock() -> float:
+        return logical_time
+
+    def slow_read(path: Path) -> Any:
+        nonlocal logical_time
+        logical_time += 0.01
+        return original_read(path)
+
+    monkeypatch.setattr(FeishuChannel, "_read_attachment_cleanup_job", staticmethod(slow_read))
+    discovered: set[str] = set()
+    timed_out_passes = 0
+    for _ in range(20):
+        jobs, invalid, timed_out = feishu_module._scan_all_cleanup_jobs(
+            deadline=clock() + 0.045,
+            clock=clock,
+        )
+        assert invalid is False
+        timed_out_passes += int(timed_out)
+        discovered.update(job.job_id for job in jobs)
+
+    assert timed_out_passes > 0
+    assert "slow-job-19" in discovered
+
+
+def test_cleanup_discovery_cursor_retries_transient_windows_replace_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+    from app.channels import feishu as feishu_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    outbox_dir = tmp_path / "published-attachment-cleanup"
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    job_path = outbox_dir / "cursor-retry-job.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "job_id": "cursor-retry-job",
+                "binding_id": "binding-cursor-retry",
+                "thread_id": "thread-cursor-retry",
+                "owner_user_id": "owner-a",
+                "virtual_paths": ["/mnt/user-data/uploads/input.bin"],
+                "phase": "ready_to_delete",
+                "producer_token": None,
+                "producer_lease_expires_at": None,
+                "claim_token": None,
+                "claim_lease_expires_at": None,
+                "version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_replace = Path.replace
+    replace_attempts = 0
+
+    def transiently_contended_replace(path: Path, target: Path) -> Path:
+        nonlocal replace_attempts
+        if Path(target).name == ".discovery-cursor-global":
+            replace_attempts += 1
+            if replace_attempts < 3:
+                raise PermissionError(5, "cursor temporarily shared", str(target))
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", transiently_contended_replace)
+
+    jobs, invalid, timed_out = feishu_module._scan_all_cleanup_jobs(
+        deadline=time.monotonic() + 1.0,
+    )
+
+    assert [job.job_id for job in jobs] == ["cursor-retry-job"]
+    assert invalid is False
+    assert timed_out is False
+    assert replace_attempts == 3
+    assert (outbox_dir / ".discovery-cursor-global").read_text(encoding="utf-8") == job_path.name
+
+
+def test_cleanup_cursor_replace_rejects_expired_deadline_before_first_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    source = tmp_path / ".discovery-cursor-global.pending"
+    target = tmp_path / ".discovery-cursor-global"
+    source.write_text("cursor-job.json", encoding="utf-8")
+    original_replace = Path.replace
+    replace_attempts = 0
+
+    def tracked_replace(path: Path, destination: Path) -> Path:
+        nonlocal replace_attempts
+        replace_attempts += 1
+        return original_replace(path, destination)
+
+    monkeypatch.setattr(Path, "replace", tracked_replace)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        feishu_module._replace_cleanup_state_with_deadline(
+            source,
+            target,
+            deadline=0.5,
+            clock=lambda: 1.0,
+        )
+
+    assert replace_attempts == 0
+    assert source.read_text(encoding="utf-8") == "cursor-job.json"
+    assert target.exists() is False
+
+
+def test_cleanup_cursor_replace_does_not_retry_after_sleep_reaches_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    source = tmp_path / ".discovery-cursor-global.pending"
+    target = tmp_path / ".discovery-cursor-global"
+    source.write_text("cursor-job.json", encoding="utf-8")
+    replace_attempts = 0
+    clock_reads = 0
+    sleep_calls = 0
+
+    def deadline_clock() -> float:
+        nonlocal clock_reads
+        clock_reads += 1
+        return 0.0 if clock_reads <= 3 else 1.0
+
+    def permanently_contended_replace(path: Path, destination: Path) -> Path:
+        nonlocal replace_attempts
+        replace_attempts += 1
+        raise PermissionError(5, "cursor remains shared", str(destination))
+
+    def advance_to_deadline(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+
+    monkeypatch.setattr(Path, "replace", permanently_contended_replace)
+    monkeypatch.setattr(feishu_module.time, "sleep", advance_to_deadline)
+
+    with pytest.raises(PermissionError, match="cursor remains shared"):
+        feishu_module._replace_cleanup_state_with_deadline(
+            source,
+            target,
+            deadline=1.0,
+            clock=deadline_clock,
+        )
+
+    assert replace_attempts == 1
+    assert sleep_calls == 1
+    assert source.read_text(encoding="utf-8") == "cursor-job.json"
+    assert target.exists() is False
+
+
+def test_cleanup_cursor_replace_uses_wall_deadline_when_logical_clock_is_frozen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    source = tmp_path / ".discovery-cursor-global.pending"
+    target = tmp_path / ".discovery-cursor-global"
+    source.write_text("cursor-job.json", encoding="utf-8")
+    replace_attempts = 0
+    wall_time = 0.0
+    sleep_durations: list[float] = []
+
+    def permanently_contended_replace(path: Path, destination: Path) -> Path:
+        nonlocal replace_attempts
+        replace_attempts += 1
+        raise PermissionError(5, "cursor remains shared", str(destination))
+
+    def wall_clock() -> float:
+        return wall_time
+
+    def advance_wall_clock(seconds: float) -> None:
+        nonlocal wall_time
+        sleep_durations.append(seconds)
+        wall_time += seconds
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", permanently_contended_replace)
+        patch.setattr(feishu_module.time, "monotonic", wall_clock)
+        patch.setattr(feishu_module.time, "sleep", advance_wall_clock)
+
+        with pytest.raises(PermissionError, match="cursor remains shared"):
+            feishu_module._replace_cleanup_state_with_deadline(
+                source,
+                target,
+                deadline=0.02,
+                clock=lambda: 0.0,
+            )
+
+    assert replace_attempts == 2
+    assert sleep_durations == pytest.approx([0.01, 0.01])
+    assert source.read_text(encoding="utf-8") == "cursor-job.json"
+    assert target.exists() is False
+
+
+def test_cleanup_discovery_quarantines_two_hung_reads_and_reaches_normal_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+    from app.channels import feishu as feishu_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    outbox_dir = tmp_path / "published-attachment-cleanup"
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    for job_id in ("hung-job-00", "hung-job-01", "normal-job-02"):
+        (outbox_dir / f"{job_id}.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "binding_id": "binding-hung-scan",
+                    "thread_id": f"thread-{job_id}",
+                    "owner_user_id": "owner-a",
+                    "virtual_paths": ["/mnt/user-data/uploads/input.bin"],
+                    "phase": "ready_to_delete",
+                    "producer_token": None,
+                    "producer_lease_expires_at": None,
+                    "claim_token": None,
+                    "claim_lease_expires_at": None,
+                    "version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    original_read = FeishuChannel._read_attachment_cleanup_job
+    release_hung = threading.Event()
+
+    def selectively_hung_read(path: Path) -> Any:
+        if path.name.startswith("hung-"):
+            release_hung.wait()
+        return original_read(path)
+
+    monkeypatch.setattr(FeishuChannel, "_read_attachment_cleanup_job", staticmethod(selectively_hung_read))
+    discovered: set[str] = set()
+    try:
+        for _ in range(6):
+            jobs, invalid, _timed_out = feishu_module._scan_all_cleanup_jobs(deadline=time.monotonic() + 0.03)
+            assert invalid is False
+            discovered.update(job.job_id for job in jobs)
+            if "normal-job-02" in discovered:
+                break
+        assert "normal-job-02" in discovered
+        active_readers = [thread for thread in threading.enumerate() if thread.name == "feishu-cleanup-job-read"]
+        assert len(active_readers) <= 3
+    finally:
+        release_hung.set()
+
+
+def test_cleanup_discovery_reaches_normal_job_after_ten_hung_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+    from app.channels import feishu as feishu_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    outbox_dir = tmp_path / "published-attachment-cleanup"
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    job_ids = [*(f"hung-job-{index:02d}" for index in range(10)), "normal-job-10"]
+    for job_id in job_ids:
+        (outbox_dir / f"{job_id}.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "binding_id": "binding-full-quarantine",
+                    "thread_id": f"thread-{job_id}",
+                    "owner_user_id": "owner-a",
+                    "virtual_paths": ["/mnt/user-data/uploads/input.bin"],
+                    "phase": "ready_to_delete",
+                    "producer_token": None,
+                    "producer_lease_expires_at": None,
+                    "claim_token": None,
+                    "claim_lease_expires_at": None,
+                    "version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    original_read = FeishuChannel._read_attachment_cleanup_job
+    release_hung = threading.Event()
+
+    def selectively_hung_read(path: Path) -> Any:
+        if path.name.startswith("hung-"):
+            release_hung.wait()
+        return original_read(path)
+
+    def isolated_read(path: Path, *, timeout: float) -> Any:
+        if timeout <= 0 or path.name.startswith("hung-"):
+            raise TimeoutError("isolated cleanup read timed out")
+        return original_read(path)
+
+    monkeypatch.setattr(FeishuChannel, "_read_attachment_cleanup_job", staticmethod(selectively_hung_read))
+    monkeypatch.setattr(feishu_module, "_read_attachment_cleanup_job_isolated", isolated_read, raising=False)
+    try:
+        for job_id in job_ids[:8]:
+            with pytest.raises(TimeoutError, match="deadline exceeded"):
+                feishu_module._read_cleanup_job_with_deadline(
+                    outbox_dir / f"{job_id}.json",
+                    timeout=0.1,
+                )
+        with feishu_module._ATTACHMENT_CLEANUP_READ_STATE_LOCK:
+            assert len(feishu_module._ATTACHMENT_CLEANUP_QUARANTINED_READS) == 8
+
+        jobs, invalid, _timed_out = feishu_module._scan_all_cleanup_jobs(deadline=time.monotonic() + 1.0)
+        assert invalid is False
+        assert "normal-job-10" in {job.job_id for job in jobs}
+        active_readers = [thread for thread in threading.enumerate() if thread.name == "feishu-cleanup-job-read"]
+        assert len(active_readers) <= 8
+    finally:
+        release_hung.set()
+
+
+def test_cleanup_job_isolated_reader_round_trips_valid_job(tmp_path: Path) -> None:
+    from app.channels import feishu as feishu_module
+
+    path = tmp_path / "isolated-job.json"
+    path.write_text(
+        json.dumps(
+            {
+                "job_id": "isolated-job",
+                "binding_id": "binding-isolated",
+                "thread_id": "thread-isolated",
+                "owner_user_id": "owner-a",
+                "virtual_paths": ["/mnt/user-data/uploads/input.bin"],
+                "phase": "ready_to_delete",
+                "producer_token": None,
+                "producer_lease_expires_at": None,
+                "claim_token": None,
+                "claim_lease_expires_at": None,
+                "version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    job = feishu_module._read_attachment_cleanup_job_isolated(path, timeout=10.0)
+
+    assert job.job_id == "isolated-job"
+    assert job.binding_id == "binding-isolated"
+
+
+def test_delete_backlog_scan_fails_closed_without_starting_worker_in_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=0)
+    monkeypatch.setattr(feishu_module, "_published_attachment_backlog_scanner", scanner)
+
+    def forbidden_start(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("DELETE request attempted to start a worker")
+
+    monkeypatch.setattr(multiprocessing.process.BaseProcess, "start", forbidden_start)
+
+    assert feishu_module.has_published_attachment_cleanup_backlog("binding-delete") is True
+
+
+class _ScannerFakeProcess:
+    def __init__(
+        self,
+        *,
+        alive: bool = False,
+        fail_start: bool = False,
+        terminate_stops: bool = True,
+        kill_stops: bool = True,
+        terminate_error: bool = False,
+        join_error: bool = False,
+        kill_error: bool = False,
+        is_alive_error_calls: set[int] | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        self.alive = alive
+        self.fail_start = fail_start
+        self.terminate_stops = terminate_stops
+        self.kill_stops = kill_stops
+        self.terminate_error = terminate_error
+        self.join_error = join_error
+        self.kill_error = kill_error
+        self.is_alive_error_calls = set(is_alive_error_calls or ())
+        self.is_alive_calls = 0
+        self.terminated = False
+        self.killed = False
+        self.join_timeouts: list[float] = []
+
+    def start(self) -> None:
+        if self.fail_start:
+            raise RuntimeError("spawn failed")
+        self.alive = True
+
+    def is_alive(self) -> bool:
+        self.is_alive_calls += 1
+        if self.is_alive_calls in self.is_alive_error_calls:
+            raise RuntimeError("is_alive failed")
+        return self.alive
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if self.terminate_error:
+            raise RuntimeError("terminate failed")
+        if self.terminate_stops:
+            self.alive = False
+
+    def kill(self) -> None:
+        self.killed = True
+        if self.kill_error:
+            raise RuntimeError("kill failed")
+        if self.kill_stops:
+            self.alive = False
+
+    def join(self, timeout: float) -> None:
+        self.join_timeouts.append(timeout)
+        if self.join_error:
+            raise RuntimeError("join failed")
+
+
+class _ScannerFakeConnection:
+    def __init__(
+        self,
+        *,
+        ready_pending: bool = False,
+        scan_hangs: bool = False,
+        recv_error: BaseException | None = None,
+        readiness_release: threading.Event | None = None,
+        readiness_entered: threading.Event | None = None,
+    ) -> None:
+        self.ready_pending = ready_pending
+        self.scan_hangs = scan_hangs
+        self.recv_error = recv_error
+        self.readiness_release = readiness_release
+        self.readiness_entered = readiness_entered
+        self.request_id = ""
+        self.closed = False
+        self.poll_timeout: float | None = None
+
+    def send(self, request: Any) -> None:
+        if request == ("stop",):
+            return
+        assert request[0] == "scan"
+        self.request_id = request[1]
+
+    def poll(self, timeout: float) -> bool:
+        self.poll_timeout = timeout
+        if self.ready_pending and self.readiness_release is not None:
+            if self.readiness_entered is not None:
+                self.readiness_entered.set()
+            return self.readiness_release.wait(timeout)
+        return not self.scan_hangs
+
+    def recv(self) -> tuple[Any, ...]:
+        if self.recv_error is not None:
+            raise self.recv_error
+        if self.ready_pending:
+            self.ready_pending = False
+            return ("ready",)
+        return "ok", self.request_id, False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ScannerFakeChildConnection:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ScannerFakeContext:
+    def __init__(
+        self,
+        *,
+        connection_factory: Any | None = None,
+        fail_start_indices: set[int] | None = None,
+        process_options: dict[int, dict[str, Any]] | None = None,
+    ) -> None:
+        self.connection_factory = connection_factory or (lambda: _ScannerFakeConnection(ready_pending=True))
+        self.fail_start_indices = fail_start_indices or set()
+        self.process_options = process_options or {}
+        self.connections: list[_ScannerFakeConnection] = []
+        self.processes: list[_ScannerFakeProcess] = []
+
+    def Pipe(self, *, duplex: bool) -> tuple[_ScannerFakeConnection, _ScannerFakeChildConnection]:
+        assert duplex is True
+        connection = self.connection_factory()
+        self.connections.append(connection)
+        return connection, _ScannerFakeChildConnection()
+
+    def Process(self, **kwargs: Any) -> _ScannerFakeProcess:
+        index = len(self.processes)
+        process = _ScannerFakeProcess(
+            fail_start=index in self.fail_start_indices,
+            **self.process_options.get(index, {}),
+            **kwargs,
+        )
+        self.processes.append(process)
+        return process
+
+
+def test_delete_backlog_scan_kills_hung_whole_scan_and_uses_prestarted_standby() -> None:
+    from app.channels import feishu as feishu_module
+
+    hung_process = _ScannerFakeProcess(alive=True)
+    hung_connection = _ScannerFakeConnection(scan_hangs=True)
+    healthy_process = _ScannerFakeProcess(alive=True)
+    healthy_connection = _ScannerFakeConnection()
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=0)
+    scanner._slots = [
+        feishu_module._AttachmentBacklogScannerSlot(hung_process, hung_connection),
+        feishu_module._AttachmentBacklogScannerSlot(healthy_process, healthy_connection),
+    ]
+
+    assert scanner.scan("binding-delete", timeout=0.01) is True
+    assert hung_process.terminated is True
+    assert hung_connection.closed is True
+    assert scanner.scan("binding-delete", timeout=0.01) is False
+    assert healthy_process.terminated is False
+    assert healthy_connection.poll_timeout == 0.01
+
+
+def test_delete_backlog_scanner_replenishes_two_failed_slots_off_request_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    context = _ScannerFakeContext()
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=2)
+    scanner._slots = [
+        feishu_module._AttachmentBacklogScannerSlot(_ScannerFakeProcess(alive=True), _ScannerFakeConnection(scan_hangs=True)),
+        feishu_module._AttachmentBacklogScannerSlot(_ScannerFakeProcess(alive=True), _ScannerFakeConnection(scan_hangs=True)),
+    ]
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _method: context)
+    scanner.start()
+    maintenance_thread = scanner._maintenance_thread
+    try:
+        assert scanner.scan("binding-delete", timeout=0.01) is True
+        assert scanner.scan("binding-delete", timeout=0.01) is True
+        for _ in range(100):
+            with scanner._lock:
+                if len(scanner._slots) == 2:
+                    break
+            time.sleep(0.01)
+        assert scanner.scan("binding-delete", timeout=0.01) is False
+    finally:
+        scanner.stop()
+    assert maintenance_thread is not None
+    assert maintenance_thread.is_alive() is False
+    assert scanner._slots == []
+
+
+def test_delete_backlog_scanner_rolls_back_partial_prestart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    context = _ScannerFakeContext(fail_start_indices={1})
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _method: context)
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=2)
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        scanner.start()
+
+    assert scanner._slots == []
+    assert context.processes[0].terminated is True
+
+
+def test_delete_backlog_scanner_stop_drains_blocked_readiness_and_allows_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    readiness_release = threading.Event()
+    readiness_entered = threading.Event()
+    blocked_context = _ScannerFakeContext(
+        connection_factory=lambda: _ScannerFakeConnection(
+            ready_pending=True,
+            readiness_release=readiness_release,
+            readiness_entered=readiness_entered,
+        )
+    )
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=2)
+    scanner._slots = [
+        feishu_module._AttachmentBacklogScannerSlot(_ScannerFakeProcess(alive=True), _ScannerFakeConnection(scan_hangs=True)),
+        feishu_module._AttachmentBacklogScannerSlot(_ScannerFakeProcess(alive=True), _ScannerFakeConnection(scan_hangs=True)),
+    ]
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _method: blocked_context)
+    scanner.start()
+    try:
+        assert scanner.scan("binding-delete", timeout=0.01) is True
+        assert scanner.scan("binding-delete", timeout=0.01) is True
+        assert readiness_entered.wait(timeout=1.0)
+        maintenance_thread = scanner._maintenance_thread
+        assert maintenance_thread is not None
+
+        started = time.monotonic()
+        scanner.stop()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.75
+        assert maintenance_thread.is_alive() is False
+        assert scanner._slots == []
+        assert blocked_context.processes
+        assert all(not process.is_alive() for process in blocked_context.processes)
+
+        ready_context = _ScannerFakeContext()
+        monkeypatch.setattr(multiprocessing, "get_context", lambda _method: ready_context)
+        scanner.start()
+        restarted_manager = scanner._maintenance_thread
+        assert restarted_manager is not None and restarted_manager.is_alive()
+        assert len(scanner._slots) == 2
+        scanner.stop()
+        assert restarted_manager.is_alive() is False
+    finally:
+        readiness_release.set()
+        scanner.stop()
+
+
+def test_delete_backlog_scanner_stop_retains_stubborn_child_and_rejects_restart() -> None:
+    from app.channels import feishu as feishu_module
+
+    process = _ScannerFakeProcess(
+        alive=True,
+        terminate_stops=False,
+        kill_stops=False,
+    )
+    slot = feishu_module._AttachmentBacklogScannerSlot(
+        process,
+        _ScannerFakeConnection(),
+    )
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=0)
+    scanner._slots = [slot]
+
+    with pytest.raises(RuntimeError, match="child worker did not stop"):
+        scanner.stop()
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.is_alive() is True
+    assert scanner._slots == [slot]
+    with pytest.raises(RuntimeError, match="still stopping"):
+        scanner.start()
+
+    process.alive = False
+    scanner.stop()
+    assert scanner._slots == []
+
+
+def test_delete_backlog_scanner_stop_confirms_kill_fallback_exit() -> None:
+    from app.channels import feishu as feishu_module
+
+    process = _ScannerFakeProcess(
+        alive=True,
+        terminate_stops=False,
+        kill_stops=True,
+    )
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=0)
+    scanner._slots = [
+        feishu_module._AttachmentBacklogScannerSlot(
+            process,
+            _ScannerFakeConnection(),
+        )
+    ]
+
+    scanner.stop()
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.is_alive() is False
+    assert scanner._slots == []
+
+
+@pytest.mark.parametrize(
+    ("failure_options", "expected_call"),
+    [
+        ({"terminate_error": True}, "terminated"),
+        ({"join_error": True}, "join"),
+        ({"kill_error": True}, "killed"),
+        ({"is_alive_error_calls": {4}}, "is_alive"),
+    ],
+)
+def test_delete_backlog_scan_retains_live_child_when_process_api_raises(
+    failure_options: dict[str, Any],
+    expected_call: str,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    process = _ScannerFakeProcess(
+        alive=True,
+        terminate_stops=False,
+        kill_stops=False,
+        **failure_options,
+    )
+    slot = feishu_module._AttachmentBacklogScannerSlot(
+        process,
+        _ScannerFakeConnection(scan_hangs=True),
+    )
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=0)
+    scanner._slots = [slot]
+
+    assert scanner.scan("binding-process-api-failure", timeout=0.01) is True
+    assert scanner._slots == [slot]
+    assert scanner._stopping is True
+    assert scanner._maintenance_stop.is_set()
+    if expected_call == "terminated":
+        assert process.terminated is True
+    elif expected_call == "join":
+        assert process.join_timeouts
+    elif expected_call == "killed":
+        assert process.killed is True
+    else:
+        assert process.is_alive_calls >= 4
+    with pytest.raises(RuntimeError, match="still stopping"):
+        scanner.start()
+
+    process.alive = False
+    process.terminate_error = False
+    process.join_error = False
+    process.kill_error = False
+    process.is_alive_error_calls.clear()
+    scanner.stop()
+    assert scanner._slots == []
+
+
+def test_delete_backlog_scan_retains_live_child_when_response_cannot_be_deserialized() -> None:
+    from app.channels import feishu as feishu_module
+
+    process = _ScannerFakeProcess(
+        alive=True,
+        terminate_stops=False,
+        kill_stops=False,
+    )
+    slot = feishu_module._AttachmentBacklogScannerSlot(
+        process,
+        _ScannerFakeConnection(recv_error=pickle.UnpicklingError("corrupt scanner response")),
+    )
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=0)
+    scanner._slots = [slot]
+
+    assert scanner.scan("binding-corrupt-response", timeout=0.01) is True
+    assert scanner._slots == [slot]
+    assert scanner._stopping is True
+    assert scanner._maintenance_stop.is_set()
+    with pytest.raises(RuntimeError, match="still stopping"):
+        scanner.start()
+
+    process.alive = False
+    scanner.stop()
+    assert scanner._slots == []
+
+
+def test_delete_backlog_scanner_replenish_retains_unpublished_child_when_termination_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import feishu as feishu_module
+
+    context = _ScannerFakeContext(
+        fail_start_indices={1},
+        process_options={
+            0: {
+                "terminate_stops": False,
+                "kill_stops": False,
+                "terminate_error": True,
+            }
+        },
+    )
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _method: context)
+    scanner = feishu_module._PublishedAttachmentBacklogScanner(worker_count=2)
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        scanner.start()
+
+    assert scanner._slots == [feishu_module._AttachmentBacklogScannerSlot(context.processes[0], context.connections[0])]
+    assert scanner._stopping is True
+    assert scanner._maintenance_stop.is_set()
+    with pytest.raises(RuntimeError, match="still stopping"):
+        scanner.start()
+
+    retained = context.processes[0]
+    retained.alive = False
+    retained.terminate_error = False
+    scanner.stop()
+    assert scanner._slots == []
+
+
 @pytest.mark.asyncio
-async def test_cleanup_recovery_budget_includes_outbox_discovery(monkeypatch) -> None:
+async def test_other_binding_write_does_not_poison_cleanup_health(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    binding_a = FeishuChannel(MessageBus(), binding_id="binding-health-a")
+    binding_b = FeishuChannel(MessageBus(), binding_id="binding-health-b")
+    assert await binding_a._refresh_attachment_cleanup_health() is True
+    host_path = get_paths().sandbox_uploads_dir("thread-binding-b", user_id="owner-b") / "input.bin"
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    host_path.write_bytes(b"pending")
+    await binding_b._persist_attachment_cleanup_job(
+        thread_id="thread-binding-b",
+        owner_user_id="owner-b",
+        files=[SimpleNamespace(virtual_path="/mnt/user-data/uploads/input.bin", actual_path=host_path)],
+    )
+
+    assert await binding_a._refresh_attachment_cleanup_health() is True
+    assert binding_a.attachment_cleanup_healthy is True
+
+
+@pytest.mark.asyncio
+async def test_same_binding_remote_job_is_visible_to_health_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    first_gateway = FeishuChannel(MessageBus(), binding_id="binding-shared-health")
+    second_gateway = FeishuChannel(MessageBus(), binding_id="binding-shared-health")
+
+    assert await first_gateway._refresh_attachment_cleanup_health() is True
+    host_path = get_paths().sandbox_uploads_dir("thread-shared-health", user_id="owner-a") / "input.bin"
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    host_path.write_bytes(b"pending")
+    await second_gateway._persist_attachment_cleanup_job(
+        thread_id="thread-shared-health",
+        owner_user_id="owner-a",
+        files=[SimpleNamespace(virtual_path="/mnt/user-data/uploads/input.bin", actual_path=host_path)],
+    )
+
+    assert await first_gateway._refresh_attachment_cleanup_health() is False
+    assert first_gateway.attachment_cleanup_healthy is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_other_binding_job_does_not_poison_clean_binding_health(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.config.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+    channel = FeishuChannel(MessageBus(), binding_id="binding-clean")
+    outbox_dir = tmp_path / "published-attachment-cleanup"
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    (outbox_dir / "unknown-corrupt.json").write_text("{not-json", encoding="utf-8")
+
+    assert await channel._refresh_attachment_cleanup_health() is True
+    assert channel.attachment_cleanup_healthy is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_recovery_budget_includes_outbox_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("app.channels.feishu.FEISHU_ATTACHMENT_RECOVERY_TIMEOUT_SECONDS", 0.05)
     channel = FeishuChannel(
         MessageBus(),
@@ -891,11 +1785,11 @@ async def test_cleanup_recovery_budget_includes_outbox_discovery(monkeypatch) ->
         binding_id="binding-slow-discovery",
     )
 
-    def slow_scan():
+    def slow_scan(*, deadline: float) -> tuple[list[Any], bool, bool]:
         threading.Event().wait(0.2)
-        return []
+        return [], False, True
 
-    monkeypatch.setattr(channel, "_read_attachment_cleanup_jobs", slow_scan)
+    monkeypatch.setattr("app.channels.feishu._scan_all_cleanup_jobs", slow_scan)
 
     assert (
         await asyncio.wait_for(
@@ -909,8 +1803,8 @@ async def test_cleanup_recovery_budget_includes_outbox_discovery(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_old_cleanup_snapshot_cannot_clear_health_after_new_job(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import deerflow.config.paths as paths_module
 

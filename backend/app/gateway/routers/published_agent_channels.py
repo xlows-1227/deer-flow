@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Self
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from app.channels.supervisor import BindingCleanupPendingError, BindingNotFoundError, FeishuSupervisor
-from deerflow.persistence.agent_channel import ActiveAgentChannelConflictError, AgentChannelRepository
+from app.channels.supervisor import BindingCleanupPendingError, BindingNotFoundError, BindingStartError, FeishuSupervisor
+from deerflow.persistence.agent_channel import ActiveAgentChannelConflictError, AgentChannelRepository, AgentChannelSecretCleanupPendingError
 from deerflow.publishing.feishu_credentials import FeishuCredentials, encode_feishu_credentials
 from deerflow.publishing.secret_store import SecretStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/published-agents/{agent_id}/channels", tags=["published-agent-channels"])
+SECRET_INGEST_WRITER_LEASE_SECONDS = 30.0
 
 
 class AgentChannelCreateRequest(BaseModel):
@@ -153,6 +156,125 @@ def _safe_binding(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _discard_unstaged_secret(
+    repository: AgentChannelRepository,
+    secrets: SecretStore,
+    secret_ref: str,
+    *,
+    agent_id: str,
+    binding_id: str,
+    owner_user_id: str,
+) -> None:
+    """CAS and erase a route-local ingest only if DB transfer has not won."""
+    claim_token = uuid4().hex
+    try:
+        claimed = await repository.claim_owned_secret_ingest_cleanup(
+            secret_ref,
+            agent_id=agent_id,
+            binding_id=binding_id,
+            owner_user_id=owner_user_id,
+            claim_token=claim_token,
+        )
+        if claimed is None:
+            return
+        await secrets.delete(secret_ref)
+        completed = await repository.complete_owned_secret_ingest_cleanup(
+            secret_ref,
+            agent_id=agent_id,
+            binding_id=binding_id,
+            owner_user_id=owner_user_id,
+            claim_token=claim_token,
+        )
+        if not completed:
+            raise RuntimeError("Feishu credential ingest cleanup acknowledgement failed")
+    except Exception:
+        logger.warning("Failed to erase unstaged Feishu credential", extra={"binding_id": binding_id})
+
+
+async def _put_database_owned_secret(
+    repository: AgentChannelRepository,
+    secrets: SecretStore,
+    secret: str,
+    *,
+    agent_id: str,
+    binding_id: str,
+    owner_user_id: str,
+) -> str:
+    """Fence and heartbeat one writer until ciphertext becomes transferable."""
+    secret_ref = secrets.new_ref()
+    reserved = await repository.reserve_secret_ingest(
+        agent_id=agent_id,
+        binding_id=binding_id,
+        owner_user_id=owner_user_id,
+        secret_ref=secret_ref,
+    )
+    if reserved is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    writer_token = uuid4().hex
+    writing = await repository.begin_secret_ingest_write(
+        secret_ref,
+        agent_id=agent_id,
+        binding_id=binding_id,
+        owner_user_id=owner_user_id,
+        writer_token=writer_token,
+        lease_seconds=SECRET_INGEST_WRITER_LEASE_SECONDS,
+    )
+    if writing is None:
+        raise RuntimeError("Feishu credential ingest writer could not be claimed")
+    writer_generation = int(writing["writer_generation"])
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(SECRET_INGEST_WRITER_LEASE_SECONDS / 3)
+            try:
+                renewed = await repository.renew_secret_ingest_write(
+                    secret_ref,
+                    writer_token=writer_token,
+                    writer_generation=writer_generation,
+                    lease_seconds=SECRET_INGEST_WRITER_LEASE_SECONDS,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Failed to renew Feishu credential writer lease", extra={"binding_id": binding_id})
+                continue
+            if not renewed:
+                return
+
+    write_task = asyncio.create_task(secrets.put_reserved(secret_ref, secret))
+    heartbeat_task = asyncio.create_task(heartbeat())
+    cancelled = False
+    try:
+        try:
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                # ``put_reserved`` may be backed by a worker thread. Do not
+                # abandon its DB owner while that write can still land later.
+                cancelled = True
+                await asyncio.shield(write_task)
+        except BaseException:
+            await repository.fail_secret_ingest_write(
+                secret_ref,
+                writer_token=writer_token,
+                writer_generation=writer_generation,
+            )
+            raise
+        ready = await repository.complete_secret_ingest_write(
+            secret_ref,
+            writer_token=writer_token,
+            writer_generation=writer_generation,
+        )
+        if ready is None:
+            raise RuntimeError("Feishu credential ingest writer lost ownership before transfer")
+        if cancelled:
+            raise asyncio.CancelledError()
+    finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+    return secret_ref
+
+
 @router.post("", status_code=201)
 async def create_agent_channel(agent_id: str, body: AgentChannelCreateRequest, request: Request) -> dict[str, Any]:
     """Create an inactive binding and encrypt its complete credential bundle."""
@@ -160,26 +282,47 @@ async def create_agent_channel(agent_id: str, body: AgentChannelCreateRequest, r
     secrets = _secret_store(request)
     owner_user_id = _owner_id(request)
     await _require_owned_agent(repository, agent_id, owner_user_id)
-    secret_ref = await secrets.put(
+    binding_id = f"ach_{uuid4().hex}"
+    secret_ref = await _put_database_owned_secret(
+        repository,
+        secrets,
         _secret_payload(
             app_secret=body.app_secret,
             verification_token=body.verification_token,
             encrypt_key=body.encrypt_key,
-        )
+        ),
+        agent_id=agent_id,
+        binding_id=binding_id,
+        owner_user_id=owner_user_id,
     )
     try:
-        created = await repository.create(
+        created = await repository.create_from_secret_ingest(
             agent_id=agent_id,
+            binding_id=binding_id,
             owner_user_id=owner_user_id,
             app_id=body.app_id,
             secret_ref=secret_ref,
         )
     except BaseException:
-        await secrets.delete(secret_ref)
+        await _discard_unstaged_secret(
+            repository,
+            secrets,
+            secret_ref,
+            agent_id=agent_id,
+            binding_id=binding_id,
+            owner_user_id=owner_user_id,
+        )
         raise
     if created is None:
-        await secrets.delete(secret_ref)
-        raise HTTPException(status_code=404, detail="Agent not found")
+        await _discard_unstaged_secret(
+            repository,
+            secrets,
+            secret_ref,
+            agent_id=agent_id,
+            binding_id=binding_id,
+            owner_user_id=owner_user_id,
+        )
+        raise HTTPException(status_code=409, detail="Channel credential ingest is no longer available")
     return _safe_binding(created)
 
 
@@ -212,6 +355,8 @@ async def _lifecycle_action(agent_id: str, binding_id: str, request: Request, ac
         await getattr(supervisor, f"{action}_binding")(binding_id)
     except ActiveAgentChannelConflictError as exc:
         raise HTTPException(status_code=409, detail="Agent already has an active Feishu binding") from exc
+    except BindingCleanupPendingError as exc:
+        raise HTTPException(status_code=409, detail="Channel binding deletion is pending") from exc
     except BindingNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Channel binding not found") from exc
     return _safe_binding(await _binding_or_404(repository, agent_id, binding_id, owner_user_id))
@@ -247,35 +392,69 @@ async def rotate_agent_channel_credentials(
     secrets = _secret_store(request)
     owner_user_id = _owner_id(request)
     current = await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
+    if current.get("secret_cleanup_ref"):
+        try:
+            await _supervisor(request).cleanup_binding_secrets(binding_id)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="Previous credential cleanup is still pending") from exc
+        current = await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
     app_secret = body.app_secret
     verification_token = body.verification_token
     if app_secret is None or verification_token is None:
         # The Pydantic model validator rejects this first; keep the route
         # explicitly narrowed for static typing and defensive direct calls.
         raise HTTPException(status_code=422, detail="Complete credentials are required")
-    new_ref = await secrets.put(
+    new_ref = await _put_database_owned_secret(
+        repository,
+        secrets,
         _secret_payload(
             app_secret=app_secret,
             verification_token=verification_token,
             encrypt_key=body.encrypt_key,
-        )
+        ),
+        agent_id=agent_id,
+        binding_id=binding_id,
+        owner_user_id=owner_user_id,
     )
     try:
-        previous = await _supervisor(request).rotate_binding_credentials(
+        await _supervisor(request).rotate_binding_credentials(
             agent_id,
             binding_id,
             owner_user_id=owner_user_id,
             app_id=body.app_id or str(current["app_id"]),
             secret_ref=new_ref,
         )
+    except AgentChannelSecretCleanupPendingError as exc:
+        await _discard_unstaged_secret(repository, secrets, new_ref, agent_id=agent_id, binding_id=binding_id, owner_user_id=owner_user_id)
+        raise HTTPException(status_code=409, detail="Previous credential cleanup is still pending") from exc
+    except BindingCleanupPendingError as exc:
+        await _discard_unstaged_secret(repository, secrets, new_ref, agent_id=agent_id, binding_id=binding_id, owner_user_id=owner_user_id)
+        raise HTTPException(status_code=409, detail="Channel binding deletion is pending") from exc
     except BindingNotFoundError as exc:
-        await secrets.delete(new_ref)
+        await _discard_unstaged_secret(repository, secrets, new_ref, agent_id=agent_id, binding_id=binding_id, owner_user_id=owner_user_id)
         raise HTTPException(status_code=404, detail="Channel binding not found") from exc
+    except BindingStartError as exc:
+        try:
+            await _supervisor(request).cleanup_binding_secrets(binding_id)
+        except Exception:
+            logger.warning("Failed to erase rolled-back Feishu credential", extra={"binding_id": binding_id})
+        raise HTTPException(status_code=502, detail="Rotated credentials failed readiness; previous credentials restored") from exc
     except BaseException:
-        await secrets.delete(new_ref)
+        latest = await repository.get(agent_id, binding_id, owner_user_id=owner_user_id)
+        if latest is not None and new_ref in {
+            latest.get("secret_ref"),
+            latest.get("secret_cleanup_ref"),
+            latest.get("rotation_previous_secret_ref"),
+        }:
+            try:
+                await _supervisor(request).cleanup_binding_secrets(binding_id)
+            except Exception:
+                logger.warning("Failed to erase rejected Feishu credential", extra={"binding_id": binding_id})
+        else:
+            await _discard_unstaged_secret(repository, secrets, new_ref, agent_id=agent_id, binding_id=binding_id, owner_user_id=owner_user_id)
         raise
     try:
-        await secrets.delete(str(previous["secret_ref"]))
+        await _supervisor(request).cleanup_binding_secrets(binding_id)
     except Exception:
         logger.warning("Failed to delete superseded Feishu credential", extra={"binding_id": binding_id})
     return _safe_binding(await _binding_or_404(repository, agent_id, binding_id, owner_user_id))
@@ -285,11 +464,10 @@ async def rotate_agent_channel_credentials(
 async def delete_agent_channel(agent_id: str, binding_id: str, request: Request) -> dict[str, bool]:
     """Stop, delete and erase one owner-scoped binding's encrypted secret."""
     repository = _repository(request)
-    secrets = _secret_store(request)
     owner_user_id = _owner_id(request)
     await _binding_or_404(repository, agent_id, binding_id, owner_user_id)
     try:
-        deleted = await _supervisor(request).delete_binding(
+        await _supervisor(request).delete_binding(
             agent_id,
             binding_id,
             owner_user_id=owner_user_id,
@@ -301,5 +479,4 @@ async def delete_agent_channel(agent_id: str, binding_id: str, request: Request)
         ) from exc
     except BindingNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Channel binding not found") from exc
-    await secrets.delete(str(deleted["secret_ref"]))
     return {"deleted": True}
