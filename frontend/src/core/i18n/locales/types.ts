@@ -120,6 +120,8 @@ export interface Translations {
     referencedFileFromLibrary: string;
     referencedFileOpenInLibrary: string;
     searchModels: string;
+    searchSkills: string;
+    skillSearchEmpty: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;
@@ -545,10 +547,16 @@ export interface Translations {
       authMode: string;
       authModeEnv: string;
       authModeInline: string;
+      authModeOneData: string;
       credentialRef: string;
       username: string;
       password: string;
       passwordPlaceholder: string;
+      secretId: string;
+      secretKey: string;
+      secretKeyPlaceholder: string;
+      oneDataSummary: string;
+      oneDataPolicy: string;
       credentialUpdateHint: string;
       credentialUpdateHintInline: string;
       maxRowsLabel: string;
@@ -572,6 +580,8 @@ export interface Translations {
       validationCredentialRef: string;
       validationUsername: string;
       validationPassword: string;
+      validationSecretId: string;
+      validationSecretKey: string;
     };
     skills: {
       title: string;

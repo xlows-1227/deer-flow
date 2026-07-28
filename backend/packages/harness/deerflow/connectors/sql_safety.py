@@ -44,6 +44,58 @@ def _strip_identifier(value: str) -> str:
     return value.strip().strip("`").strip('"')
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Remove SQL comments while preserving comment-like text inside quoted literals.
+
+    Supports ``--`` / ``#`` line comments and ``/* ... */`` block comments.
+    Quoted regions cover single quotes, double quotes, and backtick identifiers.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)
+            i += 1
+            while i < n:
+                cur = sql[i]
+                out.append(cur)
+                if cur == quote:
+                    # SQL escaped quote: '' or "" or ``
+                    if i + 1 < n and sql[i + 1] == quote:
+                        out.append(quote)
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            i += 2
+            while i < n and sql[i] not in ("\n", "\r"):
+                i += 1
+            out.append(" ")
+            continue
+        if ch == "#":
+            i += 1
+            while i < n and sql[i] not in ("\n", "\r"):
+                i += 1
+            out.append(" ")
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i = i + 2 if i + 1 < n else n
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _normalize_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", sql.strip()).strip()
 
@@ -123,7 +175,7 @@ def validate_read_only_sql(
     default_schema: str | None = None,
 ) -> SqlSafetyResult:
     del dialect  # Kept in the API so future parser-backed validation can branch per connector type.
-    cleaned = _without_single_trailing_semicolon(sql)
+    cleaned = _without_single_trailing_semicolon(_strip_sql_comments(sql))
     normalized = _normalize_sql(cleaned)
     if not normalized:
         raise ConnectorSqlSafetyError("SQL is empty", recoverable=True)

@@ -969,6 +969,7 @@ connectors:
   enabled_types:
     - mysql
     - starrocks
+    - onedata
   secret_store:
     provider: env
   default_policy:
@@ -977,6 +978,8 @@ connectors:
       max_rows: 10000
       statement_timeout_ms: 30000
       require_limit: true
+# OneData discovery base URL (list_apis / get_params). Business calls use calUrl from get_params.
+# ONEDATA_API_BASE_URL=http://share-onedata-api-ent4.prd.yumc.local/v1
 
 # ============================================================================
 # Run Events Configuration

@@ -119,6 +119,10 @@ function booleanValue(value: unknown, fallback = false) {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function isOneDataType(type?: string) {
+  return type === "onedata";
+}
+
 function getPortKey(definition?: ConnectorTypeDefinition) {
   return definition?.config_schema?.query_port ? "query_port" : "port";
 }
@@ -154,7 +158,9 @@ function connectorToForm(
   definition?: ConnectorTypeDefinition,
 ): ConnectorForm {
   const portKey = getPortKey(definition);
-  const authMode = inferAuthMode(connector.credential);
+  const authMode = isOneDataType(connector.type)
+    ? "inline"
+    : inferAuthMode(connector.credential);
   const credential = connector.credential;
   return {
     id: connector.id,
@@ -183,6 +189,9 @@ function buildConfig(
   form: ConnectorForm,
   definition?: ConnectorTypeDefinition,
 ) {
+  if (isOneDataType(form.type)) {
+    return {};
+  }
   const portKey = getPortKey(definition);
   const port = Number.parseInt(form.port, 10);
   return {
@@ -196,6 +205,9 @@ function buildConfig(
 }
 
 function buildPolicy(form: ConnectorForm) {
+  if (isOneDataType(form.type)) {
+    return { request_timeout_ms: 30000 };
+  }
   const maxRows = Number.parseInt(form.maxRows, 10);
   return {
     mode: "read_only",
@@ -308,9 +320,7 @@ export function ConnectorSettingsPage({
   const activeCount = connectors.filter(
     (item) => item.status === "active",
   ).length;
-  const databaseTypeCount = types.filter(
-    (item) => item.category === "database",
-  ).length;
+  const availableTypeCount = types.length;
   const selectedType = typeByName.get(form.type);
 
   async function refresh() {
@@ -355,10 +365,12 @@ export function ConnectorSettingsPage({
 
   function openCreate() {
     const firstType = types[0];
+    const type = firstType?.type ?? "mysql";
     setForm({
       ...emptyForm,
-      type: firstType?.type ?? "mysql",
-      port: getDefaultPort(firstType),
+      type,
+      port: isOneDataType(type) ? "" : getDefaultPort(firstType),
+      authMode: isOneDataType(type) ? "inline" : "env",
     });
     setFormOpen(true);
   }
@@ -374,6 +386,17 @@ export function ConnectorSettingsPage({
 
   function updateType(type: string) {
     const definition = typeByName.get(type);
+    if (isOneDataType(type)) {
+      updateForm({
+        type,
+        port: "",
+        host: "",
+        database: "",
+        ssl: false,
+        authMode: "inline",
+      });
+      return;
+    }
     updateForm({
       type,
       port: getDefaultPort(definition),
@@ -386,6 +409,13 @@ export function ConnectorSettingsPage({
   }
 
   function validateConnectionFields() {
+    if (isOneDataType(form.type)) {
+      if (!form.username.trim()) throw new Error(copy.validationSecretId);
+      if (!form.id && !form.password) {
+        throw new Error(copy.validationSecretKey);
+      }
+      return;
+    }
     if (!form.host.trim()) throw new Error(copy.validationHost);
     if (!form.database.trim()) throw new Error(copy.validationDatabase);
     if (form.authMode === "env") {
@@ -553,7 +583,7 @@ export function ConnectorSettingsPage({
         <div className="grid gap-3 sm:grid-cols-3">
           <Metric label={copy.total} value={connectors.length} />
           <Metric label={copy.active} value={activeCount} />
-          <Metric label={copy.availableTypes} value={databaseTypeCount} />
+          <Metric label={copy.availableTypes} value={availableTypeCount} />
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -618,9 +648,11 @@ export function ConnectorSettingsPage({
                             {definition?.display_name ?? connector.type}
                           </Badge>
                           <Badge variant="outline">
-                            {connector.credential?.provider === "inline"
-                              ? copy.authModeInline
-                              : copy.authModeEnv}
+                            {isOneDataType(connector.type)
+                              ? copy.authModeOneData
+                              : connector.credential?.provider === "inline"
+                                ? copy.authModeInline
+                                : copy.authModeEnv}
                           </Badge>
                           <Badge variant={statusVariant(connector.status)}>
                             {connector.status === "active" ? (
@@ -634,10 +666,15 @@ export function ConnectorSettingsPage({
                           </Badge>
                         </div>
                         <CardDescription className="break-all">
-                          {stringValue(connector.config.host)}
-                          {stringValue(connector.config.database)
-                            ? ` / ${stringValue(connector.config.database)}`
-                            : ""}
+                          {isOneDataType(connector.type)
+                            ? connector.credential?.username
+                              ? `${copy.secretId}: ${connector.credential.username}`
+                              : copy.oneDataSummary
+                            : `${stringValue(connector.config.host)}${
+                                stringValue(connector.config.database)
+                                  ? ` / ${stringValue(connector.config.database)}`
+                                  : ""
+                              }`}
                         </CardDescription>
                       </div>
                       <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -698,9 +735,15 @@ export function ConnectorSettingsPage({
                   <CardContent className="grid gap-3 text-sm sm:grid-cols-3">
                     <ConnectorFact
                       label={copy.policy}
-                      value={copy.maxRows(
-                        Number(connector.default_policy.max_rows ?? 10000),
-                      )}
+                      value={
+                        isOneDataType(connector.type)
+                          ? copy.oneDataPolicy
+                          : copy.maxRows(
+                              Number(
+                                connector.default_policy.max_rows ?? 10000,
+                              ),
+                            )
+                      }
                     />
                     <ConnectorFact
                       label={copy.lastTested}
@@ -773,92 +816,70 @@ export function ConnectorSettingsPage({
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label={copy.host}>
-                <Input
-                  value={form.host}
-                  onChange={(event) => updateForm({ host: event.target.value })}
-                  placeholder="db.internal"
-                />
-              </Field>
-              <Field label={copy.port}>
-                <Input
-                  value={form.port}
-                  inputMode="numeric"
-                  onChange={(event) => updateForm({ port: event.target.value })}
-                  placeholder={getDefaultPort(selectedType)}
-                />
-              </Field>
+              {!isOneDataType(form.type) ? (
+                <>
+                  <Field label={copy.host}>
+                    <Input
+                      value={form.host}
+                      onChange={(event) =>
+                        updateForm({ host: event.target.value })
+                      }
+                      placeholder="db.internal"
+                    />
+                  </Field>
+                  <Field label={copy.port}>
+                    <Input
+                      value={form.port}
+                      inputMode="numeric"
+                      onChange={(event) =>
+                        updateForm({ port: event.target.value })
+                      }
+                      placeholder={getDefaultPort(selectedType)}
+                    />
+                  </Field>
+                </>
+              ) : null}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_140px]">
-              <Field label={copy.database}>
-                <Input
-                  value={form.database}
-                  onChange={(event) =>
-                    updateForm({ database: event.target.value })
-                  }
-                  placeholder="analytics"
-                />
-              </Field>
-              <label className="flex items-end gap-3 pb-2 text-sm font-medium">
-                <Switch
-                  checked={form.ssl}
-                  onCheckedChange={(ssl) => updateForm({ ssl })}
-                />
-                <span>{copy.ssl}</span>
-              </label>
-            </div>
+            {!isOneDataType(form.type) ? (
+              <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_140px]">
+                <Field label={copy.database}>
+                  <Input
+                    value={form.database}
+                    onChange={(event) =>
+                      updateForm({ database: event.target.value })
+                    }
+                    placeholder="analytics"
+                  />
+                </Field>
+                <label className="flex items-end gap-3 pb-2 text-sm font-medium">
+                  <Switch
+                    checked={form.ssl}
+                    onCheckedChange={(ssl) => updateForm({ ssl })}
+                  />
+                  <span>{copy.ssl}</span>
+                </label>
+              </div>
+            ) : null}
 
             <div className="rounded-lg border p-4">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium">
                 <ShieldCheckIcon className="text-muted-foreground size-4" />
                 {copy.secretBoundary}
               </div>
-              <Field label={copy.authMode}>
-                <Select
-                  value={form.authMode}
-                  onValueChange={(value) =>
-                    updateForm({ authMode: value as ConnectorAuthMode })
-                  }
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent {...connectorSelectContentProps}>
-                    <SelectItem value="env">{copy.authModeEnv}</SelectItem>
-                    <SelectItem value="inline">
-                      {copy.authModeInline}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              {form.authMode === "env" ? (
-                <Field label={copy.credentialRef}>
-                  <Input
-                    value={form.credentialRef}
-                    onChange={(event) =>
-                      updateForm({ credentialRef: event.target.value })
-                    }
-                    placeholder={
-                      form.type === "starrocks"
-                        ? "ADS_STARROCKS_URL"
-                        : "PROD_MYSQL_URL"
-                    }
-                  />
-                </Field>
-              ) : (
+              {isOneDataType(form.type) ? (
                 <div className="grid gap-4">
-                  <Field label={copy.username}>
+                  <Field label={copy.secretId}>
                     <Input
                       value={form.username}
                       autoComplete="off"
                       onChange={(event) =>
                         updateForm({ username: event.target.value })
                       }
-                      placeholder="readonly_user"
+                      placeholder="5926768a118b4e749a145187cc1595f0"
                     />
                   </Field>
-                  <Field label={copy.password}>
+                  <Field label={copy.secretKey}>
                     <Input
                       type="password"
                       value={form.password}
@@ -869,42 +890,113 @@ export function ConnectorSettingsPage({
                       placeholder={
                         form.hasStoredPassword
                           ? STORED_PASSWORD_PLACEHOLDER
-                          : copy.passwordPlaceholder
+                          : copy.secretKeyPlaceholder
                       }
                     />
                   </Field>
+                  {form.id ? (
+                    <p className="text-muted-foreground text-xs">
+                      {copy.credentialUpdateHintInline}
+                    </p>
+                  ) : null}
                 </div>
+              ) : (
+                <>
+                  <Field label={copy.authMode}>
+                    <Select
+                      value={form.authMode}
+                      onValueChange={(value) =>
+                        updateForm({ authMode: value as ConnectorAuthMode })
+                      }
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent {...connectorSelectContentProps}>
+                        <SelectItem value="env">{copy.authModeEnv}</SelectItem>
+                        <SelectItem value="inline">
+                          {copy.authModeInline}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  {form.authMode === "env" ? (
+                    <Field label={copy.credentialRef}>
+                      <Input
+                        value={form.credentialRef}
+                        onChange={(event) =>
+                          updateForm({ credentialRef: event.target.value })
+                        }
+                        placeholder={
+                          form.type === "starrocks"
+                            ? "ADS_STARROCKS_URL"
+                            : "PROD_MYSQL_URL"
+                        }
+                      />
+                    </Field>
+                  ) : (
+                    <div className="grid gap-4">
+                      <Field label={copy.username}>
+                        <Input
+                          value={form.username}
+                          autoComplete="off"
+                          onChange={(event) =>
+                            updateForm({ username: event.target.value })
+                          }
+                          placeholder="readonly_user"
+                        />
+                      </Field>
+                      <Field label={copy.password}>
+                        <Input
+                          type="password"
+                          value={form.password}
+                          autoComplete="new-password"
+                          onChange={(event) =>
+                            updateForm({ password: event.target.value })
+                          }
+                          placeholder={
+                            form.hasStoredPassword
+                              ? STORED_PASSWORD_PLACEHOLDER
+                              : copy.passwordPlaceholder
+                          }
+                        />
+                      </Field>
+                    </div>
+                  )}
+                  {form.id ? (
+                    <p className="text-muted-foreground mt-2 text-xs">
+                      {form.authMode === "env"
+                        ? copy.credentialUpdateHint
+                        : copy.credentialUpdateHintInline}
+                    </p>
+                  ) : null}
+                </>
               )}
-              {form.id ? (
-                <p className="text-muted-foreground mt-2 text-xs">
-                  {form.authMode === "env"
-                    ? copy.credentialUpdateHint
-                    : copy.credentialUpdateHintInline}
-                </p>
-              ) : null}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
-              <Field label={copy.maxRowsLabel}>
-                <Input
-                  value={form.maxRows}
-                  inputMode="numeric"
-                  onChange={(event) =>
-                    updateForm({ maxRows: event.target.value })
-                  }
-                />
-              </Field>
-              <Field label={copy.allowedSchemas}>
-                <Textarea
-                  className="min-h-20 resize-none"
-                  value={form.allowedSchemasText}
-                  onChange={(event) =>
-                    updateForm({ allowedSchemasText: event.target.value })
-                  }
-                  placeholder={copy.allowedSchemasPlaceholder}
-                />
-              </Field>
-            </div>
+            {!isOneDataType(form.type) ? (
+              <div className="grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
+                <Field label={copy.maxRowsLabel}>
+                  <Input
+                    value={form.maxRows}
+                    inputMode="numeric"
+                    onChange={(event) =>
+                      updateForm({ maxRows: event.target.value })
+                    }
+                  />
+                </Field>
+                <Field label={copy.allowedSchemas}>
+                  <Textarea
+                    className="min-h-20 resize-none"
+                    value={form.allowedSchemasText}
+                    onChange={(event) =>
+                      updateForm({ allowedSchemasText: event.target.value })
+                    }
+                    placeholder={copy.allowedSchemasPlaceholder}
+                  />
+                </Field>
+              </div>
+            ) : null}
           </div>
 
           <DialogFooter>

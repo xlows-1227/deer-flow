@@ -7,6 +7,9 @@ from deerflow.connectors.schemas import (
     DATABASE_QUERY,
     DATABASE_SCHEMA_INSPECT,
     DATABASE_TABLE_SAMPLE,
+    ONEDATA_CALL_API,
+    ONEDATA_GET_PARAMS,
+    ONEDATA_LIST_APIS,
     ConnectorTypeDefinition,
 )
 
@@ -91,6 +94,22 @@ def _build_default_registry() -> ConnectorRegistry:
             config_schema=_database_config_schema(default_port=9030, port_name="query_port"),
             credential_schema=credential_schema,
             default_policy=default_policy,
+        )
+    )
+    registry.register(
+        ConnectorTypeDefinition(
+            type="onedata",
+            category="api",
+            display_name="OneData",
+            adapter="deerflow.connectors.adapters.onedata:OneDataConnectorAdapter",
+            auth_modes=["password"],
+            capabilities=[ONEDATA_LIST_APIS, ONEDATA_GET_PARAMS, ONEDATA_CALL_API],
+            config_schema={},
+            credential_schema={
+                "secretId": {"type": "string", "required": True},
+                "secretKey": {"type": "secret", "required": True},
+            },
+            default_policy={"request_timeout_ms": 30000},
         )
     )
     return registry

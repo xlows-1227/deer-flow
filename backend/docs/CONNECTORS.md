@@ -4,10 +4,10 @@ DeerFlow connectors are managed external resources. A connector stores metadata,
 
 ## Version 1 Scope
 
-The first version supports read-only database analysis for:
+Supported connector types:
 
-- `mysql`
-- `starrocks`
+- `mysql` / `starrocks` — read-only database analysis
+- `onedata` — OneData agent APIs (`list_apis` / `get_params` / `call_api`)
 
 Only connector types listed in `connectors.enabled_types` can be discovered, created, enabled, tested, or used at runtime.
 
@@ -21,6 +21,7 @@ connectors:
   enabled_types:
     - mysql
     - starrocks
+    - onedata
   secret_store:
     provider: env
   default_policy:
@@ -54,6 +55,23 @@ ADS_STARROCKS_URL=mysql+asyncmy://readonly:password@starrocks-fe.internal:9030/a
 > ```
 >
 > Keep this key out of source control and shared logs. If you change it after creating inline connectors, existing encrypted passwords cannot be decrypted with the new key; re-enter the connector passwords or run a credential migration. Connectors that use `credential.ref` to point at environment variables do not store inline passwords, so `DEERFLOW_CONNECTOR_KEY` is specifically required for inline credential storage.
+
+
+## OneData
+
+Configure the discovery base URL in the backend environment:
+
+```env
+ONEDATA_API_BASE_URL=http://share-onedata-api-ent4.prd.yumc.local/v1
+```
+
+Create an `onedata` connector with inline `secretId` / `secretKey` (stored as credential username/password). Runtime:
+
+1. `call_connector_action` + `onedata.list_apis`
+2. `call_connector_action` + `onedata.get_params` (`args.apiId`) — response includes `calUrl`
+3. `call_connector_action` + `onedata.call_api` (`args.calUrl`, `args.paramData`, optional paging fields)
+
+Business calls POST directly to `calUrl`. Request headers use `sign=<secretKey>` (no HMAC). Field encryption/decryption is not implemented.
 
 ## API
 
@@ -126,6 +144,8 @@ Database connectors are read-only. The tool layer rejects:
 - schema/table access outside policy allowlists
 
 Queries are bounded by `max_rows`, `statement_timeout_ms`, and result truncation rules.
+
+Before validation/execution, SQL comments are stripped (`--`, `#`, `/* ... */`) while preserving comment-like text inside quoted string/identifier literals. This avoids syntax failures when models emit annotated SQL that some engines reject.
 
 ## Skill Requirements
 

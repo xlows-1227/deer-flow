@@ -9,6 +9,10 @@ DATABASE_QUERY = "database.query"
 DATABASE_SCHEMA_INSPECT = "database.schema.inspect"
 DATABASE_TABLE_SAMPLE = "database.table.sample"
 
+ONEDATA_LIST_APIS = "onedata.list_apis"
+ONEDATA_GET_PARAMS = "onedata.get_params"
+ONEDATA_CALL_API = "onedata.call_api"
+
 
 class ConnectorTypeDefinition(BaseModel):
     type: str

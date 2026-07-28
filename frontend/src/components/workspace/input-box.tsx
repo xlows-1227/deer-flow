@@ -67,6 +67,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useConnectors } from "@/core/connectors/hooks";
@@ -211,6 +212,7 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [skillSearch, setSkillSearch] = useState("");
   const [connectorMenuOpen, setConnectorMenuOpen] = useState(false);
   const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const { models } = useModels();
@@ -497,6 +499,23 @@ export function InputBox({
     const skill = skills.find((item) => item.name === lockedSkillName);
     return skill?.display_name ?? lockedSkillName;
   }, [lockedSkillName, skills]);
+
+  const filteredSkills = useMemo(() => {
+    const enabled = skills.filter((skill) => skill.enabled);
+    const needle = skillSearch.trim().toLowerCase();
+    if (!needle) return enabled;
+    return enabled.filter((skill) => {
+      const haystack = [
+        skill.name,
+        skill.display_name ?? "",
+        skill.description,
+        skill.description_zh ?? "",
+      ]
+        .join("\n")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [skills, skillSearch]);
 
   // Apply the slash command at `slashIndex`. Routes by `kind`:
   //   - skill:   set/clear the active skill via `handleSkillSelect`
@@ -1551,7 +1570,10 @@ export function InputBox({
               skills.length > 0 && (
                 <PromptInputActionMenu
                   open={skillMenuOpen}
-                  onOpenChange={setSkillMenuOpen}
+                  onOpenChange={(open) => {
+                    setSkillMenuOpen(open);
+                    if (!open) setSkillSearch("");
+                  }}
                 >
                   <PromptInputActionMenuTrigger className="gap-1! px-2!">
                     <WrenchIcon className="size-3" />
@@ -1586,6 +1608,19 @@ export function InputBox({
                     )}
                   </PromptInputActionMenuTrigger>
                   <PromptInputActionMenuContent className="w-70">
+                    <div
+                      className="px-2 pt-2 pb-1"
+                      onKeyDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    >
+                      <Input
+                        value={skillSearch}
+                        onChange={(e) => setSkillSearch(e.target.value)}
+                        placeholder={t.inputBox.searchSkills}
+                        className="h-8"
+                        autoFocus
+                      />
+                    </div>
                     <DropdownMenuGroup>
                       <DropdownMenuLabel className="text-muted-foreground text-xs">
                         {t.inputBox.skill}
@@ -1608,9 +1643,8 @@ export function InputBox({
                             <div className="ml-auto size-4" />
                           )}
                         </PromptInputActionMenuItem>
-                        {skills
-                          .filter((s) => s.enabled)
-                          .map((skill) => (
+                        <div className="max-h-64 overflow-y-auto">
+                          {filteredSkills.map((skill) => (
                             <PromptInputActionMenuItem
                               key={skill.name}
                               className={cn(
@@ -1630,6 +1664,12 @@ export function InputBox({
                               )}
                             </PromptInputActionMenuItem>
                           ))}
+                          {filteredSkills.length === 0 && (
+                            <div className="text-muted-foreground px-2 py-3 text-center text-xs">
+                              {t.inputBox.skillSearchEmpty}
+                            </div>
+                          )}
+                        </div>
                       </PromptInputActionMenu>
                     </DropdownMenuGroup>
                   </PromptInputActionMenuContent>

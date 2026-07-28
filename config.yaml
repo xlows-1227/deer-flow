@@ -1158,6 +1158,7 @@ connectors:
   enabled_types:
     - mysql
     - starrocks
+    - onedata
   secret_store:
     provider: env
   default_policy:
