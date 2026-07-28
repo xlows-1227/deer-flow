@@ -42,6 +42,33 @@ def test_authorize_owner_without_grant():
     assert isinstance(decision.effective_policy, dict)
 
 
+def test_published_runtime_owner_is_limited_to_release_connector_capability():
+    context = ConnectorRuntimeContext(
+        user_id="owner",
+        connector_capabilities={"conn-1": ["database.query"]},
+    )
+
+    decision = authorize_connector_action(
+        connector_id="conn-1",
+        connector_policy={},
+        grants=[],
+        context=context,
+        capability="database.query",
+        owner_id="owner",
+    )
+    assert decision.allow is True
+
+    with pytest.raises(ConnectorAuthorizationError):
+        authorize_connector_action(
+            connector_id="conn-1",
+            connector_policy={},
+            grants=[],
+            context=context,
+            capability="database.schema.inspect",
+            owner_id="owner",
+        )
+
+
 def test_authorize_non_database_policy_does_not_require_database_shape():
     decision = authorize_connector_action(
         connector_policy={"allowed_spaces": ["product_kb"], "max_documents_per_query": 20},

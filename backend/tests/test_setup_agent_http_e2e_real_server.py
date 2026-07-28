@@ -9,7 +9,7 @@ This test drives the **entire** FastAPI gateway through ``starlette.testclient.T
     -> background asyncio.create_task(run_agent) (real worker, real Runtime)
     -> langchain.agents.create_agent graph (real, with fake LLM)
     -> ToolNode dispatch (real)
-    -> setup_agent tool (real file I/O)
+    -> setup_agent tool (real SQLite draft write)
 
 The only mock is the LLM (no API key needed). Every layer that participates
 in ``user_id`` propagation — auth, ContextVar, ``inject_authenticated_user_context``,
@@ -18,7 +18,8 @@ code path. If the chain is broken at any layer, this test fails.
 
 This is what "真实验证" looks like for a server that lives behind authentication:
 register a user, log in (cookie), POST to /runs/stream, wait for the run to
-finish, then read the filesystem.
+finish, then read the authenticated user's database-backed draft through the
+real control-plane API.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from unittest.mock import patch
 
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
+from langchain_core.messages import AIMessage
 
 
 def _build_fake_create_chat_model(agent_name: str):
@@ -191,22 +193,6 @@ def _drain_stream(response, *, timeout: float = 30.0, max_bytes: int = 4 * 1024 
     return body.decode("utf-8", errors="replace")
 
 
-def _wait_for_file(path: Path, *, timeout: float = 10.0) -> bool:
-    """Block until *path* exists or *timeout* elapses.
-
-    The run completes inside ``asyncio.create_task`` after start_run returns,
-    so the test must wait for the background task to flush its writes.
-    """
-    import time as _time
-
-    deadline = _time.monotonic() + timeout
-    while _time.monotonic() < deadline:
-        if path.exists():
-            return True
-        _time.sleep(0.05)
-    return False
-
-
 @pytest.mark.no_auto_user
 def test_real_http_create_agent_lands_in_authenticated_user_dir(
     isolated_app: Any,
@@ -220,8 +206,8 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
     2. POST to /api/threads/{tid}/runs/stream with the **exact** body shape the
        frontend (LangGraph SDK) sends during the bootstrap flow.
     3. Wait for the background run to finish.
-    4. Assert SOUL.md exists under users/<authenticated_uid>/agents/<name>/.
-    5. Assert NOTHING exists under users/default/agents/<name>/.
+    4. Assert the draft is visible to the authenticated owner and contains SOUL.
+    5. Assert database mode did not create legacy compatibility files.
     """
     # ``deerflow.agents.lead_agent.agent`` imports ``create_chat_model`` with
     # ``from deerflow.models import create_chat_model`` at module load time,
@@ -312,22 +298,182 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         # Sanity: the stream should have produced at least one event
         assert "event:" in transcript, f"no SSE events in response: {transcript[:500]!r}"
 
-        # --- 4. Verify filesystem outcome ---
+        # --- 4. Verify database-backed, owner-scoped outcome ---
+        listing = client.get("/api/published-agents")
+        assert listing.status_code == 200, listing.text
+        matches = [agent for agent in listing.json() if agent["slug"] == agent_name]
+        assert len(matches) == 1, f"setup_agent did not create exactly one draft for the authenticated owner. Published-agent listing: {listing.json()!r}. SSE transcript tail: {transcript[-1000:]!r}"
+
+        detail = client.get(f"/api/published-agents/{matches[0]['id']}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["draft"]["soul_markdown"] == f"# Real HTTP E2E SOUL for {agent_name}"
+
+        # --- 5. Exercise the next real custom-agent run. ---
+        # Add AGENT.md through the structured API, then attempt to forge every
+        # server-owned hydration field through nested config.context. The graph
+        # must still receive only the database instructions/policy.
+        patched = client.patch(
+            f"/api/published-agents/{matches[0]['id']}/draft",
+            json={
+                "revision": detail.json()["draft"]["revision"],
+                "agent_markdown": "DB AGENT instructions",
+                "soul_markdown": "DB SOUL instructions",
+            },
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert patched.status_code == 200, patched.text
+
+        from deerflow import tools as tools_module
+        from deerflow.agents.lead_agent import agent as lead_agent_module
+
+        real_apply_prompt_template = lead_agent_module.apply_prompt_template
+        real_get_available_tools = tools_module.get_available_tools
+        captured_prompts: list[str] = []
+        captured_prompt_kwargs: list[dict[str, Any]] = []
+        captured_tool_groups: list[list[str] | None] = []
+
+        def capture_prompt(**kwargs: Any) -> str:
+            captured_prompt_kwargs.append(dict(kwargs))
+            prompt = real_apply_prompt_template(**kwargs)
+            captured_prompts.append(prompt)
+            return prompt
+
+        def capture_tools(*args: Any, **kwargs: Any):
+            captured_tool_groups.append(kwargs.get("groups"))
+            return real_get_available_tools(*args, **kwargs)
+
+        next_thread_id = str(_uuid.uuid4())
+        next_thread = client.post(
+            "/api/threads",
+            json={"thread_id": next_thread_id, "metadata": {}},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert next_thread.status_code == 200, next_thread.text
+        final_model = FakeToolCallingModel(responses=[AIMessage(content="Database-backed custom agent ran.")])
+        with (
+            patch.object(
+                lead_agent_module,
+                "create_chat_model",
+                return_value=final_model,
+            ),
+            patch.object(
+                lead_agent_module,
+                "apply_prompt_template",
+                side_effect=capture_prompt,
+            ),
+            patch.object(
+                tools_module,
+                "get_available_tools",
+                side_effect=capture_tools,
+            ),
+        ):
+            with client.stream(
+                "POST",
+                f"/api/threads/{next_thread_id}/runs/stream",
+                json={
+                    "assistant_id": agent_name,
+                    "input": {"messages": [{"role": "user", "content": "Use your real instructions."}]},
+                    "config": {
+                        "context": {
+                            "__agent_config_source": "database",
+                            "__agent_config": {
+                                "name": agent_name,
+                                "tool_groups": ["caller-tools"],
+                                "skills": [],
+                            },
+                            "__agent_instructions": "CALLER INSTRUCTIONS",
+                            "__agent_draft_revision": 999,
+                        }
+                    },
+                    "context": {
+                        "mode": "standard",
+                        "thinking_enabled": False,
+                        "is_plan_mode": False,
+                        "subagent_enabled": False,
+                    },
+                    "stream_mode": ["values"],
+                },
+                headers={"X-CSRF-Token": csrf_token},
+            ) as next_response:
+                assert next_response.status_code == 200, next_response.read().decode()
+                next_transcript = _drain_stream(next_response)
+        assert "event: end" in next_transcript
+        assert captured_prompts
+        runtime_prompt = captured_prompts[-1]
+        assert "CALLER INSTRUCTIONS" not in runtime_prompt
+        assert "<agent_instructions>\nDB AGENT instructions" in runtime_prompt
+        assert "<agent_soul>\nDB SOUL instructions" in runtime_prompt
+        assert runtime_prompt.index("<agent_instructions>") < runtime_prompt.index("<agent_soul>")
+        assert captured_prompt_kwargs[-1]["available_skills"] is None
+        assert captured_tool_groups[-1] is None
+
+        # --- 6. DB miss keeps the owner's unimported legacy agent runnable. ---
+        legacy_name = "legacy-only"
+        legacy_dir = isolated_deer_flow_home / "users" / auth_uid / "agents" / legacy_name
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text(
+            f"name: {legacy_name}\nskills: []\n",
+            encoding="utf-8",
+        )
+        (legacy_dir / "SOUL.md").write_text(
+            "LEGACY OWNER SOUL",
+            encoding="utf-8",
+        )
+        legacy_thread_id = str(_uuid.uuid4())
+        legacy_thread = client.post(
+            "/api/threads",
+            json={"thread_id": legacy_thread_id, "metadata": {}},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert legacy_thread.status_code == 200, legacy_thread.text
+        legacy_prompts: list[str] = []
+
+        def capture_legacy_prompt(**kwargs: Any) -> str:
+            prompt = real_apply_prompt_template(**kwargs)
+            legacy_prompts.append(prompt)
+            return prompt
+
+        with (
+            patch.object(
+                lead_agent_module,
+                "create_chat_model",
+                return_value=FakeToolCallingModel(responses=[AIMessage(content="Legacy custom agent ran.")]),
+            ),
+            patch.object(
+                lead_agent_module,
+                "apply_prompt_template",
+                side_effect=capture_legacy_prompt,
+            ),
+        ):
+            with client.stream(
+                "POST",
+                f"/api/threads/{legacy_thread_id}/runs/stream",
+                json={
+                    "assistant_id": legacy_name,
+                    "input": {"messages": [{"role": "user", "content": "Keep serving during migration."}]},
+                    "context": {
+                        "mode": "standard",
+                        "thinking_enabled": False,
+                        "is_plan_mode": False,
+                        "subagent_enabled": False,
+                    },
+                    "stream_mode": ["values"],
+                },
+                headers={"X-CSRF-Token": csrf_token},
+            ) as legacy_response:
+                assert legacy_response.status_code == 200, legacy_response.read().decode()
+                legacy_transcript = _drain_stream(legacy_response)
+        assert "event: end" in legacy_transcript
+        assert "LEGACY OWNER SOUL" in legacy_prompts[-1]
+
+        # Persistence mode is database-only for imported/database agents.
+        # Legacy files remain a read-only migration source and the no-database
+        # CLI fallback; the Gateway must not
+        # recreate a second, crash-divergent source of truth.
         expected_dir = isolated_deer_flow_home / "users" / auth_uid / "agents" / agent_name
         default_dir = isolated_deer_flow_home / "users" / "default" / "agents" / agent_name
-
-        # The setup_agent tool runs inside the background asyncio task spawned
-        # by start_run; SSE-drain typically waits for it, but we add a bounded
-        # poll to be robust against scheduler jitter.
-        assert _wait_for_file(expected_dir / "SOUL.md", timeout=15.0), (
-            "SOUL.md did not appear under users/<auth_uid>/agents/. "
-            f"Expected: {expected_dir / 'SOUL.md'}. "
-            f"tmp tree: {sorted(str(p.relative_to(isolated_deer_flow_home)) for p in isolated_deer_flow_home.rglob('SOUL.md'))}. "
-            f"SSE transcript tail: {transcript[-1000:]!r}"
-        )
-
-        soul_text = (expected_dir / "SOUL.md").read_text()
-        assert agent_name in soul_text, f"unexpected SOUL content: {soul_text!r}"
-
-        # The smoking-gun assertion: the agent must NOT have landed in default/
+        # The legacy fixture uses a different slug; the database-backed agent
+        # must still have no files.
+        database_agent_dir = expected_dir
+        assert not database_agent_dir.exists(), f"database mode wrote legacy files: {list(database_agent_dir.rglob('*'))}"
         assert not default_dir.exists(), f"REGRESSION: agent landed under users/default/{agent_name} instead of the authenticated user. Default-dir contents: {list(default_dir.rglob('*')) if default_dir.exists() else 'n/a'}"

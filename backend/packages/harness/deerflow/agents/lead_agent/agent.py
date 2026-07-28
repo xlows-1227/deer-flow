@@ -46,7 +46,12 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import SOUL_FILENAME, load_agent_config, resolve_agent_dir, validate_agent_name
+from deerflow.config.agents_config import (
+    SOUL_FILENAME,
+    load_agent_config,
+    resolve_agent_dir,
+    validate_agent_name,
+)
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
@@ -191,7 +196,7 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
+def _create_summarization_middleware(*, app_config: AppConfig | None = None, memory_enabled: bool | None = None) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
     resolved_app_config = app_config or get_app_config()
     config = resolved_app_config.summarization
@@ -238,7 +243,7 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if resolved_app_config.memory.enabled:
+    if resolved_app_config.memory.enabled if memory_enabled is None else memory_enabled:
         hooks.append(memory_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
@@ -406,30 +411,42 @@ def _build_middlewares(
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.publishing.context import PublishedAgentContext
 
-    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+    cfg = _get_runtime_config(config)
+    published_context = cfg.get("published_agent_context")
+    is_published = isinstance(published_context, PublishedAgentContext)
+    if is_published:
+        middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config, include_memory=False))
+    else:
+        middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
-    # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
-    if summarization_middleware is not None:
-        middlewares.append(summarization_middleware)
+    # Published Runs cannot invoke auxiliary/global models: the immutable
+    # Release model and one Run token budget govern every model call.
+    if not is_published:
+        summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+        if summarization_middleware is not None:
+            middlewares.append(summarization_middleware)
 
     # Add TodoList middleware if plan mode is enabled
-    cfg = _get_runtime_config(config)
-    is_plan_mode = cfg.get("is_plan_mode", False)
+    is_plan_mode = False if is_published else cfg.get("is_plan_mode", False)
     todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
-    # Add TokenUsageMiddleware when token_usage tracking is enabled
-    if resolved_app_config.token_usage.enabled:
-        middlewares.append(TokenUsageMiddleware())
+    token_usage_middleware = None
+    if resolved_app_config.token_usage.enabled or is_published:
+        max_tokens_per_run = int(published_context.effective_quota.max_tokens_per_run) if is_published else None
+        token_usage_middleware = TokenUsageMiddleware(max_tokens_per_run=max_tokens_per_run)
 
-    # Add TitleMiddleware
-    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
+    # Title generation is another model call and therefore disabled for
+    # published Runs; public Conversation titles remain caller metadata.
+    if not is_published:
+        middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+    if not is_published:
+        middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -444,7 +461,7 @@ def _build_middlewares(
         middlewares.append(DeferredToolFilterMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = cfg.get("subagent_enabled", False)
+    subagent_enabled = False if is_published else cfg.get("subagent_enabled", False)
     if subagent_enabled:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
@@ -466,6 +483,12 @@ def _build_middlewares(
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
+    # Keep token accounting/capping inside every request-rewriting middleware
+    # (loop warnings, images, deferred tools, and custom middleware) so the
+    # provider cap is derived from the final outbound request.
+    if token_usage_middleware is not None:
+        middlewares.append(token_usage_middleware)
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
@@ -531,30 +554,62 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
 
-    thinking_enabled = cfg.get("thinking_enabled", True)
+    from deerflow.publishing.context import PublishedAgentContext
+
+    raw_published_context = cfg.get("published_agent_context")
+    if raw_published_context is not None and not isinstance(raw_published_context, PublishedAgentContext):
+        raise ValueError("published_agent_context must be a trusted PublishedAgentContext")
+    published_context: PublishedAgentContext | None = raw_published_context
+    is_published = published_context is not None
+
+    thinking_enabled = False if is_published else cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
-    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
-    is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
+    requested_model_name: str | None = published_context.model_name if published_context is not None else (cfg.get("model_name") or cfg.get("model"))
+    is_plan_mode = False if is_published else cfg.get("is_plan_mode", False)
+    subagent_enabled = False if is_published else cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
-    is_bootstrap = cfg.get("is_bootstrap", False)
-    agent_name = validate_agent_name(cfg.get("agent_name"))
+    is_bootstrap = False if is_published else cfg.get("is_bootstrap", False)
+    agent_name = None if is_published else validate_agent_name(cfg.get("agent_name"))
     runtime_cache_key = cfg.get("__agent_graph_runtime_key")
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    from deerflow.publishing.runtime_loader import (
+        resolve_runtime_agent_config,
+        resolve_runtime_agent_instructions,
+    )
+
+    if is_published:
+        agent_config = None
+    elif cfg.get("__agent_config_source") in {"database", "filesystem"}:
+        agent_config = resolve_runtime_agent_config(
+            cfg,
+            agent_name=agent_name,
+            is_bootstrap=is_bootstrap,
+        )
+    else:
+        agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    agent_instructions = published_context.instructions if published_context is not None else resolve_runtime_agent_instructions(cfg)
     forced_skill = cfg.get("skill_name")
-    available_skills = _resolve_available_skill_names(
-        agent_config,
-        is_bootstrap,
-        forced_skill,
-        app_config=resolved_app_config,
-        external_allowed_skills=cfg.get("external_allowed_skills"),
+    available_skills = (
+        set()
+        if is_published
+        else _resolve_available_skill_names(
+            agent_config,
+            is_bootstrap,
+            forced_skill,
+            app_config=resolved_app_config,
+            external_allowed_skills=cfg.get("external_allowed_skills"),
+        )
     )
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
-    model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
+    if published_context is not None:
+        if resolved_app_config.get_model_config(published_context.model_name) is None:
+            raise ValueError(f"Published Agent model is unavailable: {published_context.model_name}")
+        model_name = published_context.model_name
+    else:
+        model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
 
     model_config = resolved_app_config.get_model_config(model_name)
 
@@ -589,6 +644,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
+            "published_agent_id": published_context.agent_id if published_context is not None else None,
+            "published_release_id": published_context.release_id if published_context is not None else None,
         }
     )
 
@@ -605,7 +662,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    skills_for_tool_policy = [] if is_published else _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
     skills_signature = _skills_cache_signature(skills_for_tool_policy)
 
     try:
@@ -619,7 +676,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         "lead_agent",
         _fingerprint_value(resolved_app_config),
         _fingerprint_value(agent_config) if agent_config is not None else None,
-        _agent_files_signature(agent_name, user_id=effective_user_id),
+        (
+            "database",
+            cfg.get("__agent_draft_revision"),
+        )
+        if cfg.get("__agent_config_source") == "database"
+        else _agent_files_signature(agent_name, user_id=effective_user_id),
         agent_name or "default",
         model_name,
         bool(thinking_enabled),
@@ -628,6 +690,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         bool(subagent_enabled),
         max_concurrent_subagents,
         bool(is_bootstrap),
+        ("published", published_context.release_id, published_context.allowed_tool_names) if published_context is not None else None,
         tuple(agent_config.tool_groups or ()) if agent_config else None,
         tuple(sorted(available_skills)) if available_skills is not None else None,
         bool(getattr(model_config, "supports_vision", False)),
@@ -660,6 +723,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                     max_concurrent_subagents=max_concurrent_subagents,
                     available_skills=set(["bootstrap"]),
                     app_config=resolved_app_config,
+                    agent_instructions=agent_instructions,
                 ),
                 state_schema=ThreadState,
             ),
@@ -667,9 +731,23 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
-    extra_tools = [update_agent] if agent_name else []
+    extra_tools = [update_agent] if agent_name and not is_published else []
     # Default lead agent (unchanged behavior)
-    tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    if published_context is not None:
+        tools = get_available_tools(
+            model_name=model_name,
+            groups=None,
+            subagent_enabled=False,
+            app_config=resolved_app_config,
+            published_context=published_context,
+        )
+    else:
+        tools = get_available_tools(
+            model_name=model_name,
+            groups=agent_config.tool_groups if agent_config else None,
+            subagent_enabled=subagent_enabled,
+            app_config=resolved_app_config,
+        )
     filtered_tools = filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy)
     cache_key = (
         *base_cache_key,
@@ -687,6 +765,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 agent_name=agent_name,
                 available_skills=available_skills,
                 app_config=resolved_app_config,
+                agent_instructions=agent_instructions,
+                published=is_published,
             ),
             state_schema=ThreadState,
         ),

@@ -322,6 +322,37 @@ title:
   model_name: null  # Use first model in list
 ```
 
+### Published Agent Runtime Quotas
+
+Published-Agent API runs are protected by deployment-level hard caps under
+`publishing.platform_quota`. Owner Release overrides and individual Agent Key
+overrides may only make these values stricter; an omitted value inherits the
+previous layer and never means unlimited.
+
+```yaml
+publishing:
+  platform_quota:
+    max_concurrent_runs_per_agent: 8
+    max_input_bytes: 262144
+    max_run_seconds: 600
+    max_tokens_per_run: 200000
+    inbound_rps: 20
+    daily_runs_default: 1000
+    daily_tokens_default: 2000000
+```
+
+- `max_concurrent_runs_per_agent`: hard Agent-wide concurrent Run limit.
+- `max_input_bytes`: maximum UTF-8 request message size before a `413` response.
+- `max_run_seconds`: maximum runtime before timeout settlement.
+- `max_tokens_per_run`: maximum tokens reserved for one Run.
+- `inbound_rps`: hard Agent-wide inbound reservation rate.
+- `daily_runs_default`: default Agent-wide daily Run allowance.
+- `daily_tokens_default`: default Agent-wide daily token allowance.
+
+Agent-wide platform/owner accounting and credential-level Key accounting are
+both enforced atomically. One Key's stricter allowance does not consume another
+Key's allowance, while all Keys still share the Agent-wide hard caps.
+
 ### GitHub API Token (Optional for GitHub Deep Research Skill)
 
 The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.

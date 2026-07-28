@@ -146,6 +146,33 @@ class TestResolveAttachments:
         assert result[0].is_image is True
         assert result[0].mime_type == "image/png"
 
+    def test_explicit_owner_resolves_same_thread_from_isolated_real_paths(self, tmp_path, monkeypatch):
+        import deerflow.config.paths as paths_module
+        from app.channels.manager import _resolve_attachments
+        from deerflow.config.paths import Paths, get_paths
+
+        monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path))
+        virtual_path = "/mnt/user-data/outputs/report.txt"
+        for owner, content in (("owner-a", "alpha"), ("owner-b", "bravo")):
+            output = get_paths().sandbox_outputs_dir("shared-thread", user_id=owner) / "report.txt"
+            output.parent.mkdir(parents=True)
+            output.write_text(content, encoding="utf-8")
+
+        owner_a = _resolve_attachments(
+            "shared-thread",
+            [virtual_path],
+            owner_user_id="owner-a",
+        )
+        owner_b = _resolve_attachments(
+            "shared-thread",
+            [virtual_path],
+            owner_user_id="owner-b",
+        )
+
+        assert owner_a[0].actual_path.read_text(encoding="utf-8") == "alpha"
+        assert owner_b[0].actual_path.read_text(encoding="utf-8") == "bravo"
+        assert owner_a[0].actual_path != owner_b[0].actual_path
+
     def test_skips_missing_file(self, tmp_path):
         """Missing files are skipped with a warning."""
         from app.channels.manager import _resolve_attachments

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from deerflow.connectors.schemas import ConnectorInstance
 
-
 _SAFE_CONNECTION_CONFIG_KEYS = ("host", "port", "query_port", "database")
 
 

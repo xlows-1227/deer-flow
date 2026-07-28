@@ -219,6 +219,11 @@ class DeerFlowClient:
 
     def _ensure_agent(self, config: RunnableConfig):
         """Create (or recreate) the agent when config-dependent params change."""
+        if self._agent_name is not None:
+            from deerflow.persistence.engine import get_session_factory
+
+            if get_session_factory() is not None:
+                raise RuntimeError("Database-backed custom agents require the async Gateway runtime; the synchronous embedded client cannot load an AsyncEngine-owned draft.")
         cfg = config.get("configurable", {})
         key = (
             cfg.get("model_name"),

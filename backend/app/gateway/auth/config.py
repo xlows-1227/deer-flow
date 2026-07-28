@@ -80,10 +80,7 @@ def _load_or_create_secret() -> str:
                 except FileNotFoundError:
                     pass
                 except OSError as exc:
-                    raise RuntimeError(
-                        f"Failed to remove empty JWT secret file {secret_file}. "
-                        "Set AUTH_JWT_SECRET explicitly or fix base directory permissions."
-                    ) from exc
+                    raise RuntimeError(f"Failed to remove empty JWT secret file {secret_file}. Set AUTH_JWT_SECRET explicitly or fix base directory permissions.") from exc
 
             secret = secrets.token_urlsafe(32)
             try:
@@ -99,22 +96,13 @@ def _load_or_create_secret() -> str:
                 # Another worker created the secret while we held the lock.
                 existing, _ = _read_secret_file()
                 if existing is None:
-                    raise RuntimeError(
-                        f"JWT secret file {secret_file} was created by another process but is empty. "
-                        "Set AUTH_JWT_SECRET explicitly or remove the empty secret file."
-                    ) from None
+                    raise RuntimeError(f"JWT secret file {secret_file} was created by another process but is empty. Set AUTH_JWT_SECRET explicitly or remove the empty secret file.") from None
                 return existing
             except OSError as exc:
-                raise RuntimeError(
-                    f"Failed to persist JWT secret to {secret_file}. "
-                    "Set AUTH_JWT_SECRET explicitly or fix DEER_FLOW_HOME/base directory permissions."
-                ) from exc
+                raise RuntimeError(f"Failed to persist JWT secret to {secret_file}. Set AUTH_JWT_SECRET explicitly or fix DEER_FLOW_HOME/base directory permissions.") from exc
             return secret
     except FileLockTimeout as exc:
-        raise RuntimeError(
-            f"Timed out waiting for JWT secret lock {lock_file}. "
-            "Another process may be initializing the secret. Set AUTH_JWT_SECRET explicitly to avoid this."
-        ) from exc
+        raise RuntimeError(f"Timed out waiting for JWT secret lock {lock_file}. Another process may be initializing the secret. Set AUTH_JWT_SECRET explicitly to avoid this.") from exc
 
 
 def get_auth_config() -> AuthConfig:

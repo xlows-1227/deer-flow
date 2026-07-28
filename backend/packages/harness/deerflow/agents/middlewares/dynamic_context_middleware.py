@@ -123,6 +123,10 @@ def _connector_runtime_context(runtime: Runtime | None):
 
     ctx = runtime.context if runtime is not None else {}
     ctx = ctx if isinstance(ctx, dict) else {}
+    raw_capabilities = ctx.get("connector_capabilities")
+    connector_capabilities = (
+        {str(connector_id): [str(capability) for capability in capabilities if capability] for connector_id, capabilities in raw_capabilities.items() if isinstance(capabilities, list)} if isinstance(raw_capabilities, dict) else None
+    )
     return ConnectorRuntimeContext(
         user_id=resolve_runtime_user_id(runtime),
         thread_id=str(ctx.get("thread_id")) if ctx.get("thread_id") else None,
@@ -130,6 +134,7 @@ def _connector_runtime_context(runtime: Runtime | None):
         agent_id=str(ctx.get("agent_name")) if ctx.get("agent_name") else None,
         skill_name=str(ctx.get("skill_name")) if ctx.get("skill_name") else None,
         connector_ids=list(_runtime_connector_ids(runtime)) or None,
+        connector_capabilities=connector_capabilities,
     )
 
 
@@ -206,11 +211,7 @@ def _build_connector_summary_xml(summary: dict[str, Any]) -> str:
 
 def _build_selected_connectors_section(connector_ids: tuple[str, ...], connector_summaries: list[dict[str, Any]] | None = None) -> str:
     if connector_ids:
-        connector_items = (
-            "\n".join(_build_connector_summary_xml(summary) for summary in connector_summaries)
-            if connector_summaries
-            else "\n".join(f"<connector_id>{escape(connector_id)}</connector_id>" for connector_id in connector_ids)
-        )
+        connector_items = "\n".join(_build_connector_summary_xml(summary) for summary in connector_summaries) if connector_summaries else "\n".join(f"<connector_id>{escape(connector_id)}</connector_id>" for connector_id in connector_ids)
         return "\n".join(
             [
                 "<selected_connectors>",
@@ -253,16 +254,17 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None, include_memory: bool = True) -> None:
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._include_memory = include_memory
 
     def _build_full_reminder(self, *, connector_ids: tuple[str, ...] = (), connector_summaries: list[dict[str, Any]] | None = None) -> str:
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
         # Memory injection is gated by injection_enabled; date is always included.
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        injection_enabled = self._include_memory and (self._app_config.memory.injection_enabled if self._app_config else True)
         memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 

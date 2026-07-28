@@ -239,7 +239,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         _is_auth = is_auth_endpoint(request)
-        api_key_authenticated = getattr(request.state, "auth_method", None) == "api_key"
+        api_key_authenticated = getattr(request.state, "auth_method", None) in {"api_key", "agent_api_key"}
         csrf_required = should_check_csrf(request)
         header_token = request.headers.get(CSRF_HEADER_NAME)
         csrf_supplied = header_token is not None

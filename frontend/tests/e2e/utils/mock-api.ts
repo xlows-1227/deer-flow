@@ -25,12 +25,15 @@ export type MockThread = {
   title?: string;
   updated_at?: string;
   agent_name?: string;
+  agent_display_name?: string;
+  draft_sandbox_agent_id?: string;
   messages?: unknown[];
   artifacts?: string[];
 };
 
 export type MockAgent = {
   name: string;
+  display_name?: string;
   description?: string;
   system_prompt?: string;
 };
@@ -70,7 +73,15 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       thread_id: t.thread_id,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: t.updated_at ?? "2025-01-01T00:00:00Z",
-      metadata: t.agent_name ? { agent_name: t.agent_name } : {},
+      metadata: {
+        ...(t.agent_name ? { agent_name: t.agent_name } : {}),
+        ...(t.agent_display_name
+          ? { agent_display_name: t.agent_display_name }
+          : {}),
+        ...(t.draft_sandbox_agent_id
+          ? { draft_sandbox_agent_id: t.draft_sandbox_agent_id }
+          : {}),
+      },
       status: "idle",
       values: { title: t.title ?? "Untitled" },
     }));
@@ -289,6 +300,32 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ agents }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Published Agent identities — owner console. Legacy mock agents are
+  // projected into private drafts so existing chat-oriented E2E fixtures can
+  // also render the publishing Gallery.
+  void page.route("**/api/published-agents", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          agents.map((agent) => ({
+            id: `pa_${agent.name}`,
+            slug: agent.name,
+            display_name: agent.display_name ?? agent.name,
+            description: agent.description ?? null,
+            avatar_ref: null,
+            status: "draft",
+            current_release_id: null,
+            created_at: "2025-01-01T00:00:00Z",
+            updated_at: "2025-01-01T00:00:00Z",
+          })),
+        ),
       });
     }
     return route.fallback();

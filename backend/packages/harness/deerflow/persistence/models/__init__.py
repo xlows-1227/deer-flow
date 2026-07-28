@@ -15,7 +15,20 @@ its storage implementation lives in ``deerflow.runtime.events.store.db`` and
 there is no matching entity directory.
 """
 
+from deerflow.persistence.agent_api_key.model import AgentAPIKeyRow
+from deerflow.persistence.agent_channel.model import AgentChannelRow
+from deerflow.persistence.agent_release.model import (
+    AgentReleaseConnectorGrantRow,
+    AgentReleaseRow,
+    AgentReleaseSkillRow,
+)
+from deerflow.persistence.agent_usage.model import (
+    AgentQuotaRejectionRow,
+    AgentQuotaReservationRow,
+    AgentUsageRecordRow,
+)
 from deerflow.persistence.api_key.model import APIKeyRow
+from deerflow.persistence.channel_mapping.model import ChannelConversationMappingRow, ChannelEventDedupRow
 from deerflow.persistence.connector.model import ConnectorAuditLogRow, ConnectorGrantRow, ConnectorInstanceRow, ConnectorMetadataCacheRow
 from deerflow.persistence.external_audit.model import ExternalAuditRow
 from deerflow.persistence.external_conversation.model import ExternalConversationRow
@@ -24,9 +37,16 @@ from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.file_share.model import FileShareRow
 from deerflow.persistence.invite_code.model import InviteCodeRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.published_agent.model import (
+    AgentDraftConnectorGrantRow,
+    AgentDraftRow,
+    AgentDraftSkillRow,
+    PublishedAgentRow,
+)
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task.model import ScheduledTaskRow
 from deerflow.persistence.scheduled_task_run.model import ScheduledTaskRunRow
+from deerflow.persistence.skill_revision.model import SkillRevisionRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_share.model import ThreadShareRow
 from deerflow.persistence.user.model import UserRow
@@ -43,6 +63,19 @@ __all__ = [
     "FileShareRow",
     "InviteCodeRow",
     "APIKeyRow",
+    "AgentAPIKeyRow",
+    "AgentChannelRow",
+    "AgentDraftConnectorGrantRow",
+    "AgentDraftRow",
+    "AgentDraftSkillRow",
+    "AgentReleaseConnectorGrantRow",
+    "AgentReleaseRow",
+    "AgentReleaseSkillRow",
+    "AgentQuotaRejectionRow",
+    "AgentQuotaReservationRow",
+    "AgentUsageRecordRow",
+    "ChannelConversationMappingRow",
+    "ChannelEventDedupRow",
     "ConnectorAuditLogRow",
     "ConnectorGrantRow",
     "ConnectorInstanceRow",
@@ -62,4 +95,6 @@ __all__ = [
     "UserMcpServerStateRow",
     "UserModelRow",
     "UserRow",
+    "PublishedAgentRow",
+    "SkillRevisionRow",
 ]

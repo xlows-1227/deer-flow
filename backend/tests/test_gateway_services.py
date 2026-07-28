@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
+
+import pytest
 
 
 def test_format_sse_basic():
@@ -14,6 +17,225 @@ def test_format_sse_basic():
     assert "data: " in frame
     parsed = json.loads(frame.split("data: ")[1].split("\n")[0])
     assert parsed["run_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_start_run_restores_draft_sandbox_context_for_follow_up(monkeypatch):
+    from app.gateway import services
+    from deerflow.publishing.context import DraftSandboxContext
+
+    snapshot = DraftSandboxContext(
+        owner_user_id="owner-a",
+        agent_id="agent-1",
+        agent_slug="sandbox-agent",
+        draft_revision=7,
+        description="Sandbox",
+        agent_markdown="Frozen instruction",
+        soul_markdown="Frozen soul",
+        model_name="model-a",
+        tool_groups=("web",),
+        skill_names=("selected-skill",),
+        connector_capabilities=(),
+    )
+    captured: dict[str, object] = {}
+
+    async def resolve_context(request, thread_id):
+        assert request is request_stub
+        assert thread_id == "thread-sandbox"
+        return snapshot
+
+    async def start_scoped(
+        body,
+        thread_id,
+        request,
+        *,
+        published_context,
+        draft_sandbox_context,
+        run_id,
+    ):
+        captured.update(
+            body=body,
+            thread_id=thread_id,
+            request=request,
+            published_context=published_context,
+            draft_sandbox_context=draft_sandbox_context,
+            run_id=run_id,
+        )
+        return "record"
+
+    request_stub = SimpleNamespace()
+    body = SimpleNamespace()
+    monkeypatch.setattr(
+        services,
+        "resolve_draft_sandbox_context_for_thread",
+        resolve_context,
+    )
+    monkeypatch.setattr(services, "_start_run_scoped", start_scoped)
+
+    result = await services.start_run(body, "thread-sandbox", request_stub)
+
+    assert result == "record"
+    assert captured["draft_sandbox_context"] is snapshot
+    assert captured["published_context"] is None
+
+
+def test_apply_trusted_draft_sandbox_metadata_strips_caller_forgery():
+    from app.gateway.services import _apply_trusted_draft_sandbox_metadata
+
+    body = SimpleNamespace(
+        metadata={
+            "draft_sandbox": True,
+            "draft_sandbox_agent_id": "forged-agent",
+            "draft_sandbox_revision": 999,
+            "draft_sandbox_billable": False,
+            "client_key": "kept",
+        }
+    )
+
+    _apply_trusted_draft_sandbox_metadata(body, None)
+
+    assert body.metadata == {"client_key": "kept"}
+
+
+@pytest.mark.asyncio
+async def test_start_run_cancellation_during_thread_upsert_discards_pending_run(monkeypatch):
+    from app.gateway import services
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class CancellingThreadStore:
+        async def get(self, thread_id):
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+    run_store = MemoryRunStore()
+    manager = RunManager(store=run_store)
+    run_context = SimpleNamespace(thread_store=CancellingThreadStore())
+    monkeypatch.setattr(services, "get_stream_bridge", lambda request: object())
+    monkeypatch.setattr(services, "get_run_manager", lambda request: manager)
+    monkeypatch.setattr(services, "get_run_context", lambda request: run_context)
+    body = SimpleNamespace(
+        on_disconnect="continue",
+        context=None,
+        assistant_id="lead_agent",
+        metadata={"published_agent": True},
+        input={"messages": [{"role": "user", "content": "hello"}]},
+        config={},
+        multitask_strategy="reject",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await services.start_run(body, "thread-cancel", SimpleNamespace())
+
+    assert await manager.list_by_thread("thread-cancel") == []
+    assert await run_store.list_pending() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.no_auto_user
+async def test_published_start_run_scopes_sql_persistence_and_owner_model(tmp_path, monkeypatch):
+    from app.gateway import services
+    from deerflow.config import effective_config as effective_config_module
+    from deerflow.config.app_config import get_app_config
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.publishing.context import PublishedAgentContext
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.user_context import get_current_user
+
+    await init_engine(
+        "sqlite",
+        url=f"sqlite+aiosqlite:///{tmp_path / 'published-start-run.db'}",
+        sqlite_dir=str(tmp_path),
+    )
+    worker_started = asyncio.Event()
+    release_worker = asyncio.Event()
+    owner_config = SimpleNamespace(
+        get_model_config=lambda name: object() if name == "owner-custom-model" else None,
+    )
+
+    async def build_owner_config(*, user_id):
+        assert user_id == "owner-a"
+        return owner_config
+
+    async def run_agent_in_owner_scope(*_args, **_kwargs):
+        current_user = get_current_user()
+        assert current_user is not None
+        assert current_user.id == "owner-a"
+        assert get_app_config() is owner_config
+        worker_started.set()
+        await release_worker.wait()
+
+    try:
+        session_factory = get_session_factory()
+        assert session_factory is not None
+        run_repo = RunRepository(session_factory)
+        thread_repo = ThreadMetaRepository(session_factory)
+        manager = RunManager(store=run_repo)
+        run_context = SimpleNamespace(thread_store=thread_repo)
+        monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
+        monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+        monkeypatch.setattr(services, "get_run_context", lambda _request: run_context)
+        monkeypatch.setattr(services, "resolve_agent_factory", lambda _assistant_id: object())
+        monkeypatch.setattr(services, "run_agent", run_agent_in_owner_scope)
+        monkeypatch.setattr(effective_config_module, "build_effective_app_config", build_owner_config)
+
+        body = SimpleNamespace(
+            on_disconnect="continue",
+            context=None,
+            assistant_id="lead_agent",
+            metadata={"published_agent": True},
+            input={"messages": [{"role": "user", "content": "hello"}]},
+            config={},
+            multitask_strategy="reject",
+            stream_mode=["values"],
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        published_context = PublishedAgentContext(
+            owner_user_id="owner-a",
+            agent_id="agent-1",
+            release_id="release-1",
+            source="feishu",
+            credential_id="binding-1",
+            external_actor="feishu-user-1",
+            conversation_scope="chat-1",
+            skill_revision_ids=(),
+            connector_capabilities=(),
+            tool_groups=(),
+            model_name="owner-custom-model",
+            instructions="Be helpful.",
+            effective_quota=SimpleNamespace(),
+            correlation_id="request-1",
+            idempotency_key=None,
+        )
+
+        record = await services.start_run(
+            body,
+            "thread-owner-a",
+            SimpleNamespace(),
+            published_context=published_context,
+            run_id="run-owner-a",
+        )
+        await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+
+        assert get_current_user() is None
+        run_row = await run_repo.get(record.run_id, user_id=None)
+        thread_row = await thread_repo.get("thread-owner-a", user_id=None)
+        assert run_row is not None
+        assert run_row["user_id"] == "owner-a"
+        assert thread_row is not None
+        assert thread_row["user_id"] == "owner-a"
+
+        record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+        assert get_current_user() is None
+    finally:
+        release_worker.set()
+        await close_engine()
 
 
 def test_format_sse_with_event_id():
@@ -204,6 +426,24 @@ def test_build_run_config_custom_agent_injects_agent_name():
     config = build_run_config("thread-1", None, None, assistant_id="finalis")
     assert config["configurable"]["agent_name"] == "finalis"
     assert config["run_name"] == "finalis"
+
+
+def test_build_run_config_preserves_case_sensitive_agent_slug():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", None, None, assistant_id="MiXeD")
+    assert config["configurable"]["agent_name"] == "MiXeD"
+    assert config["run_name"] == "MiXeD"
+
+
+def test_build_run_config_rejects_noncanonical_agent_slug():
+    import pytest
+
+    from app.gateway.services import build_run_config
+
+    for slug in ("bad/name", "has space", "under_score"):
+        with pytest.raises(ValueError, match="Invalid agent name"):
+            build_run_config("thread-1", None, None, assistant_id=slug)
 
 
 def test_build_run_config_lead_agent_no_agent_name():
@@ -519,6 +759,56 @@ def test_inject_authenticated_user_context_overrides_client_user_id():
     assert config["context"]["user_id"] == "auth-user-42"
 
 
+def test_draft_sandbox_injects_capability_level_connector_grants():
+    from app.gateway.services import _inject_draft_sandbox_context
+    from deerflow.connectors.errors import ConnectorAuthorizationError
+    from deerflow.connectors.policy import authorize_connector_action
+    from deerflow.connectors.schemas import ConnectorRuntimeContext
+    from deerflow.publishing.context import DraftSandboxContext
+
+    snapshot = DraftSandboxContext(
+        owner_user_id="owner-a",
+        agent_id="agent-1",
+        agent_slug="draft-agent",
+        draft_revision=2,
+        description="",
+        agent_markdown="",
+        soul_markdown="",
+        model_name=None,
+        tool_groups=(),
+        skill_names=(),
+        connector_capabilities=(("conn-1", "database.query"),),
+    )
+    config: dict = {"configurable": {}, "context": {"user_id": "owner-a"}}
+
+    _inject_draft_sandbox_context(config, snapshot)
+
+    assert config["context"]["connector_ids"] == ["conn-1"]
+    assert config["context"]["connector_capabilities"] == {"conn-1": ["database.query"]}
+    runtime_context = ConnectorRuntimeContext(
+        user_id="owner-a",
+        connector_ids=config["context"]["connector_ids"],
+        connector_capabilities=config["context"]["connector_capabilities"],
+    )
+    authorize_connector_action(
+        connector_id="conn-1",
+        connector_policy={},
+        grants=[],
+        context=runtime_context,
+        capability="database.query",
+        owner_id="owner-a",
+    )
+    with pytest.raises(ConnectorAuthorizationError):
+        authorize_connector_action(
+            connector_id="conn-1",
+            connector_policy={},
+            grants=[],
+            context=runtime_context,
+            capability="database.write",
+            owner_id="owner-a",
+        )
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------
@@ -530,11 +820,11 @@ def test_build_run_config_with_context():
 
     config = build_run_config(
         "thread-1",
-        {"context": {"user_id": "u-42", "thread_id": "thread-1"}},
+        {"context": {"model_name": "model-a", "thread_id": "thread-1"}},
         None,
     )
     assert "context" in config
-    assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["model_name"] == "model-a"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
 
@@ -579,13 +869,13 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
         config = build_run_config(
             "thread-1",
             {
-                "context": {"user_id": "u-42"},
+                "context": {"model_name": "model-a"},
                 "configurable": {"model_name": "gpt-4"},
             },
             None,
         )
     assert "context" in config
-    assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["model_name"] == "model-a"
     assert "configurable" not in config
     assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
 
@@ -602,6 +892,42 @@ def test_build_run_config_context_passthrough_other_keys():
     assert config["context"]["thread_id"] == "thread-1"
     assert "configurable" not in config
     assert config["tags"] == ["prod"]
+
+
+def test_build_run_config_drops_server_reserved_agent_fields():
+    from app.gateway.services import build_run_config
+
+    context_config = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "model_name": "model-a",
+                "user_id": "caller-user",
+                "__agent_config_source": "database",
+                "__agent_config": {"tool_groups": ["caller-tools"]},
+                "__agent_instructions": "CALLER",
+                "__agent_draft_revision": 999,
+            }
+        },
+        None,
+    )
+    assert context_config["context"] == {"model_name": "model-a"}
+
+    configurable_config = build_run_config(
+        "thread-1",
+        {
+            "configurable": {
+                "model_name": "model-a",
+                "thread_id": "caller-thread",
+                "__agent_instructions": "CALLER",
+            }
+        },
+        None,
+    )
+    assert configurable_config["configurable"] == {
+        "model_name": "model-a",
+        "thread_id": "thread-1",
+    }
 
 
 def test_build_run_config_no_request_config():

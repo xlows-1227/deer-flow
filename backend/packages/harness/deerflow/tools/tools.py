@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 
 from langchain.tools import BaseTool
 
@@ -12,6 +13,23 @@ from deerflow.tools.image_generation import has_enabled_image_generation_provide
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from deerflow.publishing.context import PublishedAgentContext
+
+PUBLISHED_DENIED_TOOL_NAMES = frozenset(
+    {
+        "setup_agent",
+        "update_agent",
+        "skill_manage",
+        "task",
+        "task_status",
+        "tool_search",
+        "list_connectors",
+        "inspect_connector",
+        "invoke_acp_agent",
+    }
+)
 
 BUILTIN_TOOLS = [
     present_file_tool,
@@ -49,6 +67,7 @@ def get_available_tools(
     subagent_enabled: bool = False,
     *,
     app_config: AppConfig | None = None,
+    published_context: "PublishedAgentContext | None" = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -65,6 +84,10 @@ def get_available_tools(
         List of available tools.
     """
     config = app_config or get_app_config()
+    if published_context is not None:
+        groups = list(published_context.tool_groups)
+        include_mcp = False
+        subagent_enabled = False
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
@@ -91,7 +114,7 @@ def get_available_tools(
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
     skill_evolution_config = getattr(config, "skill_evolution", None)
-    if getattr(skill_evolution_config, "enabled", False):
+    if published_context is None and getattr(skill_evolution_config, "enabled", False):
         from deerflow.tools.skill_manage_tool import skill_manage_tool
 
         builtin_tools.append(skill_manage_tool)
@@ -107,7 +130,7 @@ def get_available_tools(
         logger.info("Including generate_image_tool (image generation enabled)")
 
     # Add subagent tools only if enabled via runtime parameter
-    if subagent_enabled:
+    if subagent_enabled and published_context is None:
         builtin_tools.extend(SUBAGENT_TOOLS)
         logger.info("Including subagent tools (task)")
 
@@ -210,7 +233,9 @@ def get_available_tools(
     try:
         from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
 
-        if app_config is None:
+        if published_context is not None:
+            acp_agents = {}
+        elif app_config is None:
             from deerflow.config.acp_config import get_acp_agents
 
             acp_agents = get_acp_agents()
@@ -239,4 +264,10 @@ def get_available_tools(
                 "Duplicate tool name %r detected and skipped — check your config.yaml and MCP server registrations (issue #1803).",
                 t.name,
             )
+    if published_context is not None:
+        unique_tools = [tool for tool in unique_tools if tool.name not in PUBLISHED_DENIED_TOOL_NAMES]
+        allowed_names = published_context.allowed_tool_names
+        if allowed_names is not None:
+            allowed = set(allowed_names)
+            unique_tools = [tool for tool in unique_tools if tool.name in allowed]
     return unique_tools

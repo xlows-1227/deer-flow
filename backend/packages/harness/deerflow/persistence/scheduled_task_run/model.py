@@ -28,6 +28,4 @@ class ScheduledTaskRunRow(Base):
         nullable=False,
     )
 
-    __table_args__ = (
-        Index("ix_scheduled_task_runs_task_started", "task_id", "started_at"),
-    )
+    __table_args__ = (Index("ix_scheduled_task_runs_task_started", "task_id", "started_at"),)

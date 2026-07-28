@@ -19,6 +19,7 @@ from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.publishing_config import PublishingConfig
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
@@ -111,6 +112,7 @@ class AppConfig(BaseModel):
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
     connectors: ConnectorsConfig = Field(default_factory=ConnectorsConfig, description="Connector platform configuration")
+    publishing: PublishingConfig = Field(default_factory=PublishingConfig, description="Published Agent runtime configuration")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:

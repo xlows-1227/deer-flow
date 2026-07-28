@@ -445,7 +445,7 @@ channels:
 
 Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
-- If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
+- If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the owner's current database draft (combined AGENT/SOUL instructions and config) takes effect for IM channels; an unmigrated owner-scoped legacy agent remains available through a read-only fallback after a confirmed database miss.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 
 Set the corresponding API keys in your `.env` file:
@@ -707,9 +707,41 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
+## Published Agent API
+
+Published Agents can be served to external systems through a stable,
+Agent-specific API. Owners create multiple named `dfa_...` Keys, rotate or
+revoke each Key independently, and optionally apply stricter per-Key quotas.
+External callers can create isolated conversations and run the published Agent
+asynchronously, synchronously, or over SSE under
+`/api/v1/agents/{agent_id}`.
+
+Published runs are deliberately memory-free and use the immutable Release that
+was current when the Run started. Request bodies cannot override the model,
+Release, Skills, Connector grants, owner, or runtime policy. Public responses
+use explicit field allowlists and do not expose internal Release or instruction
+data. Platform, owner, and Key quotas are reserved before Run creation and are
+settled exactly once for success, failure, cancellation, or timeout.
+
+Agent Studio draft sandbox conversations similarly keep their saved draft
+revision and capability allowlist on every message. The chat composer shows
+only the frozen Skills and Connector instances, and the Gateway restores the
+same server-owned scope for follow-up Runs. Editing the draft invalidates an
+older sandbox conversation; start a new sandbox Run to test the new revision.
+
+See the Chinese
+[external integration guide](docs/reference/PUBLISHED_AGENT_API_zh.md),
+[backend API reference](backend/docs/API.md#published-agent-api-m2), and
+[configuration guide](backend/docs/CONFIGURATION.md#published-agent-runtime-quotas).
+Deployment, SecretStore recovery, quota tuning, Feishu troubleshooting, and
+rollback procedures are documented in the
+[Published Agents operations handbook](docs/PUBLISHED_AGENTS.md).
+
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+
+When database persistence is enabled, custom-agent conversations—including creation and editing—must use the async Gateway path, which strips reserved caller fields and hydrates the owner-scoped draft before building the graph. A confirmed database miss can read only that owner's legacy files during migration; database failures and cross-owner/shared files never trigger fallback. The synchronous embedded client intentionally rejects custom agents in that mode so it never reuses the Gateway-owned async database engine from a different event loop; default-agent embedded flows are unaffected. Without database persistence, embedded custom agents continue to use their per-user files. Studio drafts default to an explicit empty Skill set, while conversational/legacy drafts that omit Skills inherit the currently selectable set and materialize it into immutable revisions at publish time. Publishing captures the draft and child rows in one SQL snapshot, double-checks each Skill file tree for stability, derives connector requirements from the exact frozen `SKILL.md` bytes, and rejects same-checksum revision metadata mismatches. Publish and conversational authoring share the identity → draft row-lock order; concurrent changes return a conflict and create no release. Connector grants are intersected with authoritative Connector-type capabilities both when saving and publishing. PATCH rejects malformed or duplicate nested Skill/grant entries, and legacy import writes identity, draft, and Skills in one retry-safe transaction. Published-Agent slugs are case-preserving and must match `[A-Za-z0-9-]{1,64}` consistently at control-plane creation/import, Gateway assistant routing, and database-backed runtime lookup.
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -737,6 +769,7 @@ All dict-returning methods are validated against Gateway Pydantic response model
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
+- [Published Agents Operations](docs/PUBLISHED_AGENTS.md) - Deployment, quotas, Feishu troubleshooting, and rollback
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
 

@@ -17,6 +17,7 @@ from deerflow.runtime.runs.worker import (
     _install_runtime_context,
     _queue_flash_memory_capture,
     _rollback_to_pre_run_checkpoint,
+    _should_track_run_tokens,
     _should_use_flash_direct_path,
     run_agent,
 )
@@ -45,6 +46,19 @@ def test_build_runtime_context_includes_app_config_when_present():
     assert context["thread_id"] == "thread-1"
     assert context["run_id"] == "run-1"
     assert context["app_config"] is app_config
+
+
+def test_published_run_tracks_tokens_when_global_tracking_is_disabled():
+    run_events_config = SimpleNamespace(track_token_usage=False)
+
+    assert _should_track_run_tokens(
+        SimpleNamespace(metadata={"published_agent": True}),
+        run_events_config,
+    )
+    assert not _should_track_run_tokens(
+        SimpleNamespace(metadata={}),
+        run_events_config,
+    )
 
 
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
@@ -211,6 +225,30 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
         supports_vision = False
 
     app_config = SimpleNamespace(get_model_config=lambda _name: MockModelConfig())
+    combined_instructions = "<agent_instructions>\nDB AGENT instructions\n</agent_instructions>\n\n<agent_soul>\nDB SOUL instructions\n</agent_soul>"
+    captured_prompt_kwargs: list[dict] = []
+
+    async def hydrate_database_agent(config, *, owner_user_id):
+        assert owner_user_id
+        configurable = config.setdefault("configurable", {})
+        configurable.update(
+            {
+                "__agent_config_source": "database",
+                "__agent_config": {
+                    "name": "db-agent",
+                    "description": "",
+                    "model": "flash-model",
+                    "tool_groups": [],
+                    "skills": [],
+                },
+                "__agent_instructions": combined_instructions,
+                "__agent_draft_revision": 7,
+            }
+        )
+
+    def capture_prompt(**kwargs):
+        captured_prompt_kwargs.append(dict(kwargs))
+        return kwargs["agent_instructions"]
 
     class FakeModel:
         def with_config(self, **_kwargs):
@@ -218,6 +256,7 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
 
         async def astream(self, messages, config=None):
             assert messages[0].type == "system"
+            assert messages[0].content == combined_instructions
             yield AIMessageChunk(content="hello")
             yield AIMessageChunk(content="!")
 
@@ -225,7 +264,8 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
         raise AssertionError("agent_factory should not be called for flash direct path")
 
     monkeypatch.setattr("deerflow.agents.lead_agent.agent._resolve_model_name", lambda requested=None, *, app_config=None: requested or "flash-model")
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", lambda **_kwargs: "system prompt")
+    monkeypatch.setattr("deerflow.publishing.runtime_loader.hydrate_runtime_agent_config", hydrate_database_agent)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.apply_prompt_template", capture_prompt)
     monkeypatch.setattr(
         "deerflow.models.factory.create_chat_model",
         lambda **_kwargs: FakeModel(),
@@ -240,6 +280,7 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
         graph_input={"messages": [HumanMessage(content="hi")]},
         config={
             "context": {
+                "agent_name": "db-agent",
                 "mode": "flash",
                 "thinking_enabled": False,
                 "is_plan_mode": False,
@@ -257,6 +298,7 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
     values_events = [data for event, data in published if event == "values"]
     assert values_events
     assert values_events[-1]["messages"][-1]["content"] == "hello!"
+    assert captured_prompt_kwargs[-1]["agent_instructions"] == combined_instructions
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

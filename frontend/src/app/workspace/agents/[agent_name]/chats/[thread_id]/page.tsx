@@ -1,11 +1,10 @@
 "use client";
 
-import { BotIcon, PlusSquare } from "lucide-react";
-import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { BotIcon } from "lucide-react";
+import { useParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
-import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
@@ -23,11 +22,11 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
-import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
+import { useDraftSandboxThread } from "@/core/published-agents";
 import {
   copyThreadSettings,
   useLocalSettings,
@@ -41,7 +40,6 @@ import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
-  const router = useRouter();
 
   const { agent_name } = useParams<{
     agent_name: string;
@@ -58,6 +56,43 @@ export default function AgentChatPage() {
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
+  const sandboxScopeQuery = useDraftSandboxThread(
+    isNewThread || isMock ? undefined : threadId,
+  );
+  const sandboxScope = sandboxScopeQuery.sandbox;
+  const effectiveContext = useMemo(() => {
+    const selectedSkillName =
+      typeof settings.context.skill_name === "string"
+        ? settings.context.skill_name
+        : undefined;
+    const selectedConnectorIds = Array.isArray(settings.context.connector_ids)
+      ? settings.context.connector_ids.filter(
+          (connectorId): connectorId is string =>
+            typeof connectorId === "string",
+        )
+      : undefined;
+    if (!sandboxScope) {
+      return {
+        ...settings.context,
+        skill_name: selectedSkillName,
+        connector_ids: selectedConnectorIds,
+      };
+    }
+    const allowedSkills = new Set(sandboxScope.skill_names);
+    const allowedConnectors = new Set(sandboxScope.connector_ids);
+    const connectorIds = selectedConnectorIds?.filter((connectorId) =>
+      allowedConnectors.has(connectorId),
+    );
+    return {
+      ...settings.context,
+      skill_name:
+        selectedSkillName && allowedSkills.has(selectedSkillName)
+          ? selectedSkillName
+          : undefined,
+      connector_ids:
+        connectorIds && connectorIds.length > 0 ? connectorIds : undefined,
+    };
+  }, [sandboxScope, settings.context]);
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
     isNewThread || isMock ? undefined : threadId,
@@ -81,7 +116,7 @@ export default function AgentChatPage() {
     loadMoreHistory,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
-    context: { ...settings.context, agent_name: agent_name },
+    context: { ...effectiveContext, agent_name: agent_name },
     isMock,
     onSend: () => {
       setIsWelcomeMode(false);
@@ -117,19 +152,30 @@ export default function AgentChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
+      if (sandboxScopeQuery.isLoading || sandboxScopeQuery.error) {
+        return;
+      }
       const sendPromise = sendMessage(threadId, message, { agent_name });
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId, agent_name],
+    [
+      sendMessage,
+      threadId,
+      agent_name,
+      sandboxScopeQuery.error,
+      sandboxScopeQuery.isLoading,
+    ],
   );
   const handleChoiceSelect = useCallback(
     (choice: string) => {
       if (
         isUploading ||
         thread.isLoading ||
+        sandboxScopeQuery.isLoading ||
+        sandboxScopeQuery.error ||
         env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
       ) {
         return;
@@ -137,7 +183,15 @@ export default function AgentChatPage() {
 
       void sendMessage(threadId, { text: choice, files: [] }, { agent_name });
     },
-    [agent_name, isUploading, sendMessage, thread.isLoading, threadId],
+    [
+      agent_name,
+      isUploading,
+      sandboxScopeQuery.error,
+      sandboxScopeQuery.isLoading,
+      sendMessage,
+      thread.isLoading,
+      threadId,
+    ],
   );
 
   const handleStop = useCallback(async () => {
@@ -176,17 +230,6 @@ export default function AgentChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="mr-4 flex items-center">
-              <Tooltip content={t.agents.newChat}>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    router.push(`/workspace/agents/${agent_name}/chats/new`);
-                  }}
-                >
-                  <PlusSquare /> {t.agents.newChat}
-                </Button>
-              </Tooltip>
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
@@ -270,7 +313,9 @@ export default function AgentChatPage() {
                         ? "streaming"
                         : "ready"
                   }
-                  context={settings.context}
+                  context={effectiveContext}
+                  allowedSkillNames={sandboxScope?.skill_names}
+                  allowedConnectorIds={sandboxScope?.connector_ids}
                   extraHeader={
                     isWelcomeMode && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
@@ -278,12 +323,24 @@ export default function AgentChatPage() {
                   }
                   disabled={
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                    isUploading
+                    isUploading ||
+                    sandboxScopeQuery.isLoading ||
+                    Boolean(sandboxScopeQuery.error)
                   }
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />
+                {sandboxScopeQuery.error && (
+                  <div
+                    role="alert"
+                    className="text-destructive mt-2 text-center text-xs"
+                  >
+                    {sandboxScopeQuery.error instanceof Error
+                      ? sandboxScopeQuery.error.message
+                      : "Unable to load the draft sandbox capability scope."}
+                  </div>
+                )}
                 {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
                   <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
                     {t.common.notAvailableInDemoMode}

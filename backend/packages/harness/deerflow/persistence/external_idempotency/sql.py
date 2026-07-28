@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -75,6 +75,7 @@ class ExternalIdempotencyRepository:
             api_key_id=api_key_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
+            run_id=str(values["run_id"]) if values.get("run_id") else None,
             expires_at=values["expires_at"],
         )
         async with self._sf() as session:
@@ -130,3 +131,16 @@ class ExternalIdempotencyRepository:
             if row is not None and row.response_json is None:
                 await session.delete(row)
                 await session.commit()
+
+    async def release_incomplete_by_run_id(self, *, run_id: str, user_id: str) -> bool:
+        """Release a pre-bound claim whose Run never became durable."""
+        async with self._sf() as session:
+            result = await session.execute(
+                delete(ExternalIdempotencyRow).where(
+                    ExternalIdempotencyRow.run_id == run_id,
+                    ExternalIdempotencyRow.user_id == user_id,
+                    ExternalIdempotencyRow.response_json.is_(None),
+                )
+            )
+            await session.commit()
+            return result.rowcount > 0

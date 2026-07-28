@@ -553,9 +553,84 @@ Note: MCP outbound connections can still use OAuth for configured HTTP/SSE MCP s
 
 ---
 
+## Published Agent API (M2)
+
+Published Agents expose a stable, credential-scoped API under
+`/api/v1/agents/{agent_id}`. These routes require an Agent Key in
+`Authorization: Bearer dfa_...`; browser session cookies and user-level `dfk_...`
+keys are not accepted. A Key only authorizes its own Agent, and cross-Agent or
+cross-credential access returns `404` without revealing resource existence.
+
+Published runs always use the Agent's current immutable Release at Run creation,
+disable long-term memory and management tools, and ignore caller attempts to
+select owner, model, Release, Skills, connectors, or runtime configuration.
+
+### Owner Key Management
+
+These control-plane routes require a browser session and CSRF for mutations:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/published-agents/{agent_id}/keys` | Create a named Key; plaintext `api_key` is returned once |
+| `GET` | `/api/published-agents/{agent_id}/keys` | List safe prefix/last-four/status/quota metadata |
+| `PATCH` | `/api/published-agents/{agent_id}/keys/{key_id}` | Rename or tighten Key quota overrides |
+| `POST` | `/api/published-agents/{agent_id}/keys/{key_id}/rotate` | Create a successor; predecessor overlaps for 24 hours by default |
+| `POST` | `/api/published-agents/{agent_id}/keys/{key_id}/revoke` | Revoke immediately |
+| `GET` | `/api/published-agents/{agent_id}/usage?days=30` | Owner-only UTC daily usage aggregate |
+
+The overlap can be changed with
+`AGENT_API_KEY_ROTATION_OVERLAP_SECONDS`. Plaintext Keys are never persisted;
+the database contains a slow salted hash plus safe display metadata.
+
+### Public Endpoints
+
+| Method | Path | Success |
+|---|---|---|
+| `GET` | `/api/v1/agents/{agent_id}` | Safe metadata only |
+| `POST` | `/api/v1/agents/{agent_id}/conversations` | Create a credential-isolated Conversation (`201`) |
+| `GET` | `/api/v1/agents/{agent_id}/conversations/{conversation_id}` | Read scoped Conversation state |
+| `POST` | `.../conversations/{conversation_id}/runs` | Start asynchronously (`202`) |
+| `POST` | `.../conversations/{conversation_id}/runs/wait` | Start and wait for terminal state |
+| `POST` | `.../conversations/{conversation_id}/runs/stream` | Start and stream sanitized SSE |
+| `GET` | `.../conversations/{conversation_id}/runs/{run_id}` | Read scoped Run state |
+| `POST` | `.../conversations/{conversation_id}/runs/{run_id}/cancel` | Cancel a pending/running Run |
+
+Conversation creation accepts only `external_conversation_id` and JSON
+`metadata`. Run creation accepts only `message` and JSON `metadata`; extra
+fields are rejected with `422`.
+
+```bash
+AGENT_ID=pa_example
+AGENT_KEY=dfa_example
+
+curl -X POST "http://localhost:2026/api/v1/agents/${AGENT_ID}/conversations" \
+  -H "Authorization: Bearer ${AGENT_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"external_conversation_id":"customer-42"}'
+
+curl -X POST "http://localhost:2026/api/v1/agents/${AGENT_ID}/conversations/CONVERSATION_ID/runs/wait" \
+  -H "Authorization: Bearer ${AGENT_KEY}" \
+  -H "Idempotency-Key: request-001" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Summarize the account status."}'
+```
+
+Use the same `Idempotency-Key` with the same operation/body to replay the
+original Run. Reusing it with a different body returns `409`. Quota rejection
+returns `429` and `Retry-After`; oversized input returns `413`; suspended Agents
+return `410`; revoked/expired Keys return `401`.
+
+Public JSON and SSE serializers use explicit allowlists. They never expose
+owner ids, Release ids/numbers, instructions, model selection, Skill revisions,
+Connector metadata, credentials, hashes, internal thread ids, or paths.
+
+---
+
 ## Rate Limiting
 
-No rate limiting is implemented by default. For production deployments, configure rate limiting in Nginx:
+General Gateway routes do not implement a default rate limiter. Published-Agent
+routes enforce the configured Agent/Key quota ledger described above. For an
+additional deployment-wide edge limit, configure Nginx:
 
 ```nginx
 limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
