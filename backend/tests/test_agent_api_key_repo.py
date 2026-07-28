@@ -84,6 +84,20 @@ async def test_verify_revocation_and_multiple_active_keys(key_repo) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_permanently_removes_key_and_invalidates_plaintext(key_repo) -> None:
+    repo, _session_factory, _clock = key_repo
+    created = await repo.create(agent_id="pa_1", owner_user_id="owner-a", name="Temporary")
+
+    assert await repo.delete("pa_1", created["id"], owner_user_id="owner-b") is False
+    assert await repo.verify(created["api_key"]) is not None
+
+    assert await repo.delete("pa_1", created["id"], owner_user_id="owner-a") is True
+    assert await repo.get("pa_1", created["id"], owner_user_id="owner-a") is None
+    assert await repo.verify(created["api_key"]) is None
+    assert await repo.delete("pa_1", created["id"], owner_user_id="owner-a") is False
+
+
+@pytest.mark.asyncio
 async def test_rotation_keeps_old_key_during_overlap_then_expires_it(key_repo) -> None:
     repo, _session_factory, clock = key_repo
     old = await repo.create(agent_id="pa_1", owner_user_id="owner-a", name="Partner")

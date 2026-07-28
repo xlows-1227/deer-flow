@@ -201,6 +201,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 startup_config.publishing.platform_quota,
                 app.state.agent_api_key_repo,
             )
+            app.state.publishing_platform_quota = startup_config.publishing.platform_quota
+            app.state.publishing_model_costs = {model_name: pricing.model_dump(mode="json") for model_name, pricing in startup_config.publishing.model_costs.items()}
             app.state.quota_ledger = QuotaLedger(app.state.agent_usage_repo)
 
             app.state.published_agent_resolver = PublishedAgentResolver(
@@ -228,6 +230,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.published_agent_repo = None
             app.state.published_agent_resolver = None
             app.state.agent_usage_repo = None
+            app.state.publishing_model_costs = {}
             app.state.quota_ledger = None
             app.state.external_conversation_repo = None
             app.state.external_idempotency_repo = None

@@ -3209,6 +3209,7 @@ class FeishuChannel(Channel):
 
             event_header = getattr(event, "header", None)
             event_id = getattr(event_header, "event_id", None)
+            event_created_at = FeishuEventVerifier._timestamp(event)
             message = event.event.message
             chat_id = message.chat_id
             msg_id = message.message_id
@@ -3317,6 +3318,7 @@ class FeishuChannel(Channel):
                     **({"event_id": event_id} if isinstance(event_id, str) else {}),
                     **({"binding_id": self.binding_id, "agent_id": self.agent_id} if self.binding_id else {}),
                 },
+                created_at=event_created_at,
             )
             inbound.topic_id = topic_id
 

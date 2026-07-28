@@ -450,6 +450,31 @@ class PublishedAgentRepository:
             await session.commit()
             return True
 
+    async def transition_status(
+        self,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        from_statuses: Sequence[str],
+        to_status: str,
+        require_current_release: bool = False,
+    ) -> bool:
+        """Atomically apply one owner-scoped, release-aware state transition."""
+        conditions = [
+            PublishedAgentRow.id == agent_id,
+            PublishedAgentRow.owner_user_id == owner_user_id,
+            PublishedAgentRow.status.in_(tuple(from_statuses)),
+        ]
+        if require_current_release:
+            conditions.append(PublishedAgentRow.current_release_id.is_not(None))
+        async with self._sf() as session:
+            result = await session.execute(update(PublishedAgentRow).where(*conditions).values(status=to_status, updated_at=_now()))
+            if result.rowcount != 1:
+                await session.rollback()
+                return False
+            await session.commit()
+            return True
+
     async def set_current_release(self, agent_id: str, *, owner_user_id: str, release_id: str | None) -> bool:
         async with self._sf() as session:
             row = (
@@ -570,6 +595,7 @@ class AgentDraftRepository:
         agent_markdown: str | None = None,
         soul_markdown: str | None = None,
         model_name: str | None = None,
+        model_name_provided: bool = False,
         tool_groups: Sequence[str] | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -578,8 +604,9 @@ class AgentDraftRepository:
         Uses a single conditional ``UPDATE ... WHERE agent_id = ? AND revision = ?``
         (plus an ownership guard) and checks the rowcount, so two transactions
         that both read the same revision cannot both succeed — only the winner's
-        UPDATE matches a row (rereview Critical-2). Only fields explicitly passed
-        (not ``None``) are written.
+        UPDATE matches a row (rereview Critical-2). Nullable model selection
+        uses ``model_name_provided`` to distinguish omission from an explicit
+        request to restore the platform default by writing SQL NULL.
         """
         async with self._sf() as session:
             set_values: dict[str, Any] = {
@@ -591,7 +618,7 @@ class AgentDraftRepository:
                 set_values["agent_markdown"] = agent_markdown
             if soul_markdown is not None:
                 set_values["soul_markdown"] = soul_markdown
-            if model_name is not None:
+            if model_name_provided or model_name is not None:
                 set_values["model_name"] = model_name
             if tool_groups is not None:
                 set_values["tool_groups_json"] = list(tool_groups)
@@ -630,6 +657,7 @@ class AgentDraftRepository:
         agent_markdown: str | None = None,
         soul_markdown: str | None = None,
         model_name: str | None = None,
+        model_name_provided: bool = False,
         tool_groups: Sequence[str] | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
         skills: Sequence[Mapping[str, str]] | None = None,
@@ -657,7 +685,7 @@ class AgentDraftRepository:
                 set_values["agent_markdown"] = agent_markdown
             if soul_markdown is not None:
                 set_values["soul_markdown"] = soul_markdown
-            if model_name is not None:
+            if model_name_provided or model_name is not None:
                 set_values["model_name"] = model_name
             if tool_groups is not None:
                 set_values["tool_groups_json"] = list(tool_groups)

@@ -29,13 +29,13 @@ test.describe("Sidebar navigation", () => {
     const expandedBox = await sidebar.boundingBox();
     expect(expandedBox).not.toBeNull();
 
-    await page.getByRole("button", { name: "收起侧边栏" }).click();
+    await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
     await expect(sidebar.locator("a[href='/workspace/agents']")).toHaveCSS(
       "width",
       "32px",
     );
-    await expect(sidebar.getByText("智能体")).toBeHidden();
+    await expect(sidebar.getByText("Agents")).toBeHidden();
 
     const collapsedBox = await sidebar.boundingBox();
     expect(collapsedBox).not.toBeNull();

@@ -25,6 +25,7 @@ from deerflow.persistence.agent_release.model import (
     AgentReleaseSkillRow,
 )
 from deerflow.persistence.published_agent.model import PublishedAgentRow
+from deerflow.persistence.skill_revision.model import SkillRevisionRow
 
 
 def _now() -> datetime:
@@ -34,7 +35,7 @@ def _now() -> datetime:
 def _release_to_dict(
     row: AgentReleaseRow,
     *,
-    skills: list[dict[str, str]] | None = None,
+    skills: list[dict[str, str | None]] | None = None,
     connector_grants: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     data = row.to_dict()
@@ -233,9 +234,41 @@ class AgentReleaseRepository:
         )
         return (await session.execute(stmt)).scalar_one_or_none()
 
-    async def _load_skills(self, session: AsyncSession, release_id: str) -> list[dict[str, str]]:
-        rows = (await session.execute(select(AgentReleaseSkillRow).where(AgentReleaseSkillRow.release_id == release_id))).scalars().all()
-        return [{"skill_revision_id": row.skill_revision_id} for row in rows]
+    async def _load_skills(
+        self,
+        session: AsyncSession,
+        release_id: str,
+    ) -> list[dict[str, str | None]]:
+        """Return pinned revision IDs with their owner-console display names.
+
+        ``skill_name`` is immutable metadata from the pinned revision itself,
+        not the mutable Skill index.  The outer join keeps repositories
+        tolerant of legacy/test rows that predate enforced foreign keys.
+        """
+        rows = (
+            await session.execute(
+                select(
+                    AgentReleaseSkillRow,
+                    SkillRevisionRow.skill_name,
+                )
+                .outerjoin(
+                    SkillRevisionRow,
+                    SkillRevisionRow.id == AgentReleaseSkillRow.skill_revision_id,
+                )
+                .where(AgentReleaseSkillRow.release_id == release_id)
+                .order_by(
+                    SkillRevisionRow.skill_name,
+                    AgentReleaseSkillRow.skill_revision_id,
+                )
+            )
+        ).all()
+        return [
+            {
+                "skill_revision_id": row.skill_revision_id,
+                "skill_name": skill_name,
+            }
+            for row, skill_name in rows
+        ]
 
     async def _load_grants(self, session: AsyncSession, release_id: str) -> list[dict[str, str]]:
         rows = (

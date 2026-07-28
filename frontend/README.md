@@ -72,7 +72,9 @@ pnpm start
 ├── /                    # Landing page
 ├── /chats               # Chat list
 ├── /chats/new           # New chat page
-└── /chats/[thread_id]   # A specific chat page
+├── /chats/[thread_id]   # A specific chat page
+├── /workspace/agents    # Published-Agent owner control console
+└── /workspace/agents/[agent_id] # Agent Studio draft editor
 ```
 
 ## Configuration
@@ -112,6 +114,7 @@ src/
 │   ├── mcp/                # MCP integration
 │   ├── messages/           # Message handling
 │   ├── models/             # Data models & types
+│   ├── published-agents/   # Publishing control-plane API, types, and Query hooks
 │   ├── settings/           # User settings
 │   ├── skills/             # Skills system
 │   ├── threads/            # Thread management
@@ -124,22 +127,54 @@ src/
 └── styles/                 # Global styles
 ```
 
+The Published-Agent owner console combines immutable Release, API Key,
+Feishu binding, health, and seven-day usage summaries without exposing a
+public marketplace. Agent Studio edits `AGENT.md` and `SOUL.md` as a
+revisioned backend draft with separate responsibilities: **Work rules**
+`AGENT.md` is user-editable and empty drafts receive a localized template for
+role, responsibilities, workflow, boundaries, and output requirements;
+`SOUL.md` is system-generated from a managed personality preset and has no
+free-text editor. Existing custom `SOUL.md` content remains read-only until the
+owner explicitly replaces it with a preset. The live Release remains unchanged
+until publish. Studio
+filters public/private Skills through owner-authorized options, displays
+localized Skill names and descriptions when available, and searches across
+both localized and technical catalog metadata. It connects Skill requirements
+to capability-level Connector grants,
+and launches explicitly non-live draft test chats. Its owner-only publishing
+area previews saved-draft changes, localizes publish violations, compares
+immutable Releases, and rolls back without changing API paths, Keys, bindings,
+or conversation identity. Post-publish panels provide one-time Key reveal,
+stable sync/SSE/async examples, Feishu lifecycle health, filtered daily
+usage/error charts, bounded quota inheritance, and metadata-only rejection
+events. Custom-Agent conversations retain their Agent slug and display name in
+Thread metadata; the recent-chat sidebar and full chat history show a compact
+Agent icon/name badge beside the generated conversation title. Older sandbox
+Threads that only contain `draft_sandbox_agent_id` resolve the same identity
+from the owner Agent list. The custom-Agent chat header keeps usage and
+artifact controls but intentionally omits a duplicate "New chat" action beside
+the token indicator. The final Playwright acceptance gate verifies all
+supported instruction
+combinations, draft/live separation, and adding Agent Keys or Feishu bindings
+after the first publish. Generated public API examples use the stable
+`{"message":"..."}` request body; they never expose a Release identifier.
+
 ## Scripts
 
-| Command             | Description                             |
-| ------------------- | --------------------------------------- |
+| Command             | Description                                          |
+| ------------------- | ---------------------------------------------------- |
 | `pnpm dev`          | Start development server with Webpack (lower memory) |
 | `pnpm dev:turbo`    | Start development server with Turbopack (faster HMR) |
-| `pnpm build`        | Build for production                    |
-| `pnpm start`        | Start production server                 |
-| `pnpm test`         | Run unit tests with Vitest              |
-| `pnpm test:e2e`     | Run E2E tests with Playwright           |
-| `pnpm format`       | Check formatting with Prettier          |
-| `pnpm format:write` | Apply formatting with Prettier          |
-| `pnpm lint`         | Run ESLint                              |
-| `pnpm lint:fix`     | Fix ESLint issues                       |
-| `pnpm typecheck`    | Run TypeScript type checking            |
-| `pnpm check`        | Run both lint and typecheck             |
+| `pnpm build`        | Build for production                                 |
+| `pnpm start`        | Start production server                              |
+| `pnpm test`         | Run unit tests with Vitest                           |
+| `pnpm test:e2e`     | Run E2E tests with Playwright                        |
+| `pnpm format`       | Check formatting with Prettier                       |
+| `pnpm format:write` | Apply formatting with Prettier                       |
+| `pnpm lint`         | Run ESLint                                           |
+| `pnpm lint:fix`     | Fix ESLint issues                                    |
+| `pnpm typecheck`    | Run TypeScript type checking                         |
+| `pnpm check`        | Run both lint and typecheck                          |
 
 ## Development Notes
 

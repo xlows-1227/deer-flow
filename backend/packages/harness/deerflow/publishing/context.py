@@ -10,6 +10,35 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class DraftSandboxContext:
+    """Trusted, immutable database-draft snapshot for one owner sandbox Run."""
+
+    owner_user_id: str
+    agent_id: str
+    agent_slug: str
+    draft_revision: int
+    description: str
+    agent_markdown: str
+    soul_markdown: str
+    model_name: str | None
+    tool_groups: tuple[str, ...]
+    skill_names: tuple[str, ...]
+    connector_capabilities: tuple[tuple[str, str], ...]
+
+    @property
+    def connector_ids(self) -> tuple[str, ...]:
+        """Return the selected Connector instances without widening grants."""
+        return tuple(sorted({connector_id for connector_id, _ in self.connector_capabilities}))
+
+    def connector_capability_map(self) -> dict[str, list[str]]:
+        """Return the runtime policy shape derived from the frozen draft."""
+        mapping: dict[str, set[str]] = {}
+        for connector_id, capability in self.connector_capabilities:
+            mapping.setdefault(connector_id, set()).add(capability)
+        return {connector_id: sorted(capabilities) for connector_id, capabilities in sorted(mapping.items())}
+
+
+@dataclass(frozen=True)
 class PublishedAgentContext:
     """Server-derived runtime authority for a single external run.
 

@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ThreadAgentBadge } from "@/components/workspace/thread-agent-badge";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -15,8 +16,12 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
 import { useRollupThreadMemory } from "@/core/memory/hooks";
+import { usePublishedAgents } from "@/core/published-agents";
 import { useThreads } from "@/core/threads/hooks";
 import {
+  agentDisplayNameOfThread,
+  agentNameOfThread,
+  draftSandboxAgentIdOfThread,
   isVisibleInChatList,
   pathOfThread,
   titleOfThread,
@@ -26,6 +31,20 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 export default function ChatsPage() {
   const { t } = useI18n();
   const { data: threads } = useThreads();
+  const needsPublishedAgentLookup = Boolean(
+    threads?.some(
+      (thread) =>
+        !agentNameOfThread(thread) &&
+        Boolean(draftSandboxAgentIdOfThread(thread)),
+    ),
+  );
+  const { agents: publishedAgents } = usePublishedAgents(
+    needsPublishedAgentLookup,
+  );
+  const publishedAgentsById = useMemo(
+    () => new Map(publishedAgents.map((agent) => [agent.id, agent])),
+    [publishedAgents],
+  );
   const [search, setSearch] = useState("");
   const [rollupThreadId, setRollupThreadId] = useState<string | null>(null);
   const { mutateAsync: rollupThreadMemory, isPending: isRollingUpMemory } =
@@ -79,39 +98,63 @@ export default function ChatsPage() {
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
-                {filteredThreads?.map((thread) => (
-                  <div
-                    key={thread.thread_id}
-                    className="flex items-center gap-3 border-b p-4"
-                  >
-                    <Link
-                      className="min-w-0 flex-1"
-                      href={pathOfThread(thread)}
+                {filteredThreads?.map((thread) => {
+                  const publishedAgent = publishedAgentsById.get(
+                    draftSandboxAgentIdOfThread(thread) ?? "",
+                  );
+                  const agentName =
+                    agentNameOfThread(thread) ?? publishedAgent?.slug;
+                  const agentDisplayName =
+                    agentDisplayNameOfThread(thread) ??
+                    publishedAgent?.display_name ??
+                    agentName;
+                  const threadPath = pathOfThread(
+                    thread,
+                    agentName ? { agent_name: agentName } : undefined,
+                  );
+                  return (
+                    <div
+                      key={thread.thread_id}
+                      className="flex items-center gap-3 border-b p-4"
                     >
-                      <div className="flex flex-col gap-2">
-                        <div className="truncate">{titleOfThread(thread)}</div>
-                        {thread.updated_at && (
-                          <div className="text-muted-foreground text-sm">
-                            {formatTimeAgo(thread.updated_at)}
+                      <Link className="min-w-0 flex-1" href={threadPath}>
+                        <div className="flex flex-col gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="truncate">
+                              {titleOfThread(thread)}
+                            </div>
+                            {agentDisplayName && (
+                              <ThreadAgentBadge
+                                agentName={agentDisplayName}
+                                className="max-w-48"
+                              />
+                            )}
                           </div>
+                          {thread.updated_at && (
+                            <div className="text-muted-foreground text-sm">
+                              {formatTimeAgo(thread.updated_at)}
+                            </div>
+                          )}
+                        </div>
+                      </Link>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={isRollingUpMemory}
+                        onClick={() =>
+                          void handleRollupMemory(thread.thread_id)
+                        }
+                      >
+                        {rollupThreadId === thread.thread_id ? (
+                          <LoaderCircle className="animate-spin" />
+                        ) : (
+                          <Sparkles />
                         )}
-                      </div>
-                    </Link>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={isRollingUpMemory}
-                      onClick={() => void handleRollupMemory(thread.thread_id)}
-                    >
-                      {rollupThreadId === thread.thread_id ? (
-                        <LoaderCircle className="animate-spin" />
-                      ) : (
-                        <Sparkles />
-                      )}
-                      <span>{t.conversation.memoryRollup}</span>
-                    </Button>
-                  </div>
-                ))}
+                        <span>{t.conversation.memoryRollup}</span>
+                      </Button>
+                    </div>
+                  );
+                })}
               </div>
             </ScrollArea>
           </main>

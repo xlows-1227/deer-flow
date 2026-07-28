@@ -36,6 +36,9 @@ def _make_storage(skills: list[dict[str, Any]], owners: dict[str, str] | None = 
                 out.append(
                     SimpleNamespace(
                         name=s["name"],
+                        description=s.get("description"),
+                        display_name=s.get("display_name"),
+                        description_zh=s.get("description_zh"),
                         category=SkillCategory(s["category"]),
                         enabled=s.get("enabled", True),
                         skill_dir=s.get("skill_dir"),
@@ -65,6 +68,33 @@ def test_enabled_public_skill_is_selectable():
     storage = _make_storage([{"name": "reporting", "category": "public", "enabled": True}])
     index = StorageSkillsIndex(storage, owner_user_id="user-a")
     assert index.is_selectable_by("reporting", "user-a") is True
+
+
+def test_selectable_skills_include_localized_catalog_metadata():
+    storage = _make_storage(
+        [
+            {
+                "name": "reporting",
+                "description": "Generate business reports",
+                "display_name": "经营报表",
+                "description_zh": "生成并分析经营报表。",
+                "category": "public",
+                "enabled": True,
+            }
+        ]
+    )
+    index = StorageSkillsIndex(storage, owner_user_id="user-a")
+
+    assert index.list_selectable_by("user-a") == [
+        {
+            "skill_name": "reporting",
+            "source": "public",
+            "display_name": "经营报表",
+            "description": "Generate business reports",
+            "description_zh": "生成并分析经营报表。",
+            "declared_connector_caps": [],
+        }
+    ]
 
 
 def test_disabled_private_skill_is_not_selectable_even_for_owner():

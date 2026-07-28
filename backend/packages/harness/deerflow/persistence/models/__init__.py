@@ -22,7 +22,11 @@ from deerflow.persistence.agent_release.model import (
     AgentReleaseRow,
     AgentReleaseSkillRow,
 )
-from deerflow.persistence.agent_usage.model import AgentQuotaReservationRow, AgentUsageRecordRow
+from deerflow.persistence.agent_usage.model import (
+    AgentQuotaRejectionRow,
+    AgentQuotaReservationRow,
+    AgentUsageRecordRow,
+)
 from deerflow.persistence.api_key.model import APIKeyRow
 from deerflow.persistence.channel_mapping.model import ChannelConversationMappingRow, ChannelEventDedupRow
 from deerflow.persistence.connector.model import ConnectorAuditLogRow, ConnectorGrantRow, ConnectorInstanceRow, ConnectorMetadataCacheRow
@@ -65,6 +69,7 @@ __all__ = [
     "AgentReleaseConnectorGrantRow",
     "AgentReleaseRow",
     "AgentReleaseSkillRow",
+    "AgentQuotaRejectionRow",
     "AgentQuotaReservationRow",
     "AgentUsageRecordRow",
     "ChannelConversationMappingRow",

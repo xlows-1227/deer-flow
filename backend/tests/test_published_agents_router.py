@@ -13,12 +13,20 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI, Request
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.testclient import TestClient
 
 from app.gateway.routers import published_agents
+from deerflow.persistence.base import Base
+from deerflow.persistence.published_agent import (
+    AgentDraftRepository,
+    PublishedAgentRepository,
+)
+from deerflow.publishing.draft_service import DraftService
 
 
 class _SessionMiddleware(BaseHTTPMiddleware):
@@ -76,6 +84,21 @@ class _MemAgents:
         r["status"] = status
         return True
 
+    async def transition_status(
+        self,
+        agent_id,
+        *,
+        owner_user_id,
+        from_statuses,
+        to_status,
+        require_current_release=False,
+    ):
+        r = self.rows.get(agent_id)
+        if not r or r["owner_user_id"] != owner_user_id or r["status"] not in from_statuses or (require_current_release and r["current_release_id"] is None):
+            return False
+        r["status"] = to_status
+        return True
+
     async def set_current_release(self, agent_id, *, owner_user_id, release_id):
         r = self.rows.get(agent_id)
         if not r or r["owner_user_id"] != owner_user_id:
@@ -119,8 +142,9 @@ class _MemDrafts:
         d = self.drafts.get(agent_id)
         if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
             return None
+        model_name_provided = fields.pop("model_name_provided", False)
         for k, v in fields.items():
-            if v is not None:
+            if v is not None or (k == "model_name" and model_name_provided):
                 d[k] = v
         d["revision"] = revision + 1
         return dict(d)
@@ -130,8 +154,9 @@ class _MemDrafts:
         d = self.drafts.get(agent_id)
         if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
             return None
+        model_name_provided = fields.pop("model_name_provided", False)
         for k, v in fields.items():
-            if v is not None:
+            if v is not None or (k == "model_name" and model_name_provided):
                 d[k] = v
         if skills is not None:
             d["skills"] = list(skills)
@@ -160,7 +185,42 @@ class _MemSkillsIndex:
         return name in {"reporting", "public-tool"}
 
     def get(self, name):
-        return {"visibility": "public"} if name in {"reporting", "public-tool"} else None
+        if name == "reporting":
+            return {
+                "visibility": "private",
+                "owner": "owner",
+                "description": "Owner reporting workflow",
+                "caps": ["database.query"],
+            }
+        return (
+            {
+                "visibility": "public",
+                "description": "Public helper",
+                "caps": [],
+            }
+            if name == "public-tool"
+            else None
+        )
+
+    def list_selectable_by(self, owner_user_id):
+        return [
+            {
+                "skill_name": "public-tool",
+                "source": "public",
+                "display_name": "公共工具",
+                "description": "Public helper",
+                "description_zh": "用于公共辅助任务。",
+                "declared_connector_caps": [],
+            },
+            {
+                "skill_name": "reporting",
+                "source": "private",
+                "display_name": "经营报表",
+                "description": "Owner reporting workflow",
+                "description_zh": "查询业务数据并生成经营报表。",
+                "declared_connector_caps": ["database.query"],
+            },
+        ]
 
 
 class _MemConnectorRepo:
@@ -250,6 +310,58 @@ def test_create_and_get_agent():
     assert "agent_markdown" in detail.json()["draft"]
 
 
+def test_list_draft_options_returns_owner_selectable_skill_metadata():
+    client, _service, _owner = _make_client()
+    agent = client.post(
+        "/api/published-agents",
+        json={"slug": "studio", "display_name": "Studio"},
+    ).json()
+
+    response = client.get(f"/api/published-agents/{agent['id']}/draft/options")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "skills": [
+            {
+                "skill_name": "public-tool",
+                "source": "public",
+                "display_name": "公共工具",
+                "description": "Public helper",
+                "description_zh": "用于公共辅助任务。",
+                "declared_connector_caps": [],
+            },
+            {
+                "skill_name": "reporting",
+                "source": "private",
+                "display_name": "经营报表",
+                "description": "Owner reporting workflow",
+                "description_zh": "查询业务数据并生成经营报表。",
+                "declared_connector_caps": ["database.query"],
+            },
+        ]
+    }
+
+
+def test_quota_policy_distinguishes_platform_defaults_and_draft_overrides():
+    client, _, _ = _make_client()
+    agent = client.post(
+        "/api/published-agents",
+        json={"slug": "quota-agent", "display_name": "Quota Agent"},
+    ).json()
+    patched = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={"revision": 1, "quota_overrides": {"daily_runs": 25}},
+    )
+    assert patched.status_code == 200
+
+    response = client.get(f"/api/published-agents/{agent['id']}/quota")
+
+    assert response.status_code == 200
+    assert response.json()["platform_defaults"]["daily_runs"] == 1000
+    assert response.json()["owner_overrides"] == {"daily_runs": 25}
+    assert response.json()["effective"]["daily_runs"] == 25
+
+
 def test_create_agent_rejects_slug_that_runtime_cannot_resolve():
     client, _, _ = _make_client()
     for slug in ("bad/name", "has space", "under_score"):
@@ -321,6 +433,30 @@ def test_patch_draft_updates_fields():
     assert patched.json()["soul_markdown"] == "# Soul"
 
 
+def test_patch_draft_explicit_null_clears_model_but_omission_preserves_it():
+    client, _, _ = _make_client()
+    agent = client.post("/api/published-agents", json={"slug": "bot", "display_name": "Bot"}).json()
+    set_model = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={"revision": 1, "model_name": "gpt-x"},
+    )
+    assert set_model.status_code == 200, set_model.text
+
+    omitted = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={"revision": 2, "soul_markdown": "# keep model"},
+    )
+    assert omitted.status_code == 200, omitted.text
+    assert omitted.json()["model_name"] == "gpt-x"
+
+    cleared = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={"revision": 3, "model_name": None},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["model_name"] is None
+
+
 def test_patch_draft_revision_conflict_returns_409():
     client, _, _ = _make_client()
     agent = client.post("/api/published-agents", json={"slug": "bot", "display_name": "Bot"}).json()
@@ -385,13 +521,193 @@ def test_patch_draft_rejects_malformed_or_duplicate_nested_entries(invalid_field
 
 
 def test_archive_suspend_resume():
-    client, _, _ = _make_client()
+    client, service, _ = _make_client()
     agent = client.post("/api/published-agents", json={"slug": "bot", "display_name": "Bot"}).json()
+    draft_suspend = client.post(f"/api/published-agents/{agent['id']}/suspend")
+    assert draft_suspend.status_code == 409
+    assert draft_suspend.json()["detail"]["code"] == "invalid_state_transition"
+    assert client.post(f"/api/published-agents/{agent['id']}/resume").status_code == 409
+
+    service._agents.rows[agent["id"]]["current_release_id"] = "rel-1"
+    service._agents.rows[agent["id"]]["status"] = "published"
     assert client.post(f"/api/published-agents/{agent['id']}/suspend").status_code == 200
     assert client.get(f"/api/published-agents/{agent['id']}").json()["status"] == "suspended"
     assert client.post(f"/api/published-agents/{agent['id']}/resume").status_code == 200
     assert client.post(f"/api/published-agents/{agent['id']}/archive").status_code == 200
     assert client.get(f"/api/published-agents/{agent['id']}").json()["status"] == "archived"
+
+
+@pytest.mark.anyio
+async def test_lifecycle_router_uses_real_repository_transition_guards(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'router-lifecycle.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    agents = PublishedAgentRepository(session_factory)
+    service = DraftService(
+        published_agent_repo=agents,
+        draft_repo=AgentDraftRepository(session_factory),
+        skills_index=_MemSkillsIndex(),
+        connector_repo=_MemConnectorRepo(),
+    )
+    app = FastAPI()
+    app.add_middleware(_SessionMiddleware, user_id="owner-a")
+    app.include_router(published_agents.router)
+    app.dependency_overrides[published_agents.get_draft_service] = lambda: service
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            created = (
+                await client.post(
+                    "/api/published-agents",
+                    json={"slug": "real-state", "display_name": "Real state"},
+                )
+            ).json()
+            agent_id = created["id"]
+
+            assert (await client.post(f"/api/published-agents/{agent_id}/suspend")).status_code == 409
+            assert (await client.post(f"/api/published-agents/{agent_id}/resume")).status_code == 409
+
+            assert await agents.set_current_release(
+                agent_id,
+                owner_user_id="owner-a",
+                release_id="rel-1",
+            )
+            suspended = await client.post(f"/api/published-agents/{agent_id}/suspend")
+            assert suspended.status_code == 200
+            assert suspended.json()["status"] == "suspended"
+            resumed = await client.post(f"/api/published-agents/{agent_id}/resume")
+            assert resumed.status_code == 200
+            assert resumed.json()["status"] == "published"
+            archived = await client.post(f"/api/published-agents/{agent_id}/archive")
+            assert archived.status_code == 200
+            assert archived.json()["status"] == "archived"
+            assert (await client.post(f"/api/published-agents/{agent_id}/resume")).status_code == 409
+    finally:
+        await engine.dispose()
+
+
+def test_draft_sandbox_run_freezes_revision_and_is_not_published_usage(
+    monkeypatch,
+):
+    client, service, _ = _make_client()
+    agent = client.post(
+        "/api/published-agents",
+        json={"slug": "sandbox-bot", "display_name": "Sandbox Bot"},
+    ).json()
+    saved = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={
+            "revision": 1,
+            "agent_markdown": "UNPUBLISHED SNAPSHOT INSTRUCTION",
+            "model_name": "model-a",
+            "connector_grants": [
+                {
+                    "connector_instance_id": "conn_own",
+                    "capability": "database.query",
+                }
+            ],
+        },
+    ).json()
+    captured: dict[str, Any] = {}
+
+    async def fake_start_run(
+        body,
+        thread_id,
+        request,
+        *,
+        draft_sandbox_context=None,
+        **_kwargs,
+    ):
+        captured.update(
+            body=body,
+            thread_id=thread_id,
+            request=request,
+            context=draft_sandbox_context,
+        )
+        return SimpleNamespace(
+            run_id="run-sandbox-1",
+            thread_id=thread_id,
+            status=SimpleNamespace(value="pending"),
+        )
+
+    monkeypatch.setattr(published_agents, "start_run", fake_start_run)
+    before_status = service._agents.rows[agent["id"]]["status"]
+    before_release = service._agents.rows[agent["id"]]["current_release_id"]
+
+    response = client.post(
+        f"/api/published-agents/{agent['id']}/draft/sandbox-runs",
+        json={"message": "Follow the current draft."},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {
+        "agent_id": agent["id"],
+        "thread_id": captured["thread_id"],
+        "run_id": "run-sandbox-1",
+        "status": "pending",
+        "draft_revision": saved["revision"],
+        "billable": False,
+    }
+    assert captured["context"].draft_revision == saved["revision"]
+    assert captured["context"].agent_markdown == "UNPUBLISHED SNAPSHOT INSTRUCTION"
+    assert captured["context"].connector_capabilities == (("conn_own", "database.query"),)
+    assert captured["context"].connector_capability_map() == {"conn_own": ["database.query"]}
+    assert captured["body"].metadata["draft_sandbox"] is True
+    assert captured["body"].metadata["agent_name"] == agent["slug"]
+    assert captured["body"].metadata["agent_display_name"] == "Sandbox Bot"
+    assert "published_quota_reservation_id" not in captured["body"].metadata
+    assert service._agents.rows[agent["id"]]["status"] == before_status
+    assert service._agents.rows[agent["id"]]["current_release_id"] == before_release
+
+
+def test_get_draft_sandbox_thread_returns_only_frozen_capability_scope():
+    client, _, _ = _make_client(owner="owner-a")
+    agent = client.post(
+        "/api/published-agents",
+        json={"slug": "scope-agent", "display_name": "Scope Agent"},
+    ).json()
+    draft = client.patch(
+        f"/api/published-agents/{agent['id']}/draft",
+        json={
+            "revision": 1,
+            "skills": [
+                {"skill_name": "public-tool", "source": "public"},
+            ],
+            "connector_grants": [],
+        },
+    ).json()
+
+    class ThreadStore:
+        async def get(self, thread_id):
+            assert thread_id == "thread-sandbox"
+            return {
+                "thread_id": thread_id,
+                "metadata": {
+                    "draft_sandbox": True,
+                    "draft_sandbox_agent_id": agent["id"],
+                    "draft_sandbox_revision": draft["revision"],
+                    "draft_sandbox_billable": False,
+                },
+            }
+
+    client.app.state.thread_store = ThreadStore()
+
+    response = client.get("/api/published-agents/draft/sandbox-threads/thread-sandbox")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "agent_id": agent["id"],
+        "agent_slug": "scope-agent",
+        "thread_id": "thread-sandbox",
+        "draft_revision": draft["revision"],
+        "skill_names": ["public-tool"],
+        "connector_ids": [],
+        "billable": False,
+    }
 
 
 def test_patch_draft_revision_conflict_leaves_subtables_unchanged():

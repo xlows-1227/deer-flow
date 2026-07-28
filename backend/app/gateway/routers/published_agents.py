@@ -13,17 +13,31 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.gateway.deps import get_agent_usage_repo
+from app.gateway.deps import (
+    get_agent_usage_repo,
+    get_external_audit_repo,
+    get_thread_store,
+)
+from app.gateway.draft_sandbox import (
+    build_draft_sandbox_context,
+    draft_sandbox_thread_metadata,
+    resolve_draft_sandbox_context,
+)
+from app.gateway.routers.thread_runs import RunCreateRequest
+from app.gateway.services import start_run
 from deerflow.config.agents_config import validate_agent_slug
 from deerflow.persistence.agent_usage import AgentUsageRepository
+from deerflow.persistence.external_audit import ExternalAuditRepository
 from deerflow.publishing.draft_service import (
     ConnectorNotGrantableError,
     DraftConflictError,
     DraftService,
+    InvalidAgentStateTransitionError,
     SkillNotSelectableError,
 )
 from deerflow.publishing.import_service import AgentImportService, ImportAlreadyExistsError
@@ -32,6 +46,7 @@ from deerflow.publishing.publish_service import (
     PublishService,
     ReleaseNotFoundError,
 )
+from deerflow.publishing.quota import PlatformQuota, resolve_effective_quota
 
 router = APIRouter(prefix="/api/published-agents", tags=["published-agents"])
 
@@ -154,6 +169,28 @@ class RollbackRequest(BaseModel):
     release_no: int = Field(..., ge=1)
 
 
+class DraftSandboxRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(..., min_length=1, max_length=200_000)
+
+    @field_validator("message")
+    @classmethod
+    def reject_blank_message(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must not be blank")
+        return value
+
+
+class DraftSandboxThreadResponse(BaseModel):
+    agent_id: str
+    agent_slug: str
+    thread_id: str
+    draft_revision: int
+    skill_names: list[str]
+    connector_ids: list[str]
+    billable: Literal[False] = False
+
+
 def _agent_summary(agent: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": agent["id"],
@@ -219,11 +256,26 @@ async def get_agent(
     return {**_agent_summary(agent), "draft": draft}
 
 
+@router.get("/{agent_id}/draft/options")
+async def get_draft_options(
+    agent_id: str,
+    request: Request,
+    service: DraftService = Depends(get_draft_service),
+) -> dict[str, Any]:
+    """Return owner-authorized capability choices for the Studio editor."""
+    owner = _user_id(request)
+    if await service.get_agent(agent_id, owner_user_id=owner) is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {"skills": service.list_selectable_skills(owner_user_id=owner)}
+
+
 @router.get("/{agent_id}/usage")
 async def get_agent_usage(
     agent_id: str,
     request: Request,
     days: int = Query(default=30, ge=1, le=365),
+    source: Literal["api", "feishu"] | None = Query(default=None),
+    key_id: str | None = Query(default=None, min_length=1, max_length=64),
     service: DraftService = Depends(get_draft_service),
     repository: AgentUsageRepository = Depends(get_agent_usage_repo),
 ) -> dict[str, Any]:
@@ -237,7 +289,116 @@ async def get_agent_usage(
         owner_user_id=owner,
         agent_id=agent_id,
         since=since,
+        source=source,
+        credential_id=key_id,
+        model_costs=getattr(request.app.state, "publishing_model_costs", {}),
     )
+
+
+def _platform_quota(request: Request) -> PlatformQuota:
+    value = getattr(
+        request.app.state,
+        "publishing_platform_quota",
+        None,
+    )
+    return value if isinstance(value, PlatformQuota) else PlatformQuota()
+
+
+def _quota_values(platform: PlatformQuota) -> dict[str, int]:
+    return {
+        "max_concurrent_runs": platform.max_concurrent_runs_per_agent,
+        "daily_runs": platform.daily_runs_default,
+        "daily_tokens": platform.daily_tokens_default,
+        "max_run_seconds": platform.max_run_seconds,
+        "max_tokens_per_run": platform.max_tokens_per_run,
+        "max_input_bytes": platform.max_input_bytes,
+        "inbound_rps": platform.inbound_rps,
+    }
+
+
+@router.get("/{agent_id}/quota")
+async def get_agent_quota_policy(
+    agent_id: str,
+    request: Request,
+    service: DraftService = Depends(get_draft_service),
+) -> dict[str, Any]:
+    """Preview the next Release's owner quota under platform hard caps."""
+    owner = _user_id(request)
+    if await service.get_agent(agent_id, owner_user_id=owner) is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    draft = await service.get_draft(agent_id, owner_user_id=owner)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Agent draft not found")
+    platform = _platform_quota(request)
+    owner_overrides = dict(draft.get("quota_overrides") or {})
+    effective = resolve_effective_quota(
+        platform,
+        owner_overrides,
+        {},
+    )
+    return {
+        "agent_id": agent_id,
+        "platform_defaults": _quota_values(platform),
+        "owner_overrides": owner_overrides,
+        "effective": {
+            "max_concurrent_runs": effective.max_concurrent_runs,
+            "daily_runs": effective.daily_runs,
+            "daily_tokens": effective.daily_tokens,
+            "max_run_seconds": effective.max_run_seconds,
+            "max_tokens_per_run": effective.max_tokens_per_run,
+            "max_input_bytes": effective.max_input_bytes,
+            "inbound_rps": effective.inbound_rps,
+        },
+    }
+
+
+def _audit_category(status_code: int) -> str:
+    if status_code == 429:
+        return "quota"
+    if status_code == 401:
+        return "authentication"
+    if status_code == 403:
+        return "capability"
+    return "request"
+
+
+@router.get("/{agent_id}/audit")
+async def get_agent_rejection_audit(
+    agent_id: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    service: DraftService = Depends(get_draft_service),
+    repository: ExternalAuditRepository = Depends(get_external_audit_repo),
+) -> list[dict[str, Any]]:
+    """Return a metadata-only owner view of recent rejected requests."""
+    owner = _user_id(request)
+    if await service.get_agent(agent_id, owner_user_id=owner) is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    rows = await repository.list(
+        owner_user_id=owner,
+        agent_id=agent_id,
+        minimum_status_code=400,
+        limit=limit,
+    )
+    return [
+        {
+            "id": row["id"],
+            "request_id": row["request_id"],
+            "source": row.get("source"),
+            "credential_id": row.get("credential_id"),
+            "category": _audit_category(int(row["status_code"])),
+            "action": row["action"],
+            "resource_type": row.get("resource_type"),
+            "resource_id": row.get("resource_id"),
+            "skill_name": row.get("skill_name"),
+            "method": row["method"],
+            "path_template": row["path_template"],
+            "status_code": row["status_code"],
+            "duration_ms": row["duration_ms"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 @router.patch("/{agent_id}/draft")
@@ -263,6 +424,7 @@ async def patch_draft(
             agent_markdown=payload.agent_markdown,
             soul_markdown=payload.soul_markdown,
             model_name=payload.model_name,
+            model_name_provided="model_name" in payload.model_fields_set,
             tool_groups=payload.tool_groups,
             quota_overrides=payload.quota_overrides,
             skills=([entry.model_dump(exclude_none=True) for entry in payload.skills] if payload.skills is not None else None),
@@ -276,6 +438,95 @@ async def patch_draft(
         raise HTTPException(status_code=409, detail={"code": "revision_conflict", "message": str(exc)}) from exc
 
 
+@router.post("/{agent_id}/draft/sandbox-runs", status_code=202)
+async def create_draft_sandbox_run(
+    agent_id: str,
+    payload: DraftSandboxRunRequest,
+    request: Request,
+    service: DraftService = Depends(get_draft_service),
+) -> dict[str, Any]:
+    """Start an owner-only Run from a frozen draft without Published billing."""
+    owner = _user_id(request)
+    agent = await service.get_agent(agent_id, owner_user_id=owner)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    draft = await service.get_draft(agent_id, owner_user_id=owner)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    snapshot = build_draft_sandbox_context(
+        owner_user_id=owner,
+        agent_id=agent_id,
+        agent=agent,
+        draft=draft,
+    )
+    thread_id = str(uuid4())
+    body = RunCreateRequest(
+        assistant_id="lead_agent",
+        input={"messages": [{"role": "user", "content": payload.message}]},
+        metadata=draft_sandbox_thread_metadata(
+            agent_id=agent_id,
+            draft_revision=snapshot.draft_revision,
+        )
+        | {
+            "agent_name": snapshot.agent_slug,
+            "agent_display_name": str(agent.get("display_name") or snapshot.agent_slug),
+        },
+        context={
+            "agent_name": snapshot.agent_slug,
+            "model_name": snapshot.model_name,
+            "connector_ids": list(snapshot.connector_ids),
+        },
+        stream_mode=["values", "messages-tuple", "custom"],
+        on_disconnect="continue",
+        multitask_strategy="reject",
+    )
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        draft_sandbox_context=snapshot,
+    )
+    status = getattr(record.status, "value", str(record.status))
+    return {
+        "agent_id": agent_id,
+        "thread_id": record.thread_id,
+        "run_id": record.run_id,
+        "status": status,
+        "draft_revision": snapshot.draft_revision,
+        "billable": False,
+    }
+
+
+@router.get(
+    "/draft/sandbox-threads/{thread_id}",
+    response_model=DraftSandboxThreadResponse,
+)
+async def get_draft_sandbox_thread(
+    thread_id: str,
+    request: Request,
+    service: DraftService = Depends(get_draft_service),
+) -> DraftSandboxThreadResponse:
+    """Return the frozen capability scope for an owner sandbox conversation."""
+    snapshot = await resolve_draft_sandbox_context(
+        thread_store=get_thread_store(request),
+        draft_service=service,
+        owner_user_id=_user_id(request),
+        thread_id=thread_id,
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Draft sandbox not found")
+    return DraftSandboxThreadResponse(
+        agent_id=snapshot.agent_id,
+        agent_slug=snapshot.agent_slug,
+        thread_id=thread_id,
+        draft_revision=snapshot.draft_revision,
+        skill_names=list(snapshot.skill_names),
+        connector_ids=list(snapshot.connector_ids),
+        billable=False,
+    )
+
+
 @router.post("/{agent_id}/archive")
 async def archive_agent(
     agent_id: str,
@@ -286,7 +537,10 @@ async def archive_agent(
     agent = await service.get_agent(agent_id, owner_user_id=owner)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    await service.archive(agent_id, owner_user_id=owner)
+    try:
+        await service.archive(agent_id, owner_user_id=owner)
+    except InvalidAgentStateTransitionError as exc:
+        raise HTTPException(status_code=409, detail={"code": "invalid_state_transition", "message": str(exc)}) from exc
     updated = await service.get_agent(agent_id, owner_user_id=owner)
     return _agent_summary(updated or agent)
 
@@ -301,7 +555,10 @@ async def suspend_agent(
     agent = await service.get_agent(agent_id, owner_user_id=owner)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    await service.suspend(agent_id, owner_user_id=owner)
+    try:
+        await service.suspend(agent_id, owner_user_id=owner)
+    except InvalidAgentStateTransitionError as exc:
+        raise HTTPException(status_code=409, detail={"code": "invalid_state_transition", "message": str(exc)}) from exc
     updated = await service.get_agent(agent_id, owner_user_id=owner)
     return _agent_summary(updated or agent)
 
@@ -316,7 +573,10 @@ async def resume_agent(
     agent = await service.get_agent(agent_id, owner_user_id=owner)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    await service.resume(agent_id, owner_user_id=owner)
+    try:
+        await service.resume(agent_id, owner_user_id=owner)
+    except InvalidAgentStateTransitionError as exc:
+        raise HTTPException(status_code=409, detail={"code": "invalid_state_transition", "message": str(exc)}) from exc
     updated = await service.get_agent(agent_id, owner_user_id=owner)
     return _agent_summary(updated or agent)
 

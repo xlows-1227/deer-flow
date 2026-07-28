@@ -4,11 +4,47 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from deerflow.publishing.context import DraftSandboxContext
 from deerflow.publishing.runtime_loader import (
     hydrate_runtime_agent_config,
     resolve_runtime_agent_config,
     resolve_runtime_agent_instructions,
 )
+
+
+@pytest.mark.asyncio
+async def test_draft_sandbox_hydration_uses_frozen_route_snapshot():
+    snapshot = DraftSandboxContext(
+        owner_user_id="user-a",
+        agent_id="pa-1",
+        agent_slug="db-agent",
+        draft_revision=8,
+        description="Snapshot description",
+        agent_markdown="UNPUBLISHED SNAPSHOT INSTRUCTION",
+        soul_markdown="Snapshot soul",
+        model_name="model-snapshot",
+        tool_groups=("snapshot-tools",),
+        skill_names=("snapshot-skill",),
+        connector_capabilities=(("conn-1", "database.query"),),
+    )
+    config = {
+        "configurable": {
+            "agent_name": "db-agent",
+            "__agent_draft_sandbox_context": snapshot,
+        },
+        "context": {"agent_name": "db-agent"},
+    }
+
+    await hydrate_runtime_agent_config(config, owner_user_id="user-a")
+
+    configurable = config["configurable"]
+    resolved = resolve_runtime_agent_config(configurable, agent_name="db-agent")
+    assert configurable["__agent_config_source"] == "database"
+    assert configurable["__agent_draft_revision"] == 8
+    assert resolved.model == "model-snapshot"
+    assert resolved.tool_groups is None
+    assert resolved.skills == ["snapshot-skill"]
+    assert "UNPUBLISHED SNAPSHOT INSTRUCTION" in resolve_runtime_agent_instructions(configurable)
 
 
 @pytest.mark.asyncio
@@ -41,7 +77,7 @@ async def test_hydrate_runtime_agent_config_uses_database_draft():
     assert configurable["__agent_draft_revision"] == 7
     assert resolved.description == "DB description"
     assert resolved.model == "model-db"
-    assert resolved.tool_groups == ["group-db"]
+    assert resolved.tool_groups is None
     assert resolved.skills == ["skill-db"]
     assert resolve_runtime_agent_instructions(configurable) == ("<agent_instructions>\nDB agent instructions\n</agent_instructions>\n\n<agent_soul>\nDB soul\n</agent_soul>")
 
@@ -135,6 +171,6 @@ async def test_hydration_removes_caller_agent_internal_fields():
 
     assert not any(key.startswith("__agent_") for key in config["context"])
     resolved = resolve_runtime_agent_config(config["configurable"], agent_name="db-agent")
-    assert resolved.tool_groups == ["db-tools"]
+    assert resolved.tool_groups is None
     assert config["configurable"]["__agent_draft_revision"] == 3
     assert resolve_runtime_agent_instructions(config["configurable"]) == ("<agent_instructions>\nDB instructions\n</agent_instructions>")

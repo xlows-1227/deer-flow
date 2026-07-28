@@ -326,3 +326,33 @@ async def test_published_audit_agent_query_requires_and_filters_owner(memory_rep
     assert [row["owner_user_id"] for row in rows] == ["owner-a"]
     with pytest.raises(ValueError, match="owner"):
         await repository.list(agent_id="pa_shared")
+
+
+@pytest.mark.anyio
+async def test_published_audit_can_filter_rejections_before_limit(memory_repos):
+    repository = memory_repos["audit"]
+    for index, status_code in enumerate((202, 429, 403)):
+        await repository.append(
+            {
+                "request_id": f"req-status-{index}",
+                "owner_user_id": "owner-a",
+                "agent_id": "pa_1",
+                "credential_id": "key-1",
+                "source": "api",
+                "action": "post:create_agent_run",
+                "method": "POST",
+                "path_template": "/api/v1/agents/{agent_id}/runs",
+                "status_code": status_code,
+                "duration_ms": 5,
+            }
+        )
+
+    rows = await repository.list(
+        owner_user_id="owner-a",
+        agent_id="pa_1",
+        minimum_status_code=400,
+        limit=1,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["status_code"] in {403, 429}

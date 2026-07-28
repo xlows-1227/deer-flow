@@ -75,9 +75,10 @@ class Channel(ABC):
         thread_ts: str | None = None,
         files: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
+        created_at: float | None = None,
     ) -> InboundMessage:
         """Convenience factory for creating InboundMessage instances."""
-        return InboundMessage(
+        inbound = InboundMessage(
             channel_name=self.name,
             chat_id=chat_id,
             user_id=user_id,
@@ -87,6 +88,9 @@ class Channel(ABC):
             files=files or [],
             metadata=metadata or {},
         )
+        if created_at is not None:
+            inbound.created_at = created_at
+        return inbound
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         """Outbound callback registered with the bus.

@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -13,10 +14,14 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.agent_channel.model import AgentChannelRow
 from deerflow.persistence.agent_usage.model import (
+    AgentQuotaRejectionRow,
     AgentQuotaReservationRow,
     AgentUsageRecordRow,
 )
+from deerflow.persistence.connector.model import ConnectorAuditLogRow
+from deerflow.persistence.published_agent.model import PublishedAgentRow
 
 
 class EffectiveQuotaLike(Protocol):
@@ -64,6 +69,37 @@ def _row_dict(row: AgentQuotaReservationRow) -> dict[str, Any]:
 
 def _usage_dict(row: AgentUsageRecordRow) -> dict[str, Any]:
     return row.to_dict()
+
+
+def _cost_microusd(
+    row: AgentUsageRecordRow,
+    model_costs: Mapping[str, Mapping[str, Any]],
+) -> int:
+    """Calculate micro-USD from configured USD-per-million-token rates."""
+    rates = model_costs.get(row.model)
+    if not isinstance(rates, Mapping):
+        return 0
+    try:
+        input_rate = Decimal(str(rates.get("input_usd_per_million_tokens", 0)))
+        output_rate = Decimal(str(rates.get("output_usd_per_million_tokens", 0)))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    if input_rate < 0 or output_rate < 0:
+        return 0
+    # USD / 1M tokens converts directly to micro-USD / token.
+    value = input_rate * max(0, row.input_tokens) + output_rate * max(0, row.output_tokens)
+    return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _latency_summary(values: list[int]) -> dict[str, int]:
+    if not values:
+        return {"average": 0, "p95": 0}
+    ordered = sorted(max(0, int(value)) for value in values)
+    p95_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+    return {
+        "average": round(sum(ordered) / len(ordered)),
+        "p95": ordered[p95_index],
+    }
 
 
 @dataclass(frozen=True)
@@ -366,22 +402,93 @@ class AgentUsageRepository:
             ).scalar_one_or_none()
             return (_usage_dict(row) if row is not None else None), created
 
+    async def record_quota_rejection(
+        self,
+        *,
+        owner_user_id: str,
+        agent_id: str,
+        credential_id: str,
+        source: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Persist a metadata-only quota denial for owner operations."""
+        row = AgentQuotaRejectionRow(
+            id=f"qrej_{uuid4().hex}",
+            owner_user_id=owner_user_id,
+            agent_id=agent_id,
+            credential_id=credential_id,
+            source=source,
+            reason=reason,
+        )
+        async with self._sf() as session:
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.to_dict()
+
     async def aggregate_daily(
         self,
         *,
         owner_user_id: str,
         agent_id: str,
         since: datetime,
+        source: str | None = None,
+        credential_id: str | None = None,
+        model_costs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Aggregate owner-scoped Agent usage by UTC day and terminal status."""
+        """Aggregate owner-scoped usage and sanitized operational signals."""
         async with self._sf() as session:
-            rows = (
+            statement = select(AgentUsageRecordRow).where(
+                AgentUsageRecordRow.owner_user_id == owner_user_id,
+                AgentUsageRecordRow.agent_id == agent_id,
+                AgentUsageRecordRow.created_at >= since,
+            )
+            if source is not None:
+                statement = statement.where(AgentUsageRecordRow.source == source)
+            if credential_id is not None:
+                statement = statement.where(AgentUsageRecordRow.credential_id == credential_id)
+            rows = (await session.execute(statement)).scalars().all()
+            agent = (
+                await session.execute(
+                    select(PublishedAgentRow).where(
+                        PublishedAgentRow.owner_user_id == owner_user_id,
+                        PublishedAgentRow.id == agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            channel_rows = (
                 (
                     await session.execute(
-                        select(AgentUsageRecordRow).where(
-                            AgentUsageRecordRow.owner_user_id == owner_user_id,
-                            AgentUsageRecordRow.agent_id == agent_id,
-                            AgentUsageRecordRow.created_at >= since,
+                        select(AgentChannelRow).where(
+                            AgentChannelRow.agent_id == agent_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+                if agent is not None
+                else []
+            )
+            rejection_rows = (
+                (
+                    await session.execute(
+                        select(AgentQuotaRejectionRow).where(
+                            AgentQuotaRejectionRow.owner_user_id == owner_user_id,
+                            AgentQuotaRejectionRow.agent_id == agent_id,
+                            AgentQuotaRejectionRow.created_at >= since,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            connector_rows = (
+                (
+                    await session.execute(
+                        select(ConnectorAuditLogRow).where(
+                            ConnectorAuditLogRow.user_id == owner_user_id,
+                            ConnectorAuditLogRow.agent_id == agent_id,
+                            ConnectorAuditLogRow.created_at >= since,
                         )
                     )
                 )
@@ -390,14 +497,17 @@ class AgentUsageRepository:
             )
 
         daily: dict[str, dict[str, Any]] = {}
+        pricing = model_costs or {}
         totals = {
             "runs": 0,
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "cost_microusd": 0,
         }
         for row in rows:
             day = _as_utc(row.created_at).date().isoformat()
+            cost_microusd = _cost_microusd(row, pricing)
             bucket = daily.setdefault(
                 day,
                 {
@@ -406,6 +516,7 @@ class AgentUsageRepository:
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
+                    "cost_microusd": 0,
                     "statuses": {},
                 },
             )
@@ -413,15 +524,38 @@ class AgentUsageRepository:
             bucket["input_tokens"] += row.input_tokens
             bucket["output_tokens"] += row.output_tokens
             bucket["total_tokens"] += row.total_tokens
+            bucket["cost_microusd"] += cost_microusd
             bucket["statuses"][row.status] = bucket["statuses"].get(row.status, 0) + 1
             totals["runs"] += 1
             totals["input_tokens"] += row.input_tokens
             totals["output_tokens"] += row.output_tokens
             totals["total_tokens"] += row.total_tokens
+            totals["cost_microusd"] += cost_microusd
+
+        current_release_id = str(agent.current_release_id) if agent is not None and agent.current_release_id else None
+        current_release_rows = [row for row in rows if current_release_id is not None and row.release_id == current_release_id]
+        current_release_errors = sum(row.status != "success" for row in current_release_rows)
+        feishu_latencies = [row.event_latency_ms for row in rows if row.source == "feishu" and row.event_latency_ms is not None]
+        operations = {
+            "agent_status": str(agent.status) if agent is not None else None,
+            "agent_active": bool(agent is not None and agent.status == "published"),
+            "active_bindings": sum(row.status == "active" for row in channel_rows),
+            "unhealthy_bindings": sum(row.health == "unhealthy" for row in channel_rows),
+            "quota_rejections": len(rejection_rows),
+            "concurrency_saturation": sum(row.reason == "max_concurrent_runs_exceeded" for row in rejection_rows),
+            "feishu_event_latency_ms": _latency_summary(feishu_latencies),
+            "connector_failures": sum(row.decision == "error" for row in connector_rows),
+            "connector_denials": sum(row.decision == "deny" for row in connector_rows),
+            "current_release_id": current_release_id,
+            "current_release_runs": len(current_release_rows),
+            "current_release_errors": current_release_errors,
+            "current_release_error_rate": (current_release_errors / len(current_release_rows) if current_release_rows else 0.0),
+        }
         return {
             "agent_id": agent_id,
             "days": [daily[key] for key in sorted(daily)],
             "totals": totals,
+            "operations": operations,
         }
 
     async def release_reservation(self, reservation_id: str, *, owner_user_id: str) -> bool:

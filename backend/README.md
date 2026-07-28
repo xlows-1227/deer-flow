@@ -30,6 +30,7 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 ```
 
 **Request Routing** (via Nginx):
+
 - `/api/langgraph/*` → Gateway LangGraph-compatible API - agent interactions, threads, streaming
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
@@ -83,7 +84,13 @@ curl -X POST 'http://localhost:8001/api/v1/external/conversations/<conversation_
 
 启用 SQLite/PostgreSQL 持久化后，自定义 Agent 的 `setup_agent` / `update_agent` 写入应走异步 Gateway：身份、草稿、Skills 只在单个数据库事务中提交。Gateway 每次构建 Agent 前按 owner 注入当前数据库草稿，将 AGENT.md 与 SOUL.md 组合为可信运行指令，并丢弃请求伪造的 `__agent_*` 内部字段。数据库明确查无该草稿时，迁移窗口内可只读回退到当前 owner 的旧 `SOUL.md` / `config.yaml`；数据库错误、跨 owner 文件和共享目录均不触发回退，旧文件也不再参与双写。同步 `DeerFlowClient` 在该模式下会拒绝自定义 Agent 运行，避免从新事件循环复用 Gateway 所属的异步数据库引擎；无数据库的 CLI/embedded 模式仍支持同步文件读写。Studio 新建草稿默认使用显式空 Skills；对话式/旧导入省略 Skills 时才使用继承模式，发布时会把 owner 当前可选择的 Skills 固化为不可变 revisions。发布服务以单条 SQL 捕获草稿及子表；Skill 文件树经过稳定性复核，connector requirements 直接从最终冻结的 `SKILL.md` bytes 派生，同 checksum revision 的 owner/visibility/caps/content_ref 不变量不一致会 fail closed。发布与对话式 authoring 统一按 identity → draft 加锁，并发编辑时返回 409 且不创建 Release。Connector grant 在草稿保存和发布时都会与权威 Connector type capabilities 求交；PATCH 的 Skill/grant 子项拒绝空值、额外字段和重复项。旧 Agent 导入在一个事务内写 identity、draft 与 Skills，失败后可安全重试。Published-Agent slug 在控制面创建/导入、Gateway assistant 路由和数据库草稿运行时查询中统一使用保留大小写的 `[A-Za-z0-9-]{1,64}` 契约。
 
+Studio 前端将两份指令分工展示：`AGENT.md` 提供可编辑的完整工作规则模板，覆盖职责、流程、边界与输出要求；`SOUL.md` 由系统根据人格预设生成，不提供自由文本编辑。后端继续保留独立的 `soul_markdown`，兼容旧草稿、旧导入与不可变 Release；已有自定义 SOUL 会保持原样并只读展示，只有 owner 主动选择预设时才会替换，不会静默修改当前线上 Release。
+
+Studio 草稿沙箱的 Thread 元数据由服务端保留，客户端创建或 PATCH Thread 时不能伪造。新建沙箱 Thread 同时保存 Agent slug 与展示名称，供对话历史正确路由并在标题旁显示 Agent 标识。首条及后续 Run 都恢复相同的草稿 revision、Skill 清单与 Connector capability map；聊天输入框只展示该范围。草稿 revision 变化后旧沙箱会话返回 409 并要求重新启动，避免静默改用新草稿或退回 owner 的普通 Connector 权限。
+
 Published Agent 公共运行时会从不可变 Skill revision 的 `SKILL.md` 派生 `allowed-tools`，并在 Connector 服务层按 `(connector_id, capability)` 执行 Release 授权，即使运行身份是 owner 也不能绕过。无 `Idempotency-Key` 的 Run 使用服务端唯一 quota attempt id；超时会等待 worker 刷新 token 后再结算，published middleware 同时强制 `max_tokens_per_run`。Agent Key quota override 在写入时仅接受已知字段的正整数。Agent Key、quota reservation、published conversation 与 audit 查询均在仓储层携带 owner scope。
+
+Owner 运维查询支持按 `api` / `feishu` 来源及 credential ID 聚合用量。配额策略接口明确区分平台默认/硬上限、草稿 owner override 与发布后的预期生效值；空 override 表示继承而不是无限制。拒绝审计只对白名单元数据做序列化，并在仓储查询应用 `status_code >= 400` 后再执行 limit。
 
 冻结 Skill 的完整 `SKILL.md` 正文也会直接组合进 Published Run 的可信指令；正文与 `allowed-tools` 都来自同一个不可变 revision，跨 owner 的 private revision 会 fail closed。Published 模式禁用 Title/Summarization 辅助模型，并让 token 预算在 loop warning 等请求改写之后执行；计费用量即使在全局 `run_events.track_token_usage=false` 时也强制采集。Quota reserve 事务会在 Run 持久化之前预绑定服务端 `run_id`，随后挂接带有界重试的结算任务；Gateway shutdown 会限时排空，重启与周期恢复会从 pending 绑定记录幂等补写 usage，超过 max-run deadline 的共享数据库 orphan 按 timeout 收敛。如果预绑定后进程在 Run 落库前退出，恢复任务会在 deadline 后确认 Run 不存在，再释放 reservation 与 owner-scoped 未完成幂等 claim。启动阶段取消会删除尚未绑定 worker 的 pending Run，并释放相同资源。
 
@@ -105,17 +112,17 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 
 Middlewares execute in strict order, each handling a specific concern:
 
-| # | Middleware | Purpose |
-|---|-----------|---------|
-| 1 | **ThreadDataMiddleware** | Creates per-thread isolated directories (workspace, uploads, outputs) |
-| 2 | **UploadsMiddleware** | Injects newly uploaded files into conversation context |
-| 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
-| 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
-| 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles after first exchange |
-| 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
-| 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
-| 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
+| #   | Middleware                  | Purpose                                                                   |
+| --- | --------------------------- | ------------------------------------------------------------------------- |
+| 1   | **ThreadDataMiddleware**    | Creates per-thread isolated directories (workspace, uploads, outputs)     |
+| 2   | **UploadsMiddleware**       | Injects newly uploaded files into conversation context                    |
+| 3   | **SandboxMiddleware**       | Acquires sandbox environment for code execution                           |
+| 4   | **SummarizationMiddleware** | Reduces context when approaching token limits (optional)                  |
+| 5   | **TodoListMiddleware**      | Tracks multi-step tasks in plan mode (optional)                           |
+| 6   | **TitleMiddleware**         | Auto-generates conversation titles after first exchange                   |
+| 7   | **MemoryMiddleware**        | Queues conversations for async memory extraction                          |
+| 8   | **ViewImageMiddleware**     | Injects image data for vision-capable models (conditional)                |
+| 9   | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
 
 ### Sandbox System
 
@@ -150,36 +157,43 @@ LLM-powered persistent context retention across conversations:
 
 ### Tool Ecosystem
 
-| Category | Tools |
-|----------|-------|
-| **Sandbox** | `bash`, `ls`, `read_file`, `write_file`, `str_replace` |
-| **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent) |
+| Category      | Tools                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| **Sandbox**   | `bash`, `ls`, `read_file`, `write_file`, `str_replace`                                    |
+| **Built-in**  | `present_files`, `ask_clarification`, `view_image`, `task` (subagent)                     |
 | **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), DuckDuckGo (image search) |
-| **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
-| **Skills** | Domain-specific workflows injected via system prompt |
+| **MCP**       | Any Model Context Protocol server (stdio, SSE, HTTP transports)                           |
+| **Skills**    | Domain-specific workflows injected via system prompt                                      |
 
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
 
-| Route | Purpose |
-|-------|---------|
-| `GET /api/models` | List available LLM models |
-| `GET/PUT /api/mcp/config` | Manage MCP server configurations |
-| `GET/PUT /api/skills` | List and manage skills |
-| `POST /api/skills/install` | Install skill from `.skill` archive |
-| `GET /api/memory` | Retrieve memory data |
-| `POST /api/memory/reload` | Force memory reload |
-| `GET /api/memory/config` | Memory configuration |
-| `GET /api/memory/status` | Combined config + data |
-| `GET /api/files` | List current user's file library items |
-| `GET /api/files/folders` | List current user's file library folders |
-| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
-| `GET /api/threads/{id}/uploads/list` | List uploaded files |
-| `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
-| `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+| Route                                                         | Purpose                                                                                                                                               |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/models`                                             | List available LLM models                                                                                                                             |
+| `GET/PUT /api/mcp/config`                                     | Manage MCP server configurations                                                                                                                      |
+| `GET/PUT /api/skills`                                         | List and manage skills                                                                                                                                |
+| `POST /api/skills/install`                                    | Install skill from `.skill` archive                                                                                                                   |
+| `GET /api/memory`                                             | Retrieve memory data                                                                                                                                  |
+| `POST /api/memory/reload`                                     | Force memory reload                                                                                                                                   |
+| `GET /api/memory/config`                                      | Memory configuration                                                                                                                                  |
+| `GET /api/memory/status`                                      | Combined config + data                                                                                                                                |
+| `GET /api/files`                                              | List current user's file library items                                                                                                                |
+| `GET /api/files/folders`                                      | List current user's file library folders                                                                                                              |
+| `POST /api/threads/{id}/uploads`                              | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request)                 |
+| `GET /api/threads/{id}/uploads/list`                          | List uploaded files                                                                                                                                   |
+| `DELETE /api/threads/{id}`                                    | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
+| `GET /api/threads/{id}/artifacts/{path}`                      | Serve generated artifacts                                                                                                                             |
+| `GET /api/published-agents/{agent_id}/draft/options`          | List owner-authorized public/private Skills, localized catalog metadata, and declared Connector capability requirements for Agent Studio              |
+| `POST /api/published-agents/{agent_id}/draft/sandbox-runs`    | Start a non-billable Run from a frozen saved draft                                                                                                    |
+| `GET /api/published-agents/draft/sandbox-threads/{thread_id}` | Return the owner-only frozen Skill and Connector scope for a sandbox conversation                                                                     |
+| `GET /api/published-agents/{agent_id}/usage`                  | Aggregate owner-scoped daily Published usage; optional `source` and `key_id` filters are applied in SQL                                               |
+| `GET /api/published-agents/{agent_id}/quota`                  | Return platform defaults, draft owner overrides, and the bounded next-Release effective quota                                                         |
+| `GET /api/published-agents/{agent_id}/audit`                  | List recent owner-visible rejection metadata without request/response content or identifying hashes                                                   |
 
 Notes:
+
 - These APIs are **always scoped to the authenticated user**. Supplying a different `user_id` (e.g. as a query parameter) is rejected with 403.
 
 ### IM Channels
@@ -197,6 +211,11 @@ export DEER_FLOW_SECRET_STORE_KEY='<generated-key>'
 ```
 
 The encrypted credential bundle (`app_secret`, required `verification_token`, and optional `encrypt_key`) is stored below `${DEER_FLOW_HOME:-.deer-flow}/secret-store/feishu/`; SQL rows contain only an opaque `secret_ref`. Do not rotate the deployment key without re-encrypting existing entries. If the key is absent or invalid, the Gateway logs `Published Feishu Supervisor unavailable`; Published-Agent APIs and legacy `config.yaml` channels continue to run, but binding lifecycle routes return 503. The Supervisor acquires `${DEER_FLOW_HOME:-.deer-flow}/published-feishu-supervisor.lock` before runtime recovery. Stop every pre-fence Gateway during rollout before starting this build.
+
+The operator-facing deployment checklist, SecretStore backup/key-rotation
+constraints, quota tuning procedure, Feishu diagnosis table, and Release
+rollback SOP live in
+[Published Agents Operations](../docs/PUBLISHED_AGENTS.md).
 
 Owner routes support create/list/test/start/stop/restart/credential rotation/delete. A create request uses:
 
@@ -219,7 +238,7 @@ Dynamic binding Runs accept at most 10 inbound files, at most 50 MiB per file, a
 
 Partial host and remote-sandbox files are removed on rejection, timeout, or cancellation. Critical cleanup tasks are isolated from disposable card/progress tasks. Every uncertain cleanup is recorded below `${DEER_FLOW_HOME:-.deer-flow}/published-attachment-cleanup/` as `producer_pending → ready_to_delete → deleting`, with renewable producer leases plus atomic delete claims/fencing. Global recovery keeps its persisted cursor, bounded reader slots/quarantine and killable-process fallback. Before HTTP admission, the Supervisor prestarts two disposable DELETE scan workers and a process-owned background pool manager. Directory enumeration, stat, size check, read and JSON parse all execute inside one worker operation; both owner DELETE and binding startup cleanup-health projection use the deadline-bound scanner, so neither path starts a process or performs a filesystem scan. Each request has a 2-second budget, kills a hung worker, keeps the prestarted standby available for the next scan, and fails closed with retryable `409` on timeout, invalid state, concurrency or exhausted workers. Failed slots are replenished outside request threads with bounded backoff, and partial spawn failures roll back newly created slots without consuming healthy peers. Worker readiness waits check the shutdown signal in short slices. Terminate/kill is followed by a final liveness check: successful shutdown requires the manager and every published or in-flight child to have actually exited; a stubborn child remains tracked behind the stop fence, shutdown raises, and restart is rejected until a later lifecycle check confirms exit. The coordinator selects at most 25 claimable jobs and runs at most four concurrently within the 10-second budget. The outbox and binding index are removed only after remote and host deletion are confirmed.
 
-Scanner shutdown treats exceptions from `is_alive()`, `terminate()`, `join()`, and `kill()` as an unknown exit, continues all remaining best-effort termination steps, and never drops ownership unless a final liveness check confirms exit. Request transport and response-deserialization failures use the same fail-closed termination/retention path, so a popped live child cannot escape tracking. Scan, replenish rollback, and process shutdown all route an unconfirmed child through the same tracked stop fence. Discovery cursor replacement retries transient Windows sharing violations inside both the logical scan deadline and a real monotonic wall-clock bound. Both deadlines are checked before every atomic replace: an already-expired first attempt raises `TimeoutError`, while an exhausted retry preserves its last `PermissionError`, so a timed-out scanner cannot start a late durable cursor publication. Cursor tests use logical clocks; the remaining real-deadline and Supervisor contention tests use explicit barriers, bounded retries, and expanded observation budgets. Release-failure tests wait for the quiescing cleanup owner and durable lease token to converge before retrying shutdown. Aggregate router/supervisor tests use the same pytest-asyncio runner, release barriers in `finally`, join route tasks, and stop the process-owned scanner at module boundaries. Router tests register each database engine and Supervisor with one async resource fixture at creation time; fixture teardown always attempts Supervisor shutdown and engine disposal, preserves the original single failure, and exposes both failures together when shutdown and disposal both fail.
+Scanner shutdown treats exceptions from `is_alive()`, `terminate()`, `join()`, and `kill()` as an unknown exit, continues all remaining best-effort termination steps, and never drops ownership unless a final liveness check confirms exit. Request transport and response-deserialization failures use the same fail-closed termination/retention path, so a popped live child cannot escape tracking. Scan, replenish rollback, and process shutdown all route an unconfirmed child through the same tracked stop fence. Discovery cursor replacement retries transient Windows sharing violations inside both the logical scan deadline and a real monotonic wall-clock bound. Both deadlines are checked before every atomic replace: an already-expired first attempt raises `TimeoutError`, while an exhausted retry preserves its last `PermissionError`, so a timed-out scanner cannot start a late durable cursor publication. Cursor tests use logical clocks; the remaining real-deadline and Supervisor contention tests use explicit barriers, bounded retries, and expanded observation budgets. Release- and stop-failure tests share one entered/release/recovered barrier, durable-token wait, process-local ownership wait, conditional shutdown and error-grouping implementation. Cleanup always releases the test barrier, but unresolved ownership raises a cleanup error without calling shutdown or manually releasing the leader fence; Gateway database disposal remains an independent cleanup step so body, ownership and disposal failures can all be reported. Aggregate router/supervisor tests use the same pytest-asyncio runner, release barriers in `finally`, join route tasks, and stop the process-owned scanner at module boundaries. Router tests register each database engine and Supervisor with one async resource fixture at creation time; fixture teardown always attempts Supervisor shutdown and engine disposal, preserves the original single failure, and exposes both failures together when shutdown and disposal both fail.
 
 Gateway stream consumption is decoupled from Feishu card I/O through a one-item latest-progress queue. Slow intermediate progress may be dropped after the 250 ms drain window, but final values and artifacts are drained independently. Once a quota reservation is bound to a started Run, ordinary release cannot free it: every post-start cancellation/finalization failure becomes detached recovery, while Run cancellation and worker join each have a short cleanup deadline so a non-cooperative worker cannot hold the dispatcher forever.
 
@@ -349,7 +368,7 @@ backend/
 └── Dockerfile                  # Container build
 ```
 
-`langgraph.json` is not the default service entrypoint.  The scripts and Docker
+`langgraph.json` is not the default service entrypoint. The scripts and Docker
 deployments run the Gateway embedded runtime; the file is kept for LangGraph
 tooling, Studio, or direct LangGraph Server compatibility.
 
@@ -362,6 +381,7 @@ tooling, Studio, or direct LangGraph Server compatibility.
 Place in project root. Config values starting with `$` resolve as environment variables.
 
 Key sections:
+
 - `models` - LLM configurations with class paths, API keys, thinking/vision flags
 - `tools` - Tool definitions with module paths and groups
 - `tool_groups` - Logical tool groupings
@@ -373,6 +393,7 @@ Key sections:
 - `memory` - Memory system settings (enabled, storage, debounce, facts limits)
 
 Provider note:
+
 - `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).
 - If a provider module is missing, DeerFlow now returns an actionable error with install guidance (for example `uv add langchain-google-genai`).
 
@@ -388,7 +409,7 @@ MCP servers and skill states in a single file:
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"}
+      "env": { "GITHUB_TOKEN": "$GITHUB_TOKEN" }
     },
     "secure-http": {
       "enabled": true,
@@ -404,7 +425,7 @@ MCP servers and skill states in a single file:
     }
   },
   "skills": {
-    "pdf-processing": {"enabled": true}
+    "pdf-processing": { "enabled": true }
   }
 }
 ```
@@ -508,6 +529,7 @@ uv run pytest
 - [Path Examples](docs/PATH_EXAMPLES.md)
 - [Context Summarization](docs/summarization.md)
 - [Plan Mode](docs/plan_mode_usage.md)
+- [Published Agents Operations](../docs/PUBLISHED_AGENTS.md)
 - [Setup Guide](docs/SETUP.md)
 
 ---

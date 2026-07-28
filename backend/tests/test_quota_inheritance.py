@@ -45,6 +45,24 @@ def test_publishing_config_validates_platform_quota():
         PublishingConfig.model_validate({"platform_quota": {"daily_runs_default": 0}})
 
 
+def test_publishing_config_validates_model_costs():
+    config = PublishingConfig.model_validate(
+        {
+            "model_costs": {
+                "model-1": {
+                    "input_usd_per_million_tokens": "2.5",
+                    "output_usd_per_million_tokens": 10,
+                }
+            }
+        }
+    )
+    assert str(config.model_costs["model-1"].input_usd_per_million_tokens) == "2.5"
+    assert str(config.model_costs["model-1"].output_usd_per_million_tokens) == "10"
+
+    with pytest.raises(ValidationError):
+        PublishingConfig.model_validate({"model_costs": {"model-1": {"input_usd_per_million_tokens": -1}}})
+
+
 def test_owner_override_can_only_tighten_platform_limit():
     quota = resolve_effective_quota(
         _platform(),

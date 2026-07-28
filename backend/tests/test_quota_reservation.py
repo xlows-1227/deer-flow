@@ -130,6 +130,34 @@ async def test_daily_limit_rejects_without_creating_reservation(quota_repo):
 
 
 @pytest.mark.asyncio
+async def test_metrics_write_failure_does_not_mask_quota_rejection(
+    quota_repo,
+    monkeypatch,
+):
+    ledger = QuotaLedger(quota_repo)
+    await ledger.reserve(
+        _context(agent_id="pa_metric_failure", max_concurrent_runs=1),
+        request_key="metric-failure-running",
+    )
+
+    async def fail_metric(**_kwargs):
+        raise RuntimeError("metrics store unavailable")
+
+    monkeypatch.setattr(quota_repo, "record_quota_rejection", fail_metric)
+    with pytest.raises(QuotaExceededError) as captured:
+        await ledger.reserve(
+            _context(
+                agent_id="pa_metric_failure",
+                max_concurrent_runs=1,
+                correlation_id="metric-failure-rejected",
+            ),
+            request_key="metric-failure-rejected",
+        )
+
+    assert captured.value.code == "max_concurrent_runs_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_key_daily_limits_are_isolated_but_agent_limit_still_caps_all_keys(quota_repo):
     ledger = QuotaLedger(quota_repo)
     first = await ledger.reserve(

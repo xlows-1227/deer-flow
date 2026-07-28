@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,16 @@ class UsageRepoLike(Protocol):
         quota: EffectiveQuota,
     ) -> tuple[dict[str, Any], bool]: ...
 
+    async def record_quota_rejection(
+        self,
+        *,
+        owner_user_id: str,
+        agent_id: str,
+        credential_id: str,
+        source: str,
+        reason: str,
+    ) -> dict[str, Any]: ...
+
     async def settle_reservation(
         self,
         reservation_id: str,
@@ -215,6 +228,23 @@ class QuotaLedger:
                 quota=quota,
             )
         except QuotaReservationLimitError as exc:
+            try:
+                await self._repository.record_quota_rejection(
+                    owner_user_id=context.owner_user_id,
+                    agent_id=context.agent_id,
+                    credential_id=context.credential_id,
+                    source=str(getattr(context, "source", "api")),
+                    reason=exc.code,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record published-Agent quota rejection metric",
+                    extra={
+                        "agent_id": context.agent_id,
+                        "credential_id": context.credential_id,
+                        "reason": exc.code,
+                    },
+                )
             raise QuotaExceededError(exc.code, retry_after=exc.retry_after) from exc
         return Reservation(
             id=str(row["id"]),

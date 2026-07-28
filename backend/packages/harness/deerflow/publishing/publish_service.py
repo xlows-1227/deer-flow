@@ -199,6 +199,10 @@ class PublishService:
             draft,
             owner_user_id=owner_user_id,
         )
+        # Tool groups are platform-managed for Studio Agents. Snapshot the
+        # current platform policy into each new immutable Release while leaving
+        # historical Releases untouched.
+        draft["tool_groups"] = sorted(self._tool_group_whitelist)
         # Pre-resolve async connector ownership into a sync adapter so the
         # pure validator stays synchronous and easily testable.
         sync_connector_repo = await self._build_sync_connector_repo(draft, owner_user_id)

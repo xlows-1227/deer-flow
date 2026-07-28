@@ -79,6 +79,14 @@ class _KeyRepo:
         row["status"] = "revoked"
         return True
 
+    async def delete(self, agent_id: str, key_id: str, *, owner_user_id: str):
+        assert owner_user_id == "owner-a"
+        row = self.rows.get(key_id)
+        if row is None or row["agent_id"] != agent_id:
+            return False
+        del self.rows[key_id]
+        return True
+
     async def update(self, agent_id: str, key_id: str, *, owner_user_id: str, name=None, quota_overrides=None):
         assert owner_user_id == "owner-a"
         row = self.rows.get(key_id)
@@ -141,6 +149,28 @@ def test_rotate_patch_and_revoke() -> None:
     assert rotated.json()["api_key"].startswith("dfa_")
     assert revoked.status_code == 200
     assert revoked.json() == {"revoked": True}
+
+
+def test_delete_removes_revoked_key_and_is_not_found_on_retry() -> None:
+    client, repo = _client()
+    created = client.post(
+        "/api/published-agents/pa_owned/keys",
+        json={"name": "Disposable"},
+    ).json()
+    key_id = created["id"]
+    assert (
+        client.post(
+            f"/api/published-agents/pa_owned/keys/{key_id}/revoke",
+        ).status_code
+        == 200
+    )
+
+    deleted = client.delete(f"/api/published-agents/pa_owned/keys/{key_id}")
+
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert key_id not in repo.rows
+    assert client.delete(f"/api/published-agents/pa_owned/keys/{key_id}").status_code == 404
 
 
 def test_agent_key_cannot_call_owner_management_api() -> None:

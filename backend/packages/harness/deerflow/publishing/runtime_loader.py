@@ -12,6 +12,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.persistence.engine import get_session_factory
+from deerflow.publishing.context import DraftSandboxContext
 from deerflow.publishing.instructions import compose_agent_instructions
 
 _INTERNAL_AGENT_PREFIX = "__agent_"
@@ -34,6 +35,34 @@ def _owner_legacy_agent_exists(owner_user_id: str, agent_name: str) -> bool:
     return agent_dir.is_dir() and (agent_dir / "config.yaml").is_file()
 
 
+def _hydrate_frozen_draft_snapshot(
+    configurable: dict[str, Any],
+    *,
+    snapshot: DraftSandboxContext,
+    owner_user_id: str,
+    agent_name: str | None,
+) -> None:
+    if snapshot.owner_user_id != owner_user_id:
+        raise PermissionError("draft sandbox owner does not match runtime owner")
+    if agent_name != snapshot.agent_slug:
+        raise ValueError("draft sandbox Agent does not match runtime Agent")
+    configurable["__agent_config_source"] = "database"
+    configurable["__agent_config"] = {
+        "name": snapshot.agent_slug,
+        "description": snapshot.description,
+        "model": snapshot.model_name,
+        # Database-authored Agents follow the platform tool policy. Historical
+        # filesystem Agents keep their explicit tool-group configuration.
+        "tool_groups": None,
+        "skills": list(snapshot.skill_names),
+    }
+    configurable["__agent_instructions"] = compose_agent_instructions(
+        snapshot.agent_markdown,
+        snapshot.soul_markdown,
+    )
+    configurable["__agent_draft_revision"] = snapshot.draft_revision
+
+
 async def hydrate_runtime_agent_config(config: dict[str, Any], *, owner_user_id: str) -> None:
     """Inject the authoritative DB draft before the synchronous graph factory runs.
 
@@ -42,12 +71,22 @@ async def hydrate_runtime_agent_config(config: dict[str, Any], *, owner_user_id:
     without creating another event loop.  A confirmed database miss may use
     only the current owner's read-only legacy files during migration.
     """
+    raw_configurable = config.get("configurable")
+    trusted_snapshot = raw_configurable.get("__agent_draft_sandbox_context") if isinstance(raw_configurable, dict) else None
     _clear_untrusted_agent_fields(config)
     configurable = config.setdefault("configurable", {})
     context = config.get("context") if isinstance(config.get("context"), dict) else {}
     agent_name = validate_agent_name(context.get("agent_name", configurable.get("agent_name")))
     is_bootstrap = bool(context.get("is_bootstrap", configurable.get("is_bootstrap", False)))
     if agent_name is None or is_bootstrap:
+        return
+    if isinstance(trusted_snapshot, DraftSandboxContext):
+        _hydrate_frozen_draft_snapshot(
+            configurable,
+            snapshot=trusted_snapshot,
+            owner_user_id=owner_user_id,
+            agent_name=agent_name,
+        )
         return
     if get_session_factory() is None:
         configurable["__agent_config_source"] = "filesystem"
@@ -75,7 +114,7 @@ async def hydrate_runtime_agent_config(config: dict[str, Any], *, owner_user_id:
         "name": agent_name,
         "description": agent.get("description") or "",
         "model": draft.get("model_name"),
-        "tool_groups": list(draft.get("tool_groups") or []),
+        "tool_groups": None,
         "skills": (None if draft.get("skill_selection_mode", "explicit") == "inherit" else [entry["skill_name"] for entry in draft.get("skills") or []]),
     }
     agent_markdown = draft.get("agent_markdown") or ""

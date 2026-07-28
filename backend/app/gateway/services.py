@@ -19,6 +19,11 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.draft_sandbox import (
+    DRAFT_SANDBOX_METADATA_KEYS,
+    draft_sandbox_thread_metadata,
+    resolve_draft_sandbox_context,
+)
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.agents_config import validate_agent_slug
 from deerflow.config.app_config import get_app_config
@@ -39,7 +44,7 @@ from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.user_context import runtime_user_scope
 
 if TYPE_CHECKING:
-    from deerflow.publishing.context import PublishedAgentContext
+    from deerflow.publishing.context import DraftSandboxContext, PublishedAgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +208,60 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
         runtime_context["user_id"] = str(user_id)
 
 
+def _inject_draft_sandbox_context(
+    config: dict[str, Any],
+    snapshot: DraftSandboxContext,
+) -> None:
+    """Inject only the frozen draft's selected Connector capabilities."""
+    configurable = config.setdefault("configurable", {})
+    runtime_context = config.setdefault("context", {})
+    connector_capabilities = snapshot.connector_capability_map()
+    configurable["agent_name"] = snapshot.agent_slug
+    configurable["model_name"] = snapshot.model_name
+    configurable["connector_ids"] = list(snapshot.connector_ids)
+    configurable["connector_capabilities"] = connector_capabilities
+    configurable["__agent_draft_sandbox_context"] = snapshot
+    runtime_context["agent_name"] = snapshot.agent_slug
+    runtime_context["connector_ids"] = list(snapshot.connector_ids)
+    runtime_context["connector_capabilities"] = connector_capabilities
+
+
+async def resolve_draft_sandbox_context_for_thread(
+    request: Request,
+    thread_id: str,
+) -> DraftSandboxContext | None:
+    """Resolve server-owned draft sandbox authority for a follow-up Run."""
+    request_state = getattr(request, "state", None)
+    user = getattr(request_state, "user", None)
+    owner_user_id = str(user.id) if user is not None and getattr(request_state, "auth_method", None) == "session" else None
+    app = getattr(request, "app", None)
+    app_state = getattr(app, "state", None)
+    return await resolve_draft_sandbox_context(
+        thread_store=get_run_context(request).thread_store,
+        draft_service=getattr(app_state, "draft_service", None),
+        owner_user_id=owner_user_id,
+        thread_id=thread_id,
+    )
+
+
+def _apply_trusted_draft_sandbox_metadata(
+    body: Any,
+    snapshot: DraftSandboxContext | None,
+) -> None:
+    """Strip caller-forged sandbox fields and add server-derived values."""
+    metadata = dict(getattr(body, "metadata", None) or {})
+    for key in DRAFT_SANDBOX_METADATA_KEYS:
+        metadata.pop(key, None)
+    if snapshot is not None:
+        metadata.update(
+            draft_sandbox_thread_metadata(
+                agent_id=snapshot.agent_id,
+                draft_revision=snapshot.draft_revision,
+            )
+        )
+    body.metadata = metadata
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -307,6 +366,7 @@ async def start_run(
     request: Request,
     *,
     published_context: PublishedAgentContext | None = None,
+    draft_sandbox_context: DraftSandboxContext | None = None,
     run_id: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
@@ -331,6 +391,11 @@ async def start_run(
         Optional preallocated Run id used to bind an idempotency claim before
         execution starts.
     """
+    if published_context is not None and draft_sandbox_context is not None:
+        raise ValueError("a Run cannot be both published and a draft sandbox")
+    if published_context is None and draft_sandbox_context is None:
+        draft_sandbox_context = await resolve_draft_sandbox_context_for_thread(request, thread_id)
+    _apply_trusted_draft_sandbox_metadata(body, draft_sandbox_context)
     if published_context is not None:
         owner_user_id = published_context.owner_user_id
         with runtime_user_scope(owner_user_id):
@@ -340,6 +405,7 @@ async def start_run(
                     thread_id,
                     request,
                     published_context=published_context,
+                    draft_sandbox_context=None,
                     run_id=run_id,
                 )
     return await _start_run_scoped(
@@ -347,6 +413,7 @@ async def start_run(
         thread_id,
         request,
         published_context=None,
+        draft_sandbox_context=draft_sandbox_context,
         run_id=run_id,
     )
 
@@ -357,6 +424,7 @@ async def _start_run_scoped(
     request: Request,
     *,
     published_context: PublishedAgentContext | None,
+    draft_sandbox_context: DraftSandboxContext | None,
     run_id: str | None,
 ) -> RunRecord:
     """Run the lifecycle after any trusted Published owner scope is active."""
@@ -367,7 +435,7 @@ async def _start_run_scoped(
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
     body_context = getattr(body, "context", None) or {}
-    model_name = published_context.model_name if published_context is not None else body_context.get("model_name")
+    model_name = published_context.model_name if published_context is not None else draft_sandbox_context.model_name if draft_sandbox_context is not None else body_context.get("model_name")
 
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
@@ -444,6 +512,8 @@ async def _start_run_scoped(
         # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
         merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
         inject_authenticated_user_context(config, request)
+        if draft_sandbox_context is not None:
+            _inject_draft_sandbox_context(config, draft_sandbox_context)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

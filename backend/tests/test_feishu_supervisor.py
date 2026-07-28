@@ -14,6 +14,15 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.feishu_shutdown import (
+    CleanupRetryBarrier,
+    finish_supervisor_cleanup,
+    raise_test_cleanup_errors,
+    wait_for_supervisor_ownership,
+)
+from support.feishu_shutdown import (
+    wait_for_runtime_token_clear as _wait_for_runtime_token_clear,
+)
 
 from app.channels.base import Channel
 from app.channels.message_bus import MessageBus, OutboundMessage
@@ -133,6 +142,51 @@ class _TestRuntimeLeaderFence:
         self.held = False
 
 
+@pytest.mark.asyncio
+async def test_shutdown_test_cleanup_preserves_fence_when_ownership_does_not_converge() -> None:
+    class NeverConvergingSupervisor:
+        _shutdown_complete = False
+        owned_binding_ids = ("binding-still-owned",)
+
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        async def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    supervisor = NeverConvergingSupervisor()
+    fence = _TestRuntimeLeaderFence()
+    assert await fence.acquire()
+
+    with pytest.raises(
+        AssertionError,
+        match="Supervisor ownership did not converge during test cleanup",
+    ):
+        await finish_supervisor_cleanup(
+            supervisor,
+            fence=fence,
+            attempts=1,
+            interval=0,
+        )
+
+    assert supervisor.shutdown_calls == 0
+    assert fence.held is True
+
+
+def test_shutdown_test_cleanup_preserves_body_and_cleanup_errors() -> None:
+    body_error = AssertionError("regression failed")
+    cleanup_error = RuntimeError("cleanup failed")
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        raise_test_cleanup_errors(
+            body_error,
+            [cleanup_error],
+            message="combined shutdown test failure",
+        )
+
+    assert captured.value.exceptions == (body_error, cleanup_error)
+
+
 SupervisorEnv = tuple[AgentChannelRepository, LocalEncryptedSecretStore, dict[str, Any], dict[str, Any]]
 
 
@@ -231,28 +285,6 @@ async def _prepare_rotation_secret(
         writer_generation=writing["writer_generation"],
     )
     return secret_ref
-
-
-async def _wait_for_runtime_token_clear(
-    repository: AgentChannelRepository,
-    binding: dict[str, Any],
-    *,
-    owner_user_id: str,
-    timeout: float = 1.0,
-) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while True:
-        current = await repository.get(
-            str(binding["agent_id"]),
-            str(binding["id"]),
-            owner_user_id=owner_user_id,
-        )
-        assert current is not None
-        if current["runtime_lease_token"] is None:
-            return current
-        if asyncio.get_running_loop().time() >= deadline:
-            pytest.fail("runtime token was not reconciled before the deadline")
-        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -916,15 +948,30 @@ async def test_shutdown_remains_retryable_while_quiescing_transport_cannot_stop(
     await supervisor.load_active_bindings()
     await supervisor.start_binding(first["id"])
 
+    channel = factory.instances[0]
+    cleanup_barrier = CleanupRetryBarrier(channel.stop)
+    monkeypatch.setattr(channel, "stop", cleanup_barrier.stop)
     retry_completed = False
+    test_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
         with pytest.raises(RuntimeError, match="runtime ownership"):
             await supervisor.shutdown()
+        await asyncio.wait_for(cleanup_barrier.entered.wait(), timeout=1.0)
         assert supervisor._shutdown_complete is False
         assert supervisor.owned_binding_ids == (first["id"],)
         assert fence.held is True
 
-        factory.instances[0].fail_stop = False
+        channel.fail_stop = False
+        cleanup_barrier.release.set()
+        await asyncio.wait_for(cleanup_barrier.recovered.wait(), timeout=1.0)
+        await _wait_for_runtime_token_clear(
+            repository,
+            first,
+            owner_user_id="owner-a",
+        )
+        await wait_for_supervisor_ownership(supervisor)
+
         monkeypatch.setattr(
             "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
             1.0,
@@ -934,15 +981,26 @@ async def test_shutdown_remains_retryable_while_quiescing_transport_cannot_stop(
         assert supervisor._shutdown_complete is True
         assert supervisor.owned_binding_ids == ()
         assert fence.held is False
+    except BaseException as exc:
+        test_error = exc
     finally:
-        factory.instances[0].fail_stop = False
-        if not retry_completed:
-            for _ in range(100):
-                if supervisor.owned_binding_ids == ():
-                    break
-                await asyncio.sleep(0.01)
-            if fence.held:
-                await fence.release()
+        cleanup_barrier.release.set()
+        channel.fail_stop = False
+        try:
+            if not retry_completed:
+                monkeypatch.setattr(
+                    "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
+                    1.0,
+                )
+                await finish_supervisor_cleanup(supervisor, fence=fence)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+        raise_test_cleanup_errors(
+            test_error,
+            cleanup_errors,
+            message="Supervisor shutdown regression and cleanup both failed",
+        )
 
 
 @pytest.mark.asyncio
@@ -1798,26 +1856,17 @@ async def test_stop_failure_preserves_active_runtime_and_status(
     supervisor = FeishuSupervisor(repository, secrets, MessageBus(), channel_factory=factory)
     await supervisor.start_binding(first["id"])
     channel = factory.instances[-1]
-    original_stop = channel.stop
-    cleanup_retry_started = asyncio.Event()
-    release_cleanup_retry = asyncio.Event()
-    stop_attempts = 0
-
-    async def controlled_stop() -> None:
-        nonlocal stop_attempts
-        stop_attempts += 1
-        if stop_attempts > 1 and channel.fail_stop:
-            cleanup_retry_started.set()
-            await release_cleanup_retry.wait()
-        await original_stop()
-
-    channel.stop = controlled_stop
+    cleanup_barrier = CleanupRetryBarrier(channel.stop)
+    channel.stop = cleanup_barrier.stop
     health_task: asyncio.Task[None] | None = None
+    retry_completed = False
+    test_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
         with pytest.raises(BindingCleanupPendingError):
             await supervisor.stop_binding(first["id"])
 
-        await asyncio.wait_for(cleanup_retry_started.wait(), timeout=1.0)
+        await asyncio.wait_for(cleanup_barrier.entered.wait(), timeout=1.0)
         assert supervisor.running_binding_ids == ()
         assert supervisor.owned_binding_ids == (first["id"],)
         retained = await repository.get("pa_1", first["id"], owner_user_id="owner-a")
@@ -1829,7 +1878,7 @@ async def test_stop_failure_preserves_active_runtime_and_status(
         health_task = asyncio.create_task(channel.runtime_health_callback(False, "cleanup still pending"))
         await asyncio.sleep(0)
         assert health_task.done() is False
-        release_cleanup_retry.set()
+        cleanup_barrier.release.set()
         await health_task
         assert supervisor.health()[first["id"]].running is False
         with pytest.raises(RuntimeError, match="runtime ownership"):
@@ -1838,24 +1887,44 @@ async def test_stop_failure_preserves_active_runtime_and_status(
         assert supervisor.owned_binding_ids == (first["id"],)
 
         channel.fail_stop = False
+        await asyncio.wait_for(cleanup_barrier.recovered.wait(), timeout=1.0)
+        await _wait_for_runtime_token_clear(
+            repository,
+            first,
+            owner_user_id="owner-a",
+        )
+        await wait_for_supervisor_ownership(supervisor)
+
         monkeypatch.setattr(
             "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
             1.0,
         )
         await supervisor.shutdown()
+        retry_completed = True
         assert supervisor._shutdown_complete is True
         assert supervisor.owned_binding_ids == ()
+    except BaseException as exc:
+        test_error = exc
     finally:
-        release_cleanup_retry.set()
+        cleanup_barrier.release.set()
         channel.fail_stop = False
-        if health_task is not None and not health_task.done():
-            await asyncio.gather(health_task, return_exceptions=True)
-        if not supervisor._shutdown_complete:
-            monkeypatch.setattr(
-                "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
-                1.0,
-            )
-            await supervisor.shutdown()
+        try:
+            if health_task is not None and not health_task.done():
+                await health_task
+            if not retry_completed:
+                monkeypatch.setattr(
+                    "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
+                    1.0,
+                )
+                await finish_supervisor_cleanup(supervisor)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+        raise_test_cleanup_errors(
+            test_error,
+            cleanup_errors,
+            message="Stop-failure regression and cleanup both failed",
+        )
 
 
 @pytest.mark.asyncio

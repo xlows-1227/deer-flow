@@ -296,6 +296,7 @@ class PublishedChannelRuntime:
         on_progress: PublishedProgressCallback | None = None,
     ) -> PublishedChannelExecution:
         """Execute one verified and deduplicated binding message exactly once."""
+        event_created_at = message.created_at
         binding_id = self._metadata_value(message, "binding_id")
         agent_id = self._metadata_value(message, "agent_id")
         event_id = self._metadata_value(message, "event_id")
@@ -370,6 +371,12 @@ class PublishedChannelRuntime:
                 if on_progress is not None:
                     await on_progress(thread_id, text)
 
+            # Measures channel ingress through dispatch, excluding model/Run
+            # execution so a slow model is not reported as Feishu event lag.
+            event_latency_ms = max(
+                0,
+                int((time.time() - event_created_at) * 1000),
+            )
             execution = await self._executor.execute(
                 run_id=run_id,
                 thread_id=thread_id,
@@ -403,11 +410,13 @@ class PublishedChannelRuntime:
             "external_actor_hash": hashlib.sha256(context.external_actor.encode()).hexdigest(),
             "conversation_id": thread_id,
             "run_id": execution.run_id,
+            "release_id": context.release_id,
             "model": context.model_name,
             "input_tokens": execution.input_tokens,
             "output_tokens": execution.output_tokens,
             "total_tokens": execution.total_tokens,
             "latency_ms": execution.latency_ms,
+            "event_latency_ms": event_latency_ms,
             "status": execution.status,
             "error_class": error_class,
             "idempotency_key": None,

@@ -20,6 +20,84 @@ def test_format_sse_basic():
 
 
 @pytest.mark.asyncio
+async def test_start_run_restores_draft_sandbox_context_for_follow_up(monkeypatch):
+    from app.gateway import services
+    from deerflow.publishing.context import DraftSandboxContext
+
+    snapshot = DraftSandboxContext(
+        owner_user_id="owner-a",
+        agent_id="agent-1",
+        agent_slug="sandbox-agent",
+        draft_revision=7,
+        description="Sandbox",
+        agent_markdown="Frozen instruction",
+        soul_markdown="Frozen soul",
+        model_name="model-a",
+        tool_groups=("web",),
+        skill_names=("selected-skill",),
+        connector_capabilities=(),
+    )
+    captured: dict[str, object] = {}
+
+    async def resolve_context(request, thread_id):
+        assert request is request_stub
+        assert thread_id == "thread-sandbox"
+        return snapshot
+
+    async def start_scoped(
+        body,
+        thread_id,
+        request,
+        *,
+        published_context,
+        draft_sandbox_context,
+        run_id,
+    ):
+        captured.update(
+            body=body,
+            thread_id=thread_id,
+            request=request,
+            published_context=published_context,
+            draft_sandbox_context=draft_sandbox_context,
+            run_id=run_id,
+        )
+        return "record"
+
+    request_stub = SimpleNamespace()
+    body = SimpleNamespace()
+    monkeypatch.setattr(
+        services,
+        "resolve_draft_sandbox_context_for_thread",
+        resolve_context,
+    )
+    monkeypatch.setattr(services, "_start_run_scoped", start_scoped)
+
+    result = await services.start_run(body, "thread-sandbox", request_stub)
+
+    assert result == "record"
+    assert captured["draft_sandbox_context"] is snapshot
+    assert captured["published_context"] is None
+
+
+def test_apply_trusted_draft_sandbox_metadata_strips_caller_forgery():
+    from app.gateway.services import _apply_trusted_draft_sandbox_metadata
+
+    body = SimpleNamespace(
+        metadata={
+            "draft_sandbox": True,
+            "draft_sandbox_agent_id": "forged-agent",
+            "draft_sandbox_revision": 999,
+            "draft_sandbox_billable": False,
+            "client_key": "kept",
+        }
+    )
+
+    _apply_trusted_draft_sandbox_metadata(body, None)
+
+    assert body.metadata == {"client_key": "kept"}
+
+
+@pytest.mark.asyncio
 async def test_start_run_cancellation_during_thread_upsert_discards_pending_run(monkeypatch):
     from app.gateway import services
     from deerflow.runtime import RunManager
@@ -615,6 +693,56 @@ def test_inject_authenticated_user_context_overrides_client_user_id():
     inject_authenticated_user_context(config, request)
 
     assert config["context"]["user_id"] == "auth-user-42"
+
+
+def test_draft_sandbox_injects_capability_level_connector_grants():
+    from app.gateway.services import _inject_draft_sandbox_context
+    from deerflow.connectors.errors import ConnectorAuthorizationError
+    from deerflow.connectors.policy import authorize_connector_action
+    from deerflow.connectors.schemas import ConnectorRuntimeContext
+    from deerflow.publishing.context import DraftSandboxContext
+
+    snapshot = DraftSandboxContext(
+        owner_user_id="owner-a",
+        agent_id="agent-1",
+        agent_slug="draft-agent",
+        draft_revision=2,
+        description="",
+        agent_markdown="",
+        soul_markdown="",
+        model_name=None,
+        tool_groups=(),
+        skill_names=(),
+        connector_capabilities=(("conn-1", "database.query"),),
+    )
+    config: dict = {"configurable": {}, "context": {"user_id": "owner-a"}}
+
+    _inject_draft_sandbox_context(config, snapshot)
+
+    assert config["context"]["connector_ids"] == ["conn-1"]
+    assert config["context"]["connector_capabilities"] == {"conn-1": ["database.query"]}
+    runtime_context = ConnectorRuntimeContext(
+        user_id="owner-a",
+        connector_ids=config["context"]["connector_ids"],
+        connector_capabilities=config["context"]["connector_capabilities"],
+    )
+    authorize_connector_action(
+        connector_id="conn-1",
+        connector_policy={},
+        grants=[],
+        context=runtime_context,
+        capability="database.query",
+        owner_id="owner-a",
+    )
+    with pytest.raises(ConnectorAuthorizationError):
+        authorize_connector_action(
+            connector_id="conn-1",
+            connector_policy={},
+            grants=[],
+            context=runtime_context,
+            capability="database.write",
+            owner_id="owner-a",
+        )
 
 
 # ---------------------------------------------------------------------------

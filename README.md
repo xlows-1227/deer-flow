@@ -719,8 +719,19 @@ use explicit field allowlists and do not expose internal Release or instruction
 data. Platform, owner, and Key quotas are reserved before Run creation and are
 settled exactly once for success, failure, cancellation, or timeout.
 
-See [the backend API reference](backend/docs/API.md#published-agent-api-m2) and
+Agent Studio draft sandbox conversations similarly keep their saved draft
+revision and capability allowlist on every message. The chat composer shows
+only the frozen Skills and Connector instances, and the Gateway restores the
+same server-owned scope for follow-up Runs. Editing the draft invalidates an
+older sandbox conversation; start a new sandbox Run to test the new revision.
+
+See the Chinese
+[external integration guide](docs/reference/PUBLISHED_AGENT_API_zh.md),
+[backend API reference](backend/docs/API.md#published-agent-api-m2), and
 [configuration guide](backend/docs/CONFIGURATION.md#published-agent-runtime-quotas).
+Deployment, SecretStore recovery, quota tuning, Feishu troubleshooting, and
+rollback procedures are documented in the
+[Published Agents operations handbook](docs/PUBLISHED_AGENTS.md).
 
 ## Embedded Python Client
 
@@ -754,6 +765,7 @@ All dict-returning methods are validated against Gateway Pydantic response model
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
+- [Published Agents Operations](docs/PUBLISHED_AGENTS.md) - Deployment, quotas, Feishu troubleshooting, and rollback
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
 

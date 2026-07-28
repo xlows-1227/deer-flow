@@ -199,11 +199,16 @@ async def _dispatch_once(runtime: PublishedChannelRuntime, store_path) -> str:
     return str(text)
 
 
-def _event(event_id: str = "event-1", *, text: str = "hello published agent"):
+def _event(
+    event_id: str = "event-1",
+    *,
+    text: str = "hello published agent",
+    age_seconds: float = 0,
+):
     return SimpleNamespace(
         header=SimpleNamespace(
             event_id=event_id,
-            create_time=str(int(time.time() * 1000)),
+            create_time=str(int((time.time() - age_seconds) * 1000)),
             token="verification-token",
         ),
         event=SimpleNamespace(
@@ -286,8 +291,8 @@ async def test_binding_message_uses_db_mapping_published_agent_quota_and_one_usa
     )
     channel._main_loop = asyncio.get_running_loop()
 
-    channel._on_message(_event(text=text))
-    channel._on_message(_event(text=text))
+    channel._on_message(_event(text=text, age_seconds=1))
+    channel._on_message(_event(text=text, age_seconds=1))
     response = await asyncio.wait_for(outbound, timeout=2.0)
     await asyncio.sleep(0.05)
     await manager.stop()
@@ -298,6 +303,8 @@ async def test_binding_message_uses_db_mapping_published_agent_quota_and_one_usa
     assert len(executor.calls) == 1
     assert len(ledger.settled_usage) == 1
     assert ledger.settled_usage[0]["source"] == "feishu"
+    assert int(ledger.settled_usage[0]["event_latency_ms"]) >= 900
+    assert ledger.settled_usage[0]["event_latency_ms"] != 12
     assert resolver.calls[0]["agent_id"] == "agent-1"
     assert resolver.calls[0]["credential_id"] == "binding-1"
     assert resolver.calls[0]["source"] == "feishu"

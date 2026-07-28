@@ -19,6 +19,13 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.feishu_shutdown import (
+    CleanupRetryBarrier,
+    finish_supervisor_cleanup,
+    raise_test_cleanup_errors,
+    wait_for_runtime_token_clear,
+    wait_for_supervisor_ownership,
+)
 
 from app.channels.message_bus import MessageBus
 from app.channels.supervisor import FeishuSupervisor
@@ -285,6 +292,8 @@ async def test_lifespan_does_not_mark_supervisor_complete_with_quiescing_owner(
     assert active is not None
 
     channel = _FailingStopChannel(binding_id=binding["id"])
+    cleanup_barrier = CleanupRetryBarrier(channel.stop)
+    monkeypatch.setattr(channel, "stop", cleanup_barrier.stop)
     fence = _RuntimeLeaderFence()
     supervisor = FeishuSupervisor(
         repository,
@@ -319,6 +328,9 @@ async def test_lifespan_does_not_mark_supervisor_complete_with_quiescing_owner(
     app = FastAPI()
     app.state.agent_channel_repo = repository
     app.state.channel_event_repo = None
+    retry_completed = False
+    test_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
         with (
             patch("app.gateway.app.get_app_config"),
@@ -358,23 +370,54 @@ async def test_lifespan_does_not_mark_supervisor_complete_with_quiescing_owner(
             async with gateway_app.lifespan(app):
                 assert supervisor.running_binding_ids == (binding["id"],)
 
+        await asyncio.wait_for(cleanup_barrier.entered.wait(), timeout=1.0)
         assert supervisor._shutdown_complete is False
         assert supervisor.owned_binding_ids == (binding["id"],)
         assert fence.held is True
 
         channel.fail_stop = False
+        cleanup_barrier.release.set()
+        await asyncio.wait_for(cleanup_barrier.recovered.wait(), timeout=1.0)
+
+        current = await wait_for_runtime_token_clear(
+            repository,
+            binding,
+            owner_user_id="owner-a",
+        )
+        assert current["runtime_lease_token"] is None
+
+        await wait_for_supervisor_ownership(supervisor)
+
         monkeypatch.setattr(
             "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
             1.0,
         )
         await supervisor.shutdown()
+        retry_completed = True
         assert supervisor._shutdown_complete is True
         assert supervisor.owned_binding_ids == ()
         assert fence.held is False
+    except BaseException as exc:
+        test_error = exc
     finally:
+        cleanup_barrier.release.set()
         channel.fail_stop = False
         try:
-            if not supervisor._shutdown_complete:
-                await supervisor.shutdown()
-        finally:
+            if not retry_completed:
+                monkeypatch.setattr(
+                    "app.channels.supervisor.RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS",
+                    1.0,
+                )
+                await finish_supervisor_cleanup(supervisor, fence=fence)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        try:
             await engine.dispose()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+        raise_test_cleanup_errors(
+            test_error,
+            cleanup_errors,
+            message="Gateway lifespan regression and cleanup both failed",
+        )

@@ -236,9 +236,9 @@ def _internal_run_request(
     metadata = {
         "published_agent": True,
         "published_agent_id": context.agent_id,
+        "published_release_id": context.release_id,
         "published_credential_id": context.credential_id,
         "published_conversation_id": conversation_id,
-        "published_release_id": context.release_id,
         "published_correlation_id": context.correlation_id,
         "published_idempotency_key": context.idempotency_key,
         "published_quota_reservation_id": reservation_id,
@@ -260,6 +260,7 @@ def _settlement_metadata(context: PublishedAgentContext) -> dict[str, Any]:
     """Persist immutable, non-secret usage fields with the durable Run."""
     return {
         "published_agent_id": context.agent_id,
+        "published_release_id": context.release_id,
         "published_credential_id": context.credential_id,
         "published_conversation_id": context.conversation_scope,
         "published_correlation_id": context.correlation_id,
@@ -301,6 +302,7 @@ def _usage_from_record(
         model_name = str(metadata["published_model_name"])
         idempotency_key = metadata.get("published_idempotency_key")
         correlation_id = str(metadata["published_correlation_id"])
+        release_id = str(metadata["published_release_id"]) if metadata.get("published_release_id") else None
     else:
         agent_id = context.agent_id
         source = context.source
@@ -310,6 +312,7 @@ def _usage_from_record(
         model_name = context.model_name
         idempotency_key = context.idempotency_key
         correlation_id = context.correlation_id
+        release_id = context.release_id
     error_class = {
         "cancelled": "CancelledError",
         "timeout": "TimeoutError",
@@ -323,6 +326,7 @@ def _usage_from_record(
         "external_actor_hash": actor_hash,
         "conversation_id": conversation_id,
         "run_id": record.run_id,
+        "release_id": release_id,
         "model": model_name,
         "input_tokens": int(getattr(record, "total_input_tokens", 0) or 0),
         "output_tokens": int(getattr(record, "total_output_tokens", 0) or 0),

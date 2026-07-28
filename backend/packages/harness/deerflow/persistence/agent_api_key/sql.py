@@ -284,6 +284,26 @@ class AgentAPIKeyRepository:
                 await session.commit()
             return True
 
+    async def delete(self, agent_id: str, key_id: str, *, owner_user_id: str) -> bool:
+        """Permanently remove an Agent-scoped key within its owner scope."""
+        async with self._sf() as session:
+            row = (
+                await session.execute(
+                    select(AgentAPIKeyRow)
+                    .join(PublishedAgentRow, PublishedAgentRow.id == AgentAPIKeyRow.agent_id)
+                    .where(
+                        AgentAPIKeyRow.id == key_id,
+                        AgentAPIKeyRow.agent_id == agent_id,
+                        PublishedAgentRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.commit()
+            return True
+
     async def update(
         self,
         agent_id: str,

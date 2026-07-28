@@ -52,11 +52,13 @@ class AgentUsageRecordRow(Base):
     external_actor_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    release_id: Mapped[str | None] = mapped_column(String(64), index=True)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    event_latency_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     error_class: Mapped[str | None] = mapped_column(String(128))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
@@ -69,4 +71,24 @@ class AgentUsageRecordRow(Base):
     )
 
 
-__all__ = ["AgentQuotaReservationRow", "AgentUsageRecordRow"]
+class AgentQuotaRejectionRow(Base):
+    """One sanitized pre-run rejection for saturation and quota operations."""
+
+    __tablename__ = "agent_quota_rejections"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    credential_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+
+    __table_args__ = (Index("ix_agent_quota_rejection_agent_created", "agent_id", "created_at"),)
+
+
+__all__ = [
+    "AgentQuotaRejectionRow",
+    "AgentQuotaReservationRow",
+    "AgentUsageRecordRow",
+]

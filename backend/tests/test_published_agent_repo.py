@@ -197,19 +197,53 @@ async def test_update_meta_owner_scoped(agent_repo):
 
 
 @pytest.mark.asyncio
-async def test_set_status_and_set_current_release_owner_scoped(agent_repo):
+async def test_agent_status_transitions_are_release_aware_and_owner_scoped(agent_repo):
     pub, _ = agent_repo
     created = await pub.create_agent(owner_user_id="user-a", slug="status", display_name="S")
-    ok = await pub.set_status(created["id"], owner_user_id="user-a", status="suspended")
-    assert ok is True
-    assert (await pub.get(created["id"], owner_user_id="user-a"))["status"] == "suspended"
-    # Cross-owner status change rejected (returns False, never mutates).
-    assert await pub.set_status(created["id"], owner_user_id="user-b", status="archived") is False
-    assert (await pub.get(created["id"], owner_user_id="user-a"))["status"] == "suspended"
+    # A never-published draft cannot enter the suspend/resume path.
+    assert (
+        await pub.transition_status(
+            created["id"],
+            owner_user_id="user-a",
+            from_statuses=("published",),
+            to_status="suspended",
+            require_current_release=True,
+        )
+        is False
+    )
+    assert (await pub.get(created["id"], owner_user_id="user-a"))["status"] == "draft"
 
     ok = await pub.set_current_release(created["id"], owner_user_id="user-a", release_id="rel_1")
     assert ok is True
-    assert (await pub.get(created["id"], owner_user_id="user-a"))["current_release_id"] == "rel_1"
+    published = await pub.get(created["id"], owner_user_id="user-a")
+    assert published["current_release_id"] == "rel_1"
+    assert published["status"] == "published"
+
+    assert await pub.transition_status(
+        created["id"],
+        owner_user_id="user-a",
+        from_statuses=("published",),
+        to_status="suspended",
+        require_current_release=True,
+    )
+    assert (await pub.get(created["id"], owner_user_id="user-a"))["status"] == "suspended"
+    assert await pub.transition_status(
+        created["id"],
+        owner_user_id="user-a",
+        from_statuses=("suspended",),
+        to_status="published",
+        require_current_release=True,
+    )
+    assert (await pub.get(created["id"], owner_user_id="user-a"))["status"] == "published"
+
+    # Cross-owner transitions and release changes never mutate the row.
+    assert not await pub.transition_status(
+        created["id"],
+        owner_user_id="user-b",
+        from_statuses=("published",),
+        to_status="archived",
+    )
+    assert (await pub.get(created["id"], owner_user_id="user-a"))["status"] == "published"
     assert await pub.set_current_release(created["id"], owner_user_id="user-b", release_id="rel_2") is False
 
 
@@ -442,6 +476,31 @@ async def test_draft_partial_update_keeps_other_fields(agent_repo):
     assert draft["agent_markdown"] == "# Agent"
     assert draft["model_name"] == "gpt-x"
     assert draft["soul_markdown"] == "# Soul"
+
+
+@pytest.mark.asyncio
+async def test_draft_update_can_explicitly_clear_model_name(agent_repo):
+    pub, drafts = agent_repo
+    agent = await pub.create_agent(owner_user_id="user-a", slug="clear-model", display_name="Clear")
+    await drafts.update_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        model_name="gpt-x",
+        model_name_provided=True,
+    )
+
+    cleared = await drafts.update_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=2,
+        model_name=None,
+        model_name_provided=True,
+    )
+
+    assert cleared is not None
+    assert cleared["revision"] == 3
+    assert cleared["model_name"] is None
 
 
 @pytest.mark.asyncio

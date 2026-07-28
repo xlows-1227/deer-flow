@@ -153,6 +153,27 @@ async def test_publish_creates_release_and_switches_pointer(env):
 
 
 @pytest.mark.asyncio
+async def test_publish_replaces_legacy_draft_tool_groups_with_platform_policy(env):
+    service, draft_service, _, release_repo = env
+    agent = await _seed_agent(draft_service)
+    draft = await draft_service.get_draft(agent["id"], owner_user_id="user-a")
+    await draft_service.update_draft(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=draft["revision"],
+        tool_groups=["legacy-custom-group"],
+    )
+
+    await service.publish(agent["id"], owner_user_id="user-a")
+
+    releases = await release_repo.list_by_agent(
+        agent["id"],
+        owner_user_id="user-a",
+    )
+    assert releases[0]["tool_groups"] == ["web"]
+
+
+@pytest.mark.asyncio
 async def test_publish_rejects_invalid_draft_without_changes(env):
     service, draft_service, agent_repo, _ = env
     agent = await _seed_agent(draft_service)
@@ -228,6 +249,7 @@ async def test_skill_revision_pinning(env):
     r1 = await service.publish(agent["id"], owner_user_id="user-a")
     release1 = await release_repo.get(r1["release_id"], owner_user_id="user-a")
     pinned_revision = release1["skills"][0]["skill_revision_id"]
+    assert release1["skills"][0]["skill_name"] == "reporting"
     # Re-publish: the skill content is identical so the revision must be reused.
     draft = await draft_service.get_draft(agent["id"], owner_user_id="user-a")
     await draft_service.update_draft(agent["id"], owner_user_id="user-a", revision=draft["revision"], agent_markdown="# Agent v2")

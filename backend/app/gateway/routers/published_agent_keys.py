@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Self
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.gateway.deps import get_agent_api_key_repo
@@ -189,6 +189,21 @@ async def revoke_agent_key(
     if not await repository.revoke(agent_id, key_id, owner_user_id=owner_user_id):
         raise HTTPException(status_code=404, detail="Key not found")
     return {"revoked": True}
+
+
+@router.delete("/{key_id}", status_code=204)
+async def delete_agent_key(
+    agent_id: str,
+    key_id: str,
+    request: Request,
+    repository: AgentAPIKeyRepository = Depends(get_agent_api_key_repo),
+    service: DraftService = Depends(get_draft_service),
+) -> Response:
+    """Permanently delete one Agent credential."""
+    owner_user_id = await _require_owned_agent(request, agent_id, service)
+    if not await repository.delete(agent_id, key_id, owner_user_id=owner_user_id):
+        raise HTTPException(status_code=404, detail="Key not found")
+    return Response(status_code=204)
 
 
 @router.patch("/{key_id}")

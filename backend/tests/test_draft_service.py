@@ -17,6 +17,7 @@ from deerflow.publishing.draft_service import (
     ConnectorNotGrantableError,
     DraftConflictError,
     DraftService,
+    InvalidAgentStateTransitionError,
     SkillNotSelectableError,
 )
 
@@ -76,6 +77,21 @@ class FakePublishedAgentRepo:
         a["status"] = status
         return True
 
+    async def transition_status(
+        self,
+        agent_id,
+        *,
+        owner_user_id,
+        from_statuses,
+        to_status,
+        require_current_release=False,
+    ):
+        a = self.agents.get(agent_id)
+        if a is None or a["owner_user_id"] != owner_user_id or a["status"] not in from_statuses or (require_current_release and a["current_release_id"] is None):
+            return False
+        a["status"] = to_status
+        return True
+
     async def set_current_release(self, agent_id, *, owner_user_id, release_id):
         a = self.agents.get(agent_id)
         if a is None or a["owner_user_id"] != owner_user_id:
@@ -123,8 +139,9 @@ class FakeDraftRepo:
         d = self.drafts.get(agent_id)
         if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
             return None
+        model_name_provided = fields.pop("model_name_provided", False)
         for k, v in fields.items():
-            if v is not None:
+            if v is not None or (k == "model_name" and model_name_provided):
                 d[k] = v
         d["revision"] = revision + 1
         return dict(d)
@@ -133,8 +150,9 @@ class FakeDraftRepo:
         d = self.drafts.get(agent_id)
         if d is None or not self._owned(agent_id, owner_user_id) or d["revision"] != revision:
             return None
+        model_name_provided = fields.pop("model_name_provided", False)
         for k, v in fields.items():
-            if v is not None:
+            if v is not None or (k == "model_name" and model_name_provided):
                 d[k] = v
         if skills is not None:
             d["skills"] = list(skills)
@@ -385,6 +403,16 @@ async def test_replace_connector_grants_rejects_other_owners_connector(service):
 @pytest.mark.anyio
 async def test_suspend_resume_archive(service):
     agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
+    with pytest.raises(InvalidAgentStateTransitionError):
+        await service.suspend(agent["id"], owner_user_id="user-a")
+    with pytest.raises(InvalidAgentStateTransitionError):
+        await service.resume(agent["id"], owner_user_id="user-a")
+
+    await service._agents.set_current_release(
+        agent["id"],
+        owner_user_id="user-a",
+        release_id="rel-1",
+    )
     await service.suspend(agent["id"], owner_user_id="user-a")
     assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "suspended"
     await service.resume(agent["id"], owner_user_id="user-a")
@@ -396,7 +424,7 @@ async def test_suspend_resume_archive(service):
 @pytest.mark.anyio
 async def test_lifecycle_cross_owner_noop(service):
     agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
-    await service.suspend(agent["id"], owner_user_id="user-b")
+    assert await service.suspend(agent["id"], owner_user_id="user-b") is False
     assert (await service.get_agent(agent["id"], owner_user_id="user-a"))["status"] == "draft"
 
 

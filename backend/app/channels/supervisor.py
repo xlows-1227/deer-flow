@@ -2036,6 +2036,9 @@ class FeishuSupervisor:
                                 logger.exception("Failed to stop Feishu binding during shutdown", extra={"binding_id": binding_id})
 
                     lifecycle_ids = set(self._binding_locks) | set(self._running)
+                    for binding_id, running in tuple(self._running.items()):
+                        if running.cleanup_task is not None and not running.cleanup_task.done():
+                            lifecycle_ids.discard(binding_id)
                     await asyncio.gather(*(stop_one(binding_id) for binding_id in lifecycle_ids))
                     await self._drain_late_runtime_claim_ownership(deadline=shutdown_deadline)
                     await self._drain_quiescing_runtime_ownership(deadline=shutdown_deadline)

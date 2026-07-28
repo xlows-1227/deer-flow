@@ -42,6 +42,10 @@ class ConnectorNotGrantableError(Exception):
     """Raised when a granted connector instance does not belong to the caller (422)."""
 
 
+class InvalidAgentStateTransitionError(Exception):
+    """Raised when a lifecycle action is invalid for the current Agent state."""
+
+
 class SkillsIndex(Protocol):
     """Minimal interface the service needs to authorize skill selection.
 
@@ -53,6 +57,8 @@ class SkillsIndex(Protocol):
     def is_selectable_by(self, name: str, owner_user_id: str) -> bool: ...
 
     def get(self, name: str) -> dict[str, Any] | None: ...
+
+    def list_selectable_by(self, owner_user_id: str) -> list[dict[str, Any]]: ...
 
 
 def _resolve_skill_source(skills_index: SkillsIndex, name: str, owner_user_id: str) -> str:
@@ -199,6 +205,16 @@ class DraftService:
     async def get_draft(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
         return await self._drafts.get(agent_id, owner_user_id=owner_user_id)
 
+    def list_selectable_skills(self, *, owner_user_id: str) -> list[dict[str, Any]]:
+        """Return the authoritative owner-visible skill catalog for Studio.
+
+        The publishing index, rather than the browser, owns visibility and
+        connector-requirement classification. Keeping this read on
+        ``DraftService`` gives the structured editor the same authorization
+        boundary used by draft writes and publish validation.
+        """
+        return self._skills.list_selectable_by(owner_user_id)
+
     async def get_authoring_state(self, *, owner_user_id: str, slug: str) -> dict[str, Any] | None:
         """Return the identity and mutable draft for one owner-scoped slug."""
         get_state = getattr(self._agents, "get_authoring_state", None)
@@ -248,6 +264,7 @@ class DraftService:
         agent_markdown: str | None = None,
         soul_markdown: str | None = None,
         model_name: str | None = None,
+        model_name_provided: bool = False,
         tool_groups: Sequence[str] | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -258,6 +275,7 @@ class DraftService:
             agent_markdown=agent_markdown,
             soul_markdown=soul_markdown,
             model_name=model_name,
+            model_name_provided=model_name_provided or model_name is not None,
             tool_groups=tool_groups,
             quota_overrides=quota_overrides,
         )
@@ -277,6 +295,7 @@ class DraftService:
         agent_markdown: str | None = None,
         soul_markdown: str | None = None,
         model_name: str | None = None,
+        model_name_provided: bool = False,
         tool_groups: Sequence[str] | None = None,
         quota_overrides: Mapping[str, Any] | None = None,
         skills: Sequence[Mapping[str, str]] | None = None,
@@ -308,6 +327,7 @@ class DraftService:
             agent_markdown=agent_markdown,
             soul_markdown=soul_markdown,
             model_name=model_name,
+            model_name_provided=model_name_provided or model_name is not None,
             tool_groups=tool_groups,
             quota_overrides=quota_overrides,
             skills=resolved_skills,
@@ -400,10 +420,56 @@ class DraftService:
     # ------------------------------------------------------------------
 
     async def suspend(self, agent_id: str, *, owner_user_id: str) -> bool:
-        return await self._agents.set_status(agent_id, owner_user_id=owner_user_id, status="suspended")
+        return await self._transition_status(
+            agent_id,
+            owner_user_id=owner_user_id,
+            operation="suspend",
+            from_statuses=("published",),
+            to_status="suspended",
+            require_current_release=True,
+        )
 
     async def resume(self, agent_id: str, *, owner_user_id: str) -> bool:
-        return await self._agents.set_status(agent_id, owner_user_id=owner_user_id, status="published")
+        return await self._transition_status(
+            agent_id,
+            owner_user_id=owner_user_id,
+            operation="resume",
+            from_statuses=("suspended",),
+            to_status="published",
+            require_current_release=True,
+        )
 
     async def archive(self, agent_id: str, *, owner_user_id: str) -> bool:
-        return await self._agents.set_status(agent_id, owner_user_id=owner_user_id, status="archived")
+        return await self._transition_status(
+            agent_id,
+            owner_user_id=owner_user_id,
+            operation="archive",
+            from_statuses=("draft", "published", "suspended"),
+            to_status="archived",
+        )
+
+    async def _transition_status(
+        self,
+        agent_id: str,
+        *,
+        owner_user_id: str,
+        operation: str,
+        from_statuses: Sequence[str],
+        to_status: str,
+        require_current_release: bool = False,
+    ) -> bool:
+        changed = await self._agents.transition_status(
+            agent_id,
+            owner_user_id=owner_user_id,
+            from_statuses=from_statuses,
+            to_status=to_status,
+            require_current_release=require_current_release,
+        )
+        if changed:
+            return True
+        current = await self._agents.get(agent_id, owner_user_id=owner_user_id)
+        if current is None:
+            return False
+        status = str(current.get("status", "unknown"))
+        release_suffix = " with a current release" if require_current_release else ""
+        raise InvalidAgentStateTransitionError(f"cannot {operation} Agent from {status}{release_suffix}")

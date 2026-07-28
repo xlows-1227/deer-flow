@@ -244,7 +244,16 @@ def test_strip_reserved_metadata_empty_input():
 
 
 def test_strip_reserved_metadata_strips_all_reserved_keys():
-    out = threads._strip_reserved_metadata({"user_id": "x", "keep": "me"})
+    out = threads._strip_reserved_metadata(
+        {
+            "user_id": "x",
+            "draft_sandbox": True,
+            "draft_sandbox_agent_id": "forged-agent",
+            "draft_sandbox_revision": 999,
+            "draft_sandbox_billable": False,
+            "keep": "me",
+        }
+    )
     assert out == {"keep": "me"}
 
 

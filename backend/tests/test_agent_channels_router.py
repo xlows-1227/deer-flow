@@ -20,6 +20,7 @@ from app.channels.supervisor import BindingNotFoundError, FeishuSupervisor
 from app.gateway.routers import published_agent_channels
 from deerflow.config.paths import Paths
 from deerflow.persistence.agent_channel import AgentChannelRepository
+from deerflow.persistence.agent_channel.model import AgentChannelRow
 from deerflow.persistence.base import Base
 from deerflow.persistence.published_agent import PublishedAgentRow
 from deerflow.publishing.feishu_credentials import decode_feishu_credentials
@@ -200,6 +201,58 @@ async def test_router_resource_cleanup_preserves_shutdown_and_dispose_failures()
     assert str(failures[0]) == "runtime ownership unresolved"
     assert isinstance(failures[1], OSError)
     assert str(failures[1]) == "database disposal failed"
+
+
+@pytest.mark.asyncio
+async def test_list_channels_preserves_deleting_status_contract(
+    tmp_path: Path,
+    router_test_resources: _RouterTestResources,
+) -> None:
+    engine = router_test_resources.own_engine(create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'deleting-contract.db'}"))
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(
+            PublishedAgentRow(
+                id="pa_1",
+                owner_user_id="owner-a",
+                slug="one",
+                display_name="One",
+                status="published",
+            )
+        )
+        session.add(
+            AgentChannelRow(
+                id="ach_deleting",
+                agent_id="pa_1",
+                app_id="cli_deleting",
+                secret_ref="secret://redacted",
+                status="deleting",
+                delete_previous_status="active",
+            )
+        )
+        await session.commit()
+
+    app = FastAPI()
+    app.state.agent_channel_repo = AgentChannelRepository(session_factory)
+
+    @app.middleware("http")
+    async def session_auth(request: Request, call_next: Any) -> Any:
+        request.state.user = SimpleNamespace(id="owner-a")
+        request.state.auth_method = "session"
+        return await call_next(request)
+
+    app.include_router(published_agent_channels.router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/published-agents/pa_1/channels")
+
+    assert response.status_code == 200
+    assert response.json()[0]["status"] == "deleting"
+    assert "secret_ref" not in response.json()[0]
 
 
 @pytest.fixture(scope="module", autouse=True)

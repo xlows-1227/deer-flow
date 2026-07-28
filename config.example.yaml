@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 11
+config_version: 12
 
 # ============================================================================
 # Logging
@@ -46,6 +46,12 @@ publishing:
     inbound_rps: 20
     daily_runs_default: 1000
     daily_tokens_default: 2000000
+  # Optional deployment pricing used by the owner operations dashboard.
+  # Costs are calculated from terminal token usage and shown in micro-USD.
+  # model_costs:
+  #   your-model-name:
+  #     input_usd_per_million_tokens: 0
+  #     output_usd_per_million_tokens: 0
 
 # ============================================================================
 # Models Configuration

@@ -405,7 +405,7 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         assert "<agent_soul>\nDB SOUL instructions" in runtime_prompt
         assert runtime_prompt.index("<agent_instructions>") < runtime_prompt.index("<agent_soul>")
         assert captured_prompt_kwargs[-1]["available_skills"] is None
-        assert captured_tool_groups[-1] == []
+        assert captured_tool_groups[-1] is None
 
         # --- 6. DB miss keeps the owner's unimported legacy agent runnable. ---
         legacy_name = "legacy-only"

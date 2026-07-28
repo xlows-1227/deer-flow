@@ -75,6 +75,11 @@ class StorageSkillsIndex:
             index[skill.name] = {
                 "visibility": "public" if skill.category == SkillCategory.PUBLIC else "private",
                 "owner": owner,
+                # Older SkillStorage implementations and lightweight adapter
+                # fixtures predate the optional localized catalog fields.
+                "display_name": getattr(skill, "display_name", None),
+                "description": getattr(skill, "description", None),
+                "description_zh": getattr(skill, "description_zh", None),
                 "caps": caps,
                 "skill_dir": skill.skill_dir,
                 "enabled": bool(skill.enabled),
@@ -107,9 +112,9 @@ class StorageSkillsIndex:
         """
         return self._ensure_index().get(name)
 
-    def list_selectable_by(self, owner_user_id: str) -> list[dict[str, str]]:
+    def list_selectable_by(self, owner_user_id: str) -> list[dict[str, Any]]:
         """Return the owner's current enabled skill set in stable order."""
-        result: list[dict[str, str]] = []
+        result: list[dict[str, Any]] = []
         for name in sorted(self._ensure_index()):
             if not self.is_selectable_by(name, owner_user_id):
                 continue
@@ -118,6 +123,10 @@ class StorageSkillsIndex:
                 {
                     "skill_name": name,
                     "source": ("private" if info.get("visibility") == "private" else "public"),
+                    "display_name": info.get("display_name"),
+                    "description": info.get("description"),
+                    "description_zh": info.get("description_zh"),
+                    "declared_connector_caps": list(info.get("caps") or []),
                 }
             )
         return result

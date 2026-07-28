@@ -45,11 +45,21 @@ class AgentAPIAuthMiddleware(BaseHTTPMiddleware):
         if match is None:
             return await call_next(request)
         requested_agent_id = match.group(1)
+        # The route path is a controlled resource identifier. Attach it before
+        # credential validation so metadata-only failure audits can still be
+        # visible to the target owner without changing the external response.
+        request.state.agent_id = requested_agent_id
+        request.state.external_audit_resource_type = "agent"
+        request.state.external_audit_resource_id = requested_agent_id
 
         key_repo = getattr(request.app.state, "agent_api_key_repo", None)
         agent_repo = getattr(request.app.state, "published_agent_repo", None)
         if key_repo is None or agent_repo is None:
             return _error(503, "agent_api_unavailable", "Published Agent API persistence is unavailable.")
+
+        owner_user_id = await agent_repo.get_owner(requested_agent_id)
+        if owner_user_id is not None:
+            request.state.owner_user_id = str(owner_user_id)
 
         scheme, _, credential = request.headers.get("Authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not credential:
@@ -62,8 +72,11 @@ class AgentAPIAuthMiddleware(BaseHTTPMiddleware):
             return _error(401, "invalid_agent_key", "The Agent Key is invalid or expired.")
         if key["agent_id"] != requested_agent_id:
             return _error(404, "agent_not_found", "Published Agent not found.")
+        # Only expose the credential identifier to audit after it is proven to
+        # belong to the requested Agent. Otherwise a cross-Agent failure would
+        # leak another tenant's stable Key ID into the target owner's console.
+        request.state.agent_key_id = key["id"]
 
-        owner_user_id = await agent_repo.get_owner(requested_agent_id)
         if owner_user_id is None:
             return _error(404, "agent_not_found", "Published Agent not found.")
 
@@ -72,12 +85,7 @@ class AgentAPIAuthMiddleware(BaseHTTPMiddleware):
         request.state.user = principal
         request.state.auth = AuthContext(user=principal, permissions=[])
         request.state.auth_method = "agent_api_key"
-        request.state.agent_id = requested_agent_id
-        request.state.agent_key_id = key["id"]
         request.state.agent_key = key
-        request.state.owner_user_id = str(owner_user_id)
-        request.state.external_audit_resource_type = "agent"
-        request.state.external_audit_resource_id = requested_agent_id
         token = set_current_user(principal)
         try:
             return await call_next(request)
