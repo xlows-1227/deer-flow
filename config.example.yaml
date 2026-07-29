@@ -1001,6 +1001,8 @@ connectors:
       require_limit: true
 # OneData discovery base URL (list_apis / get_params). Business calls use calUrl from get_params.
 # ONEDATA_API_BASE_URL=http://share-onedata-api-ent4.prd.yumc.local/v1
+# Local mock: cd backend && PYTHONPATH=. uv run python scripts/mock_onedata_server.py
+# ONEDATA_API_BASE_URL=http://127.0.0.1:18087/v1  (secretId/secretKey: mock-secret-id / mock-secret-key)
 
 # ============================================================================
 # Run Events Configuration

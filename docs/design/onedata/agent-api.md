@@ -299,6 +299,7 @@ curl -G "http://localhost:8087/api/v1/agent/params" \
 - 连接器实例仅保存 `secretId` / `secretKey`
 - Agent 通过 `call_connector_action`：`onedata.list_apis` → `onedata.get_params` → `onedata.call_api`（直接使用返回的 `calUrl`）
 - 本项目不实现字段加解密与 HMAC 签名；`sign` 请求头直接传 `secretKey`
+- 下游不可用时可用本地 mock：`cd backend && PYTHONPATH=. uv run python scripts/mock_onedata_server.py`，设置 `ONEDATA_API_BASE_URL=http://127.0.0.1:18087/v1`，凭证 `mock-secret-id` / `mock-secret-key`
 
 ---
 

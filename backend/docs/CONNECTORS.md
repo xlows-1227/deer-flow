@@ -73,6 +73,22 @@ Create an `onedata` connector with inline `secretId` / `secretKey` (stored as cr
 
 Business calls POST directly to `calUrl`. Request headers use `sign=<secretKey>` (no HMAC). Field encryption/decryption is not implemented.
 
+### Local mock (downstream unavailable)
+
+When the real OneData discovery/business APIs are not reachable, start a local mock from `backend/`:
+
+```bash
+PYTHONPATH=. uv run python scripts/mock_onedata_server.py
+```
+
+Then set:
+
+```env
+ONEDATA_API_BASE_URL=http://127.0.0.1:18087/v1
+```
+
+Use connector credentials `secretId=mock-secret-id` and `secretKey=mock-secret-key`. The mock exposes two sample APIs (`1001` sales, `1002` store info); `get_params` returns `calUrl` pointing back at the same process.
+
 ## API
 
 Connector type discovery:
