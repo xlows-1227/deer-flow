@@ -15,6 +15,36 @@ export function isVisibleInChatList(
   );
 }
 
+type ThreadAgentSource = {
+  context?: Pick<AgentThreadContext, "agent_name"> | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export function agentNameOfThread(thread: ThreadAgentSource) {
+  const contextAgent = thread.context?.agent_name;
+  if (typeof contextAgent === "string" && contextAgent) {
+    return contextAgent;
+  }
+  const metadataAgent = thread.metadata?.agent_name;
+  return typeof metadataAgent === "string" && metadataAgent
+    ? metadataAgent
+    : undefined;
+}
+
+export function agentDisplayNameOfThread(thread: ThreadAgentSource) {
+  const displayName = thread.metadata?.agent_display_name;
+  return typeof displayName === "string" && displayName
+    ? displayName
+    : agentNameOfThread(thread);
+}
+
+export function draftSandboxAgentIdOfThread(
+  thread: Pick<ThreadAgentSource, "metadata">,
+) {
+  const agentId = thread.metadata?.draft_sandbox_agent_id;
+  return typeof agentId === "string" && agentId ? agentId : undefined;
+}
+
 type ThreadRouteTarget =
   | string
   | {
@@ -28,18 +58,10 @@ export function pathOfThread(
   context?: Pick<AgentThreadContext, "agent_name"> | null,
 ) {
   const threadId = typeof thread === "string" ? thread : thread.thread_id;
-  let agentName: string | undefined;
-  if (typeof thread === "string") {
-    agentName = context?.agent_name;
-  } else {
-    agentName = thread.context?.agent_name;
-    if (!agentName) {
-      const metaAgent = thread.metadata?.agent_name;
-      if (typeof metaAgent === "string") {
-        agentName = metaAgent;
-      }
-    }
-  }
+  const agentName =
+    typeof thread === "string"
+      ? context?.agent_name
+      : (agentNameOfThread(thread) ?? context?.agent_name);
 
   return agentName
     ? `/workspace/agents/${encodeURIComponent(agentName)}/chats/${threadId}`

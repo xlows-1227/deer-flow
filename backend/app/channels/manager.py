@@ -10,7 +10,10 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.channels.published_runtime import PublishedChannelRuntime
 
 import httpx
 from langgraph_sdk.errors import ConflictError
@@ -372,7 +375,12 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
-def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+def _resolve_attachments(
+    thread_id: str,
+    artifacts: list[str],
+    *,
+    owner_user_id: str | None = None,
+) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
     Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
@@ -386,7 +394,7 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
+    user_id = owner_user_id if owner_user_id is not None else get_effective_user_id()
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
@@ -426,13 +434,19 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    owner_user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
+    attachments = _resolve_attachments(
+        thread_id,
+        artifacts,
+        owner_user_id=owner_user_id,
+    )
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -449,7 +463,12 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
-async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dict[str, Any]]:
+async def _ingest_inbound_files(
+    thread_id: str,
+    msg: InboundMessage,
+    *,
+    owner_user_id: str | None = None,
+) -> list[dict[str, Any]]:
     if not msg.files:
         return []
 
@@ -461,7 +480,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
         write_upload_file_no_symlink,
     )
 
-    uploads_dir = ensure_uploads_dir(thread_id)
+    uploads_dir = ensure_uploads_dir(thread_id, user_id=owner_user_id)
     seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
 
     created: list[dict[str, Any]] = []
@@ -576,6 +595,7 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        published_runtime: PublishedChannelRuntime | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -585,6 +605,7 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._published_runtime = published_runtime
         self._client = None  # lazy init — langgraph_sdk async client
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -605,6 +626,8 @@ class ChannelManager:
             channel = service.get_channel(channel_name)
             if channel is not None:
                 return channel.supports_streaming
+        if channel_name.startswith("feishu:"):
+            return True
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -683,6 +706,10 @@ class ChannelManager:
         self._task = asyncio.create_task(self._dispatch_loop())
         logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
 
+    def configure_published_runtime(self, runtime: PublishedChannelRuntime) -> None:
+        """Attach the trusted runtime used only by DB-backed channel bindings."""
+        self._published_runtime = runtime
+
     async def stop(self) -> None:
         """Stop the dispatch loop."""
         self._running = False
@@ -729,7 +756,12 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         async with self._semaphore:
             try:
-                if msg.msg_type == InboundMessageType.COMMAND:
+                # Binding metadata is emitted only by Supervisor-owned channels.
+                # Route it before legacy command handling so /memory, /models,
+                # or /new can never escape Published-Agent runtime policy.
+                if isinstance(msg.metadata.get("binding_id"), str):
+                    await self._handle_published_chat(msg)
+                elif msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
                     await self._handle_chat(msg)
@@ -787,6 +819,10 @@ class ChannelManager:
                 self._create_thread_locks.pop(key, None)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
+        # Defense in depth for direct callers that bypass ``_handle_message``.
+        if isinstance(msg.metadata.get("binding_id"), str):
+            await self._handle_published_chat(msg)
+            return
         client = self._get_client()
 
         # Serialize get-or-create for the same conversation/topic so that
@@ -884,6 +920,111 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+    async def _handle_published_chat(self, msg: InboundMessage) -> None:
+        """Route a trusted binding message without falling back to legacy Agent config."""
+        from app.channels.published_runtime import (
+            PublishedChannelBusyError,
+            PublishedChannelUnavailableError,
+            PublishedInboundPreparation,
+        )
+
+        runtime = self._published_runtime
+        if runtime is None:
+            await self._send_error(msg, "This agent is temporarily unavailable.")
+            return
+
+        async def prepare_inbound(
+            message: InboundMessage,
+            thread_id: str,
+            owner_user_id: str,
+            max_input_bytes: int,
+        ) -> PublishedInboundPreparation:
+            attachment_bytes = 0
+            materialized_by_channel = False
+            if message.files:
+                from .service import get_channel_service
+
+                service = get_channel_service()
+                channel = service.get_channel(message.channel_name) if service else None
+                if channel is None:
+                    raise RuntimeError("published inbound channel is unavailable")
+                materialize = getattr(channel, "materialize_published_files", None)
+                if callable(materialize):
+                    message, attachment_bytes = await materialize(
+                        message,
+                        thread_id,
+                        owner_user_id=owner_user_id,
+                        max_input_bytes=max_input_bytes,
+                    )
+                    materialized_by_channel = True
+                else:
+                    message = await channel.receive_file(message, thread_id)
+            uploaded = (
+                []
+                if materialized_by_channel
+                else await _ingest_inbound_files(
+                    thread_id,
+                    message,
+                    owner_user_id=owner_user_id,
+                )
+            )
+            if uploaded:
+                message.text = f"{_format_uploaded_files_block(uploaded)}\n\n{message.text}".strip()
+                attachment_bytes += sum(int(file_info.get("size") or 0) for file_info in uploaded)
+            return PublishedInboundPreparation(
+                message=message,
+                attachment_bytes=attachment_bytes,
+            )
+
+        async def publish_progress(thread_id: str, text: str) -> None:
+            if not text:
+                return
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel_name=msg.channel_name,
+                    chat_id=msg.chat_id,
+                    thread_id=thread_id,
+                    text=text,
+                    is_final=False,
+                    thread_ts=msg.thread_ts,
+                    metadata=_slim_metadata(msg.metadata),
+                )
+            )
+
+        try:
+            execution = await runtime.run(
+                msg,
+                prepare_inbound=prepare_inbound,
+                on_progress=publish_progress,
+            )
+        except PublishedChannelBusyError:
+            await self._send_error(msg, "This agent is busy. Please try again later.")
+            return
+        except PublishedChannelUnavailableError:
+            await self._send_error(msg, "This agent is currently unavailable.")
+            return
+        artifacts = list(execution.artifacts)
+        text, attachments = _prepare_artifact_delivery(
+            execution.thread_id,
+            execution.text,
+            artifacts,
+            owner_user_id=execution.owner_user_id,
+        )
+        if not text:
+            text = _format_artifact_text(artifacts) if artifacts else "(No response from agent)"
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=execution.thread_id,
+                text=text,
+                artifacts=artifacts,
+                attachments=attachments,
+                thread_ts=msg.thread_ts,
+                metadata=_slim_metadata(msg.metadata),
+            )
+        )
 
     async def _handle_streaming_chat(
         self,

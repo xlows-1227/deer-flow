@@ -337,10 +337,11 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
 
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected correctly.
-    # Chain tail order after the custom middleware is:
-    #   ..., custom, SafetyFinishReasonMiddleware, ClarificationMiddleware
-    # so the custom mock sits at index [-3].
-    assert len(middlewares) > 0 and isinstance(middlewares[-3], MagicMock)
+    # Custom request rewriting remains outside the final token-budget check,
+    # and ClarificationMiddleware remains last.
+    custom_index = next(index for index, middleware in enumerate(middlewares) if isinstance(middleware, MagicMock))
+    token_index = next(index for index, middleware in enumerate(middlewares) if isinstance(middleware, lead_agent_module.TokenUsageMiddleware))
+    assert custom_index < token_index < len(middlewares) - 1
 
 
 def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypatch):

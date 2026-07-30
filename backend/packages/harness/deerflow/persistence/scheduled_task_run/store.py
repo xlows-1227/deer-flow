@@ -48,12 +48,7 @@ class ScheduledTaskRunRepository:
             return _row_to_dict(row)
 
     async def list_by_task(self, task_id: str, *, limit: int = 50) -> list[TaskRunDict]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(ScheduledTaskRunRow.started_at.desc())
-            .limit(limit)
-        )
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.started_at.desc()).limit(limit)
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [_row_to_dict(row) for row in rows]
@@ -67,9 +62,7 @@ class ScheduledTaskRunRepository:
         error: str | None = None,
     ) -> TaskRunDict | None:
         async with self._sf() as session:
-            result = await session.execute(
-                select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.run_id == run_id)
-            )
+            result = await session.execute(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.run_id == run_id))
             row = result.scalar_one_or_none()
             if row is None:
                 return None
@@ -102,11 +95,7 @@ class MemoryScheduledTaskRunStore:
 
     async def list_by_task(self, task_id: str, *, limit: int = 50) -> list[TaskRunDict]:
         async with self._lock:
-            rows = [
-                _copy_run(run)
-                for run in self._runs.values()
-                if run.get("task_id") == task_id
-            ]
+            rows = [_copy_run(run) for run in self._runs.values() if run.get("task_id") == task_id]
         rows.sort(key=lambda r: r.get("started_at", ""), reverse=True)
         return rows[:limit]
 

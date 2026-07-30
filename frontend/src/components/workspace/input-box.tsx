@@ -67,6 +67,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useConnectors } from "@/core/connectors/hooks";
@@ -162,6 +163,8 @@ export function InputBox({
   onStop,
   submitWhileStreaming = false,
   lockedSkillName,
+  allowedSkillNames,
+  allowedConnectorIds,
   showWelcomeSuggestions = true,
   footerExtensionClassName,
   ...props
@@ -202,6 +205,10 @@ export function InputBox({
   submitWhileStreaming?: boolean;
   /** When set, skill is fixed and cannot be changed or cleared. */
   lockedSkillName?: string;
+  /** When set, only these skills can be selected in this composer. */
+  allowedSkillNames?: readonly string[];
+  /** When set, only these Connector instances can be selected. */
+  allowedConnectorIds?: readonly string[];
   /** Whether to show welcome quick suggestion chips under the input. */
   showWelcomeSuggestions?: boolean;
   /** Background for the footer extension strip under the input (defaults to theme background). */
@@ -211,6 +218,7 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [skillSearch, setSkillSearch] = useState("");
   const [connectorMenuOpen, setConnectorMenuOpen] = useState(false);
   const [helpDialogOpen, setHelpDialogOpen] = useState(false);
   const { models } = useModels();
@@ -304,12 +312,29 @@ export function InputBox({
   // Combined command set: built-in + third-party, deduplicated by id
   // (built-ins win since they are registered first and registry is
   // idempotent on id).
+  const allowedSkillSet = useMemo(
+    () => (allowedSkillNames === undefined ? null : new Set(allowedSkillNames)),
+    [allowedSkillNames],
+  );
+  const allowedConnectorSet = useMemo(
+    () =>
+      allowedConnectorIds === undefined ? null : new Set(allowedConnectorIds),
+    [allowedConnectorIds],
+  );
+  const visibleSkills = useMemo(
+    () =>
+      allowedSkillSet === null
+        ? skills
+        : skills.filter((skill) => allowedSkillSet.has(skill.name)),
+    [allowedSkillSet, skills],
+  );
+
   const slashCommands = useMemo<SlashCommand[]>(() => {
     if (!slashActive) {
       return [];
     }
     const builtins = getBuiltinSlashCommands({
-      skills,
+      skills: visibleSkills,
       modeLabels: {
         flash: t.inputBox.flashMode,
         thinking: t.inputBox.reasoningMode,
@@ -326,12 +351,17 @@ export function InputBox({
       helpDescription: t.inputBox.slashCommandHelpDescription,
     });
     const custom = getSlashCommands().filter(
-      (c) => !builtins.some((b) => b.id === c.id),
+      (command) =>
+        !builtins.some((builtin) => builtin.id === command.id) &&
+        (command.kind !== "skill" ||
+          !command.value ||
+          allowedSkillSet === null ||
+          allowedSkillSet.has(command.value)),
     );
     return [...builtins, ...custom];
     // We intentionally re-derive when the user types or when skills/i18n
     // change, so any of these in deps is correct.
-  }, [slashActive, skills, t.inputBox]);
+  }, [allowedSkillSet, slashActive, t.inputBox, visibleSkills]);
   // Filtered view used by the picker rows.
   const slashCandidates = useMemo(
     () => filterSlashCommands(slashQuery, slashCommands),
@@ -386,8 +416,14 @@ export function InputBox({
   );
 
   const activeConnectors = useMemo(
-    () => connectors.filter((connector) => connector.status === "active"),
-    [connectors],
+    () =>
+      connectors.filter(
+        (connector) =>
+          connector.status === "active" &&
+          (allowedConnectorSet === null ||
+            allowedConnectorSet.has(connector.id)),
+      ),
+    [allowedConnectorSet, connectors],
   );
   const selectedConnectorId = context.connector_ids?.[0];
   const selectedConnector = useMemo(
@@ -459,6 +495,13 @@ export function InputBox({
       if (lockedSkillName) {
         if (skillName !== lockedSkillName) return;
       }
+      if (
+        skillName &&
+        allowedSkillSet !== null &&
+        !allowedSkillSet.has(skillName)
+      ) {
+        return;
+      }
       onContextChange?.({
         ...context,
         skill_name: skillName,
@@ -472,11 +515,18 @@ export function InputBox({
         ta?.focus();
       }, 0);
     },
-    [lockedSkillName, onContextChange, context],
+    [allowedSkillSet, lockedSkillName, onContextChange, context],
   );
 
   const handleConnectorSelect = useCallback(
     (connectorId: string | undefined) => {
+      if (
+        connectorId &&
+        allowedConnectorSet !== null &&
+        !allowedConnectorSet.has(connectorId)
+      ) {
+        return;
+      }
       onContextChange?.({
         ...context,
         connector_ids: connectorId ? [connectorId] : undefined,
@@ -489,14 +539,31 @@ export function InputBox({
         ta?.focus();
       }, 0);
     },
-    [onContextChange, context],
+    [allowedConnectorSet, onContextChange, context],
   );
 
   const lockedSkillLabel = useMemo(() => {
     if (!lockedSkillName) return lockedSkillName;
-    const skill = skills.find((item) => item.name === lockedSkillName);
+    const skill = visibleSkills.find((item) => item.name === lockedSkillName);
     return skill?.display_name ?? lockedSkillName;
-  }, [lockedSkillName, skills]);
+  }, [lockedSkillName, visibleSkills]);
+
+  const filteredSkills = useMemo(() => {
+    const enabled = skills.filter((skill) => skill.enabled);
+    const needle = skillSearch.trim().toLowerCase();
+    if (!needle) return enabled;
+    return enabled.filter((skill) => {
+      const haystack = [
+        skill.name,
+        skill.display_name ?? "",
+        skill.description,
+        skill.description_zh ?? "",
+      ]
+        .join("\n")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [skills, skillSearch]);
 
   // Apply the slash command at `slashIndex`. Routes by `kind`:
   //   - skill:   set/clear the active skill via `handleSkillSelect`
@@ -574,6 +641,7 @@ export function InputBox({
     [
       handleSkillSelect,
       handleModeSelect,
+      lockedSkillName,
       slashActive,
       slashCandidates,
       slashQuery,
@@ -1548,24 +1616,27 @@ export function InputBox({
                 <span className="truncate">{lockedSkillLabel}</span>
               </div>
             ) : (
-              skills.length > 0 && (
+              visibleSkills.length > 0 && (
                 <PromptInputActionMenu
                   open={skillMenuOpen}
-                  onOpenChange={setSkillMenuOpen}
+                  onOpenChange={(open) => {
+                    setSkillMenuOpen(open);
+                    if (!open) setSkillSearch("");
+                  }}
                 >
                   <PromptInputActionMenuTrigger className="gap-1! px-2!">
                     <WrenchIcon className="size-3" />
                     <div className="max-w-[100px] truncate text-xs font-normal">
                       {context.skill_name
                         ? ((
-                            skills.find(
+                            visibleSkills.find(
                               (s) => s.name === context.skill_name,
                             ) as
                               | { name: string; display_name: string | null }
                               | undefined
                           )?.display_name ??
                           (
-                            skills.find(
+                            visibleSkills.find(
                               (s) => s.name === context.skill_name,
                             ) as { name: string } | undefined
                           )?.name ??
@@ -1586,6 +1657,19 @@ export function InputBox({
                     )}
                   </PromptInputActionMenuTrigger>
                   <PromptInputActionMenuContent className="w-70">
+                    <div
+                      className="px-2 pt-2 pb-1"
+                      onKeyDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    >
+                      <Input
+                        value={skillSearch}
+                        onChange={(e) => setSkillSearch(e.target.value)}
+                        placeholder={t.inputBox.searchSkills}
+                        className="h-8"
+                        autoFocus
+                      />
+                    </div>
                     <DropdownMenuGroup>
                       <DropdownMenuLabel className="text-muted-foreground text-xs">
                         {t.inputBox.skill}
@@ -1608,9 +1692,8 @@ export function InputBox({
                             <div className="ml-auto size-4" />
                           )}
                         </PromptInputActionMenuItem>
-                        {skills
-                          .filter((s) => s.enabled)
-                          .map((skill) => (
+                        <div className="max-h-64 overflow-y-auto">
+                          {filteredSkills.map((skill) => (
                             <PromptInputActionMenuItem
                               key={skill.name}
                               className={cn(
@@ -1630,6 +1713,12 @@ export function InputBox({
                               )}
                             </PromptInputActionMenuItem>
                           ))}
+                          {filteredSkills.length === 0 && (
+                            <div className="text-muted-foreground px-2 py-3 text-center text-xs">
+                              {t.inputBox.skillSearchEmpty}
+                            </div>
+                          )}
+                        </div>
                       </PromptInputActionMenu>
                     </DropdownMenuGroup>
                   </PromptInputActionMenuContent>

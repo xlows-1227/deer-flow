@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,7 @@ from app.channels.store import ChannelStore
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from app.channels.published_runtime import PublishedChannelRuntime
     from deerflow.config.app_config import AppConfig
 
 # Channel name → import path for lazy loading
@@ -76,6 +78,7 @@ class ChannelService:
             channel_sessions=channel_sessions,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
+        self._dynamic_channels: dict[str, Channel] = {}
         self._config = config
         self._running = False
 
@@ -123,6 +126,12 @@ class ChannelService:
 
     async def stop(self) -> None:
         """Stop all channels and the manager."""
+        for name, channel in list(self._dynamic_channels.items()):
+            try:
+                await channel.stop()
+            except Exception:
+                logger.exception("Error stopping dynamic channel %s", name)
+        self._dynamic_channels.clear()
         for name, channel in list(self._channels.items()):
             try:
                 await channel.stop()
@@ -130,6 +139,12 @@ class ChannelService:
             except Exception:
                 logger.exception("Error stopping channel %s", name)
         self._channels.clear()
+
+        from app.channels.feishu import shutdown_lark_sdk_runtime
+
+        stopped = await asyncio.to_thread(shutdown_lark_sdk_runtime)
+        if not stopped:
+            logger.error("Feishu SDK event loop did not stop cleanly")
 
         await self.manager.stop()
         self._running = False
@@ -201,7 +216,22 @@ class ChannelService:
 
     def get_channel(self, name: str) -> Channel | None:
         """Return a running channel instance by name when available."""
-        return self._channels.get(name)
+        return self._channels.get(name) or self._dynamic_channels.get(name)
+
+    def register_dynamic_channel(self, channel: Channel) -> None:
+        """Expose one Supervisor-managed channel to the shared dispatcher."""
+        existing = self._dynamic_channels.get(channel.name)
+        if existing is not None and existing is not channel:
+            raise RuntimeError(f"Dynamic channel already registered: {channel.name}")
+        self._dynamic_channels[channel.name] = channel
+
+    def unregister_dynamic_channel(self, channel_name: str) -> None:
+        """Remove one Supervisor-managed channel from dispatcher lookup."""
+        self._dynamic_channels.pop(channel_name, None)
+
+    def configure_published_runtime(self, runtime: PublishedChannelRuntime) -> None:
+        """Attach the DB-backed Published-Agent dispatcher before bindings start."""
+        self.manager.configure_published_runtime(runtime)
 
 
 # -- singleton access -------------------------------------------------------

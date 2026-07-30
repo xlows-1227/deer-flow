@@ -272,3 +272,93 @@ def test_non_admin_can_toggle_custom_skill(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["enabled"] is False
+
+
+def _seed_skill(storage: LocalSkillStorage, *, category: str, name: str) -> None:
+    skill_dir = storage.get_skills_root_path() / category / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(_valid_skill_md(name), encoding="utf-8")
+
+
+def _patch_extensions_enabled(monkeypatch, tmp_path, enabled_map: dict[str, bool]) -> None:
+    import json
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    config_path = tmp_path / "extensions_config.json"
+    payload = {
+        "mcpServers": {},
+        "skills": {name: {"enabled": enabled} for name, enabled in enabled_map.items()},
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        ExtensionsConfig,
+        "resolve_config_path",
+        classmethod(lambda cls, config_path=None, path=config_path: path),
+    )
+
+
+def test_non_admin_list_skills_hides_disabled_public(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="user")
+    _seed_skill(storage, category="public", name="enabled-public")
+    _seed_skill(storage, category="public", name="disabled-public")
+    _seed_skill(storage, category="custom", name="disabled-custom")
+    _patch_extensions_enabled(
+        monkeypatch,
+        tmp_path,
+        {
+            "enabled-public": True,
+            "disabled-public": False,
+            "disabled-custom": False,
+        },
+    )
+
+    response = client.get("/api/skills")
+
+    assert response.status_code == 200
+    names = {skill["name"] for skill in response.json()["skills"]}
+    assert "enabled-public" in names
+    assert "disabled-public" not in names
+    assert "disabled-custom" in names
+
+
+def test_admin_list_skills_includes_disabled_public(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="admin")
+    _seed_skill(storage, category="public", name="enabled-public")
+    _seed_skill(storage, category="public", name="disabled-public")
+    _patch_extensions_enabled(
+        monkeypatch,
+        tmp_path,
+        {
+            "enabled-public": True,
+            "disabled-public": False,
+        },
+    )
+
+    response = client.get("/api/skills")
+
+    assert response.status_code == 200
+    names = {skill["name"] for skill in response.json()["skills"]}
+    assert names == {"enabled-public", "disabled-public"}
+
+
+def test_non_admin_get_disabled_public_skill_returns_404(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="user")
+    _seed_skill(storage, category="public", name="disabled-public")
+    _patch_extensions_enabled(monkeypatch, tmp_path, {"disabled-public": False})
+
+    response = client.get("/api/skills/disabled-public")
+
+    assert response.status_code == 404
+
+
+def test_admin_get_disabled_public_skill_ok(tmp_path, monkeypatch):
+    client, storage = _make_client(tmp_path, monkeypatch, system_role="admin")
+    _seed_skill(storage, category="public", name="disabled-public")
+    _patch_extensions_enabled(monkeypatch, tmp_path, {"disabled-public": False})
+
+    response = client.get("/api/skills/disabled-public")
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "disabled-public"
+    assert response.json()["enabled"] is False

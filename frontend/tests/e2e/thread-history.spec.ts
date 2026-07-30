@@ -73,4 +73,42 @@ test.describe("Thread history", () => {
     });
     await expect(main.getByText("Second conversation")).toBeVisible();
   });
+
+  test("custom agent conversations show the agent beside their title", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Agent conversation",
+          updated_at: "2025-06-01T12:00:00Z",
+          draft_sandbox_agent_id: "pa_research-agent",
+        },
+      ],
+      agents: [{ name: "research-agent", display_name: "Research Agent" }],
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebarLink = page.getByRole("link", {
+      name: /Agent conversation/,
+    });
+    const sidebarAgent = sidebarLink.getByTestId("thread-agent-badge");
+    await expect(sidebarAgent).toContainText("Research Agent");
+    await expect(sidebarAgent.locator("svg")).toBeVisible();
+    await expect(sidebarLink).toHaveAttribute(
+      "href",
+      `/workspace/agents/research-agent/chats/${MOCK_THREAD_ID}`,
+    );
+
+    await page.goto("/workspace/chats");
+
+    const listAgent = page
+      .locator("main")
+      .getByTestId("thread-agent-badge")
+      .filter({ hasText: "Research Agent" });
+    await expect(listAgent).toBeVisible();
+    await expect(listAgent.locator("svg")).toBeVisible();
+  });
 });

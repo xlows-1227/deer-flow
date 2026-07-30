@@ -24,8 +24,74 @@ const BINARY_FILE_PATTERN =
 
 const IMPORT_SOURCE_PREFIXES = ["outputs/", "workspace/"] as const;
 
+/** Virtual mounts that must never enter the skill editor draft tree. */
+const REJECTED_MOUNT_PREFIXES = ["mnt/skills/", "mnt/acp-workspace/"] as const;
+
+function isRejectedSandboxMountPath(path: string) {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  return REJECTED_MOUNT_PREFIXES.some(
+    (prefix) =>
+      normalized === prefix.slice(0, -1) || normalized.startsWith(prefix),
+  );
+}
+
+export function isImportableSandboxPath(sandboxPath: string) {
+  return sandboxPathToWorkspacePath(sandboxPath) !== "";
+}
+
+const POLLUTED_MOUNT_DRAFT_PATTERN = /(^|\/)mnt\/(skills|acp-workspace)(\/|$)/;
+
+export function isPollutedMountDraftPath(path: string) {
+  return POLLUTED_MOUNT_DRAFT_PATTERN.test(path.replace(/\\/g, "/"));
+}
+
+function pollutedMountParentDir(path: string): string | null {
+  const parts = path.replace(/\\/g, "/").split("/");
+  const index = parts.findIndex(
+    (part, i) =>
+      part === "mnt" &&
+      (parts[i + 1] === "skills" || parts[i + 1] === "acp-workspace"),
+  );
+  if (index < 0) return null;
+  return parts.slice(0, index + 1).join("/");
+}
+
+/** Drop draft entries created by mapping /mnt/skills into skills/mnt/skills. */
+export function scrubPollutedMountPathsFromDraft(
+  draft: SkillLocalDraft,
+): SkillLocalDraft {
+  const pollutedPaths = [
+    ...draft.directories.filter(isPollutedMountDraftPath),
+    ...Object.keys(draft.files).filter(isPollutedMountDraftPath),
+  ];
+  const orphanMntDirs = new Set(
+    pollutedPaths
+      .map(pollutedMountParentDir)
+      .filter((path): path is string => Boolean(path)),
+  );
+
+  const directories = draft.directories.filter(
+    (path) => !isPollutedMountDraftPath(path) && !orphanMntDirs.has(path),
+  );
+  const files = Object.fromEntries(
+    Object.entries(draft.files).filter(
+      ([path]) => !isPollutedMountDraftPath(path),
+    ),
+  );
+  return { ...draft, directories, files };
+}
+
 export function sandboxPathToWorkspacePath(sandboxPath: string): string {
   let path = sandboxPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (isRejectedSandboxMountPath(path)) {
+    return "";
+  }
+  // Unknown mounts under /mnt (not user-data) must not become skills/mnt/...
+  if (path === "mnt" || path.startsWith("mnt/")) {
+    if (!path.startsWith("mnt/user-data/") && path !== "mnt/user-data") {
+      return "";
+    }
+  }
   path = path.replace(/^mnt\/user-data\//, "");
   for (const prefix of IMPORT_SOURCE_PREFIXES) {
     if (path.startsWith(prefix)) {
@@ -102,28 +168,34 @@ export function collectThreadOutputSandboxPaths({
 }) {
   const paths = new Set<string>();
 
+  const maybeAdd = (filepath: string) => {
+    if (isImportableSandboxPath(filepath)) {
+      paths.add(filepath);
+    }
+  };
+
   for (const filepath of extractFileToolPathsFromMessages(messages)) {
-    paths.add(filepath);
+    maybeAdd(filepath);
   }
 
   for (const message of messages) {
     for (const filepath of extractPresentFilesFromMessage(message)) {
-      paths.add(filepath);
+      maybeAdd(filepath);
     }
   }
 
   for (const artifact of artifacts) {
     if (isWriteFileArtifact(artifact)) {
       const sandboxPath = parseSandboxPathFromWriteArtifact(artifact);
-      if (sandboxPath) paths.add(sandboxPath);
+      if (sandboxPath) maybeAdd(sandboxPath);
       continue;
     }
-    paths.add(artifact);
+    maybeAdd(artifact);
   }
 
   for (const file of sandboxFiles) {
     if (shouldImportSandboxFile(file)) {
-      paths.add(file.path);
+      maybeAdd(file.path);
     }
   }
 
@@ -206,6 +278,7 @@ export async function importThreadOutputsIntoDraft({
   draft: SkillLocalDraft;
   binaries: SkillLocalBinaryFile[];
   importedPaths: string[];
+  didScrub: boolean;
 }> {
   const replaceExisting = options.replaceExisting ?? false;
   const preservePaths = options.preservePaths ?? new Set<string>();
@@ -216,11 +289,20 @@ export async function importThreadOutputsIntoDraft({
     sandboxFiles: sandboxResponse.files,
   });
 
-  let nextDraft = draft;
-  const nextBinaries = new Map(binaries.map((entry) => [entry.path, entry]));
+  const scrubbedDraft = scrubPollutedMountPathsFromDraft(draft);
+  const didScrub =
+    scrubbedDraft.directories.length !== draft.directories.length ||
+    Object.keys(scrubbedDraft.files).length !== Object.keys(draft.files).length;
+  let nextDraft = scrubbedDraft;
+  const nextBinaries = new Map(
+    binaries
+      .filter((entry) => !isPollutedMountDraftPath(entry.path))
+      .map((entry) => [entry.path, entry]),
+  );
   const importedPaths: string[] = [];
 
   for (const sandboxPath of sandboxPaths) {
+    if (!isImportableSandboxPath(sandboxPath)) continue;
     const workspacePath = sandboxPathToWorkspacePath(sandboxPath);
     if (!workspacePath) continue;
 
@@ -258,5 +340,6 @@ export async function importThreadOutputsIntoDraft({
     draft: nextDraft,
     binaries: [...nextBinaries.values()],
     importedPaths,
+    didScrub,
   };
 }

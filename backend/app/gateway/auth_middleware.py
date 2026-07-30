@@ -79,7 +79,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(request.url.path):
             return await call_next(request)
 
-        if request.url.path.startswith("/api/v1/external/") and getattr(request.state, "auth_method", None) == "api_key":
+        auth_method = getattr(request.state, "auth_method", None)
+        if request.url.path.startswith("/api/v1/external/") and auth_method == "api_key":
+            return await call_next(request)
+        if request.url.path.startswith("/api/v1/agents/") and auth_method == "agent_api_key":
             return await call_next(request)
 
         internal_user = None

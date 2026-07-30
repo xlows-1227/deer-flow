@@ -66,9 +66,19 @@ export default function WorkspaceSkillsPage() {
     useState<(typeof FILTERS)[number]["value"]>("all");
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
 
+  const visibleSkills = useMemo(
+    () =>
+      isAdmin
+        ? skills
+        : skills.filter(
+            (skill) => skill.enabled || skill.category === "custom",
+          ),
+    [isAdmin, skills],
+  );
+
   const filteredSkills = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return skills.filter((skill) => {
+    return visibleSkills.filter((skill) => {
       const matchesFilter = filter === "all" || skill.category === filter;
       const matchesQuery =
         !normalizedQuery ||
@@ -81,10 +91,10 @@ export default function WorkspaceSkillsPage() {
           .includes(normalizedQuery);
       return matchesFilter && matchesQuery;
     });
-  }, [filter, query, skills]);
+  }, [filter, query, visibleSkills]);
 
-  const enabledCount = skills.filter((skill) => skill.enabled).length;
-  const customCount = skills.filter(
+  const enabledCount = visibleSkills.filter((skill) => skill.enabled).length;
+  const customCount = visibleSkills.filter(
     (skill) => skill.category === "custom",
   ).length;
 

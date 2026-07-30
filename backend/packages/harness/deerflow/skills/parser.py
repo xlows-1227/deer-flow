@@ -1,12 +1,32 @@
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from .types import SKILL_MD_FILE, ConnectorRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
+
+
+def parse_skill_frontmatter(content: str, skill_file: Path) -> dict[str, Any]:
+    """Parse the leading YAML frontmatter mapping from SKILL.md content.
+
+    Raises ValueError when the leading block is missing, contains invalid YAML,
+    or does not decode to a mapping.
+    """
+    front_matter_match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", content, re.DOTALL)
+    if front_matter_match is None:
+        raise ValueError(f"missing YAML frontmatter in {skill_file}")
+
+    try:
+        metadata = yaml.safe_load(front_matter_match.group(1))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML frontmatter in {skill_file}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"frontmatter in {skill_file} must be a YAML mapping")
+    return metadata
 
 
 def parse_allowed_tools(raw: object, skill_file: Path) -> list[str] | None:
@@ -75,21 +95,10 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
     try:
         content = skill_file.read_text(encoding="utf-8")
 
-        # Extract YAML front-matter block between leading ``---`` fences.
-        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-        if not front_matter_match:
-            return None
-
-        front_matter_text = front_matter_match.group(1)
-
         try:
-            metadata = yaml.safe_load(front_matter_text)
-        except yaml.YAMLError as exc:
-            logger.error("Invalid YAML front-matter in %s: %s", skill_file, exc)
-            return None
-
-        if not isinstance(metadata, dict):
-            logger.error("Front-matter in %s is not a YAML mapping", skill_file)
+            metadata = parse_skill_frontmatter(content, skill_file)
+        except ValueError as exc:
+            logger.error("Invalid skill frontmatter in %s: %s", skill_file, exc)
             return None
 
         # Extract required fields.  Both must be non-empty strings.

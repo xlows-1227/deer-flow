@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -45,9 +45,11 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { ThreadAgentBadge } from "@/components/workspace/thread-agent-badge";
 import { getAPIClient } from "@/core/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useRollupThreadMemory } from "@/core/memory/hooks";
+import { usePublishedAgents } from "@/core/published-agents";
 import {
   exportThreadAsJSON,
   exportThreadAsMarkdown,
@@ -59,6 +61,9 @@ import {
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import {
+  agentDisplayNameOfThread,
+  agentNameOfThread,
+  draftSandboxAgentIdOfThread,
   isVisibleInChatList,
   pathOfThread,
   titleOfThread,
@@ -80,6 +85,18 @@ export function RecentChatList() {
     }>();
   const { data: threads = [] } = useThreads();
   const visibleThreads = threads.filter(isVisibleInChatList);
+  const needsPublishedAgentLookup = visibleThreads.some(
+    (thread) =>
+      !agentNameOfThread(thread) &&
+      Boolean(draftSandboxAgentIdOfThread(thread)),
+  );
+  const { agents: publishedAgents } = usePublishedAgents(
+    needsPublishedAgentLookup,
+  );
+  const publishedAgentsById = useMemo(
+    () => new Map(publishedAgents.map((agent) => [agent.id, agent])),
+    [publishedAgents],
+  );
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
   const { mutateAsync: rollupThreadMemory, isPending: isRollingUpMemory } =
@@ -220,7 +237,20 @@ export function RecentChatList() {
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
               {recentThreads.map((thread) => {
-                const isActive = pathOfThread(thread) === pathname;
+                const publishedAgent = publishedAgentsById.get(
+                  draftSandboxAgentIdOfThread(thread) ?? "",
+                );
+                const agentName =
+                  agentNameOfThread(thread) ?? publishedAgent?.slug;
+                const agentDisplayName =
+                  agentDisplayNameOfThread(thread) ??
+                  publishedAgent?.display_name ??
+                  agentName;
+                const threadPath = pathOfThread(
+                  thread,
+                  agentName ? { agent_name: agentName } : undefined,
+                );
+                const isActive = threadPath === pathname;
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
@@ -229,11 +259,19 @@ export function RecentChatList() {
                     <SidebarMenuButton isActive={isActive} asChild>
                       <div>
                         <Link
-                          className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
-                          href={pathOfThread(thread)}
+                          className="text-muted-foreground flex w-full min-w-0 items-center gap-1.5 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                          href={threadPath}
                           prefetch={false}
                         >
-                          {titleOfThread(thread)}
+                          <span className="min-w-0 flex-1 truncate">
+                            {titleOfThread(thread)}
+                          </span>
+                          {agentDisplayName && (
+                            <ThreadAgentBadge
+                              agentName={agentDisplayName}
+                              className="max-w-24"
+                            />
+                          )}
                         </Link>
                         {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                           <DropdownMenu>

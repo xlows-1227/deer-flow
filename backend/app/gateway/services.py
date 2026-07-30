@@ -11,16 +11,22 @@ import asyncio
 import copy
 import json
 import logging
-import re
 from collections.abc import Mapping
-from typing import Any
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.draft_sandbox import (
+    DRAFT_SANDBOX_METADATA_KEYS,
+    draft_sandbox_thread_metadata,
+    resolve_draft_sandbox_context,
+)
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.agents_config import validate_agent_slug
 from deerflow.config.app_config import get_app_config
 from deerflow.config.effective_config import effective_app_config_scope
 from deerflow.runtime import (
@@ -36,6 +42,10 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.user_context import runtime_user_scope
+
+if TYPE_CHECKING:
+    from deerflow.publishing.context import DraftSandboxContext, PublishedAgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +152,23 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 )
 _SERVER_ONLY_SKILL_CONTEXT_KEYS = frozenset({"skill_projection_manifest", "skill_grants"})
 
+_SERVER_RESERVED_CONFIG_PREFIXES: tuple[str, ...] = ("__agent_",)
+
+
+def _is_server_reserved_config_key(key: object) -> bool:
+    """Return whether an inbound runtime key belongs to the server."""
+    return isinstance(key, str) and key.startswith(_SERVER_RESERVED_CONFIG_PREFIXES)
+
+
+def _sanitize_client_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply the public run-context allowlist to nested ``config.context``."""
+    return {key: value for key, value in context.items() if key in _CONTEXT_CONFIGURABLE_KEYS and not _is_server_reserved_config_key(key)}
+
+
+def _sanitize_client_configurable(configurable: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve public LangGraph options while removing server-owned fields."""
+    return {key: value for key, value in configurable.items() if not _is_server_reserved_config_key(key)}
+
 
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, thread_id: str | None = None) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
@@ -205,6 +232,60 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
         runtime_context["user_id"] = str(user_id)
 
 
+def _inject_draft_sandbox_context(
+    config: dict[str, Any],
+    snapshot: DraftSandboxContext,
+) -> None:
+    """Inject only the frozen draft's selected Connector capabilities."""
+    configurable = config.setdefault("configurable", {})
+    runtime_context = config.setdefault("context", {})
+    connector_capabilities = snapshot.connector_capability_map()
+    configurable["agent_name"] = snapshot.agent_slug
+    configurable["model_name"] = snapshot.model_name
+    configurable["connector_ids"] = list(snapshot.connector_ids)
+    configurable["connector_capabilities"] = connector_capabilities
+    configurable["__agent_draft_sandbox_context"] = snapshot
+    runtime_context["agent_name"] = snapshot.agent_slug
+    runtime_context["connector_ids"] = list(snapshot.connector_ids)
+    runtime_context["connector_capabilities"] = connector_capabilities
+
+
+async def resolve_draft_sandbox_context_for_thread(
+    request: Request,
+    thread_id: str,
+) -> DraftSandboxContext | None:
+    """Resolve server-owned draft sandbox authority for a follow-up Run."""
+    request_state = getattr(request, "state", None)
+    user = getattr(request_state, "user", None)
+    owner_user_id = str(user.id) if user is not None and getattr(request_state, "auth_method", None) == "session" else None
+    app = getattr(request, "app", None)
+    app_state = getattr(app, "state", None)
+    return await resolve_draft_sandbox_context(
+        thread_store=get_run_context(request).thread_store,
+        draft_service=getattr(app_state, "draft_service", None),
+        owner_user_id=owner_user_id,
+        thread_id=thread_id,
+    )
+
+
+def _apply_trusted_draft_sandbox_metadata(
+    body: Any,
+    snapshot: DraftSandboxContext | None,
+) -> None:
+    """Strip caller-forged sandbox fields and add server-derived values."""
+    metadata = dict(getattr(body, "metadata", None) or {})
+    for key in DRAFT_SANDBOX_METADATA_KEYS:
+        metadata.pop(key, None)
+    if snapshot is not None:
+        metadata.update(
+            draft_sandbox_thread_metadata(
+                agent_id=snapshot.agent_id,
+                draft_revision=snapshot.draft_revision,
+            )
+        )
+    body.metadata = metadata
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -232,9 +313,9 @@ def build_run_config(
     ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
     whichever runtime options container is active: ``context`` for
     LangGraph >= 0.6.0 requests, otherwise ``configurable``.
-    ``make_lead_agent`` reads this key to load the matching
-    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
-    silently runs as the default lead agent.
+    ``make_lead_agent`` reads this key to select the matching owner-scoped
+    database draft (or that owner's read-only legacy files during migration)
+    — without it the agent silently runs as the default lead agent.
 
     This mirrors the channel manager's ``_resolve_run_params`` logic so that
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
@@ -257,15 +338,22 @@ def build_run_config(
             if context_value is None:
                 context = {}
             elif isinstance(context_value, Mapping):
-                context = dict(context_value)
+                context = _sanitize_client_context(context_value)
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
             for server_only_key in _SERVER_ONLY_SKILL_CONTEXT_KEYS:
                 context.pop(server_only_key, None)
+            if "thread_id" in context:
+                context["thread_id"] = thread_id
             config["context"] = context
         else:
-            configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable", {}))
+            configurable_value = request_config.get("configurable", {})
+            if configurable_value is None:
+                configurable_value = {}
+            if not isinstance(configurable_value, Mapping):
+                raise ValueError("request config 'configurable' must be a mapping or null.")
+            configurable = _sanitize_client_configurable(configurable_value)
+            configurable["thread_id"] = thread_id
             config["configurable"] = configurable
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
@@ -276,9 +364,7 @@ def build_run_config(
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit agent_name in the active runtime options container.
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
-        normalized = assistant_id.strip().lower().replace("_", "-")
-        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        agent_slug = validate_agent_slug(assistant_id)
         if "configurable" in config:
             target = config["configurable"]
         elif "context" in config:
@@ -286,8 +372,10 @@ def build_run_config(
         else:
             target = config.setdefault("configurable", {})
         if target is not None and "agent_name" not in target:
-            target["agent_name"] = normalized
-        config.setdefault("run_name", resolve_root_run_name(config, normalized))
+            target["agent_name"] = agent_slug
+        if target is not None and "agent_name" in target:
+            target["agent_name"] = validate_agent_slug(target["agent_name"])
+        config.setdefault("run_name", resolve_root_run_name(config, agent_slug))
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
@@ -302,8 +390,17 @@ async def start_run(
     body: Any,
     thread_id: str,
     request: Request,
+    *,
+    published_context: PublishedAgentContext | None = None,
+    draft_sandbox_context: DraftSandboxContext | None = None,
+    run_id: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
+
+    Published execution establishes its trusted owner and effective config
+    before any model validation or Run/Thread persistence. The child worker
+    inherits those ContextVars when it is created, while the caller's ambient
+    context is restored before this function returns.
 
     Parameters
     ----------
@@ -314,7 +411,49 @@ async def start_run(
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
+    published_context : PublishedAgentContext | None
+        Trusted immutable Release authority for published-Agent execution.
+    run_id : str | None
+        Optional preallocated Run id used to bind an idempotency claim before
+        execution starts.
     """
+    if published_context is not None and draft_sandbox_context is not None:
+        raise ValueError("a Run cannot be both published and a draft sandbox")
+    if published_context is None and draft_sandbox_context is None:
+        draft_sandbox_context = await resolve_draft_sandbox_context_for_thread(request, thread_id)
+    _apply_trusted_draft_sandbox_metadata(body, draft_sandbox_context)
+    if published_context is not None:
+        owner_user_id = published_context.owner_user_id
+        with runtime_user_scope(owner_user_id):
+            async with effective_app_config_scope(owner_user_id):
+                return await _start_run_scoped(
+                    body,
+                    thread_id,
+                    request,
+                    published_context=published_context,
+                    draft_sandbox_context=None,
+                    run_id=run_id,
+                )
+    return await _start_run_scoped(
+        body,
+        thread_id,
+        request,
+        published_context=None,
+        draft_sandbox_context=draft_sandbox_context,
+        run_id=run_id,
+    )
+
+
+async def _start_run_scoped(
+    body: Any,
+    thread_id: str,
+    request: Request,
+    *,
+    published_context: PublishedAgentContext | None,
+    draft_sandbox_context: DraftSandboxContext | None,
+    run_id: str | None,
+) -> RunRecord:
+    """Run the lifecycle after any trusted Published owner scope is active."""
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
@@ -322,7 +461,7 @@ async def start_run(
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
     body_context = getattr(body, "context", None) or {}
-    model_name = body_context.get("model_name")
+    model_name = published_context.model_name if published_context is not None else draft_sandbox_context.model_name if draft_sandbox_context is not None else body_context.get("model_name")
 
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
@@ -342,6 +481,7 @@ async def start_run(
         record = await run_mgr.create_or_reject(
             thread_id,
             body.assistant_id,
+            run_id=run_id,
             on_disconnect=disconnect,
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
@@ -366,41 +506,65 @@ async def start_run(
             )
         else:
             await run_ctx.thread_store.update_status(thread_id, "running")
+    except asyncio.CancelledError:
+        # The Run is already durable but no worker exists yet. Remove it before
+        # propagating cancellation so retries cannot replay a forever-pending
+        # record and published quota/idempotency cleanup can safely proceed.
+        await asyncio.shield(run_mgr.discard_unstarted(record.run_id))
+        raise
     except Exception:
         logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     graph_input = normalize_input(body.input)
-    config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+    if published_context is not None:
+        from deerflow.publishing.runtime_policy import build_published_run_config
 
-    # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-    # The ``context`` field is a custom extension for the langgraph-compat layer
-    # that carries agent configuration (model_name, thinking_enabled, etc.).
-    # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
-    merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
-    inject_server_skill_context(config, request)
-    inject_authenticated_user_context(config, request)
+        config = dict(
+            build_published_run_config(
+                published_context,
+                base_config={"metadata": dict(body.metadata or {})},
+            )
+        )
+        configurable = config.setdefault("configurable", {})
+        configurable["thread_id"] = thread_id
+        configurable["user_id"] = published_context.owner_user_id
+    else:
+        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+
+        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
+        # The ``context`` field is a custom extension for the langgraph-compat layer
+        # that carries agent configuration (model_name, thinking_enabled, etc.).
+        # Only agent/runtime-relevant keys are forwarded; unknown keys are ignored.
+        merge_run_context_overrides(config, getattr(body, "context", None), thread_id=thread_id)
+        inject_server_skill_context(config, request)
+        inject_authenticated_user_context(config, request)
+        if draft_sandbox_context is not None:
+            _inject_draft_sandbox_context(config, draft_sandbox_context)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
     runtime_context = config.get("context", {})
-    user_id = runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
+    user_id = published_context.owner_user_id if published_context is not None else runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
 
     async def _run_with_effective_config() -> None:
-        async with effective_app_config_scope(str(user_id) if user_id else None):
-            await run_agent(
-                bridge,
-                run_mgr,
-                record,
-                ctx=run_ctx,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
-            )
+        resolved_user_id = str(user_id) if user_id else None
+        user_scope = runtime_user_scope(resolved_user_id) if resolved_user_id else nullcontext()
+        with user_scope:
+            async with effective_app_config_scope(resolved_user_id):
+                await run_agent(
+                    bridge,
+                    run_mgr,
+                    record,
+                    ctx=run_ctx,
+                    agent_factory=agent_factory,
+                    graph_input=graph_input,
+                    config=config,
+                    stream_modes=stream_modes,
+                    stream_subgraphs=body.stream_subgraphs,
+                    interrupt_before=body.interrupt_before,
+                    interrupt_after=body.interrupt_after,
+                )
 
     task = asyncio.create_task(_run_with_effective_config())
     record.task = task

@@ -278,16 +278,43 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
     )
 
 
+def _is_admin_auth(auth: AuthContext | None) -> bool:
+    user = None if auth is None else auth.user
+    return bool(user is not None and getattr(user, "system_role", None) == "admin")
+
+
+def _skills_visible_to_caller(skills: list[Skill], *, is_admin: bool) -> list[Skill]:
+    """Admins see every skill; others only see enabled skills and all custom skills.
+
+    Disabled public skills are platform-gated and hidden from non-admins so they
+    do not appear in the catalog. Custom skills stay visible even when disabled
+    so owners can re-enable them in the UI.
+    """
+    if is_admin:
+        return skills
+    return [skill for skill in skills if skill.enabled or skill.category == SkillCategory.CUSTOM]
+
+
+async def _resolve_auth(request: Request) -> AuthContext:
+    auth: AuthContext | None = getattr(request.state, "auth", None)
+    if auth is None:
+        auth = await authenticate(request)
+        request.state.auth = auth
+    return auth
+
+
 @router.get(
     "/skills",
     response_model=SkillsListResponse,
     summary="List All Skills",
-    description="Retrieve a list of all available skills from both public and custom directories.",
+    description="Retrieve available skills. Non-admins do not see disabled public skills; admins see the full catalog.",
 )
-async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+async def list_skills(request: Request, config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     try:
+        auth = await _resolve_auth(request)
         skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
-        return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
+        visible = _skills_visible_to_caller(skills, is_admin=_is_admin_auth(auth))
+        return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
@@ -946,15 +973,20 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, 
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Get Skill Details",
-    description="Retrieve detailed information about a specific skill by its name.",
+    description="Retrieve detailed information about a specific skill by its name. Disabled public skills are hidden from non-admins.",
 )
-async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> SkillResponse:
+async def get_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        auth = await _resolve_auth(request)
         skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        visible = _skills_visible_to_caller([skill], is_admin=_is_admin_auth(auth))
+        if not visible:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
         return _skill_to_response(skill)

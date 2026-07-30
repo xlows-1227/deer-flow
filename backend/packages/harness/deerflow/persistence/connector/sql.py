@@ -150,10 +150,7 @@ class ConnectorRepository:
                     # service layer is responsible for merging the existing
                     # ref in. If it somehow leaks through, fail loudly with
                     # a domain error instead of a generic 500.
-                    raise ValueError(
-                        "Connector credential update is missing the encrypted ref; "
-                        "send the existing ref alongside the new fields to keep the stored secret."
-                    )
+                    raise ValueError("Connector credential update is missing the encrypted ref; send the existing ref alongside the new fields to keep the stored secret.")
                 row.credential_provider = str(credential.get("provider") or "env")
                 row.credential_ref = str(ref)
                 # ``username`` may be explicitly nulled (e.g. switching back to

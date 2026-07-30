@@ -143,6 +143,8 @@ export const enUS: Translations = {
     referencedFileFromLibrary: "From library",
     referencedFileOpenInLibrary: "Open in library",
     searchModels: "Search models...",
+    searchSkills: "Search skills...",
+    skillSearchEmpty: "No matching skills",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
     followupLoading: "Generating follow-up questions...",
@@ -275,6 +277,444 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
+  },
+
+  // Published Agents
+  publishedAgents: {
+    gallery: {
+      title: "Agent control",
+      eyebrow: "PUBLISHING PLANE",
+      description:
+        "Draft, publish and operate stable Agent identities from one owner-only console.",
+      newAgent: "New Agent",
+      createTitle: "Create a stable Agent",
+      createDescription:
+        "This creates a private draft identity. Nothing goes live until you publish.",
+      slug: "Agent slug",
+      slugHint:
+        "Letters, numbers and hyphens. This stable identifier cannot be reused by another Agent you own.",
+      displayName: "Display name",
+      descriptionLabel: "Description",
+      descriptionPlaceholder: "What is this Agent responsible for?",
+      createDraft: "Create draft",
+      creating: "Creating…",
+      createSuccess: "Draft Agent created",
+      emptyTitle: "No Agent identities yet",
+      emptyDescription:
+        "Create a private draft, shape its capabilities in Studio, then publish when it is ready.",
+      loadError: "Could not load the Agent control plane.",
+      retry: "Try again",
+      studio: "Open Studio",
+      actions: "Agent actions",
+      suspend: "Suspend",
+      resume: "Resume",
+      archive: "Archive",
+      confirmSuspendTitle: "Suspend this Agent?",
+      confirmSuspendDescription:
+        "New external runs will stop. Drafts, Releases, API keys, bindings and history are preserved.",
+      confirmArchiveTitle: "Archive this Agent?",
+      confirmArchiveDescription:
+        "The Agent leaves active operation but all data remains available to its owner.",
+      statusUpdated: "Agent status updated",
+      release: (releaseNo) => `Release ${releaseNo}`,
+      noRelease: "Not published",
+      publishedAt: "Published",
+      apiKeyCount: (count) => `${count} API key${count === 1 ? "" : "s"}`,
+      feishuCount: (count) =>
+        `${count} Feishu binding${count === 1 ? "" : "s"}`,
+      runsCount: (count) => `${count} run${count === 1 ? "" : "s"}`,
+      tokensCount: (count) => `${count.toLocaleString()} tokens`,
+      usage7d: "7-day usage",
+      integrations: "Active integrations",
+      health: "Health",
+    },
+    status: {
+      draft: "Draft",
+      published: "Published",
+      suspended: "Suspended",
+      archived: "Archived",
+    },
+    health: {
+      healthy: "Healthy",
+      unhealthy: "Needs attention",
+      unknown: "Unknown",
+      notConfigured: "No channel",
+    },
+    studio: {
+      eyebrow: "AGENT STUDIO",
+      back: "Back to control",
+      draftVersion: (revision) => `Draft r${revision}`,
+      saveDraft: "Save draft",
+      saving: "Saving…",
+      saved: "Draft saved",
+      conflictTitle: "Draft changed elsewhere",
+      reloadDraft: "Reload draft",
+      overviewTab: "Overview",
+      instructionsTab: "Instructions",
+      skillsTab: "Skills",
+      connectorsTab: "Connectors",
+      sandboxTab: "Sandbox",
+      publishTab: "Publish",
+      integrationsTab: "Integrations",
+      operationsTab: "Operations",
+      overviewTitle: "Draft configuration",
+      overviewDescription:
+        "Review the stable identity and choose the runtime model. Tool availability follows the platform policy.",
+      stableIdentity: "Stable identity",
+      stableIdentityDescription:
+        "Identity fields survive republishing and rollback. The slug is used by draft test chats.",
+      slug: "Slug",
+      displayName: "Display name",
+      description: "Description",
+      avatar: "Avatar",
+      notConfigured: "Not configured",
+      model: "Model",
+      inheritModel: "Use platform default",
+      instructionsTitle: "Agent instructions",
+      instructionsDescription:
+        "Define work rules in AGENT.md, then choose a managed personality for SOUL.md. Saving the draft does not change the live Release.",
+      agentMarkdownTitle: "Work rules",
+      agentMarkdownDescription:
+        "Customize the starting template to define responsibilities, workflow, boundaries, and output requirements.",
+      agentMarkdownSuggestions: [
+        "Role & goal",
+        "Responsibilities",
+        "Workflow",
+        "Boundaries",
+        "Output requirements",
+      ],
+      agentMarkdownPlaceholder:
+        "# Responsibilities\nDescribe what this Agent owns and the outcomes it should produce.",
+      agentMarkdownTemplate:
+        "# Role & goal\nYou are [Agent name], responsible for [core goal]. Your success is measured by [expected outcome].\n\n# Responsibilities\n- Own: [primary responsibility]\n- Support: [secondary responsibility]\n- Do not take ownership of: [out-of-scope work]\n\n# Workflow\n1. Confirm the user's goal and the minimum context needed to proceed.\n2. Break the request into clear steps and use only authorized Skills and Connectors.\n3. Check the result against the user's goal before responding.\n4. State important assumptions, uncertainty, and any unfinished work.\n\n# Boundaries\n- Do not claim capabilities, data access, or permissions that are unavailable.\n- Do not invent facts, sources, execution results, or completion status.\n- Ask for clarification before acting when a missing decision would materially change the result.\n- Stop and explain the limitation when a request is unsafe, unauthorized, or outside scope.\n\n# Output requirements\n- Lead with the conclusion or completed result.\n- Use a clear structure appropriate to the task.\n- Distinguish facts, assumptions, and recommendations when relevant.\n- Include sources, risks, and suggested next steps when useful.",
+      instructionSuggestionsLabel: "Good topics",
+      soulPresetTitle: "Personality & voice",
+      soulPresetDescription:
+        "Choose one managed personality. SOUL.md is generated by the system and cannot be edited directly.",
+      soulPresetBadge: "Preset only",
+      soulPresetLegacyTitle: "Legacy custom SOUL.md is active",
+      soulPresetLegacyDescription:
+        "The existing content remains unchanged and read-only. Select a preset to replace it; the live Release is unaffected until you publish.",
+      soulPresetLegacyPreviewLabel: "Current read-only SOUL.md",
+      soulPresets: {
+        professional: {
+          name: "Professional & rigorous",
+          summary: "Evidence-led, dependable, and precise",
+          content:
+            "# Personality\nYou are professional, rigorous, and dependable.\n\n# Communication style\n- Use precise language and lead with verified facts.\n- Separate facts, assumptions, and recommendations.\n- State uncertainty and limitations plainly.\n- Remain calm, respectful, and solution-oriented.",
+        },
+        warm: {
+          name: "Warm & patient",
+          summary: "Approachable, considerate, and explanatory",
+          content:
+            "# Personality\nYou are warm, patient, and considerate.\n\n# Communication style\n- Use approachable language without becoming overly casual.\n- Explain unfamiliar concepts step by step.\n- Acknowledge the user's concerns and avoid judgment.\n- Encourage progress while remaining honest about limitations.",
+        },
+        concise: {
+          name: "Concise & direct",
+          summary: "Fast, focused, and low on ceremony",
+          content:
+            "# Personality\nYou are concise, direct, and pragmatic.\n\n# Communication style\n- Lead with the answer or completed result.\n- Remove filler, repetition, and unnecessary background.\n- Use short sections or bullets only when they improve scanning.\n- Surface important risks or blockers without softening them.",
+        },
+        coach: {
+          name: "Guiding coach",
+          summary: "Structured, curious, and growth-oriented",
+          content:
+            "# Personality\nYou are a thoughtful, structured coach.\n\n# Communication style\n- Help the user clarify goals, constraints, and success criteria.\n- Ask focused questions only when the answer materially changes the path.\n- Explain reasoning and offer actionable next steps.\n- Support the user's judgment instead of making decisions on their behalf.",
+        },
+      },
+      skillsTitle: "Skill selection",
+      skillsDescription:
+        "Only public Skills and private Skills owned by you are selectable.",
+      publicSkills: "Public",
+      privateSkills: "Private",
+      emptySkills: "No selectable Skills in this group.",
+      skillSearchLabel: "Search Skills",
+      skillSearchPlaceholder: "Search Skill names or descriptions...",
+      skillSearchSummary: (visible, total, selected) =>
+        `${visible} of ${total} Skills · ${selected} selected`,
+      noMatchingSkills: "No matching Skills.",
+      clearSkillSearch: "Clear Skill search",
+      connectorRequirements: "Connector requirements",
+      noConnectorRequired: "No Connector capability required",
+      missingGrant: "Missing Connector grant",
+      granted: "Granted",
+      connectorsTitle: "Connector grants",
+      connectorsDescription:
+        "Grant the minimum capability needed. Secrets stay in the Connector store and are never copied into a Release.",
+      emptyConnectors:
+        "No owner Connector instances are available. Add one in Settings first.",
+      disabledConnector: "Inactive Connector",
+      grantCapability: "Grant capability",
+      revokeCapability: "Revoke capability",
+      sandboxTitle: "Draft sandbox",
+      sandboxDescription:
+        "Launch an isolated internal conversation using the current draft configuration.",
+      notLive: "Not live",
+      sandboxSafety:
+        "Sandbox chats read the mutable draft, do not replace the published Release, and do not create Published usage charges.",
+      sandboxMessageLabel: "Sandbox message",
+      sandboxMessagePlaceholder: "Ask the saved draft to perform a test task…",
+      runSandbox: "Run saved draft",
+      runningSandbox: "Starting draft run…",
+      sandboxStarted: (revision: number) =>
+        `Draft revision ${revision} · Not billable`,
+      openSandbox: "Open sandbox conversation",
+    },
+    publish: {
+      title: "Publish and releases",
+      description:
+        "Validate the saved draft, inspect the exact change set, and atomically promote an immutable Release.",
+      loadError: "Could not load Release history.",
+      savedDraftOnly:
+        "This comparison uses the latest saved draft. Publishing never reads unsaved editor state.",
+      initialSummary:
+        "This will create the first immutable Release for the stable Agent identity.",
+      unsavedTitle: "Save the draft before publishing",
+      unsavedDescription:
+        "The editor contains unsaved changes. Save them so the preview and published snapshot stay identical.",
+      neverPublished: "No live Release",
+      changeSummary: "Saved draft change set",
+      publish: "Publish saved draft",
+      publishing: "Publishing…",
+      successTitle: (releaseNo) => `Release ${releaseNo} is live`,
+      successDescription:
+        "The stable Agent identity now points to the new immutable snapshot.",
+      validationTitle: "Draft validation failed",
+      validationDescription:
+        "Resolve every item below, save the draft, then publish again.",
+      violation: (code, fallback) =>
+        ({
+          EMPTY_INSTRUCTIONS:
+            "Add content to at least one of AGENT.md or SOUL.md.",
+          INSTRUCTION_TOO_LARGE:
+            "Reduce the indicated instruction file below the platform size limit.",
+          MODEL_NOT_AVAILABLE:
+            "Choose a model currently available to this owner.",
+          SKILL_NOT_FOUND:
+            "Remove or replace the Skill that is no longer selectable.",
+          CONNECTOR_NOT_GRANTED:
+            "Grant the Connector capability required by the selected Skill.",
+          CONNECTOR_NOT_OWNED:
+            "Remove the Connector instance that is unavailable to this owner.",
+          CONNECTOR_CAPABILITY_UNSUPPORTED:
+            "The selected Connector does not support this capability.",
+          TOOL_GROUP_UNKNOWN:
+            "Remove the tool group that is not on the platform allowlist.",
+          QUOTA_EXCEEDS_PLATFORM:
+            "Lower the quota override to the platform maximum.",
+          DRAFT_REVISION_CONFLICT:
+            "The draft changed during publishing. Reload and try again.",
+        })[code] ?? fallback,
+      unchanged: "Unchanged",
+      added: "Added",
+      removed: "Removed",
+      model: "Model",
+      defaultModel: "Platform default",
+      toolGroups: "Tool groups",
+      skills: "Skills",
+      connectorGrants: "Connector grants",
+      historyTitle: "Release history",
+      historyDescription:
+        "History is owner-only. Releases are immutable; rollback only changes the current pointer.",
+      historyEmpty: "No Releases have been published.",
+      createdBy: "created by",
+      current: "Current",
+      compareTitle: "Compare historical Releases",
+      compareDescription: "Choose two different Releases to inspect changes.",
+      compareFrom: "Compare from",
+      compareTo: "Compare to",
+      fromTo: (from, to) => `Release ${from} → Release ${to}`,
+      rollback: "Roll back",
+      rollbackTitle: (releaseNo) => `Roll back to Release ${releaseNo}?`,
+      rollbackDescription:
+        "The selected immutable snapshot becomes current immediately. No Release is deleted.",
+      stableIntegrationNotice:
+        "Stable contract: the Agent ID, API path, API keys, Feishu bindings and conversation identity remain unchanged.",
+      cancel: "Cancel",
+      confirmRollback: "Confirm rollback",
+      rollingBack: "Rolling back…",
+      rollbackSuccess: (releaseNo) =>
+        `Current pointer moved to Release ${releaseNo}`,
+    },
+    integrations: {
+      title: "Post-publish integrations",
+      description:
+        "Issue Agent-scoped credentials and operate independent Feishu bot bindings without republishing.",
+      apiKeysTitle: "Agent API keys",
+      apiKeysDescription:
+        "Create multiple named credentials. A new plaintext key remains copyable for this page session only; delete keys you no longer need.",
+      createApiKey: "Create API key",
+      publishFirstTitle: "Publish this Agent first",
+      publishFirstDescription:
+        "Keys and channel bindings attach to a live stable identity, so they are disabled until the first Release.",
+      loading: "Loading integration state…",
+      noKeys:
+        "No API keys. Create one when this Agent is ready for API traffic.",
+      lastUsed: "Last used",
+      copyKeyFor: (name) => `Copy ${name}`,
+      copyKeyUnavailable:
+        "The full key is only available in the page session where it was created.",
+      deleteKey: (name) => `Delete ${name}`,
+      copy: "Copy",
+      delete: "Delete",
+      apiExamplesTitle: "Stable API examples",
+      apiExamplesDescription:
+        "These paths use the stable Agent ID and never expose an internal Release. Create a conversation first and set CONVERSATION_ID.",
+      sync: "Synchronous",
+      sse: "SSE stream",
+      async: "Asynchronous",
+      copyExample: "Copy API example",
+      createKeyTitle: "Create a named API key",
+      createKeyDescription: "Enter a recognizable name for this credential.",
+      keyName: "Key name",
+      createKey: "Create key",
+      secretTitle: "Store the new API key now",
+      secretDescription:
+        "Only its prefix and final four characters will remain visible.",
+      secretOnce: "This secret is displayed once",
+      secretWarning:
+        "Copy it into your secret manager before closing. It cannot be retrieved again.",
+      copyKey: "Copy API key",
+      keyCopied: "Copied",
+      storedKey: "I stored this key",
+      deleteTitle: "Delete this API key?",
+      deleteDescription:
+        "This permanently removes the key and immediately rejects future requests that use it. This action cannot be undone.",
+      confirmDelete: "Delete API key",
+      keyDeleted: "API key deleted",
+      keyStatus: (status) =>
+        ({
+          active: "Active",
+          overlap: "Rotation overlap",
+          revoked: "Revoked",
+          expired: "Expired",
+        })[status] ?? status,
+      feishuTitle: "Feishu bot bindings",
+      feishuDescription:
+        "Each binding is an isolated app credential and WebSocket lifecycle. Health does not change Agent publish status.",
+      addBinding: "Add Feishu binding",
+      channelLoadError: "Could not load channel bindings.",
+      noBindings: "No Feishu binding. API-only operation is fully supported.",
+      channelHealth: (health) =>
+        ({
+          healthy: "Healthy",
+          unhealthy: "Needs attention",
+          unknown: "Unknown",
+          starting: "Starting",
+          stopped: "Stopped",
+        })[health] ?? health,
+      channelStatus: (status) =>
+        ({
+          inactive: "Inactive",
+          active: "Active",
+          deleting: "Deleting",
+        })[status] ?? status,
+      noHealthDetail: "No health detail reported.",
+      testConnection: "Test connection",
+      stop: "Stop",
+      start: "Start",
+      restart: "Restart",
+      rotateCredentials: "Rotate credentials",
+      createBindingTitle: "Add a Feishu application",
+      createBindingDescription:
+        "Credentials are encrypted into SecretStore and never returned by this control plane.",
+      appId: "App ID",
+      appSecret: "App Secret",
+      verificationToken: "Verification token",
+      encryptKey: "Encrypt key (optional)",
+      keepAppId: "Keep the current App ID",
+      createBinding: "Create binding",
+      bindingCreated: "Feishu binding created",
+      rotateCredentialsTitle: "Rotate Feishu credentials",
+      rotateCredentialsDescription:
+        "Active bindings restart with readiness checks. If readiness fails, the previous credentials are restored.",
+      confirmCredentialRotation: "Rotate credentials",
+      credentialsRotated: "Feishu credentials rotated",
+      channelActionSuccess: (action) =>
+        ({
+          test: "Connection test completed",
+          start: "Feishu binding started",
+          stop: "Feishu binding stopped",
+          restart: "Feishu binding restarted",
+        })[action] ?? "Channel action completed",
+    },
+    ops: {
+      title: "Usage and operations",
+      description:
+        "Inspect owner-scoped usage, set bounded quotas for the next Release, and review metadata-only rejection events.",
+      usageTitle: "Published usage",
+      usageDescription:
+        "Daily terminal Run accounting. Filters are applied inside the owner-scoped usage query.",
+      dateRange: "Date range",
+      lastDays: (days) => `Last ${days} days`,
+      source: "Traffic source",
+      allSources: "All sources",
+      apiKey: "API key",
+      allKeys: "All API keys",
+      totalRuns: "Runs",
+      totalTokens: "Tokens",
+      errorRate: "Error rate",
+      estimatedCost: "Estimated cost",
+      currentReleaseErrorRate: "Current Release errors",
+      quotaRejections: "Quota rejections",
+      saturation: "saturation",
+      feishuP95Latency: "Feishu event p95",
+      connectorIssues: "Connector failures",
+      denied: "denied",
+      bindingHealth: "Active bindings",
+      unhealthy: "unhealthy",
+      dailyRuns: "Daily runs",
+      dailyTokens: "Daily tokens",
+      dailyErrorRate: "Daily error rate",
+      auditTitle: "Recent rejection events",
+      auditDescription:
+        "Metadata only: no prompts, messages, model output, credentials, client IPs or user-agent values are exposed.",
+      loadingAudit: "Loading recent rejection metadata…",
+      noRejections: "No owner-visible rejection events in the recent window.",
+      auditCategory: (category) =>
+        ({
+          quota: "Quota rejection",
+          authentication: "Authentication failure",
+          capability: "Capability rejection",
+          request: "Request rejection",
+        })[category] ?? category,
+      quotaTitle: "Owner quota draft",
+      quotaDescription:
+        "Overrides can only tighten platform limits and are snapshotted into the next immutable Release.",
+      saveQuota: "Save quota draft",
+      savingQuota: "Saving quota…",
+      inheritanceTitle: "Inheritance is always bounded",
+      inheritanceDescription:
+        "Blank means inherit the platform default — never unlimited.",
+      saveOtherDraftTitle: "Save other draft edits first",
+      saveOtherDraftDescription:
+        "Quota saving is paused to avoid creating a revision conflict with unsaved Studio changes.",
+      quotaLoadError: "Could not load the platform quota policy.",
+      quotaOverrideLabel: (field) =>
+        `${
+          {
+            max_concurrent_runs: "Concurrent runs",
+            daily_runs: "Daily runs",
+            daily_tokens: "Daily tokens",
+            max_run_seconds: "Run duration",
+            max_tokens_per_run: "Tokens per run",
+            max_input_bytes: "Input bytes",
+            inbound_rps: "Inbound requests / second",
+          }[field] ?? field
+        } override`,
+      inherited: "Inherited",
+      overridden: "Override",
+      platformDefault: "Platform default / maximum",
+      effectiveAfterPublish: "Effective after publish",
+      exceedsMaximum: (maximum) =>
+        `Must not exceed ${maximum.toLocaleString()}.`,
+      positiveInteger: "Enter a positive whole number.",
+      draftOnlyNotice:
+        "Saving here updates the mutable draft only. The current live Release keeps its existing quota until you publish again.",
+      quotaSaved: "Quota draft saved",
+      quotaConflict:
+        "The draft changed elsewhere. Reload before saving quota overrides.",
+    },
   },
 
   // Breadcrumb
@@ -600,16 +1040,16 @@ export const enUS: Translations = {
     connectors: {
       title: "Connectors",
       description:
-        "Manage external data connectors such as MySQL and StarRocks for safe, authorized agent queries.",
+        "Manage external data connectors such as MySQL, StarRocks, and OneData for safe, authorized agent queries.",
       total: "Total connectors",
       active: "Active",
-      availableTypes: "Available database types",
+      availableTypes: "Available connector types",
       refresh: "Refresh",
       add: "Add connector",
       loading: "Loading connectors...",
       emptyTitle: "No connectors yet",
       emptyDescription:
-        "Add a MySQL or StarRocks connector so agents can query external data through authorized tools.",
+        "Add a MySQL, StarRocks, or OneData connector so agents can query external data through authorized tools.",
       statusActive: "Active",
       statusDisabled: "Disabled",
       test: "Test",
@@ -640,10 +1080,16 @@ export const enUS: Translations = {
       authMode: "Credential mode",
       authModeEnv: "Environment variable",
       authModeInline: "Username & password",
+      authModeOneData: "secretId & secretKey",
       credentialRef: "Environment variable",
       username: "Username",
       password: "Password",
       passwordPlaceholder: "Leave empty to keep existing password",
+      secretId: "secretId",
+      secretKey: "secretKey",
+      secretKeyPlaceholder: "Leave empty to keep existing secretKey",
+      oneDataSummary: "OneData API",
+      oneDataPolicy: "API calls",
       credentialUpdateHint:
         "Leave empty to keep the existing credential reference.",
       credentialUpdateHintInline:
@@ -672,6 +1118,8 @@ export const enUS: Translations = {
       validationCredentialRef: "Enter an environment variable name",
       validationUsername: "Enter a username",
       validationPassword: "Enter a password",
+      validationSecretId: "Enter a secretId",
+      validationSecretKey: "Enter a secretKey",
     },
     skills: {
       title: "Agent Skills",

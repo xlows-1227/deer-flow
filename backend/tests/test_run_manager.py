@@ -631,6 +631,18 @@ async def test_model_name_create_or_reject():
 
 
 @pytest.mark.anyio
+async def test_create_or_reject_accepts_preallocated_run_id():
+    """Public idempotency can bind a durable claim before starting its Run."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+
+    record = await manager.create_or_reject("thread-1", run_id="run-preallocated")
+
+    assert record.run_id == "run-preallocated"
+    assert await store.get("run-preallocated") is not None
+
+
+@pytest.mark.anyio
 async def test_create_or_reject_interrupt_persists_interrupted_status_to_store():
     """interrupt strategy should persist interrupted status for old runs."""
     store = MemoryRunStore()

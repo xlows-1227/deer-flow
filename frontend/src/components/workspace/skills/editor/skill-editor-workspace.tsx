@@ -845,7 +845,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
             preservePaths,
           },
         });
-        if (result.importedPaths.length === 0) return [];
+        if (result.importedPaths.length === 0 && !result.didScrub) return [];
         const organizedDraft = normalizeSkillEditorDraft(
           result.draft,
           skillName,
@@ -858,12 +858,14 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
           ),
         );
         setDraft(organizedDraft);
-        applyImportedPathsToTree(
-          organizedPaths,
-          setExpandedPaths,
-          setHighlightedPaths,
-          highlightPaths,
-        );
+        if (organizedPaths.length > 0) {
+          applyImportedPathsToTree(
+            organizedPaths,
+            setExpandedPaths,
+            setHighlightedPaths,
+            highlightPaths,
+          );
+        }
         setOpenTabs((current) =>
           current.map((tab) => {
             if (tab.dirty || preservePaths.has(tab.path)) return tab;

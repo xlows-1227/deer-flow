@@ -32,6 +32,16 @@ def test_build_self_update_section_present_for_custom_agent():
     assert "update_agent" in section
 
 
+def test_database_soul_override_never_reads_legacy_file(monkeypatch):
+    def fail_load_agent_soul(_agent_name):
+        raise AssertionError("database-backed prompt must not read legacy SOUL.md")
+
+    monkeypatch.setattr(prompt_module, "load_agent_soul", fail_load_agent_soul)
+
+    assert prompt_module.get_agent_soul("my-agent", soul_override="DB soul") == "<soul>\nDB soul\n</soul>\n"
+    assert prompt_module.get_agent_soul("my-agent", soul_override="") == ""
+
+
 def test_build_custom_mounts_section_returns_empty_when_no_mounts(monkeypatch):
     config = SimpleNamespace(sandbox=SimpleNamespace(mounts=[]))
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)

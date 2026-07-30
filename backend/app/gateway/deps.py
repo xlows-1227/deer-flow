@@ -17,9 +17,10 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
@@ -37,12 +38,18 @@ if TYPE_CHECKING:
     from app.gateway.auth.ldap_provider import LdapAuthProvider
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
+    from deerflow.persistence.agent_channel import AgentChannelRepository
+    from deerflow.persistence.agent_usage import AgentUsageRepository
     from deerflow.persistence.api_key import APIKeyRepository
     from deerflow.persistence.external_audit import ExternalAuditRepository
     from deerflow.persistence.external_conversation import ExternalConversationRepository
     from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
     from deerflow.persistence.invite_code import InviteCodeRepository
+    from deerflow.persistence.published_agent import PublishedAgentRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
+    from deerflow.publishing.quota import QuotaLedger
+    from deerflow.publishing.resolver import PublishedAgentResolver
     from deerflow.runtime import RunRecord
 
 
@@ -144,12 +151,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
+            from app.channels.store import DbMappingStore
+            from deerflow.persistence.agent_api_key import AgentAPIKeyRepository
+            from deerflow.persistence.agent_channel import AgentChannelRepository
+            from deerflow.persistence.agent_usage import AgentUsageRepository
             from deerflow.persistence.api_key import APIKeyRepository
+            from deerflow.persistence.channel_mapping import ChannelEventRepository
             from deerflow.persistence.external_audit import ExternalAuditRepository
             from deerflow.persistence.external_conversation import ExternalConversationRepository
             from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.invite_code import InviteCodeRepository
+            from deerflow.persistence.published_agent import PublishedAgentRepository
             from deerflow.persistence.run import RunRepository
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
 
@@ -160,10 +173,46 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.scheduler_run_store = ScheduledTaskRunRepository(sf)
             app.state.api_key_repo = APIKeyRepository(sf)
+            from app.gateway.external.config import get_external_api_config
+
+            app.state.agent_api_key_repo = AgentAPIKeyRepository(
+                sf,
+                pepper=get_external_api_config().api_key_pepper,
+            )
+            app.state.agent_channel_repo = AgentChannelRepository(sf)
+            app.state.channel_mapping_store = DbMappingStore(sf)
+            app.state.channel_event_repo = ChannelEventRepository(sf)
+            app.state.published_agent_repo = PublishedAgentRepository(sf)
+            app.state.agent_usage_repo = AgentUsageRepository(sf)
             app.state.external_conversation_repo = ExternalConversationRepository(sf)
             app.state.external_idempotency_repo = ExternalIdempotencyRepository(sf)
             app.state.external_audit_repo = ExternalAuditRepository(sf)
             app.state.invite_code_repo = InviteCodeRepository(sf)
+
+            from deerflow.connectors.service import make_connector_service
+            from deerflow.persistence.agent_release import AgentReleaseRepository
+            from deerflow.persistence.skill_revision import SkillRevisionRepository
+            from deerflow.publishing.content_store import get_content_store
+            from deerflow.publishing.quota import PublishedQuotaResolver, QuotaLedger
+            from deerflow.publishing.resolver import PublishedAgentResolver
+            from deerflow.publishing.skills_index import ConnectorServiceRepo
+
+            quota_resolver = PublishedQuotaResolver(
+                startup_config.publishing.platform_quota,
+                app.state.agent_api_key_repo,
+            )
+            app.state.publishing_platform_quota = startup_config.publishing.platform_quota
+            app.state.publishing_model_costs = {model_name: pricing.model_dump(mode="json") for model_name, pricing in startup_config.publishing.model_costs.items()}
+            app.state.quota_ledger = QuotaLedger(app.state.agent_usage_repo)
+
+            app.state.published_agent_resolver = PublishedAgentResolver(
+                agent_repo=app.state.published_agent_repo,
+                release_repo=AgentReleaseRepository(sf),
+                connector_repo=ConnectorServiceRepo(make_connector_service()),
+                quota_resolver=quota_resolver,
+                skill_revision_repo=SkillRevisionRepository(sf),
+                content_store=get_content_store(),
+            )
         else:
             from deerflow.persistence.scheduled_task import make_scheduled_task_store
             from deerflow.persistence.scheduled_task_run import MemoryScheduledTaskRunStore
@@ -174,6 +223,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.scheduler_store = make_scheduled_task_store(None)
             app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
             app.state.api_key_repo = None
+            app.state.agent_api_key_repo = None
+            app.state.agent_channel_repo = None
+            app.state.channel_mapping_store = None
+            app.state.channel_event_repo = None
+            app.state.published_agent_repo = None
+            app.state.published_agent_resolver = None
+            app.state.agent_usage_repo = None
+            app.state.publishing_model_costs = {}
+            app.state.quota_ledger = None
             app.state.external_conversation_repo = None
             app.state.external_idempotency_repo = None
             app.state.external_audit_repo = None
@@ -204,9 +262,61 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
+        quota_recovery_task: asyncio.Task | None = None
+        if app.state.agent_usage_repo is not None:
+            try:
+                from app.gateway.routers.agent_public_api import (
+                    recover_pending_quota_settlements,
+                    run_quota_settlement_recovery_loop,
+                )
+            except Exception:
+                logger.exception("Failed to initialize published-Agent quota recovery")
+            else:
+                try:
+                    recovered_settlements = await recover_pending_quota_settlements(app)
+                    if recovered_settlements:
+                        logger.info(
+                            "Recovered %d published-Agent quota settlement(s)",
+                            recovered_settlements,
+                        )
+                except Exception:
+                    # The periodic task below keeps the durable outbox pending
+                    # and retries after a transient startup failure.
+                    logger.exception("Failed to recover published-Agent quota settlements")
+                quota_recovery_task = asyncio.create_task(
+                    run_quota_settlement_recovery_loop(app),
+                    name="published-quota-settlement-recovery",
+                )
+                app.state.agent_quota_recovery_task = quota_recovery_task
+
+        # Published-agent control plane services (M1). Built best-effort: when
+        # persistence or a subsystem is unavailable the factory returns None and
+        # the routers answer 503 rather than failing the whole startup. The
+        # conversational agent tools reuse the same factories (they cannot
+        # import app.*), so the Gateway and tool paths share one wiring.
+        try:
+            from deerflow.publishing.factory import (
+                build_draft_service,
+                build_import_service,
+                build_publish_service,
+            )
+
+            app.state.draft_service = build_draft_service()
+            app.state.publish_service = build_publish_service()
+            app.state.import_service = build_import_service()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Published-agent services unavailable: %s", exc)
+            app.state.draft_service = None
+            app.state.publish_service = None
+            app.state.import_service = None
+
         try:
             yield
         finally:
+            if quota_recovery_task is not None:
+                quota_recovery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await quota_recovery_task
             await close_engine()
 
 
@@ -236,6 +346,12 @@ get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 get_scheduler_store: Callable[[Request], object] = _require("scheduler_store", "Scheduler store")
 get_api_key_repo: Callable[[Request], APIKeyRepository] = _require("api_key_repo", "External API persistence")
+get_agent_api_key_repo: Callable[[Request], AgentAPIKeyRepository] = _require("agent_api_key_repo", "Agent API Key persistence")
+get_agent_channel_repo: Callable[[Request], AgentChannelRepository] = _require("agent_channel_repo", "Agent channel persistence")
+get_published_agent_repo: Callable[[Request], PublishedAgentRepository] = _require("published_agent_repo", "Published Agent persistence")
+get_published_agent_resolver: Callable[[Request], PublishedAgentResolver] = _require("published_agent_resolver", "Published Agent resolver")
+get_agent_usage_repo: Callable[[Request], AgentUsageRepository] = _require("agent_usage_repo", "Agent usage persistence")
+get_quota_ledger: Callable[[Request], QuotaLedger] = _require("quota_ledger", "Published Agent quota ledger")
 get_external_conversation_repo: Callable[[Request], ExternalConversationRepository] = _require("external_conversation_repo", "External API persistence")
 get_external_idempotency_repo: Callable[[Request], ExternalIdempotencyRepository] = _require("external_idempotency_repo", "External API persistence")
 get_external_audit_repo: Callable[[Request], ExternalAuditRepository] = _require("external_audit_repo", "External API persistence")

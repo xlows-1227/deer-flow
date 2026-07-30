@@ -13,6 +13,10 @@ def _context(runtime: Runtime | None) -> ConnectorRuntimeContext:
     ctx = runtime.context if runtime is not None else {}
     raw_connector_ids = ctx.get("connector_ids") if ctx else None
     connector_ids = [str(item) for item in raw_connector_ids if item] if isinstance(raw_connector_ids, list) else None
+    raw_capabilities = ctx.get("connector_capabilities") if ctx else None
+    connector_capabilities = (
+        {str(connector_id): [str(capability) for capability in capabilities if capability] for connector_id, capabilities in raw_capabilities.items() if isinstance(capabilities, list)} if isinstance(raw_capabilities, dict) else None
+    )
     return ConnectorRuntimeContext(
         user_id=resolve_runtime_user_id(runtime),
         thread_id=str(ctx.get("thread_id")) if ctx and ctx.get("thread_id") else None,
@@ -20,6 +24,7 @@ def _context(runtime: Runtime | None) -> ConnectorRuntimeContext:
         agent_id=str(ctx.get("agent_name")) if ctx and ctx.get("agent_name") else None,
         skill_name=str(ctx.get("skill_name")) if ctx and ctx.get("skill_name") else None,
         connector_ids=connector_ids,
+        connector_capabilities=connector_capabilities,
     )
 
 
@@ -60,7 +65,7 @@ async def inspect_connector_tool(runtime: Runtime, connector_id: str, resource_t
         _ensure_selected(context, connector_id)
         if resource_type != "schema":
             return {"error": {"code": "connector.resource.unsupported", "message": "Only schema inspection is supported in v1.", "recoverable": True}}
-        cached = await make_connector_service().get_cached_schema(connector_id)
+        cached = await make_connector_service().get_cached_schema(connector_id, context=context)
         if cached is None:
             metadata = await make_connector_service().introspect_connector(connector_id, context=context)
             return metadata.model_dump()
@@ -105,7 +110,13 @@ async def sample_database_table_tool(runtime: Runtime, connector_id: str, schema
 
 
 @tool("call_connector_action", parse_docstring=True)
-async def call_connector_action_tool(runtime: Runtime, connector_id: str, capability: str, args: dict | None = None, reason: str = "") -> dict:
+async def call_connector_action_tool(
+    runtime: Runtime,
+    connector_id: str,
+    capability: str,
+    action_args: dict | None = None,
+    reason: str = "",
+) -> dict:
     """Call an authorized connector capability through the generic connector action interface.
 
     Use this for non-database connector categories or future capabilities that
@@ -115,7 +126,7 @@ async def call_connector_action_tool(runtime: Runtime, connector_id: str, capabi
     Args:
         connector_id: Connector id returned by list_connectors.
         capability: Capability to invoke, such as document.read or api.call.
-        args: Capability-specific arguments.
+        action_args: Capability-specific arguments (for example apiId or paramData).
         reason: Short reason for audit logging.
     """
     try:
@@ -124,7 +135,7 @@ async def call_connector_action_tool(runtime: Runtime, connector_id: str, capabi
         result = await make_connector_service().execute_connector_action(
             connector_id,
             capability=capability,
-            args=args or {},
+            args=action_args or {},
             reason=reason,
             context=context,
         )

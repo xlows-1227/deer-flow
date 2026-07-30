@@ -340,9 +340,7 @@ class TestUploadFileFromPath:
         """Exceptions from the client upload should propagate unchanged."""
         source = tmp_path / "source.bin"
         source.write_bytes(b"x")
-        sandbox._client.file.upload_file = MagicMock(
-            side_effect=RuntimeError("upload failed")
-        )
+        sandbox._client.file.upload_file = MagicMock(side_effect=RuntimeError("upload failed"))
 
         with pytest.raises(RuntimeError, match="upload failed"):
             sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
@@ -366,9 +364,7 @@ class TestUploadFileFromPath:
         """The local file handle must be closed even if upload fails."""
         source = tmp_path / "source.bin"
         source.write_bytes(b"x")
-        sandbox._client.file.upload_file = MagicMock(
-            side_effect=RuntimeError("upload failed")
-        )
+        sandbox._client.file.upload_file = MagicMock(side_effect=RuntimeError("upload failed"))
 
         with pytest.raises(RuntimeError):
             sandbox.update_file_from_path("/mnt/user-data/outputs/file.bin", str(source))
@@ -376,3 +372,21 @@ class TestUploadFileFromPath:
         sandbox._client.file.upload_file.assert_called_once()
         kwargs = sandbox._client.file.upload_file.call_args.kwargs
         assert kwargs["file"].closed is True
+
+
+class TestDeleteFile:
+    def test_deletes_owner_data_file_and_requires_confirmed_zero_exit(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(exit_code=0)))
+
+        sandbox.delete_file("/mnt/user-data/uploads/input.bin")
+
+        command = sandbox._client.shell.exec_command.call_args.kwargs["command"]
+        assert command == "rm -f -- /mnt/user-data/uploads/input.bin"
+
+    def test_rejects_unconfirmed_delete_and_paths_outside_user_data(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(exit_code=1)))
+
+        with pytest.raises(OSError, match="did not confirm"):
+            sandbox.delete_file("/mnt/user-data/uploads/input.bin")
+        with pytest.raises(PermissionError, match="must be under"):
+            sandbox.delete_file("/etc/passwd")

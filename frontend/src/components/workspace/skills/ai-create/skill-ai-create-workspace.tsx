@@ -463,7 +463,7 @@ export function SkillAiCreateWorkspace({
             preservePaths,
           },
         });
-        if (result.importedPaths.length === 0) {
+        if (result.importedPaths.length === 0 && !result.didScrub) {
           return [];
         }
 
@@ -477,14 +477,16 @@ export function SkillAiCreateWorkspace({
             return { ...tab, content, dirty: false };
           }),
         );
-        setExpandedPaths((current) => {
-          const next = new Set(current);
-          expandPathAncestors(result.importedPaths).forEach((item) =>
-            next.add(item),
-          );
-          return next;
-        });
-        highlightPaths(setHighlightedPaths, new Set(result.importedPaths));
+        if (result.importedPaths.length > 0) {
+          setExpandedPaths((current) => {
+            const next = new Set(current);
+            expandPathAncestors(result.importedPaths).forEach((item) =>
+              next.add(item),
+            );
+            return next;
+          });
+          highlightPaths(setHighlightedPaths, new Set(result.importedPaths));
+        }
         return result.importedPaths;
       } catch {
         return [];

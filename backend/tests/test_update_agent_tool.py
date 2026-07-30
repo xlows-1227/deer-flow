@@ -9,9 +9,10 @@ that one user's update cannot mutate another user's agent.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -65,6 +66,41 @@ def _seed_agent(
     return agent_dir
 
 
+def test_sync_update_rejects_live_persistence_without_starting_new_loop():
+    with patch("deerflow.persistence.engine.get_session_factory", return_value=object()):
+        result = update_agent.func(runtime=_runtime(), soul="new soul")
+    assert "synchronous embedded client" in result.update["messages"][0].content
+
+
+def test_persistent_update_reads_and_writes_database_only(tmp_path, stub_app_config):
+    service = MagicMock()
+    service.get_authoring_state = AsyncMock(
+        return_value={
+            "agent": {"id": "pa_1", "description": "old"},
+            "draft": {
+                "model_name": None,
+                "tool_groups": [],
+                "skills": [],
+                "soul_markdown": "old soul",
+                "revision": 1,
+            },
+        }
+    )
+    service.update_authoring_bundle = AsyncMock(return_value=({"agent": {"id": "pa_1"}, "draft": {"revision": 2}}, []))
+    with (
+        patch("deerflow.publishing.factory.build_draft_service", return_value=service),
+        patch("deerflow.tools.builtins.update_agent_tool.get_paths") as get_paths,
+        patch("deerflow.tools.builtins.update_agent_tool.load_agent_config") as load_files,
+    ):
+        result = asyncio.run(update_agent.coroutine(runtime=_runtime(), soul="new soul"))
+
+    assert "updated successfully" in result.update["messages"][0].content
+    service.update_authoring_bundle.assert_awaited_once()
+    get_paths.assert_not_called()
+    load_files.assert_not_called()
+    assert not (tmp_path / "users").exists()
+
+
 @pytest.fixture()
 def patched_paths(tmp_path: Path):
     paths_mock = _make_paths_mock(tmp_path)
@@ -87,21 +123,21 @@ def stub_app_config():
 
 
 def test_update_agent_rejects_missing_agent_name(patched_paths):
-    result = update_agent.func(runtime=_runtime(agent_name=None), soul="new soul")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(agent_name=None), soul="new soul"))
 
     msg = result.update["messages"][0]
     assert "only available inside a custom agent's chat" in msg.content
 
 
 def test_update_agent_rejects_invalid_agent_name(patched_paths):
-    result = update_agent.func(runtime=_runtime(agent_name="../../etc/passwd"), soul="x")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(agent_name="../../etc/passwd"), soul="x"))
 
     msg = result.update["messages"][0]
     assert "Invalid agent name" in msg.content
 
 
 def test_update_agent_rejects_unknown_agent(tmp_path, patched_paths):
-    result = update_agent.func(runtime=_runtime(agent_name="ghost"), soul="x")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(agent_name="ghost"), soul="x"))
 
     msg = result.update["messages"][0]
     assert "does not exist" in msg.content
@@ -111,7 +147,7 @@ def test_update_agent_rejects_unknown_agent(tmp_path, patched_paths):
 def test_update_agent_requires_at_least_one_field(tmp_path, patched_paths):
     _seed_agent(tmp_path)
 
-    result = update_agent.func(runtime=_runtime())
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime()))
 
     msg = result.update["messages"][0]
     assert "No fields provided" in msg.content
@@ -123,7 +159,7 @@ def test_update_agent_rejects_unknown_model(tmp_path, patched_paths, stub_app_co
     default and the user gets repeated warnings on every later turn."""
     _seed_agent(tmp_path)
 
-    result = update_agent.func(runtime=_runtime(), model="not-in-config")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(), model="not-in-config"))
 
     msg = result.update["messages"][0]
     assert "Unknown model" in msg.content
@@ -134,7 +170,7 @@ def test_update_agent_rejects_unknown_model(tmp_path, patched_paths, stub_app_co
 def test_update_agent_accepts_known_model(tmp_path, patched_paths, stub_app_config):
     _seed_agent(tmp_path)
 
-    result = update_agent.func(runtime=_runtime(), model="gpt-known")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(), model="gpt-known"))
 
     cfg = yaml.safe_load((_user_agent_dir(tmp_path) / "config.yaml").read_text())
     assert cfg["model"] == "gpt-known"
@@ -147,7 +183,7 @@ def test_update_agent_accepts_known_model(tmp_path, patched_paths, stub_app_conf
 def test_update_agent_updates_soul_only(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, description="keep me", soul="old soul")
 
-    result = update_agent.func(runtime=_runtime(), soul="brand new soul")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(), soul="brand new soul"))
 
     assert (agent_dir / "SOUL.md").read_text() == "brand new soul"
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
@@ -158,7 +194,7 @@ def test_update_agent_updates_soul_only(tmp_path, patched_paths):
 def test_update_agent_updates_description_only(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, description="old desc", soul="keep this soul")
 
-    result = update_agent.func(runtime=_runtime(), description="new desc")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(), description="new desc"))
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
     assert cfg["description"] == "new desc"
@@ -169,7 +205,7 @@ def test_update_agent_updates_description_only(tmp_path, patched_paths):
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, skills=["a", "b"])
 
-    result = update_agent.func(runtime=_runtime(), skills=[])
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(), skills=[]))
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
     assert cfg["skills"] == [], "empty list must persist as empty list (not be omitted)"
@@ -179,7 +215,7 @@ def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
 def test_update_agent_skills_omitted_keeps_existing(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, skills=["alpha", "beta"])
 
-    update_agent.func(runtime=_runtime(), description="bumped")
+    asyncio.run(update_agent.coroutine(runtime=_runtime(), description="bumped"))
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
     assert cfg["skills"] == ["alpha", "beta"], "omitting skills must preserve the existing whitelist"
@@ -188,7 +224,7 @@ def test_update_agent_skills_omitted_keeps_existing(tmp_path, patched_paths):
 def test_update_agent_no_op_when_values_match_existing(tmp_path, patched_paths):
     _seed_agent(tmp_path, description="same")
 
-    result = update_agent.func(runtime=_runtime(), description="same")
+    result = asyncio.run(update_agent.coroutine(runtime=_runtime(), description="same"))
 
     assert "No changes applied" in result.update["messages"][0].content
 
@@ -202,7 +238,7 @@ def test_update_agent_forces_name_to_directory(tmp_path, patched_paths):
     (agent_dir / "config.yaml").write_text(yaml.safe_dump({"name": "drifted-name", "description": "old"}, sort_keys=False), encoding="utf-8")
     (agent_dir / "SOUL.md").write_text("soul", encoding="utf-8")
 
-    update_agent.func(runtime=_runtime(), description="bumped")
+    asyncio.run(update_agent.coroutine(runtime=_runtime(), description="bumped"))
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
     assert cfg["name"] == "test-agent", "config.yaml name must follow the directory name, not legacy yaml content"
@@ -222,7 +258,7 @@ def test_update_agent_failure_preserves_existing_files(tmp_path, patched_paths):
         return real_replace(self, target)
 
     with patch.object(Path, "replace", _explode):
-        result = update_agent.func(runtime=_runtime(), soul="poisoned content")
+        result = asyncio.run(update_agent.coroutine(runtime=_runtime(), soul="poisoned content"))
 
     assert (agent_dir / "SOUL.md").read_text() == "original soul", "atomic write must not corrupt existing SOUL.md"
     assert "Error" in result.update["messages"][0].content
@@ -247,8 +283,8 @@ def test_update_agent_soul_failure_does_not_replace_config(tmp_path, patched_pat
             raise OSError("disk full while staging SOUL.md")
         return real_named_temp_file(*args, **kwargs)
 
-    with patch("deerflow.tools.builtins.update_agent_tool.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
-        result = update_agent.func(runtime=_runtime(), description="new-desc", soul="new soul")
+    with patch("deerflow.tools.builtins.agent_file_transaction.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
+        result = asyncio.run(update_agent.coroutine(runtime=_runtime(), description="new-desc", soul="new soul"))
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
     assert cfg["description"] == "original-desc", "config.yaml must not be replaced when SOUL.md staging fails"
@@ -271,7 +307,7 @@ def test_update_agent_only_writes_under_current_user(tmp_path, patched_paths):
     # Override the autouse contextvar so update_agent runs as Alice.
     token = set_current_user(SimpleNamespace(id="alice"))
     try:
-        update_agent.func(runtime=_runtime(agent_name="shared"), description="alice-bumped")
+        asyncio.run(update_agent.coroutine(runtime=_runtime(agent_name="shared"), description="alice-bumped"))
     finally:
         reset_current_user(token)
 
@@ -301,7 +337,7 @@ def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
     fake_app_config.get_model_config.return_value = object()
     with patch("deerflow.tools.builtins.update_agent_tool.load_agent_config", return_value=fake_cfg):
         with patch("deerflow.tools.builtins.update_agent_tool.get_app_config", return_value=fake_app_config):
-            update_agent.func(runtime=_runtime(), description="bumped")
+            asyncio.run(update_agent.coroutine(runtime=_runtime(), description="bumped"))
 
     cfg = yaml.safe_load((_user_agent_dir(tmp_path) / "config.yaml").read_text())
     assert cfg["description"] == "bumped"

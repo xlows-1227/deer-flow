@@ -13,6 +13,7 @@ The provider itself handles:
 import asyncio
 import atexit
 import hashlib
+import json
 import logging
 import os
 import signal
@@ -20,6 +21,9 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TextIO
 
 try:
     import fcntl
@@ -31,7 +35,7 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import SandboxAcquisition, SandboxProvider
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, _normalize_sandbox_access_url, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -47,13 +51,16 @@ DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 DEFAULT_IDLE_TIMEOUT = 600  # 10 minutes in seconds
 DEFAULT_REPLICAS = 3  # Maximum concurrent sandbox containers
+AIO_LATE_CREATE_COMPENSATION_TIMEOUT_SECONDS = 120.0
+AIO_CLEANUP_PENDING_MATERIALIZATION_GRACE_SECONDS = 300.0
+AIO_LIFECYCLE_LEASE_SECONDS = 180.0
 IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
 THREAD_LOCK_EXECUTOR_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 _THREAD_LOCK_EXECUTOR = ThreadPoolExecutor(max_workers=THREAD_LOCK_EXECUTOR_WORKERS, thread_name_prefix="sandbox-lock-wait")
 atexit.register(_THREAD_LOCK_EXECUTOR.shutdown, wait=False, cancel_futures=True)
 
 
-def _lock_file_exclusive(lock_file) -> None:
+def _lock_file_exclusive(lock_file: TextIO) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         return
@@ -62,7 +69,7 @@ def _lock_file_exclusive(lock_file) -> None:
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
 
 
-def _unlock_file(lock_file) -> None:
+def _unlock_file(lock_file: TextIO) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file, fcntl.LOCK_UN)
         return
@@ -71,8 +78,47 @@ def _unlock_file(lock_file) -> None:
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _open_lock_file(lock_path):
+def _open_lock_file(lock_path: Path) -> TextIO:
     return open(lock_path, "a", encoding="utf-8")
+
+
+def _open_and_lock_file(lock_path: Path) -> TextIO:
+    lock_file = _open_lock_file(lock_path)
+    try:
+        _lock_file_exclusive(lock_file)
+    except BaseException:
+        lock_file.close()
+        raise
+    return lock_file
+
+
+def _unlock_and_close_file(lock_file: TextIO) -> None:
+    try:
+        _unlock_file(lock_file)
+    finally:
+        lock_file.close()
+
+
+async def _acquire_file_lock_async(lock_path: Path) -> TextIO:
+    """Acquire an OS file lock without closing its handle on cancellation."""
+    acquire_task = asyncio.create_task(asyncio.to_thread(_open_and_lock_file, lock_path))
+    try:
+        return await asyncio.shield(acquire_task)
+    except asyncio.CancelledError:
+        acquire_task.add_done_callback(_release_cancelled_file_lock_acquire)
+        raise
+
+
+def _release_cancelled_file_lock_acquire(task: asyncio.Task[TextIO]) -> None:
+    """Hand late file-lock ownership to a worker that unlocks and closes it."""
+    if task.cancelled():
+        return
+    try:
+        lock_file = task.result()
+    except Exception as exc:
+        logger.warning("Cancelled sandbox file-lock acquisition finished with error: %s", exc)
+        return
+    _THREAD_LOCK_EXECUTOR.submit(_unlock_and_close_file, lock_file)
 
 
 async def _acquire_thread_lock_async(lock: threading.Lock) -> None:
@@ -105,6 +151,44 @@ def _release_cancelled_lock_acquire(lock: threading.Lock, task: asyncio.Future[b
         lock.release()
 
 
+@dataclass
+class _BackendCreateFallback:
+    lock: threading.Lock
+    requested: bool = False
+    claimed: bool = False
+    info: SandboxInfo | None = None
+
+
+@dataclass(frozen=True)
+class _BackendCreateOperation:
+    token: str
+    thread_id: str | None
+    sandbox_id: str
+    owner_user_id: str | None
+    observed_use_version: int
+    durable_generation: int
+    lifecycle_state_path: Path | None
+    fallback: _BackendCreateFallback
+
+
+def _read_sandbox_lifecycle_state(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_sandbox_lifecycle_state(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 class AioSandboxProvider(SandboxProvider):
     """Sandbox provider that manages containers running the AIO sandbox.
 
@@ -130,12 +214,18 @@ class AioSandboxProvider(SandboxProvider):
     """
 
     def __init__(self):
+        self._instance_id = uuid.uuid4().hex
         self._lock = threading.Lock()
         self._sandboxes: dict[str, AioSandbox] = {}  # sandbox_id -> AioSandbox instance
         self._sandbox_infos: dict[str, SandboxInfo] = {}  # sandbox_id -> SandboxInfo (for destroy)
         self._thread_sandboxes: dict[str, str] = {}  # thread_id -> sandbox_id
+        self._thread_owners: dict[str, str] = {}  # thread_id -> trusted owner user_id
         self._thread_locks: dict[str, threading.Lock] = {}  # thread_id -> in-process lock
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
+        self._sandbox_use_versions: dict[str, int] = {}
+        self._late_create_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._backend_create_operations: dict[str, _BackendCreateOperation] = {}
+        self._sandbox_lifecycle_paths: dict[str, Path] = {}
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
@@ -155,9 +245,9 @@ class AioSandboxProvider(SandboxProvider):
         # Reconcile orphaned containers from previous process lifecycles
         self._reconcile_orphans()
 
-        # Start idle checker if enabled
-        if self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) > 0:
-            self._start_idle_checker()
+        # Lifecycle reconciliation always runs, including idle_timeout=0;
+        # capacity cleanup must not depend on idle eviction being enabled.
+        self._start_idle_checker()
 
     @property
     def uses_thread_data_mounts(self) -> bool:
@@ -193,6 +283,14 @@ class AioSandboxProvider(SandboxProvider):
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
         )
+
+    def _provider_instance_id(self) -> str:
+        """Return this process-local lifecycle owner ID, including test-built instances."""
+        instance_id = getattr(self, "_instance_id", None)
+        if instance_id is None:
+            instance_id = uuid.uuid4().hex
+            self._instance_id = instance_id
+        return instance_id
 
     # ── Configuration ────────────────────────────────────────────────────
 
@@ -231,21 +329,11 @@ class AioSandboxProvider(SandboxProvider):
     # ── Startup reconciliation ────────────────────────────────────────────
 
     def _reconcile_orphans(self) -> None:
-        """Reconcile orphaned containers left by previous process lifecycles.
+        """Destroy only sandboxes whose durable owner lease permits cleanup.
 
-        On startup, enumerate all running containers matching our prefix
-        and adopt them all into the warm pool.  The idle checker will reclaim
-        containers that nobody re-acquires within ``idle_timeout``.
-
-        All containers are adopted unconditionally because we cannot
-        distinguish "orphaned" from "actively used by another process"
-        based on age alone — ``idle_timeout`` represents inactivity, not
-        uptime.  Adopting into the warm pool and letting the idle checker
-        decide avoids destroying containers that a concurrent process may
-        still be using.
-
-        This closes the fundamental gap where in-memory state loss (process
-        restart, crash, SIGKILL) leaves Docker containers running forever.
+        Backend discovery is observational: it never grants ownership. Live
+        records are left alone. Expired ``creating``/``active`` records are
+        fenced to ``cleanup_pending`` under the sandbox lock before destroy.
         """
         try:
             running = self._backend.list_running()
@@ -253,25 +341,66 @@ class AioSandboxProvider(SandboxProvider):
             logger.warning(f"Failed to enumerate running containers during startup reconciliation: {e}")
             return
 
-        if not running:
-            return
+        lifecycle_records: dict[str, Path] = {}
+        try:
+            for path in get_paths().base_dir.rglob(".*.lifecycle.json"):
+                state = _read_sandbox_lifecycle_state(path)
+                sandbox_id = state.get("sandbox_id") if state is not None else None
+                if state is not None and isinstance(sandbox_id, str):
+                    lifecycle_records[sandbox_id] = path
+        except OSError as exc:
+            logger.warning("Failed to scan durable sandbox cleanup records: %s", exc)
 
         current_time = time.time()
-        adopted = 0
+        running_ids = {info.sandbox_id for info in running}
 
         for info in running:
-            age = current_time - info.created_at if info.created_at > 0 else float("inf")
-            # Single lock acquisition per container: atomic check-and-insert.
-            # Avoids a TOCTOU window between the "already tracked?" check and
-            # the warm-pool insert.
-            with self._lock:
-                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
+            lifecycle_path = lifecycle_records.get(info.sandbox_id)
+            if lifecycle_path is not None:
+                lock_file: TextIO | None = None
+                try:
+                    lock_file = _open_and_lock_file(lifecycle_path.parent / f"{info.sandbox_id}.lock")
+                    state = _read_sandbox_lifecycle_state(lifecycle_path)
+                    if state is None or state.get("sandbox_id") != info.sandbox_id:
+                        continue
+                    lifecycle_state = state.get("state")
+                    lease_expires_at = state.get("lease_expires_at")
+                    if lifecycle_state in {"creating", "active", "adopted"}:
+                        if isinstance(lease_expires_at, (int, float)) and lease_expires_at > current_time:
+                            continue
+                        if lease_expires_at is None:
+                            created_at = state.get("created_at")
+                            if isinstance(created_at, (int, float)) and (created_at + AIO_LIFECYCLE_LEASE_SECONDS > current_time):
+                                continue
+                        state = {
+                            **state,
+                            "state": "cleanup_pending",
+                            "cleanup_not_before": current_time,
+                        }
+                        _write_sandbox_lifecycle_state(lifecycle_path, state)
+                        lifecycle_state = "cleanup_pending"
+                    if lifecycle_state == "cleanup_pending":
+                        self._backend.destroy(info)
+                        lifecycle_path.unlink(missing_ok=True)
+                        logger.info("Recovered fenced sandbox cleanup for %s", info.sandbox_id)
+                        continue
+                except Exception as exc:
+                    logger.warning("Failed to recover durable sandbox cleanup for %s: %s", info.sandbox_id, exc)
                     continue
-                self._warm_pool[info.sandbox_id] = (info, current_time)
-            adopted += 1
-            logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
+                finally:
+                    if lock_file is not None:
+                        _unlock_and_close_file(lock_file)
+                continue
+            logger.debug("Observed unowned sandbox %s; leaving it to its owner", info.sandbox_id)
 
-        logger.info(f"Startup reconciliation complete: {adopted} adopted into warm pool, {len(running)} total found")
+        for sandbox_id in lifecycle_records:
+            if sandbox_id not in running_ids:
+                logger.debug(
+                    "Retaining durable cleanup intent until sandbox %s materializes",
+                    sandbox_id,
+                )
+
+        logger.info("Lifecycle reconciliation complete: %s backend sandbox(es) observed", len(running))
 
     # ── Deterministic ID ─────────────────────────────────────────────────
 
@@ -286,12 +415,17 @@ class AioSandboxProvider(SandboxProvider):
 
     # ── Mount helpers ────────────────────────────────────────────────────
 
-    def _get_extra_mounts(self, thread_id: str | None) -> list[tuple[str, str, bool]]:
+    def _get_extra_mounts(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str | None = None,
+    ) -> list[tuple[str, str, bool]]:
         """Collect all extra mounts for a sandbox (thread-specific + skills)."""
         mounts: list[tuple[str, str, bool]] = []
 
         if thread_id:
-            mounts.extend(self._get_thread_mounts(thread_id))
+            mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
         skills_mount = self._get_skills_mount()
@@ -302,7 +436,11 @@ class AioSandboxProvider(SandboxProvider):
         return mounts
 
     @staticmethod
-    def _get_thread_mounts(thread_id: str) -> list[tuple[str, str, bool]]:
+    def _get_thread_mounts(
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> list[tuple[str, str, bool]]:
         """Get volume mounts for a thread's data directories.
 
         Creates directories if they don't exist (lazy initialization).
@@ -310,16 +448,16 @@ class AioSandboxProvider(SandboxProvider):
         mounted Docker socket (DooD), the host Docker daemon can resolve the paths.
         """
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        resolved_user_id = user_id if user_id is not None else get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=resolved_user_id)
 
         return [
-            (paths.host_sandbox_work_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (paths.host_sandbox_uploads_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (paths.host_sandbox_outputs_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (paths.host_sandbox_work_dir(thread_id, user_id=resolved_user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (paths.host_sandbox_uploads_dir(thread_id, user_id=resolved_user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (paths.host_sandbox_outputs_dir(thread_id, user_id=resolved_user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
             # ACP workspace: read-only inside the sandbox (lead agent reads results;
             # the ACP subprocess writes from the host side, not from within the container).
-            (paths.host_acp_workspace_dir(thread_id, user_id=user_id), "/mnt/acp-workspace", True),
+            (paths.host_acp_workspace_dir(thread_id, user_id=resolved_user_id), "/mnt/acp-workspace", True),
         ]
 
     @staticmethod
@@ -358,9 +496,78 @@ class AioSandboxProvider(SandboxProvider):
         idle_timeout = self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
         while not self._idle_checker_stop.wait(timeout=IDLE_CHECK_INTERVAL):
             try:
-                self._cleanup_idle_sandboxes(idle_timeout)
+                self._renew_owned_lifecycle_leases()
+                self._reconcile_orphans()
+                if idle_timeout > 0:
+                    self._cleanup_idle_sandboxes(idle_timeout)
             except Exception as e:
                 logger.error(f"Error in idle checker loop: {e}")
+
+    def _renew_owned_lifecycle_leases(self) -> None:
+        """Renew durable records still owned by this provider instance."""
+        with self._lock:
+            paths = set(getattr(self, "_sandbox_lifecycle_paths", {}).values())
+            paths.update(operation.lifecycle_state_path for operation in getattr(self, "_backend_create_operations", {}).values() if operation.lifecycle_state_path is not None)
+        for path in paths:
+            state = _read_sandbox_lifecycle_state(path)
+            sandbox_id = state.get("sandbox_id") if state is not None else None
+            if not isinstance(sandbox_id, str):
+                continue
+            lock_file: TextIO | None = None
+            try:
+                lock_file = _open_and_lock_file(path.parent / f"{sandbox_id}.lock")
+                state = _read_sandbox_lifecycle_state(path)
+                if state is None or state.get("owner_instance_id") != self._provider_instance_id() or state.get("state") not in {"creating", "active", "adopted"}:
+                    continue
+                _write_sandbox_lifecycle_state(
+                    path,
+                    {
+                        **state,
+                        "lease_expires_at": time.time() + AIO_LIFECYCLE_LEASE_SECONDS,
+                    },
+                )
+            except OSError as exc:
+                logger.warning("Failed to renew sandbox lifecycle lease for %s: %s", sandbox_id, exc)
+            finally:
+                if lock_file is not None:
+                    _unlock_and_close_file(lock_file)
+
+    def _destroy_backend_info_if_owned(self, sandbox_id: str, info: SandboxInfo) -> bool:
+        """Destroy while holding the durable owner fence, or forget stale local state."""
+        with self._lock:
+            lifecycle_path = getattr(self, "_sandbox_lifecycle_paths", {}).get(sandbox_id)
+        if lifecycle_path is None:
+            self._backend.destroy(info)
+            return True
+
+        lock_file: TextIO | None = None
+        try:
+            lock_file = _open_and_lock_file(lifecycle_path.parent / f"{sandbox_id}.lock")
+            state = _read_sandbox_lifecycle_state(lifecycle_path)
+            if state is None or state.get("sandbox_id") != sandbox_id or state.get("owner_instance_id") != self._provider_instance_id() or state.get("state") not in {"active", "adopted", "cleanup_pending"}:
+                logger.info(
+                    "Skipping sandbox destroy after lifecycle ownership transfer",
+                    extra={"sandbox_id": sandbox_id},
+                )
+                return False
+            _write_sandbox_lifecycle_state(
+                lifecycle_path,
+                {
+                    **state,
+                    "state": "cleanup_pending",
+                    "cleanup_not_before": time.time(),
+                },
+            )
+            self._backend.destroy(info)
+            lifecycle_path.unlink(missing_ok=True)
+            return True
+        finally:
+            if lock_file is not None:
+                _unlock_and_close_file(lock_file)
+            with self._lock:
+                paths = getattr(self, "_sandbox_lifecycle_paths", {})
+                if paths.get(sandbox_id) == lifecycle_path:
+                    paths.pop(sandbox_id, None)
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
         current_time = time.time()
@@ -407,8 +614,8 @@ class AioSandboxProvider(SandboxProvider):
         # Destroy warm-pool sandboxes (already removed from _warm_pool under lock above)
         for sandbox_id, info in warm_to_destroy:
             try:
-                self._backend.destroy(info)
-                logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
+                if self._destroy_backend_info_if_owned(sandbox_id, info):
+                    logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
             except Exception as e:
                 logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
 
@@ -451,13 +658,52 @@ class AioSandboxProvider(SandboxProvider):
     def _get_thread_lock(self, thread_id: str) -> threading.Lock:
         """Get or create an in-process lock for a specific thread_id."""
         with self._lock:
-            if thread_id not in self._thread_locks:
-                self._thread_locks[thread_id] = threading.Lock()
-            return self._thread_locks[thread_id]
+            thread_locks = getattr(self, "_thread_locks", None)
+            if thread_locks is None:
+                thread_locks = {}
+                self._thread_locks = thread_locks
+            if thread_id not in thread_locks:
+                thread_locks[thread_id] = threading.Lock()
+            return thread_locks[thread_id]
 
-    def _sandbox_id_for_thread(self, thread_id: str | None) -> str:
+    def _mark_sandbox_use_accepted(self, sandbox_id: str) -> None:
+        with self._lock:
+            versions = getattr(self, "_sandbox_use_versions", None)
+            if versions is None:
+                versions = {}
+                self._sandbox_use_versions = versions
+            versions[sandbox_id] = versions.get(sandbox_id, 0) + 1
+
+    def _managed_acquisition_snapshot(self, thread_id: str | None) -> tuple[bool, int]:
+        with self._lock:
+            existing_id = self._thread_sandboxes.get(thread_id) if thread_id is not None else None
+            active_before = existing_id is not None and existing_id in self._sandboxes
+            versions = getattr(self, "_sandbox_use_versions", {})
+            return active_before, versions.get(existing_id, 0) if existing_id is not None else 0
+
+    def _bind_thread_owner(self, thread_id: str, owner_user_id: str) -> None:
+        """Bind one thread cache entry to an owner, failing closed on conflict."""
+        with self._lock:
+            owners = getattr(self, "_thread_owners", None)
+            if owners is None:
+                owners = {}
+                self._thread_owners = owners
+            cached_owner = owners.get(thread_id)
+            if cached_owner is not None and cached_owner != owner_user_id:
+                raise PermissionError(f"sandbox thread {thread_id!r} is already bound to a different owner")
+            owners[thread_id] = owner_user_id
+
+    def _sandbox_id_for_thread(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
-        return self._deterministic_sandbox_id(thread_id) if thread_id else str(uuid.uuid4())[:8]
+        if thread_id is None:
+            return str(uuid.uuid4())[:8]
+        owner_user_id = user_id if user_id is not None else get_effective_user_id()
+        return self._deterministic_sandbox_id(f"{owner_user_id}\0{thread_id}")
 
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
@@ -518,6 +764,8 @@ class AioSandboxProvider(SandboxProvider):
         """Track a newly-created sandbox in the active maps."""
         sandbox = AioSandbox(id=sandbox_id, base_url=_normalize_sandbox_access_url(info.sandbox_url))
         with self._lock:
+            if getattr(self, "_shutdown_called", False):
+                raise RuntimeError("AIO sandbox provider has shut down")
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
@@ -547,7 +795,7 @@ class AioSandboxProvider(SandboxProvider):
 
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
         For the same thread_id, this method will return the same sandbox_id
@@ -562,31 +810,127 @@ class AioSandboxProvider(SandboxProvider):
         Returns:
             The ID of the acquired sandbox environment.
         """
+        owner_user_id = user_id if user_id is not None else get_effective_user_id()
+        if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+            raise ValueError("sandbox user_id must be a non-empty string")
         if thread_id:
             thread_lock = self._get_thread_lock(thread_id)
             with thread_lock:
-                return self._acquire_internal(thread_id)
+                self._bind_thread_owner(thread_id, owner_user_id)
+                if user_id is None:
+                    sandbox_id = self._acquire_internal(thread_id)
+                else:
+                    sandbox_id = self._acquire_internal(thread_id, user_id=owner_user_id)
+                self._mark_sandbox_use_accepted(sandbox_id)
+                return sandbox_id
         else:
-            return self._acquire_internal(thread_id)
+            if user_id is None:
+                sandbox_id = self._acquire_internal(thread_id)
+            else:
+                sandbox_id = self._acquire_internal(thread_id, user_id=owner_user_id)
+        self._mark_sandbox_use_accepted(sandbox_id)
+        return sandbox_id
 
-    async def acquire_async(self, thread_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
 
         Mirrors ``acquire()`` while keeping blocking backend operations off the
         event loop and using async-native readiness polling for newly created
         sandboxes.
         """
+        owner_user_id = user_id if user_id is not None else get_effective_user_id()
+        if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+            raise ValueError("sandbox user_id must be a non-empty string")
         if thread_id:
             thread_lock = self._get_thread_lock(thread_id)
             await _acquire_thread_lock_async(thread_lock)
             try:
-                return await self._acquire_internal_async(thread_id)
+                self._bind_thread_owner(thread_id, owner_user_id)
+                if user_id is None:
+                    sandbox_id = await self._acquire_internal_async(thread_id)
+                else:
+                    sandbox_id = await self._acquire_internal_async(thread_id, user_id=owner_user_id)
+                self._mark_sandbox_use_accepted(sandbox_id)
+                return sandbox_id
             finally:
                 thread_lock.release()
+        elif user_id is None:
+            sandbox_id = await self._acquire_internal_async(thread_id)
+        else:
+            sandbox_id = await self._acquire_internal_async(thread_id, user_id=owner_user_id)
+        self._mark_sandbox_use_accepted(sandbox_id)
+        return sandbox_id
 
-        return await self._acquire_internal_async(thread_id)
+    async def acquire_with_lease_async(
+        self,
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> SandboxAcquisition:
+        """Acquire without accepting ownership until the caller commits it."""
+        owner_user_id = user_id if user_id is not None else get_effective_user_id()
+        if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+            raise ValueError("sandbox user_id must be a non-empty string")
+        if thread_id:
+            thread_lock = self._get_thread_lock(thread_id)
+            await _acquire_thread_lock_async(thread_lock)
+            try:
+                self._bind_thread_owner(thread_id, owner_user_id)
+                active_before, _ = self._managed_acquisition_snapshot(thread_id)
+                sandbox_id = await self._acquire_internal_async(
+                    thread_id,
+                    **({} if user_id is None else {"user_id": owner_user_id}),
+                )
+                with self._lock:
+                    observed_version = getattr(self, "_sandbox_use_versions", {}).get(sandbox_id, 0)
+            finally:
+                thread_lock.release()
+        else:
+            active_before = False
+            sandbox_id = await self._acquire_internal_async(
+                thread_id,
+                **({} if user_id is None else {"user_id": owner_user_id}),
+            )
+            with self._lock:
+                observed_version = getattr(self, "_sandbox_use_versions", {}).get(sandbox_id, 0)
+        return SandboxAcquisition(
+            sandbox_id=sandbox_id,
+            acquisition_token=uuid.uuid4().hex,
+            thread_id=thread_id,
+            release_on_abandon=not active_before,
+            observed_use_version=observed_version,
+        )
 
-    def _acquire_internal(self, thread_id: str | None) -> str:
+    def accept_acquisition(self, acquisition: SandboxAcquisition) -> None:
+        """Commit a managed acquisition so an older waiter cannot release it."""
+        thread_lock = self._get_thread_lock(acquisition.thread_id) if acquisition.thread_id else None
+        if thread_lock is not None:
+            thread_lock.acquire()
+        try:
+            self._mark_sandbox_use_accepted(acquisition.sandbox_id)
+        finally:
+            if thread_lock is not None:
+                thread_lock.release()
+
+    def abandon_acquisition(self, acquisition: SandboxAcquisition) -> None:
+        """Release only capacity exclusively introduced by this operation."""
+        if not acquisition.release_on_abandon:
+            return
+        thread_lock = self._get_thread_lock(acquisition.thread_id) if acquisition.thread_id else None
+        if thread_lock is not None:
+            thread_lock.acquire()
+        try:
+            with self._lock:
+                versions = getattr(self, "_sandbox_use_versions", {})
+                unchanged = versions.get(acquisition.sandbox_id, 0) == acquisition.observed_use_version
+                mapped = acquisition.thread_id is None or self._thread_sandboxes.get(acquisition.thread_id) == acquisition.sandbox_id
+            if unchanged and mapped:
+                self.release(acquisition.sandbox_id)
+        finally:
+            if thread_lock is not None:
+                thread_lock.release()
+
+    def _acquire_internal(self, thread_id: str | None, *, user_id: str | None = None) -> str:
         """Internal sandbox acquisition with two-layer consistency.
 
         Layer 1: In-process cache (fastest, covers same-process repeated access)
@@ -599,7 +943,7 @@ class AioSandboxProvider(SandboxProvider):
             return cached_id
 
         # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id)
+        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id=user_id)
 
         # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
         reclaimed_id = self._reclaim_warm_pool_sandbox(thread_id, sandbox_id)
@@ -611,18 +955,27 @@ class AioSandboxProvider(SandboxProvider):
         # for the same thread_id serialize here: the second process will discover
         # the container started by the first instead of hitting a name-conflict.
         if thread_id:
-            return self._discover_or_create_with_lock(thread_id, sandbox_id)
+            return self._discover_or_create_with_lock(
+                thread_id,
+                sandbox_id,
+                user_id=user_id,
+            )
 
-        return self._create_sandbox(thread_id, sandbox_id)
+        return self._create_sandbox(thread_id, sandbox_id, user_id=user_id)
 
-    async def _acquire_internal_async(self, thread_id: str | None) -> str:
+    async def _acquire_internal_async(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         """Async counterpart to ``_acquire_internal``."""
         cached_id = self._reuse_in_process_sandbox(thread_id)
         if cached_id is not None:
             return cached_id
 
         # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id)
+        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id=user_id)
 
         # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
         reclaimed_id = self._reclaim_warm_pool_sandbox(thread_id, sandbox_id)
@@ -631,20 +984,30 @@ class AioSandboxProvider(SandboxProvider):
 
         # ── Layer 2: Backend discovery + create (protected by cross-process lock) ──
         if thread_id:
-            return await self._discover_or_create_with_lock_async(thread_id, sandbox_id)
+            return await self._discover_or_create_with_lock_async(
+                thread_id,
+                sandbox_id,
+                user_id=user_id,
+            )
 
-        return await self._create_sandbox_async(thread_id, sandbox_id)
+        return await self._create_sandbox_async(thread_id, sandbox_id, user_id=user_id)
 
-    def _discover_or_create_with_lock(self, thread_id: str, sandbox_id: str) -> str:
+    def _discover_or_create_with_lock(
+        self,
+        thread_id: str,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         """Discover an existing sandbox or create a new one under a cross-process file lock.
 
         The file lock serializes concurrent sandbox creation for the same thread_id
         across multiple processes, preventing container-name conflicts.
         """
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
+        owner_user_id = user_id if user_id is not None else get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=owner_user_id)
+        lock_path = paths.thread_dir(thread_id, user_id=owner_user_id) / f"{sandbox_id}.lock"
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
             locked = False
@@ -660,25 +1023,37 @@ class AioSandboxProvider(SandboxProvider):
                 # Backend discovery: another process may have created the container.
                 discovered = self._backend.discover(sandbox_id)
                 if discovered is not None:
+                    self._mark_durable_sandbox_adopted(
+                        thread_id,
+                        sandbox_id,
+                        owner_user_id=owner_user_id,
+                    )
                     return self._register_discovered_sandbox(thread_id, discovered)
 
-                return self._create_sandbox(thread_id, sandbox_id)
+                return self._create_sandbox(
+                    thread_id,
+                    sandbox_id,
+                    user_id=owner_user_id,
+                )
             finally:
                 if locked:
                     _unlock_file(lock_file)
 
-    async def _discover_or_create_with_lock_async(self, thread_id: str, sandbox_id: str) -> str:
+    async def _discover_or_create_with_lock_async(
+        self,
+        thread_id: str,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         """Async counterpart to ``_discover_or_create_with_lock``."""
         paths = get_paths()
-        user_id = get_effective_user_id()
-        await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
+        owner_user_id = user_id if user_id is not None else get_effective_user_id()
+        await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=owner_user_id)
+        lock_path = paths.thread_dir(thread_id, user_id=owner_user_id) / f"{sandbox_id}.lock"
 
-        lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
-        locked = False
+        lock_file = await _acquire_file_lock_async(lock_path)
         try:
-            await asyncio.to_thread(_lock_file_exclusive, lock_file)
-            locked = True
             # Re-check in-process caches under the file lock in case another
             # thread in this process won the race while we were waiting.
             cached_id = self._recheck_cached_sandbox(thread_id, sandbox_id)
@@ -689,13 +1064,20 @@ class AioSandboxProvider(SandboxProvider):
             # Docker and perform a health check; keep it off the event loop.
             discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
             if discovered is not None:
+                self._mark_durable_sandbox_adopted(
+                    thread_id,
+                    sandbox_id,
+                    owner_user_id=owner_user_id,
+                )
                 return self._register_discovered_sandbox(thread_id, discovered)
 
-            return await self._create_sandbox_async(thread_id, sandbox_id)
+            return await self._create_sandbox_async(
+                thread_id,
+                sandbox_id,
+                user_id=owner_user_id,
+            )
         finally:
-            if locked:
-                await asyncio.to_thread(_unlock_file, lock_file)
-            await asyncio.to_thread(lock_file.close)
+            await asyncio.to_thread(_unlock_and_close_file, lock_file)
 
     def _evict_oldest_warm(self) -> str | None:
         """Destroy the oldest container in the warm pool to free capacity.
@@ -710,14 +1092,21 @@ class AioSandboxProvider(SandboxProvider):
             info, _ = self._warm_pool.pop(oldest_id)
 
         try:
-            self._backend.destroy(info)
+            if not self._destroy_backend_info_if_owned(oldest_id, info):
+                return None
             logger.info(f"Destroyed warm-pool sandbox {oldest_id}")
         except Exception as e:
             logger.error(f"Failed to destroy warm-pool sandbox {oldest_id}: {e}")
             return None
         return oldest_id
 
-    def _create_sandbox(self, thread_id: str | None, sandbox_id: str) -> str:
+    def _create_sandbox(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         """Create a new sandbox via the backend.
 
         Args:
@@ -730,7 +1119,7 @@ class AioSandboxProvider(SandboxProvider):
         Raises:
             RuntimeError: If sandbox creation or readiness check fails.
         """
-        extra_mounts = self._get_extra_mounts(thread_id)
+        extra_mounts = self._get_extra_mounts(thread_id, user_id=user_id)
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -739,18 +1128,53 @@ class AioSandboxProvider(SandboxProvider):
             evicted = self._evict_oldest_warm()
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
-        info = self._backend.create(thread_id, sandbox_id, extra_mounts=extra_mounts or None)
+        with self._lock:
+            if getattr(self, "_shutdown_called", False):
+                raise RuntimeError("AIO sandbox provider has shut down")
+        operation = self._begin_backend_create_operation(
+            thread_id,
+            sandbox_id,
+            owner_user_id=user_id,
+        )
+        try:
+            info = self._backend.create(thread_id, sandbox_id, extra_mounts=extra_mounts or None)
+        except BaseException:
+            self._finish_backend_create_operation(operation)
+            raise
 
         # Wait for sandbox to be ready
         if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
-            self._backend.destroy(info)
+            try:
+                self._backend.destroy(info)
+            finally:
+                self._finish_backend_create_operation(operation)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
-        return self._register_created_sandbox(thread_id, sandbox_id, info)
+        try:
+            registered_id = self._register_created_sandbox(thread_id, sandbox_id, info)
+        except BaseException:
+            try:
+                self._backend.destroy(info)
+            finally:
+                self._finish_backend_create_operation(operation)
+            raise
+        self._mark_durable_sandbox_active(operation)
+        self._finish_backend_create_operation(operation, remove_lifecycle_state=False)
+        return registered_id
 
-    async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str) -> str:
+    async def _create_sandbox_async(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         """Async counterpart to ``_create_sandbox``."""
-        extra_mounts = await asyncio.to_thread(self._get_extra_mounts, thread_id)
+        extra_mounts = await asyncio.to_thread(
+            self._get_extra_mounts,
+            thread_id,
+            user_id=user_id,
+        )
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -759,14 +1183,395 @@ class AioSandboxProvider(SandboxProvider):
             evicted = await asyncio.to_thread(self._evict_oldest_warm)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
-        info = await asyncio.to_thread(self._backend.create, thread_id, sandbox_id, extra_mounts=extra_mounts or None)
+        operation = self._begin_backend_create_operation(
+            thread_id,
+            sandbox_id,
+            owner_user_id=user_id,
+        )
+
+        def create_backend() -> SandboxInfo:
+            info = self._backend.create(
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+            )
+            if self._publish_backend_create_result(operation, info):
+                self._run_worker_create_compensation(operation, info)
+            return info
+
+        create_task = asyncio.create_task(asyncio.to_thread(create_backend))
+        try:
+            info = await asyncio.shield(create_task)
+        except asyncio.CancelledError:
+            self._track_late_create_cleanup(create_task, operation)
+            raise
+        except BaseException:
+            self._finish_backend_create_operation(operation)
+            raise
 
         # Wait for sandbox to be ready without blocking the event loop.
-        if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=60):
-            await asyncio.to_thread(self._backend.destroy, info)
+        try:
+            ready = await wait_for_sandbox_ready_async(info.sandbox_url, timeout=60)
+        except asyncio.CancelledError:
+            self._track_late_create_cleanup(
+                asyncio.create_task(asyncio.sleep(0, result=info)),
+                operation,
+            )
+            raise
+        except BaseException:
+            try:
+                await asyncio.to_thread(self._backend.destroy, info)
+            finally:
+                self._finish_backend_create_operation(operation)
+            raise
+        if not ready:
+            try:
+                await asyncio.to_thread(self._backend.destroy, info)
+            finally:
+                self._finish_backend_create_operation(operation)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
-        return self._register_created_sandbox(thread_id, sandbox_id, info)
+        try:
+            registered_id = self._register_created_sandbox(thread_id, sandbox_id, info)
+        except BaseException:
+            try:
+                await asyncio.to_thread(self._backend.destroy, info)
+            finally:
+                self._finish_backend_create_operation(operation)
+            raise
+        self._mark_durable_sandbox_active(operation)
+        self._finish_backend_create_operation(operation, remove_lifecycle_state=False)
+        return registered_id
+
+    def _begin_backend_create_operation(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        *,
+        owner_user_id: str | None,
+    ) -> _BackendCreateOperation:
+        with self._lock:
+            if getattr(self, "_shutdown_called", False):
+                raise RuntimeError("AIO sandbox provider has shut down")
+            versions = getattr(self, "_sandbox_use_versions", {})
+            lifecycle_state_path: Path | None = None
+            durable_generation = 0
+            token = uuid.uuid4().hex
+            if thread_id is not None:
+                resolved_owner = owner_user_id if owner_user_id is not None else get_effective_user_id()
+                lifecycle_state_path = get_paths().thread_dir(thread_id, user_id=resolved_owner) / f".{sandbox_id}.lifecycle.json"
+                previous_state = _read_sandbox_lifecycle_state(lifecycle_state_path)
+                previous_generation = previous_state.get("generation", 0) if previous_state is not None else 0
+                durable_generation = int(previous_generation) + 1 if isinstance(previous_generation, int) else 1
+                _write_sandbox_lifecycle_state(
+                    lifecycle_state_path,
+                    {
+                        "sandbox_id": sandbox_id,
+                        "thread_id": thread_id,
+                        "owner_user_id": resolved_owner,
+                        "owner_instance_id": self._provider_instance_id(),
+                        "operation_token": token,
+                        "generation": durable_generation,
+                        "state": "creating",
+                        "created_at": time.time(),
+                        "lease_expires_at": time.time() + AIO_LIFECYCLE_LEASE_SECONDS,
+                    },
+                )
+            operation = _BackendCreateOperation(
+                token=token,
+                thread_id=thread_id,
+                sandbox_id=sandbox_id,
+                owner_user_id=(resolved_owner if thread_id is not None else owner_user_id),
+                observed_use_version=versions.get(sandbox_id, 0),
+                durable_generation=durable_generation,
+                lifecycle_state_path=lifecycle_state_path,
+                fallback=_BackendCreateFallback(lock=threading.Lock()),
+            )
+            operations = getattr(self, "_backend_create_operations", None)
+            if operations is None:
+                operations = {}
+                self._backend_create_operations = operations
+            operations[operation.token] = operation
+            return operation
+
+    def _finish_backend_create_operation(
+        self,
+        operation: _BackendCreateOperation,
+        *,
+        remove_lifecycle_state: bool = True,
+    ) -> None:
+        with self._lock:
+            operations = getattr(self, "_backend_create_operations", {})
+            if operations.get(operation.token) is operation:
+                operations.pop(operation.token, None)
+        if remove_lifecycle_state:
+            self._remove_owned_sandbox_lifecycle_state(operation)
+
+    def _mark_durable_sandbox_active(self, operation: _BackendCreateOperation) -> None:
+        """Transfer a successful create from operation ownership to instance ownership."""
+        path = operation.lifecycle_state_path
+        if path is None or not self._operation_owns_durable_state(operation):
+            return
+        previous = _read_sandbox_lifecycle_state(path)
+        now = time.time()
+        _write_sandbox_lifecycle_state(
+            path,
+            {
+                "sandbox_id": operation.sandbox_id,
+                "thread_id": operation.thread_id,
+                "owner_user_id": operation.owner_user_id,
+                "owner_instance_id": self._provider_instance_id(),
+                "operation_token": operation.token,
+                "generation": operation.durable_generation,
+                "state": "active",
+                "created_at": (previous.get("created_at") if previous is not None and isinstance(previous.get("created_at"), (int, float)) else now),
+                "lease_expires_at": now + AIO_LIFECYCLE_LEASE_SECONDS,
+            },
+        )
+        with self._lock:
+            lifecycle_paths = getattr(self, "_sandbox_lifecycle_paths", None)
+            if lifecycle_paths is None:
+                lifecycle_paths = {}
+                self._sandbox_lifecycle_paths = lifecycle_paths
+            lifecycle_paths[operation.sandbox_id] = path
+
+    def _mark_durable_sandbox_adopted(
+        self,
+        thread_id: str,
+        sandbox_id: str,
+        *,
+        owner_user_id: str,
+    ) -> None:
+        """Publish adoption only when no other provider has a live owner lease."""
+        path = get_paths().thread_dir(thread_id, user_id=owner_user_id) / f".{sandbox_id}.lifecycle.json"
+        previous = _read_sandbox_lifecycle_state(path)
+        now = time.time()
+        if previous is not None:
+            previous_owner = previous.get("owner_instance_id")
+            previous_state = previous.get("state")
+            previous_expiry = previous.get("lease_expires_at")
+            live_state = previous_state in {"creating", "active", "adopted"}
+            live_lease = not isinstance(previous_expiry, (int, float)) or previous_expiry > now
+            if previous_owner != self._provider_instance_id() and live_state and live_lease:
+                raise RuntimeError("sandbox is owned by another live provider")
+        previous_generation = previous.get("generation", 0) if previous is not None else 0
+        generation = int(previous_generation) + 1 if isinstance(previous_generation, int) else 1
+        _write_sandbox_lifecycle_state(
+            path,
+            {
+                "sandbox_id": sandbox_id,
+                "thread_id": thread_id,
+                "owner_user_id": owner_user_id,
+                "owner_instance_id": self._provider_instance_id(),
+                "operation_token": uuid.uuid4().hex,
+                "generation": generation,
+                "state": "active",
+                "created_at": now,
+                "lease_expires_at": now + AIO_LIFECYCLE_LEASE_SECONDS,
+            },
+        )
+        with self._lock:
+            lifecycle_paths = getattr(self, "_sandbox_lifecycle_paths", None)
+            if lifecycle_paths is None:
+                lifecycle_paths = {}
+                self._sandbox_lifecycle_paths = lifecycle_paths
+            lifecycle_paths[sandbox_id] = path
+
+    @staticmethod
+    def _operation_owns_durable_state(operation: _BackendCreateOperation) -> bool:
+        path = operation.lifecycle_state_path
+        if path is None:
+            return True
+        state = _read_sandbox_lifecycle_state(path)
+        return state is not None and state.get("operation_token") == operation.token and state.get("generation") == operation.durable_generation
+
+    def _mark_sandbox_cleanup_pending(self, operation: _BackendCreateOperation) -> None:
+        """Persist cancellation intent before background ownership is handed off."""
+        path = operation.lifecycle_state_path
+        if path is None or not self._operation_owns_durable_state(operation):
+            return
+        previous = _read_sandbox_lifecycle_state(path)
+        created_at = previous.get("created_at") if previous is not None else None
+        now = time.time()
+        _write_sandbox_lifecycle_state(
+            path,
+            {
+                "sandbox_id": operation.sandbox_id,
+                "thread_id": operation.thread_id,
+                "owner_user_id": operation.owner_user_id,
+                "owner_instance_id": self._provider_instance_id(),
+                "operation_token": operation.token,
+                "generation": operation.durable_generation,
+                "state": "cleanup_pending",
+                "created_at": created_at if isinstance(created_at, (int, float)) else now,
+                "cleanup_not_before": now + AIO_CLEANUP_PENDING_MATERIALIZATION_GRACE_SECONDS,
+            },
+        )
+
+    @classmethod
+    def _remove_owned_sandbox_lifecycle_state(cls, operation: _BackendCreateOperation) -> None:
+        path = operation.lifecycle_state_path
+        if path is not None and cls._operation_owns_durable_state(operation):
+            path.unlink(missing_ok=True)
+
+    def _track_late_create_cleanup(
+        self,
+        create_task: asyncio.Task[SandboxInfo],
+        operation: _BackendCreateOperation,
+    ) -> None:
+        """Keep cancellation compensation alive until backend capacity is known."""
+        self._mark_sandbox_cleanup_pending(operation)
+        cleanup_task = asyncio.create_task(self._destroy_late_created_sandbox(create_task, operation))
+        tasks = getattr(self, "_late_create_cleanup_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._late_create_cleanup_tasks = tasks
+        tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(tasks.discard)
+
+    @staticmethod
+    def _publish_backend_create_result(
+        operation: _BackendCreateOperation,
+        info: SandboxInfo,
+    ) -> bool:
+        """Return whether the backend worker owns cancelled cleanup fallback."""
+        fallback = operation.fallback
+        with fallback.lock:
+            fallback.info = info
+            if not fallback.requested or fallback.claimed:
+                return False
+            fallback.claimed = True
+            return True
+
+    @staticmethod
+    def _request_worker_create_compensation(
+        operation: _BackendCreateOperation,
+    ) -> SandboxInfo | None:
+        """Atomically hand a cancelled cleanup to the worker or a daemon."""
+        fallback = operation.fallback
+        with fallback.lock:
+            fallback.requested = True
+            if fallback.info is None or fallback.claimed:
+                return None
+            fallback.claimed = True
+            return fallback.info
+
+    def _run_worker_create_compensation(
+        self,
+        operation: _BackendCreateOperation,
+        info: SandboxInfo,
+    ) -> None:
+        succeeded = False
+        try:
+            self._compensate_late_created_sandbox_sync(operation, info)
+            succeeded = True
+        except Exception:
+            logger.exception("Backend worker failed to compensate late-created sandbox capacity")
+        finally:
+            if succeeded:
+                self._finish_backend_create_operation(operation)
+
+    async def _destroy_late_created_sandbox(
+        self,
+        create_task: asyncio.Task[SandboxInfo],
+        operation: _BackendCreateOperation,
+    ) -> None:
+        try:
+            done, _pending = await asyncio.wait(
+                {create_task},
+                timeout=AIO_LATE_CREATE_COMPENSATION_TIMEOUT_SECONDS,
+            )
+            if not done:
+                logger.error("Sandbox backend create exceeded the compensation deadline; ownership remains tracked until the backend call finishes")
+            info = await asyncio.shield(create_task)
+        except asyncio.CancelledError:
+            fallback_info = self._request_worker_create_compensation(operation)
+            if fallback_info is not None:
+                threading.Thread(
+                    target=self._run_worker_create_compensation,
+                    args=(operation, fallback_info),
+                    name="sandbox-create-compensation",
+                    daemon=True,
+                ).start()
+            raise
+        except Exception:
+            self._finish_backend_create_operation(operation)
+            return
+        if not isinstance(info, SandboxInfo):
+            self._finish_backend_create_operation(operation)
+            return
+        try:
+            await self._compensate_late_created_sandbox(operation, info)
+        except asyncio.CancelledError:
+            # Compensation defers cancellation until its sole fenced worker
+            # exits; a second fallback here would duplicate backend.destroy.
+            self._finish_backend_create_operation(operation)
+            raise
+        except Exception:
+            logger.exception("Failed to destroy sandbox capacity created after acquisition cancellation")
+            return
+        self._finish_backend_create_operation(operation)
+
+    async def _compensate_late_created_sandbox(
+        self,
+        operation: _BackendCreateOperation,
+        info: SandboxInfo,
+    ) -> None:
+        """Await the sole fenced compensation worker, even when cancelled."""
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                self._compensate_late_created_sandbox_sync,
+                operation,
+                info,
+            )
+        )
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # ``to_thread`` cannot interrupt the backend call. Continue
+            # awaiting this same worker so it retains the thread/file locks
+            # until destroy really returns, then deliver cancellation.
+            await asyncio.shield(worker)
+            raise
+
+    def _compensate_late_created_sandbox_sync(
+        self,
+        operation: _BackendCreateOperation,
+        info: SandboxInfo,
+    ) -> None:
+        """Synchronous fallback when an event loop can no longer own cleanup."""
+        thread_lock = self._get_thread_lock(operation.thread_id) if operation.thread_id else None
+        if thread_lock is not None:
+            thread_lock.acquire()
+        lock_file: TextIO | None = None
+        try:
+            if operation.thread_id is not None:
+                paths = get_paths()
+                owner_user_id = operation.owner_user_id if operation.owner_user_id is not None else get_effective_user_id()
+                paths.ensure_thread_dirs(operation.thread_id, user_id=owner_user_id)
+                lock_path = paths.thread_dir(operation.thread_id, user_id=owner_user_id) / f"{operation.sandbox_id}.lock"
+                lock_file = _open_and_lock_file(lock_path)
+            with self._lock:
+                operations = getattr(self, "_backend_create_operations", {})
+                if operations.get(operation.token) is not operation:
+                    return
+                mapped_id = self._thread_sandboxes.get(operation.thread_id) if operation.thread_id else None
+                versions = getattr(self, "_sandbox_use_versions", {})
+                adopted = mapped_id == info.sandbox_id and (info.sandbox_id in self._sandboxes or info.sandbox_id in self._sandbox_infos or info.sandbox_id in self._warm_pool)
+                accepted_after_start = versions.get(info.sandbox_id, 0) != operation.observed_use_version
+            if adopted or accepted_after_start or not self._operation_owns_durable_state(operation):
+                logger.info(
+                    "Preserving worker-completed sandbox adopted by a successor",
+                    extra={"sandbox_id": info.sandbox_id, "operation_token": operation.token},
+                )
+                return
+            self._backend.destroy(info)
+            self._remove_owned_sandbox_lifecycle_state(operation)
+        finally:
+            if lock_file is not None:
+                _unlock_and_close_file(lock_file)
+            if thread_lock is not None:
+                thread_lock.release()
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.
@@ -835,8 +1640,8 @@ class AioSandboxProvider(SandboxProvider):
                 self._warm_pool.pop(sandbox_id, None)
 
         if info:
-            self._backend.destroy(info)
-            logger.info(f"Destroyed sandbox {sandbox_id}")
+            if self._destroy_backend_info_if_owned(sandbox_id, info):
+                logger.info(f"Destroyed sandbox {sandbox_id}")
 
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
@@ -855,6 +1660,12 @@ class AioSandboxProvider(SandboxProvider):
             logger.info("Stopped idle checker thread")
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
+        pending_creates = len(getattr(self, "_backend_create_operations", {}))
+        if pending_creates:
+            logger.warning(
+                "Shutdown observed %s unfinished sandbox backend create operation(s); their completion callbacks retain compensation ownership",
+                pending_creates,
+            )
 
         for sandbox_id in sandbox_ids:
             try:
@@ -864,7 +1675,7 @@ class AioSandboxProvider(SandboxProvider):
 
         for sandbox_id, (info, _) in warm_items:
             try:
-                self._backend.destroy(info)
-                logger.info(f"Destroyed warm-pool sandbox {sandbox_id} during shutdown")
+                if self._destroy_backend_info_if_owned(sandbox_id, info):
+                    logger.info(f"Destroyed warm-pool sandbox {sandbox_id} during shutdown")
             except Exception as e:
                 logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} during shutdown: {e}")

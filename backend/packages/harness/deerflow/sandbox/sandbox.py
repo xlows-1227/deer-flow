@@ -1,3 +1,4 @@
+import shlex
 from abc import ABC, abstractmethod
 
 from deerflow.sandbox.search import GrepMatch
@@ -124,3 +125,14 @@ class Sandbox(ABC):
         """
         with open(source_path, "rb") as f:
             self.update_file(path, f.read())
+
+    def delete_file(self, path: str) -> None:
+        """Delete a file used by cancellation and admission rollback paths.
+
+        Args:
+            path: Absolute sandbox path selected by trusted runtime code.
+
+        Raises:
+            OSError: If the sandbox cannot remove the file.
+        """
+        self.execute_command(f"rm -f -- {shlex.quote(path)}")

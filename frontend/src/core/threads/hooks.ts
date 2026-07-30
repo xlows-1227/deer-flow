@@ -27,6 +27,7 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage } from "./api";
+import { findRunToRejoin } from "./rejoin";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -662,6 +663,9 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const activeRunThreadIdRef = useRef<string | null>(null);
   const startedRef = useRef(false);
+  // Suppress auto-rejoin after an intentional stop so long tool calls
+  // (e.g. query_database) are not reattached ~500ms later.
+  const suppressAutoRejoinRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const listeners = useRef({
     onSend,
@@ -695,6 +699,9 @@ export function useThreadStream({
     ) {
       activeRunThreadIdRef.current = null;
     }
+    // Switching chats clears stop suppression so scheduled/other-client runs
+    // can still be auto-joined on the newly selected thread.
+    suppressAutoRejoinRef.current = false;
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -899,9 +906,9 @@ export function useThreadStream({
         ) {
           return;
         }
-        const activeRun = runs.find(
-          (r) => r.status === "pending" || r.status === "running",
-        );
+        const activeRun = findRunToRejoin(runs, {
+          suppressRejoin: suppressAutoRejoinRef.current,
+        });
         if (
           activeRun &&
           threadRef.current &&
@@ -945,9 +952,9 @@ export function useThreadStream({
         const apiClient = getAPIClient(isMock);
         const runs = await apiClient.runs.list(streamThreadId);
         if (cancelled || !isCurrentStreamThread(streamThreadId)) return;
-        const activeRun = runs.find(
-          (r) => r.status === "pending" || r.status === "running",
-        );
+        const activeRun = findRunToRejoin(runs, {
+          suppressRejoin: suppressAutoRejoinRef.current,
+        });
         if (
           activeRun &&
           threadRef.current &&
@@ -1056,6 +1063,8 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+      // A new user turn may need auto-rejoin again if the SSE drops mid-run.
+      suppressAutoRejoinRef.current = false;
 
       const text = message.text.trim();
 
@@ -1292,11 +1301,19 @@ export function useThreadStream({
       )
     : [];
 
+  const stop = useCallback(async () => {
+    // Set before awaiting stop so the isLoading→false rejoin effect cannot
+    // race cancel and reattach a still-running backend tool call.
+    suppressAutoRejoinRef.current = true;
+    await thread.stop();
+  }, [thread]);
+
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
     messages: mergedMessages,
+    stop,
   } as typeof thread;
 
   return {

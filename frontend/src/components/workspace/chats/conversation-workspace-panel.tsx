@@ -352,7 +352,10 @@ export function ConversationWorkspacePanel({
     );
 
   return (
-    <div className="bg-background flex size-full min-w-0 flex-col border-l border-slate-200">
+    <div
+      id="artifacts"
+      className="bg-background flex size-full min-w-0 flex-col border-l border-slate-200"
+    >
       <header className="bg-background flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-800">工作空间</h2>
         <button

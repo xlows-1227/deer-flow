@@ -9,6 +9,10 @@ DATABASE_QUERY = "database.query"
 DATABASE_SCHEMA_INSPECT = "database.schema.inspect"
 DATABASE_TABLE_SAMPLE = "database.table.sample"
 
+ONEDATA_LIST_APIS = "onedata.list_apis"
+ONEDATA_GET_PARAMS = "onedata.get_params"
+ONEDATA_CALL_API = "onedata.call_api"
+
 
 class ConnectorTypeDefinition(BaseModel):
     type: str
@@ -85,6 +89,9 @@ class ConnectorRuntimeContext(BaseModel):
     agent_id: str | None = None
     skill_name: str | None = None
     connector_ids: list[str] | None = None
+    # ``None`` means an ordinary owner/grant-authorized runtime. A mapping is
+    # trusted Release authority and restricts calls to exact connector/capability pairs.
+    connector_capabilities: dict[str, list[str]] | None = None
 
 
 class AuthorizationDecision(BaseModel):

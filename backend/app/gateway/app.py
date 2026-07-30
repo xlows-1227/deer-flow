@@ -15,8 +15,10 @@ from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
 from app.gateway.effective_config_middleware import EffectiveConfigMiddleware
+from app.gateway.external.agent_auth import AgentAPIAuthMiddleware
 from app.gateway.external.audit import ExternalAuditMiddleware
 from app.gateway.routers import (
+    agent_public_api,
     agents,
     api_keys,
     artifacts,
@@ -30,6 +32,9 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    published_agent_channels,
+    published_agent_keys,
+    published_agents,
     runs,
     scheduler,
     shares,
@@ -251,6 +256,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning("Flash direct path warm-up failed (non-fatal)", exc_info=True)
 
         # Start IM channel service if any channels are configured
+        channel_service = None
+        feishu_supervisor = None
         try:
             from app.channels.service import start_channel_service
 
@@ -259,7 +266,74 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
+        # DB-backed Feishu bindings share the legacy service bus/dispatcher,
+        # but each binding owns an isolated channel instance and lifecycle.
+        app.state.agent_channel_secret_store = None
+        app.state.feishu_supervisor = None
+        app.state.published_channel_runtime = None
+        if channel_service is not None and getattr(app.state, "agent_channel_repo", None) is not None:
+            try:
+                from app.channels.published_runtime import GatewayPublishedRunExecutor, PublishedChannelRuntime
+
+                app.state.published_channel_runtime = PublishedChannelRuntime(
+                    mapping_store=app.state.channel_mapping_store,
+                    resolver=app.state.published_agent_resolver,
+                    quota_ledger=app.state.quota_ledger,
+                    executor=GatewayPublishedRunExecutor(app),
+                )
+                channel_service.configure_published_runtime(app.state.published_channel_runtime)
+                logger.info("Published channel execution runtime configured")
+            except Exception:
+                logger.exception("Published channel execution runtime unavailable")
+
+            try:
+                from app.channels.supervisor import FeishuSupervisor
+                from deerflow.publishing.secret_store import get_secret_store
+
+                app.state.agent_channel_secret_store = get_secret_store()
+                feishu_supervisor = FeishuSupervisor(
+                    app.state.agent_channel_repo,
+                    app.state.agent_channel_secret_store,
+                    channel_service.bus,
+                    channel_registry=channel_service,
+                    event_deduplicator=app.state.channel_event_repo,
+                )
+                app.state.feishu_supervisor = feishu_supervisor
+                await feishu_supervisor.load_active_bindings()
+                logger.info("Published Feishu Supervisor started with %d binding(s)", len(feishu_supervisor.running_binding_ids))
+            except Exception as exc:
+                # A missing deployment encryption key disables only DB-backed
+                # Feishu integrations; legacy config.yaml channels and Agent
+                # publication remain available.
+                logger.warning("Published Feishu Supervisor unavailable: %s", type(exc).__name__)
+                app.state.agent_channel_secret_store = None
+                app.state.feishu_supervisor = None
+
         yield
+
+        if feishu_supervisor is not None:
+            try:
+                from app.channels.supervisor import RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS
+
+                supervisor_shutdown_timeout = RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS + _SHUTDOWN_HOOK_TIMEOUT_SECONDS
+                await asyncio.wait_for(
+                    feishu_supervisor.shutdown(),
+                    timeout=supervisor_shutdown_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Published Feishu Supervisor shutdown exceeded %.1fs",
+                    supervisor_shutdown_timeout,
+                )
+            except Exception:
+                logger.exception("Failed to stop Published Feishu Supervisor")
+
+        try:
+            from app.channels.feishu import stop_published_attachment_backlog_scanner
+
+            await asyncio.to_thread(stop_published_attachment_backlog_scanner)
+        except Exception:
+            logger.exception("Failed to stop Published Feishu attachment backlog scanner")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -306,6 +380,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop daily memory rollup loop")
+
+        quota_tasks = set(getattr(app.state, "agent_quota_tasks", ()) or ())
+        if quota_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*quota_tasks, return_exceptions=True),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # Every executing published Run is durably bound to a pending
+                # reservation, so startup recovery can safely resume any task
+                # that does not finish within the bounded shutdown window.
+                logger.warning(
+                    "Published-Agent quota settlement drain exceeded %.1fs; deferring to startup recovery.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
 
     logger.info("Shutting down API Gateway")
 
@@ -467,6 +557,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # External API Key auth must execute before CSRF and browser-session auth.
     app.add_middleware(ExternalAPIAuthMiddleware)
+    app.add_middleware(AgentAPIAuthMiddleware)
     app.add_middleware(ExternalAuditMiddleware)
 
     # CORS: the unified nginx endpoint is same-origin by default. Split-origin
@@ -531,6 +622,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Connector Platform API is mounted at /api/connectors and /api/connector-types
     app.include_router(connectors.router)
+
+    # Published-agent control plane (draft CRUD). Mounted at /api/published-agents.
+    app.include_router(published_agents.router)
+    app.include_router(published_agent_channels.router)
+    app.include_router(published_agent_keys.router)
+    app.include_router(agent_public_api.router)
 
     # Assistants compatibility API (LangGraph Platform stub)
     app.include_router(assistants_compat.router)

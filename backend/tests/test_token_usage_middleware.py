@@ -2,12 +2,16 @@
 
 import importlib
 import logging
+from dataclasses import dataclass, replace
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, ToolMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
+    PublishedRunTokenLimitError,
     TokenUsageMiddleware,
 )
 
@@ -18,7 +22,145 @@ def _make_runtime():
     return runtime
 
 
+class _TokenCountingModel:
+    model_fields = {"max_tokens": object()}
+    max_tokens = 20
+
+    def get_num_tokens_from_messages(self, messages):
+        del messages
+        return 3
+
+    def get_num_tokens(self, text):
+        return len(text)
+
+
+class _MessageCountingModel(_TokenCountingModel):
+    def get_num_tokens_from_messages(self, messages):
+        return len(messages)
+
+
+class _UnboundedModel:
+    model_fields = {}
+
+    def get_num_tokens_from_messages(self, messages):
+        del messages
+        return 3
+
+
+@dataclass(frozen=True)
+class _ModelRequest:
+    model: object
+    messages: list
+    system_message: object | None = None
+    tools: list | None = None
+    model_settings: dict | None = None
+    runtime: object | None = None
+
+    def override(self, **overrides):
+        return replace(self, **overrides)
+
+
 class TestTokenUsageMiddleware:
+    def test_loop_warning_is_counted_before_final_output_cap(self):
+        runtime = _make_runtime()
+        loop = LoopDetectionMiddleware(warn_threshold=2, hard_limit=10)
+        repeated_call = {"name": "bash", "args": {"command": "ls"}}
+        for index in range(2):
+            loop.after_model(
+                {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[{**repeated_call, "id": f"call-{index}"}],
+                        )
+                    ]
+                },
+                runtime,
+            )
+        budget = TokenUsageMiddleware(max_tokens_per_run=10)
+        request = _ModelRequest(
+            model=_MessageCountingModel(),
+            messages=[
+                HumanMessage(content="current"),
+                AIMessage(content="", tool_calls=[{**repeated_call, "id": "call-1"}]),
+                ToolMessage(content="result", tool_call_id="call-1"),
+            ],
+            tools=[],
+            model_settings={},
+            runtime=runtime,
+        )
+
+        bounded = loop.wrap_model_call(
+            request,
+            lambda final_request: budget.wrap_model_call(final_request, lambda value: value),
+        )
+
+        assert bounded.messages[-1].name == "loop_warning"
+        assert bounded.model_settings["max_tokens"] == 6
+
+    def test_published_run_caps_each_model_call_to_remaining_budget(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        request = _ModelRequest(
+            model=_TokenCountingModel(),
+            messages=[
+                HumanMessage(content="current"),
+                AIMessage(content="step", usage_metadata={"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}),
+                ToolMessage(content="result", tool_call_id="call-1"),
+            ],
+            tools=[],
+            model_settings={},
+        )
+
+        bounded = middleware.wrap_model_call(request, lambda value: value)
+
+        assert bounded.model_settings["max_tokens"] == 3
+
+    def test_published_run_rejects_models_without_an_output_token_cap(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        request = _ModelRequest(
+            model=_UnboundedModel(),
+            messages=[HumanMessage(content="current")],
+            tools=[],
+            model_settings={},
+        )
+
+        with pytest.raises(PublishedRunTokenLimitError, match="does not support"):
+            middleware.wrap_model_call(request, lambda value: value)
+
+    def test_published_run_stops_when_cumulative_usage_exceeds_limit(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        messages = [
+            AIMessage(content="step", usage_metadata={"input_tokens": 3, "output_tokens": 3, "total_tokens": 6}),
+            AIMessage(content="done", usage_metadata={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}),
+        ]
+
+        with pytest.raises(PublishedRunTokenLimitError):
+            middleware.after_model({"messages": messages}, _make_runtime())
+
+    def test_published_run_does_not_execute_tools_after_consuming_exact_limit(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-1", "name": "web_search", "args": {"query": "x"}}],
+            usage_metadata={"input_tokens": 6, "output_tokens": 4, "total_tokens": 10},
+        )
+
+        with pytest.raises(PublishedRunTokenLimitError):
+            middleware.after_model({"messages": [message]}, _make_runtime())
+
+    def test_published_run_limit_ignores_previous_conversation_turns(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=10)
+        messages = [
+            HumanMessage(content="previous"),
+            AIMessage(content="old answer", usage_metadata={"input_tokens": 50, "output_tokens": 50, "total_tokens": 100}),
+            HumanMessage(content="current"),
+            AIMessage(content="new answer", usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}),
+        ]
+
+        result = middleware.after_model({"messages": messages}, _make_runtime())
+
+        assert result is not None
+
     def test_logs_cache_token_details(self, caplog):
         middleware = TokenUsageMiddleware()
         message = AIMessage(

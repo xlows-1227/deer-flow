@@ -22,6 +22,6 @@ class ConnectorDefaultPolicyConfig(BaseModel):
 
 class ConnectorsConfig(BaseModel):
     enabled: bool = Field(default=False)
-    enabled_types: list[str] = Field(default_factory=lambda: ["mysql", "starrocks"])
+    enabled_types: list[str] = Field(default_factory=lambda: ["mysql", "starrocks", "onedata"])
     secret_store: ConnectorSecretStoreConfig = Field(default_factory=ConnectorSecretStoreConfig)
     default_policy: ConnectorDefaultPolicyConfig = Field(default_factory=ConnectorDefaultPolicyConfig)

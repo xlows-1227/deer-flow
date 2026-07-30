@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
+from app.gateway.draft_sandbox import DRAFT_SANDBOX_METADATA_KEYS
 from app.gateway.skill_redaction import redact_channel_values, redact_user_payload
 from app.gateway.thread_service import create_empty_thread
 from app.gateway.utils import sanitize_log_param
@@ -43,7 +44,7 @@ router = APIRouter(prefix="/api/threads", tags=["threads"])
 # owner identity through the API surface. Defense-in-depth — the
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"} | DRAFT_SANDBOX_METADATA_KEYS)
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:

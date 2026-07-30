@@ -16,6 +16,7 @@ from deerflow.runtime.user_context import (
     get_effective_user_id,
     require_current_user,
     reset_current_user,
+    runtime_user_scope,
     set_current_user,
 )
 
@@ -35,6 +36,13 @@ def test_set_and_reset_roundtrip():
         assert get_current_user() is user
     finally:
         reset_current_user(token)
+    assert get_current_user() is None
+
+
+@pytest.mark.no_auto_user
+def test_runtime_user_scope_sets_and_restores_background_owner():
+    with runtime_user_scope("published-owner"):
+        assert get_effective_user_id() == "published-owner"
     assert get_current_user() is None
 
 

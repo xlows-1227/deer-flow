@@ -18,6 +18,23 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: deerflow
+          POSTGRES_PASSWORD: deerflow
+          POSTGRES_DB: deerflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U deerflow -d deerflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://deerflow:deerflow@localhost:5432/deerflow
+      REQUIRE_POSTGRES_TESTS: "1"
 
     steps:
       - name: Checkout
@@ -33,7 +50,7 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: uv sync --group dev
+        run: uv sync --group dev --extra postgres
 
       - name: Run unit tests of backend
         working-directory: backend
