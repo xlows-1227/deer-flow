@@ -110,7 +110,13 @@ async def sample_database_table_tool(runtime: Runtime, connector_id: str, schema
 
 
 @tool("call_connector_action", parse_docstring=True)
-async def call_connector_action_tool(runtime: Runtime, connector_id: str, capability: str, args: dict | None = None, reason: str = "") -> dict:
+async def call_connector_action_tool(
+    runtime: Runtime,
+    connector_id: str,
+    capability: str,
+    action_args: dict | None = None,
+    reason: str = "",
+) -> dict:
     """Call an authorized connector capability through the generic connector action interface.
 
     Use this for non-database connector categories or future capabilities that
@@ -120,7 +126,7 @@ async def call_connector_action_tool(runtime: Runtime, connector_id: str, capabi
     Args:
         connector_id: Connector id returned by list_connectors.
         capability: Capability to invoke, such as document.read or api.call.
-        args: Capability-specific arguments.
+        action_args: Capability-specific arguments (for example apiId or paramData).
         reason: Short reason for audit logging.
     """
     try:
@@ -129,7 +135,7 @@ async def call_connector_action_tool(runtime: Runtime, connector_id: str, capabi
         result = await make_connector_service().execute_connector_action(
             connector_id,
             capability=capability,
-            args=args or {},
+            args=action_args or {},
             reason=reason,
             context=context,
         )

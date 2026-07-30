@@ -23,7 +23,8 @@ class ConnectorInstanceRow(Base):
     type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
     config_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    credential_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Fernet ciphertext for inline credentials is typically >128 chars.
+    credential_ref: Mapped[str] = mapped_column(Text, nullable=False)
     credential_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="env")
     # Plaintext account name for inline credentials. Kept separate from the
     # encrypted ``credential_ref`` so the edit form can show who this

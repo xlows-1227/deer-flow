@@ -65,3 +65,4 @@ chrome-mac-arm64.zip
 scripts/filebrowser-image-transfer/01-test-package-upload.sh
 scripts/filebrowser-image-transfer/02-local-relay.sh
 .superpowers/
+data/postgres/

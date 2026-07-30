@@ -68,8 +68,8 @@ ONEDATA_API_BASE_URL=http://share-onedata-api-ent4.prd.yumc.local/v1
 Create an `onedata` connector with inline `secretId` / `secretKey` (stored as credential username/password). Runtime:
 
 1. `call_connector_action` + `onedata.list_apis`
-2. `call_connector_action` + `onedata.get_params` (`args.apiId`) — response includes `calUrl`
-3. `call_connector_action` + `onedata.call_api` (`args.calUrl`, `args.paramData`, optional paging fields)
+2. `call_connector_action` + `onedata.get_params` (`action_args.apiId`) — response includes `calUrl`
+3. `call_connector_action` + `onedata.call_api` (`action_args.calUrl`, `action_args.paramData`, optional paging fields)
 
 Business calls POST directly to `calUrl`. Request headers use `sign=<secretKey>` (no HMAC). Field encryption/decryption is not implemented.
 
@@ -78,16 +78,25 @@ Business calls POST directly to `calUrl`. Request headers use `sign=<secretKey>`
 When the real OneData discovery/business APIs are not reachable, start a local mock from `backend/`:
 
 ```bash
+# Local `make dev` (Gateway on host):
 PYTHONPATH=. uv run python scripts/mock_onedata_server.py
+
+# Docker Compose Gateway (container must reach host mock):
+PYTHONPATH=. uv run python scripts/mock_onedata_server.py \
+  --public-base http://host.docker.internal:18087
 ```
 
-Then set:
+Then set in `.env` (and restart Gateway so it reloads env):
 
 ```env
-ONEDATA_API_BASE_URL=http://127.0.0.1:18087/v1
+# Local Gateway:
+# ONEDATA_API_BASE_URL=http://127.0.0.1:18087/v1
+
+# Docker Compose Gateway:
+ONEDATA_API_BASE_URL=http://host.docker.internal:18087/v1
 ```
 
-Use connector credentials `secretId=mock-secret-id` and `secretKey=mock-secret-key`. The mock exposes two sample APIs (`1001` sales, `1002` store info); `get_params` returns `calUrl` pointing back at the same process.
+Use connector credentials `secretId=mock-secret-id` and `secretKey=mock-secret-key`. The mock exposes two sample APIs (`1001` sales, `1002` store info); `get_params` returns `calUrl` pointing back at the same process. `--public-base` must match the URL Gateway can reach, otherwise business `call_api` will fail the same way as discovery.
 
 ## API
 

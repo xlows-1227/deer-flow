@@ -65,10 +65,12 @@ function SkillSettingsList({
   const [filter, setFilter] = useState<string>("public");
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const { mutate: enableSkill } = useEnableSkill();
-  const filteredSkills = useMemo(
-    () => skills.filter((skill) => skill.category === filter),
-    [skills, filter],
-  );
+  const filteredSkills = useMemo(() => {
+    const visibleSkills = isAdmin
+      ? skills
+      : skills.filter((skill) => skill.enabled || skill.category === "custom");
+    return visibleSkills.filter((skill) => skill.category === filter);
+  }, [filter, isAdmin, skills]);
   const handleCreateSkill = () => {
     onClose?.();
     router.push("/workspace/chats/new?mode=skill");

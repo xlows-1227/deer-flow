@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.connectors.errors import ConnectorAuthorizationError
-from deerflow.connectors.tools import _context, _ensure_selected
+from deerflow.connectors.tools import _context, _ensure_selected, call_connector_action_tool
 from deerflow.tools.tools import get_available_tools
 
 
@@ -33,6 +33,17 @@ def test_connector_tools_loaded_when_enabled(_mock_bash):
 
     names = {tool.name for tool in tools}
     assert {"list_connectors", "inspect_connector", "query_database", "sample_database_table", "call_connector_action"} <= names
+
+
+def test_call_connector_action_schema_avoids_reserved_args_name():
+    """LangChain remaps a parameter named ``args`` to ``v__args`` and breaks invocation."""
+    schema = call_connector_action_tool.args
+    assert "args" not in schema
+    assert "v__args" not in schema
+    assert "action_args" in schema
+    action_args = schema["action_args"]
+    # object | null is encoded as anyOf in the tool schema
+    assert action_args.get("type") == "object" or any(option.get("type") == "object" for option in action_args.get("anyOf", []))
 
 
 def test_connector_tool_context_reads_selected_connector_ids():

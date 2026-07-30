@@ -3,8 +3,15 @@
 Run from backend/:
     PYTHONPATH=. uv run python scripts/mock_onedata_server.py
 
+Docker Compose Gateway (container → host mock):
+    PYTHONPATH=. uv run python scripts/mock_onedata_server.py \\
+      --public-base http://host.docker.internal:18087
+
 Then point DeerFlow at it:
+    # local Gateway
     export ONEDATA_API_BASE_URL=http://127.0.0.1:18087/v1
+    # Docker Gateway
+    export ONEDATA_API_BASE_URL=http://host.docker.internal:18087/v1
 
 Create an onedata connector with:
     secretId  = mock-secret-id
@@ -24,7 +31,7 @@ from fastapi.responses import JSONResponse
 SUCCESS_CODE = -9999800
 MOCK_SECRET_ID = "mock-secret-id"
 MOCK_SECRET_KEY = "mock-secret-key"
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18087
 
 app = FastAPI(title="OneData Mock", version="0.1.0")
@@ -260,9 +267,15 @@ def main() -> None:
         help="Base URL embedded into calUrl (default: http://{host}:{port})",
     )
     args = parser.parse_args()
-    _public_base = (args.public_base or f"http://{args.host}:{args.port}").rstrip("/")
+    if args.public_base:
+        _public_base = args.public_base.rstrip("/")
+    elif args.host in {"0.0.0.0", "::"}:
+        _public_base = f"http://127.0.0.1:{args.port}"
+    else:
+        _public_base = f"http://{args.host}:{args.port}"
 
-    print(f"OneData mock listening on {_public_base}")
+    print(f"OneData mock listening on http://{args.host}:{args.port}")
+    print(f"  public calUrl base: {_public_base}")
     print(f"  ONEDATA_API_BASE_URL={_public_base}/v1")
     print(f"  secretId={MOCK_SECRET_ID}")
     print(f"  secretKey={MOCK_SECRET_KEY}")
