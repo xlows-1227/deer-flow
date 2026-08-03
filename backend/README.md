@@ -92,7 +92,7 @@ Published Agent 公共运行时会从不可变 Skill revision 的 `SKILL.md` 派
 
 Owner 运维查询支持按 `api` / `feishu` 来源及 credential ID 聚合用量。配额策略接口明确区分平台默认/硬上限、草稿 owner override 与发布后的预期生效值；空 override 表示继承而不是无限制。拒绝审计只对白名单元数据做序列化，并在仓储查询应用 `status_code >= 400` 后再执行 limit。
 
-冻结 Skill 的完整 `SKILL.md` 正文也会直接组合进 Published Run 的可信指令；正文与 `allowed-tools` 都来自同一个不可变 revision，跨 owner 的 private revision 会 fail closed。Published 模式禁用 Title/Summarization 辅助模型，并让 token 预算在 loop warning 等请求改写之后执行；计费用量即使在全局 `run_events.track_token_usage=false` 时也强制采集。Quota reserve 事务会在 Run 持久化之前预绑定服务端 `run_id`，随后挂接带有界重试的结算任务；Gateway shutdown 会限时排空，重启与周期恢复会从 pending 绑定记录幂等补写 usage，超过 max-run deadline 的共享数据库 orphan 按 timeout 收敛。如果预绑定后进程在 Run 落库前退出，恢复任务会在 deadline 后确认 Run 不存在，再释放 reservation 与 owner-scoped 未完成幂等 claim。启动阶段取消会删除尚未绑定 worker 的 pending Run，并释放相同资源。
+冻结 Skill 的完整 `SKILL.md` 正文也会直接组合进 Published Run 的可信指令；正文与 `allowed-tools` 都来自同一个不可变 revision，跨 owner 的 private revision 会 fail closed。Published 模式禁用 Title/Summarization 辅助模型，并让 token 预算在 loop warning 等请求改写之后执行；DeepSeek 兼容网关使用自定义模型别名时，会对规范化消息载荷执行保守 Token 估算。无法完成的配额预检会让 Run 失败，不会再被 LLM 错误处理中间件包装成成功但无正文的响应。计费用量即使在全局 `run_events.track_token_usage=false` 时也强制采集。Quota reserve 事务会在 Run 持久化之前预绑定服务端 `run_id`，随后挂接带有界重试的结算任务；Gateway shutdown 会限时排空，重启与周期恢复会从 pending 绑定记录幂等补写 usage，超过 max-run deadline 的共享数据库 orphan 按 timeout 收敛。如果预绑定后进程在 Run 落库前退出，恢复任务会在 deadline 后确认 Run 不存在，再释放 reservation 与 owner-scoped 未完成幂等 claim。启动阶段取消会删除尚未绑定 worker 的 pending Run，并释放相同资源。
 
 ---
 
@@ -242,7 +242,7 @@ Scanner shutdown treats exceptions from `is_alive()`, `terminate()`, `join()`, a
 
 Gateway stream consumption is decoupled from Feishu card I/O through a one-item latest-progress queue. Slow intermediate progress may be dropped after the 250 ms drain window, but final values and artifacts are drained independently. Once a quota reservation is bound to a started Run, ordinary release cannot free it: every post-start cancellation/finalization failure becomes detached recovery, while Run cancellation and worker join each have a short cleanup deadline so a non-cooperative worker cannot hold the dispatcher forever.
 
-Gateway startup automatically upgrades persistence to Alembic head `2026_07_17_channel_deletion_state` (`agent_channels` deletion/runtime-stop and health-revision state, `agent_channel_secret_ingests`, conversation mappings, and event deduplication). Diagnose an unhealthy binding through `GET .../channels` and `POST .../channels/{binding_id}/test`, then check Gateway logs for the redacted error class. Focused regression:
+Gateway startup automatically upgrades persistence to Alembic head `2026_07_30_widen_cred_ref` (`agent_channels` deletion/runtime-stop and health-revision state, `agent_channel_secret_ingests`, conversation mappings, event deduplication, Agent operations metrics, and widened Connector credential references). The migration graph places the existing `2026_07_13_file_shares` revision before Published Agent migrations, allowing databases stamped by the file-sharing branch to continue into the current channel schema instead of failing startup migration and returning HTTP 500 from channel endpoints. Diagnose an unhealthy binding through `GET .../channels` and `POST .../channels/{binding_id}/test`, then check Gateway logs for the redacted error class. Focused regression:
 
 ```bash
 uv run pytest tests/test_agent_channel_repo.py tests/test_agent_channels_router.py tests/test_feishu_supervisor.py \
