@@ -20,6 +20,9 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.middlewares.token_usage_middleware import (
+    PublishedRunTokenLimitError,
+)
 from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -220,8 +223,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 response = handler(request)
                 self._record_success()
                 return response
-            except GraphBubbleUp:
-                # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            except (GraphBubbleUp, PublishedRunTokenLimitError):
+                # Preserve LangGraph control-flow signals and fail-closed
+                # Published runtime policy errors. Turning either into an
+                # AIMessage would make the Run appear successfully completed.
                 with self._circuit_lock:
                     if self._circuit_state == "half_open":
                         self._circuit_probe_in_flight = False
@@ -266,8 +271,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 response = await handler(request)
                 self._record_success()
                 return response
-            except GraphBubbleUp:
-                # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            except (GraphBubbleUp, PublishedRunTokenLimitError):
+                # Preserve LangGraph control-flow signals and fail-closed
+                # Published runtime policy errors. Turning either into an
+                # AIMessage would make the Run appear successfully completed.
                 with self._circuit_lock:
                     if self._circuit_state == "half_open":
                         self._circuit_probe_in_flight = False

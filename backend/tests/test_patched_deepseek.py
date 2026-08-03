@@ -11,14 +11,15 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 
 def _make_model(**kwargs):
     from deerflow.models.patched_deepseek import PatchedChatDeepSeek
 
+    model_name = kwargs.pop("model", "deepseek-reasoner")
     return PatchedChatDeepSeek(
-        model="deepseek-reasoner",
+        model=model_name,
         api_key="test-key",
         **kwargs,
     )
@@ -69,6 +70,21 @@ def test_to_json_api_key_is_masked():
     result = model.to_json()
     api_key_value = result["kwargs"].get("api_key") or result["kwargs"].get("openai_api_key")
     assert api_key_value is None or isinstance(api_key_value, dict), f"API key must not be plain text, got: {api_key_value!r}"
+
+
+def test_unknown_compatible_model_can_preflight_message_tokens():
+    """Published runs can budget OpenAI-compatible DeepSeek model aliases."""
+    model = _make_model(model="kimi-for-coding")
+
+    count = model.get_num_tokens_from_messages(
+        [
+            SystemMessage(content="You are concise."),
+            HumanMessage(content="Hello"),
+        ]
+    )
+
+    assert isinstance(count, int)
+    assert count >= 8
 
 
 # ---------------------------------------------------------------------------
