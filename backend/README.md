@@ -88,7 +88,7 @@ Studio 前端将两份指令分工展示：`AGENT.md` 提供可编辑的完整�
 
 Studio 草稿沙箱的 Thread 元数据由服务端保留，客户端创建或 PATCH Thread 时不能伪造。新建沙箱 Thread 同时保存 Agent slug 与展示名称，供对话历史正确路由并在标题旁显示 Agent 标识。首条及后续 Run 都恢复相同的草稿 revision、Skill 清单与 Connector capability map；聊天输入框只展示该范围。草稿 revision 变化后旧沙箱会话返回 409 并要求重新启动，避免静默改用新草稿或退回 owner 的普通 Connector 权限。
 
-Published Agent 公共运行时会从不可变 Skill revision 的 `SKILL.md` 派生 `allowed-tools`，并在 Connector 服务层按 `(connector_id, capability)` 执行 Release 授权，即使运行身份是 owner 也不能绕过。无 `Idempotency-Key` 的 Run 使用服务端唯一 quota attempt id；超时会等待 worker 刷新 token 后再结算，published middleware 同时强制 `max_tokens_per_run`。Agent Key quota override 在写入时仅接受已知字段的正整数。Agent Key、quota reservation、published conversation 与 audit 查询均在仓储层携带 owner scope。
+Published Agent 公共运行时会从不可变 Skill revision 的 `SKILL.md` 派生 `allowed-tools`，并在 Connector 服务层按 `(connector_id, capability)` 执行 Release 授权，即使运行身份是 owner 也不能绕过。Agent Key 可通过 `GET /api/v1/agents/{agent_id}/capabilities` 发现当前 Release 实际生效的 Skill 技术名、中文显示名、中文优先描述和模型能力；本地化字段同样来自不可变 Skill 快照，缺失时分别回退到技术名和英文描述。接口只公开模型配置别名及 thinking/reasoning/vision 标记，不公开 Skill 正文、revision、Connector、底层 provider 配置或密钥，也不允许调用方切换模型。无 `Idempotency-Key` 的 Run 使用服务端唯一 quota attempt id；超时会等待 worker 刷新 token 后再结算，published middleware 同时强制 `max_tokens_per_run`。Agent Key quota override 在写入时仅接受已知字段的正整数。Agent Key、quota reservation、published conversation 与 audit 查询均在仓储层携带 owner scope。
 
 Owner 运维查询支持按 `api` / `feishu` 来源及 credential ID 聚合用量。配额策略接口明确区分平台默认/硬上限、草稿 owner override 与发布后的预期生效值；空 override 表示继承而不是无限制。拒绝审计只对白名单元数据做序列化，并在仓储查询应用 `status_code >= 400` 后再执行 limit。
 
@@ -185,6 +185,7 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/threads/{id}/uploads/list`                          | List uploaded files                                                                                                                                   |
 | `DELETE /api/threads/{id}`                                    | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}`                      | Serve generated artifacts                                                                                                                             |
+| `GET /api/v1/agents/{agent_id}/capabilities`                  | Let the matching Agent Key discover frozen Skill names/localized descriptions and the active model's safe capability flags                            |
 | `GET /api/published-agents/{agent_id}/draft/options`          | List owner-authorized public/private Skills, localized catalog metadata, and declared Connector capability requirements for Agent Studio              |
 | `POST /api/published-agents/{agent_id}/draft/sandbox-runs`    | Start a non-billable Run from a frozen saved draft                                                                                                    |
 | `GET /api/published-agents/draft/sandbox-threads/{thread_id}` | Return the owner-only frozen Skill and Connector scope for a sandbox conversation                                                                     |

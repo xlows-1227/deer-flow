@@ -360,6 +360,16 @@ keys; it is separate from user-level External API `dfk_...` keys and browser
 sessions. `AgentAPIAuthMiddleware` establishes the owner, Agent, and credential
 principals from persistence. A Key used against another Agent returns 404.
 
+`GET /api/v1/agents/{agent_id}/capabilities` resolves the same current immutable
+Release as a Run and returns only sorted frozen Skill technical names,
+`display_name`, Chinese-preferred descriptions, plus the active model config
+alias/display name and thinking/reasoning/vision flags. Skill display metadata
+is parsed from the immutable `SKILL.md`; missing localization falls back to the
+technical name or English description. It never returns Skill content/revisions,
+Connector authority, provider model IDs, endpoints, secrets, instructions, or
+internal Release identifiers. The models array is intentionally empty or
+single-item because public Run bodies cannot select a different model.
+
 `PublishedAgentResolver` loads the stable Agent, freezes its current immutable
 Release for the new Run, intersects Release Connector grants with the current
 active authoritative Connector type capabilities, composes AGENT→SOUL

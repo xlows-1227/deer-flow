@@ -135,6 +135,10 @@ export DEER_FLOW_URL="https://deerflow.example.com"
 export AGENT_ID="pa_..."
 export AGENT_API_KEY="dfa_..."
 
+curl --request GET \
+  "$DEER_FLOW_URL/api/v1/agents/$AGENT_ID/capabilities" \
+  --header "Authorization: Bearer $AGENT_API_KEY"
+
 curl --request POST \
   "$DEER_FLOW_URL/api/v1/agents/$AGENT_ID/conversations" \
   --header "Authorization: Bearer $AGENT_API_KEY" \
@@ -150,8 +154,18 @@ curl --request POST \
   --data '{"message":"Reply with deployment-ok"}'
 ```
 
-The response must not contain `release_id`, `model_name`, internal instructions,
-Skill revision IDs, Connector details, credential IDs, or thread IDs.
+The capabilities response contains sorted frozen Skill technical names,
+localized display names, Chinese-preferred descriptions, and at most one
+currently usable model. Localized Skill fields come from the immutable
+`SKILL.md` snapshot and fall back to the technical name or English description.
+The model entry exposes only its DeerFlow config alias, display name, and
+thinking/reasoning/vision flags; it does not make the model selectable in Run
+requests. If the Release model is no longer present in the owner's effective
+configuration, `models` is empty.
+
+Public responses must not contain `release_id`, provider model IDs/config,
+internal instructions, Skill content or revision IDs, Connector details,
+credential IDs, or thread IDs.
 
 ## 3. SecretStore operations
 

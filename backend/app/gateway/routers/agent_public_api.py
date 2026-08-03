@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.deps import (
     get_checkpointer,
+    get_config,
     get_external_conversation_repo,
     get_external_idempotency_repo,
     get_published_agent_repo,
@@ -30,6 +31,7 @@ from app.gateway.deps import (
 )
 from app.gateway.external.agent_serialization import (
     sanitize_stream_payload,
+    serialize_agent_capabilities,
     serialize_agent_conversation,
     serialize_agent_metadata,
     serialize_agent_run,
@@ -37,6 +39,7 @@ from app.gateway.external.agent_serialization import (
 from app.gateway.external.service import ExternalConversationService
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import format_sse, start_run
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.external_conversation import (
     ExternalConversationExistsError,
     ExternalConversationRepository,
@@ -860,6 +863,33 @@ async def get_agent_metadata(
     if agent is None:
         raise HTTPException(status_code=404, detail={"code": "agent_not_found"})
     return serialize_agent_metadata(agent)
+
+
+@router.get("/capabilities")
+async def get_agent_capabilities(
+    agent_id: str,
+    request: Request,
+    resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
+    config: AppConfig = Depends(get_config),
+) -> dict[str, Any]:
+    """Return safe Skill names and the active published model capability."""
+    context = await _resolve_context(
+        resolver=resolver,
+        agent_id=agent_id,
+        request=request,
+        conversation_scope="capabilities",
+    )
+    model = config.get_model_config(context.model_name)
+    return serialize_agent_capabilities(
+        agent_id,
+        skills=tuple((item.name, item.display_name, item.description) for item in context.skill_metadata),
+        model_name=context.model_name,
+        model_display_name=model.display_name if model is not None else None,
+        supports_thinking=bool(model.supports_thinking) if model is not None else False,
+        supports_reasoning_effort=bool(model.supports_reasoning_effort) if model is not None else False,
+        supports_vision=bool(model.supports_vision) if model is not None else False,
+        model_available=model is not None,
+    )
 
 
 @router.post("/conversations", status_code=201)
