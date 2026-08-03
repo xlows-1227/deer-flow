@@ -91,10 +91,10 @@ class _ContentStore:
     def __init__(self, snapshots: dict[str, dict[str, bytes]] | None = None) -> None:
         self.snapshots = snapshots or {
             "cs://skills/sr_1": {
-                "SKILL.md": b"---\nname: billing-search\ndescription: Search billing data\nallowed-tools:\n  - web_search\n---\n",
+                "SKILL.md": "---\nname: billing-search\ndisplay_name: 账单搜索\ndescription: Search billing data\ndescription_zh: 查询账单数据\nallowed-tools:\n  - web_search\n---\n".encode(),
             },
             "cs://skills/sr_2": {
-                "SKILL.md": b"---\nname: billing-export\ndescription: Export billing data\nallowed-tools:\n  - read_file\n---\n",
+                "SKILL.md": "---\nname: billing-export\ndisplay_name: 账单导出\ndescription: Export billing data\ndescription_zh: 导出账单数据\nallowed-tools:\n  - read_file\n---\n".encode(),
             },
         }
 
@@ -174,6 +174,10 @@ async def test_resolve_published_agent_builds_trusted_frozen_context() -> None:
     assert context.owner_user_id == "owner-a"
     assert context.release_id == "rel_1"
     assert context.skill_revision_ids == ("sr_1", "sr_2")
+    assert [(item.name, item.display_name, item.description) for item in context.skill_metadata] == [
+        ("billing-export", "账单导出", "导出账单数据"),
+        ("billing-search", "账单搜索", "查询账单数据"),
+    ]
     assert context.connector_capabilities == (("conn-live", "mail.send"),)
     assert context.tool_groups == ("search", "database")
     assert context.model_name == "model-a"

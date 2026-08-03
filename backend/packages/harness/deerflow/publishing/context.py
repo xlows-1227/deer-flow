@@ -39,6 +39,15 @@ class DraftSandboxContext:
 
 
 @dataclass(frozen=True)
+class PublishedSkillMetadata:
+    """Safe display metadata parsed from one immutable Skill snapshot."""
+
+    name: str
+    display_name: str
+    description: str
+
+
+@dataclass(frozen=True)
 class PublishedAgentContext:
     """Server-derived runtime authority for a single external run.
 
@@ -61,6 +70,7 @@ class PublishedAgentContext:
     effective_quota: EffectiveQuota | Any
     correlation_id: str
     idempotency_key: str | None
+    skill_metadata: tuple[PublishedSkillMetadata, ...] = ()
     allowed_tool_names: tuple[str, ...] | None = None
     memory_enabled: bool = False
 

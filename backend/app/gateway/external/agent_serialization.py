@@ -51,6 +51,45 @@ def serialize_agent_metadata(agent: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def serialize_agent_capabilities(
+    agent_id: str,
+    *,
+    skills: tuple[tuple[str, str, str], ...],
+    model_name: str,
+    model_display_name: str | None,
+    supports_thinking: bool,
+    supports_reasoning_effort: bool,
+    supports_vision: bool,
+    model_available: bool,
+) -> dict[str, Any]:
+    """Serialize the safe, currently effective integration capabilities."""
+    models = []
+    if model_available:
+        models.append(
+            {
+                "name": model_name,
+                "display_name": model_display_name,
+                "supports_thinking": supports_thinking,
+                "supports_reasoning_effort": supports_reasoning_effort,
+                "supports_vision": supports_vision,
+            }
+        )
+    return _finish(
+        {
+            "agent_id": agent_id,
+            "skills": [
+                {
+                    "name": name,
+                    "display_name": display_name,
+                    "description": description,
+                }
+                for name, display_name, description in sorted(set(skills))
+            ],
+            "models": models,
+        }
+    )
+
+
 def serialize_agent_conversation(row: dict[str, Any]) -> dict[str, Any]:
     """Serialize the public state of a credential-scoped conversation."""
     return _finish(
@@ -116,6 +155,7 @@ def sanitize_stream_payload(value: Any) -> Any:
 __all__ = [
     "assert_public_payload_safe",
     "sanitize_stream_payload",
+    "serialize_agent_capabilities",
     "serialize_agent_conversation",
     "serialize_agent_metadata",
     "serialize_agent_run",
