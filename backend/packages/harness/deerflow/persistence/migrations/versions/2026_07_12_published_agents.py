@@ -1,7 +1,7 @@
 """Add published_agents, agent_drafts and their sub-tables.
 
 Revision ID: 2026_07_12_published_agents
-Revises: 2026_07_09_umodel_caps
+Revises: 2026_07_13_file_shares
 Create Date: 2026-07-12
 
 Tables (design doc §7.1 / §7.2, dev plan F1.1):
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "2026_07_12_published_agents"
-down_revision = "2026_07_09_umodel_caps"
+down_revision = "2026_07_13_file_shares"
 branch_labels = None
 depends_on = None
 

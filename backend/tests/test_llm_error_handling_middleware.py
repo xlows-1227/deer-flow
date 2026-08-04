@@ -11,6 +11,9 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
+from deerflow.agents.middlewares.token_usage_middleware import (
+    PublishedRunTokenLimitError,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -141,6 +144,17 @@ def test_async_model_call_propagates_graph_bubble_up() -> None:
         raise GraphBubbleUp()
 
     with pytest.raises(GraphBubbleUp):
+        asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+
+def test_async_model_call_propagates_published_token_preflight_failure() -> None:
+    """Runtime policy failures must fail the Run instead of becoming an answer."""
+    middleware = _build_middleware()
+
+    async def handler(_request) -> AIMessage:
+        raise PublishedRunTokenLimitError("cannot preflight published model token usage")
+
+    with pytest.raises(PublishedRunTokenLimitError, match="cannot preflight"):
         asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
 

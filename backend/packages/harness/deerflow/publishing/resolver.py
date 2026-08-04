@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from deerflow.publishing.context import PublishedAgentContext
+from deerflow.publishing.context import PublishedAgentContext, PublishedSkillMetadata
 from deerflow.publishing.instructions import compose_published_agent_instructions
 from deerflow.skills.parser import parse_allowed_tools, parse_skill_frontmatter
 
@@ -16,6 +16,15 @@ class AgentNotAvailableError(LookupError):
 
 class AgentSuspendedError(RuntimeError):
     """The Agent exists but its lifecycle state forbids new runs."""
+
+
+def _optional_frontmatter_text(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value.strip() or None
 
 
 class PublishedAgentRepoLike(Protocol):
@@ -120,7 +129,7 @@ class PublishedAgentResolver:
             release=release,
         )
         skill_revision_ids = tuple(sorted(str(item["skill_revision_id"]) for item in release.get("skills") or [] if item.get("skill_revision_id")))
-        allowed_tool_names, frozen_skills = await self._frozen_skill_policy(
+        allowed_tool_names, frozen_skills, skill_metadata = await self._frozen_skill_policy(
             skill_revision_ids,
             owner_user_id=owner_user_id,
         )
@@ -154,6 +163,7 @@ class PublishedAgentResolver:
             effective_quota=effective_quota,
             correlation_id=correlation_id,
             idempotency_key=idempotency_key,
+            skill_metadata=skill_metadata,
             allowed_tool_names=allowed_tool_names,
         )
 
@@ -162,10 +172,15 @@ class PublishedAgentResolver:
         revision_ids: tuple[str, ...],
         *,
         owner_user_id: str,
-    ) -> tuple[tuple[str, ...] | None, tuple[tuple[str, str], ...]]:
+    ) -> tuple[
+        tuple[str, ...] | None,
+        tuple[tuple[str, str], ...],
+        tuple[PublishedSkillMetadata, ...],
+    ]:
         """Load pinned Skill bodies and derive their exact tool whitelist."""
         allowed: set[str] = set()
         frozen_skills: list[tuple[str, str]] = []
+        skill_metadata: list[PublishedSkillMetadata] = []
         has_explicit_declaration = False
         for revision_id in revision_ids:
             revision = await self._skill_revisions.get(revision_id, owner_user_id=owner_user_id)
@@ -188,6 +203,11 @@ class PublishedAgentResolver:
                 metadata = parse_skill_frontmatter(skill_md, Path(skill_name) / "SKILL.md")
                 if metadata.get("name") != skill_name:
                     raise ValueError("skill metadata mismatch")
+                description = _optional_frontmatter_text(metadata, "description")
+                if description is None:
+                    raise ValueError("skill description is required")
+                display_name = _optional_frontmatter_text(metadata, "display_name") or skill_name
+                public_description = _optional_frontmatter_text(metadata, "description_zh") or description
                 declared = parse_allowed_tools(metadata.get("allowed-tools"), Path(skill_name) / "SKILL.md")
             except (KeyError, UnicodeDecodeError, ValueError) as exc:
                 raise AgentNotAvailableError(f"unreadable skill revision {revision_id}") from exc
@@ -195,9 +215,17 @@ class PublishedAgentResolver:
                 has_explicit_declaration = True
                 allowed.update(declared)
             frozen_skills.append((skill_name, skill_md))
+            skill_metadata.append(
+                PublishedSkillMetadata(
+                    name=skill_name,
+                    display_name=display_name,
+                    description=public_description,
+                )
+            )
         return (
             tuple(sorted(allowed)) if has_explicit_declaration else None,
             tuple(sorted(frozen_skills)),
+            tuple(sorted(skill_metadata, key=lambda item: item.name)),
         )
 
     async def _active_connector_capabilities(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.gateway.deps import (
+    get_config,
     get_external_conversation_repo,
     get_external_idempotency_repo,
     get_published_agent_repo,
@@ -20,7 +22,7 @@ from app.gateway.deps import (
 from app.gateway.external.agent_auth import AgentAPIAuthMiddleware
 from app.gateway.external.agent_serialization import assert_public_payload_safe
 from app.gateway.routers import agent_public_api
-from deerflow.publishing.context import PublishedAgentContext
+from deerflow.publishing.context import PublishedAgentContext, PublishedSkillMetadata
 from deerflow.publishing.quota import (
     EffectiveQuota,
     QuotaExceededError,
@@ -129,6 +131,7 @@ def _router_app(
     resolver,
     conversations,
     agents=None,
+    config=None,
     idempotency=None,
     quota_ledger=None,
 ) -> FastAPI:
@@ -145,6 +148,7 @@ def _router_app(
     app.dependency_overrides[get_published_agent_resolver] = lambda: resolver
     app.dependency_overrides[get_external_conversation_repo] = lambda: conversations
     app.dependency_overrides[get_published_agent_repo] = lambda: agents or AsyncMock()
+    app.dependency_overrides[get_config] = lambda: config or SimpleNamespace(get_model_config=lambda _name: None)
     app.dependency_overrides[get_external_idempotency_repo] = lambda: idempotency or AsyncMock()
     app.dependency_overrides[get_quota_ledger] = lambda: quota_ledger or _AllowLedger()
     app.state.thread_store = object()
@@ -212,6 +216,76 @@ def test_metadata_is_explicitly_whitelisted_and_lifecycle_is_fail_closed():
     assert TestClient(app).get("/api/v1/agents/pa_1").status_code == 410
     resolver.resolve.side_effect = AgentNotAvailableError("pa_1")
     assert TestClient(app).get("/api/v1/agents/pa_1").status_code == 404
+
+
+def test_capabilities_exposes_only_frozen_skill_names_and_active_model_metadata():
+    resolver = AsyncMock()
+    resolver.resolve.return_value = replace(
+        _context(),
+        skill_metadata=(
+            PublishedSkillMetadata(
+                name="zeta-skill",
+                display_name="Zeta 技能",
+                description="处理 Zeta 数据",
+            ),
+            PublishedSkillMetadata(
+                name="alpha-skill",
+                display_name="Alpha 技能",
+                description="处理 Alpha 数据",
+            ),
+        ),
+        model_name="kimi-for-coding",
+    )
+    model = SimpleNamespace(
+        display_name="Kimi for Coding",
+        supports_thinking=True,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+    )
+    config = SimpleNamespace(get_model_config=lambda name: model if name == "kimi-for-coding" else None)
+    app = _router_app(resolver=resolver, conversations=AsyncMock(), config=config)
+
+    response = TestClient(app).get("/api/v1/agents/pa_1/capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "agent_id": "pa_1",
+        "skills": [
+            {
+                "name": "alpha-skill",
+                "display_name": "Alpha 技能",
+                "description": "处理 Alpha 数据",
+            },
+            {
+                "name": "zeta-skill",
+                "display_name": "Zeta 技能",
+                "description": "处理 Zeta 数据",
+            },
+        ],
+        "models": [
+            {
+                "name": "kimi-for-coding",
+                "display_name": "Kimi for Coding",
+                "supports_thinking": True,
+                "supports_reasoning_effort": False,
+                "supports_vision": False,
+            }
+        ],
+    }
+    assert_public_payload_safe(response.json())
+    assert resolver.resolve.await_args.kwargs["conversation_scope"] == "capabilities"
+
+
+def test_capabilities_omits_a_published_model_that_is_no_longer_available():
+    resolver = AsyncMock()
+    resolver.resolve.return_value = replace(_context(), model_name="removed-model")
+    app = _router_app(resolver=resolver, conversations=AsyncMock())
+
+    response = TestClient(app).get("/api/v1/agents/pa_1/capabilities")
+
+    assert response.status_code == 200
+    assert response.json()["models"] == []
+    assert_public_payload_safe(response.json())
 
 
 def test_conversation_lookup_is_scoped_by_agent_and_credential():
