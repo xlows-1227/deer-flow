@@ -18,7 +18,7 @@ from deerflow.connectors.schemas import (
 )
 
 ONEDATA_API_BASE_URL_ENV = "ONEDATA_API_BASE_URL"
-ONEDATA_SUCCESS_CODE = -9999800
+ONEDATA_SUCCESS_CODES = frozenset({-9999800, 200})
 
 
 def _discovery_base_url() -> str:
@@ -51,7 +51,7 @@ def _timeout_seconds(policy: dict[str, Any] | None) -> float:
 
 def _raise_for_discovery(payload: dict[str, Any], *, action: str) -> Any:
     code = payload.get("code")
-    if code != ONEDATA_SUCCESS_CODE:
+    if code not in ONEDATA_SUCCESS_CODES:
         message = payload.get("msg") or payload.get("message") or f"OneData {action} failed"
         raise ConnectorExecutionError(f"{message} (code={code})", recoverable=True)
     return payload.get("result")

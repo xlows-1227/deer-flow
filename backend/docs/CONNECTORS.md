@@ -71,6 +71,8 @@ Create an `onedata` connector with inline `secretId` / `secretKey` (stored as cr
 2. `call_connector_action` + `onedata.get_params` (`action_args.apiId`) — response includes `calUrl`
 3. `call_connector_action` + `onedata.call_api` (`action_args.calUrl`, `action_args.paramData`, optional paging fields)
 
+Discovery responses are treated as successful when their JSON `code` is either the legacy OneData code `-9999800` or the HTTP-style code `200`. In both cases, `list_apis` returns the response `result` as `apis` instead of treating a successful HTTP response as a connector health error.
+
 Business calls POST directly to `calUrl`. Request headers use `sign=<secretKey>` (no HMAC). Field encryption/decryption is not implemented.
 
 ### Local mock (downstream unavailable)
