@@ -737,6 +737,12 @@ Deployment, SecretStore recovery, quota tuning, Feishu troubleshooting, and
 rollback procedures are documented in the
 [Published Agents operations handbook](docs/PUBLISHED_AGENTS.md).
 
+OneData connector discovery supports both deployed success-code conventions:
+the legacy `-9999800` value and HTTP-style `200`. Successful `list_apis`
+responses preserve the upstream `result` catalog for use by agent tool calls.
+See the [connector guide](backend/docs/CONNECTORS.md#onedata) for configuration
+and runtime examples.
+
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:

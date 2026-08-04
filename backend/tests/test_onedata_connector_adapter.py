@@ -188,7 +188,15 @@ async def test_test_connection_ok(monkeypatch):
     monkeypatch.setenv(ONEDATA_API_BASE_URL_ENV, "http://onedata.test/v1")
     adapter = OneDataConnectorAdapter()
     client = AsyncMock()
-    client.get = AsyncMock(return_value=_mock_response({"code": -9999800, "msg": "success", "result": []}))
+    client.get = AsyncMock(
+        return_value=_mock_response(
+            {
+                "code": 200,
+                "msg": "success",
+                "result": [{"apiId": 1001, "apiName": "PH口袋sales"}],
+            }
+        )
+    )
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=None)
 
@@ -197,3 +205,33 @@ async def test_test_connection_ok(monkeypatch):
 
     assert result.status == "ok"
     assert ONEDATA_LIST_APIS in (result.capabilities or [])
+
+
+@pytest.mark.asyncio
+async def test_list_apis_accepts_http_style_success_code(monkeypatch):
+    monkeypatch.setenv(ONEDATA_API_BASE_URL_ENV, "http://onedata.test/v1")
+    adapter = OneDataConnectorAdapter()
+    client = AsyncMock()
+    client.get = AsyncMock(
+        return_value=_mock_response(
+            {
+                "code": 200,
+                "msg": "success",
+                "result": [{"apiId": 1001, "apiName": "PH口袋sales"}],
+            }
+        )
+    )
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("deerflow.connectors.adapters.onedata.httpx.AsyncClient", return_value=client):
+        result = await adapter.execute(
+            _instance(),
+            ONEDATA_LIST_APIS,
+            {},
+            {},
+            _context(),
+            secrets={"username": "sid", "password": "skey"},
+        )
+
+    assert result == {"apis": [{"apiId": 1001, "apiName": "PH口袋sales"}]}

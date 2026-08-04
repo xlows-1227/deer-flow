@@ -448,6 +448,12 @@ Skill revisions, Connector metadata, credentials/hashes, internal thread ids,
 or paths. Owner-only Key management and usage aggregation remain under
 `/api/published-agents/{agent_id}` with session auth + CSRF.
 
+The OneData adapter accepts both discovery success-code variants used by
+deployed services: legacy `-9999800` and HTTP-style `200`. `_raise_for_discovery`
+must continue to reject all other application-level codes even when the HTTP
+response itself is 200, while returning the upstream `result` unchanged for
+capability-specific shape validation.
+
 Alembic head after M2: `2026_07_14_agent_audit_principals` (M2 chain:
 `2026_07_14_agent_api_keys → 2026_07_14_agent_conversation_scope →
 2026_07_14_agent_usage_quota → 2026_07_14_agent_audit_principals`).
