@@ -40,6 +40,9 @@ class ConnectorRegistry:
                     result[key] = spec["default"]
                 elif required:
                     raise ConnectorValidationError(f"Missing required connector config field: {key}")
+            if key in result and "enum" in spec and result[key] not in spec["enum"]:
+                choices = ", ".join(str(item) for item in spec["enum"])
+                raise ConnectorValidationError(f"Invalid connector config field {key}: expected one of {choices}")
         return result
 
 
@@ -104,7 +107,18 @@ def _build_default_registry() -> ConnectorRegistry:
             adapter="deerflow.connectors.adapters.onedata:OneDataConnectorAdapter",
             auth_modes=["password"],
             capabilities=[ONEDATA_LIST_APIS, ONEDATA_GET_PARAMS, ONEDATA_CALL_API],
-            config_schema={},
+            config_schema={
+                "auth_mode": {
+                    "type": "string",
+                    "default": "legacy_raw",
+                    "enum": ["legacy_raw", "hmac_sha256"],
+                },
+                "response_mode": {
+                    "type": "string",
+                    "default": "raw",
+                    "enum": ["raw", "strict"],
+                },
+            },
             credential_schema={
                 "secretId": {"type": "string", "required": True},
                 "secretKey": {"type": "secret", "required": True},

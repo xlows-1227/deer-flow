@@ -1088,6 +1088,12 @@ export const enUS: Translations = {
       secretId: "secretId",
       secretKey: "secretKey",
       secretKeyPlaceholder: "Leave empty to keep existing secretKey",
+      oneDataAuthMode: "Signature mode",
+      oneDataAuthLegacyRaw: "Compatibility (raw secretKey)",
+      oneDataAuthHmacSha256: "Standard (HMAC-SHA256)",
+      oneDataResponseMode: "Response mode",
+      oneDataResponseRaw: "Return as-is (compatible)",
+      oneDataResponseStrict: "Validate business status",
       oneDataSummary: "OneData API",
       oneDataPolicy: "API calls",
       credentialUpdateHint:

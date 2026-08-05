@@ -65,15 +65,22 @@ Configure the discovery base URL in the backend environment:
 ONEDATA_API_BASE_URL=http://share-onedata-api-ent4.prd.yumc.local/v1
 ```
 
-Create an `onedata` connector with inline `secretId` / `secretKey` (stored as credential username/password). Runtime:
+Create an `onedata` connector with inline `secretId` / `secretKey` (stored as credential username/password). Two connector options control deployed-version compatibility:
+
+- `auth_mode`: `legacy_raw` (default, sends the raw `secretKey` as `sign`) or `hmac_sha256` (builds the sorted OneData canonical string and sends its Base64 HMAC-SHA256 signature).
+- `response_mode`: `raw` (default, returns HTTP-200 business payloads unchanged) or `strict` (turns non-success `status` values into recoverable connector errors). Strict mode accepts `-9999800`, `0`, and `200` as success values.
+
+Both options are available in the connector settings form. Existing connectors with an empty `config` keep the legacy defaults. Runtime:
 
 1. `call_connector_action` + `onedata.list_apis`
-2. `call_connector_action` + `onedata.get_params` (`action_args.apiId`) — response includes `calUrl`
-3. `call_connector_action` + `onedata.call_api` (`action_args.calUrl`, `action_args.paramData`, optional paging fields)
+2. `get_onedata_api_params` with the returned numeric `api_id`
+3. `call_onedata_api` with `api_id` and `param_data`; the adapter resolves the URL automatically
+
+The generic `call_connector_action` remains compatible with `onedata.get_params` and `onedata.call_api`. It accepts `apiId` / `api_id`, `callUrl` / `calUrl` / `call_url`, `paramData` / `param_data`, and camelCase or snake_case paging fields. It normalizes deployed `callUrl` / legacy `calUrl` discovery fields and can resolve the business URL automatically when an API id is supplied. `pageSize` and `pageNum` must be supplied together.
 
 Discovery responses are treated as successful when their JSON `code` is either the legacy OneData code `-9999800` or the HTTP-style code `200`. In both cases, `list_apis` returns the response `result` as `apis` instead of treating a successful HTTP response as a connector health error.
 
-Business calls POST directly to `calUrl`. Request headers use `sign=<secretKey>` (no HMAC). Field encryption/decryption is not implemented.
+Business calls POST directly to the resolved business URL. Field encryption/decryption is not implemented.
 
 ### Local mock (downstream unavailable)
 

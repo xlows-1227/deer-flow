@@ -871,6 +871,12 @@ export interface Translations {
       secretId: string;
       secretKey: string;
       secretKeyPlaceholder: string;
+      oneDataAuthMode: string;
+      oneDataAuthLegacyRaw: string;
+      oneDataAuthHmacSha256: string;
+      oneDataResponseMode: string;
+      oneDataResponseRaw: string;
+      oneDataResponseStrict: string;
       oneDataSummary: string;
       oneDataPolicy: string;
       credentialUpdateHint: string;

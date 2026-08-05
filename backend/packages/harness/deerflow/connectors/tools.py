@@ -3,7 +3,7 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from deerflow.connectors.errors import ConnectorAuthorizationError, ConnectorError
-from deerflow.connectors.schemas import ConnectorRuntimeContext
+from deerflow.connectors.schemas import ONEDATA_CALL_API, ONEDATA_GET_PARAMS, ConnectorRuntimeContext
 from deerflow.connectors.service import make_connector_service
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
@@ -122,11 +122,15 @@ async def call_connector_action_tool(
     Use this for non-database connector categories or future capabilities that
     are not covered by dedicated database tools. Database query capabilities
     are still routed through the same read-only safety checks.
+    For OneData parameter inspection and calls, prefer get_onedata_api_params
+    and call_onedata_api because their model-facing schemas are explicit.
 
     Args:
         connector_id: Connector id returned by list_connectors.
         capability: Capability to invoke, such as document.read or api.call.
-        action_args: Capability-specific arguments (for example apiId or paramData).
+        action_args: Capability-specific arguments. For OneData get_params,
+            provide apiId with its numeric value. For call_api, provide apiId
+            and paramData. call_api resolves callUrl automatically.
         reason: Short reason for audit logging.
     """
     try:
@@ -136,6 +140,87 @@ async def call_connector_action_tool(
             connector_id,
             capability=capability,
             args=action_args or {},
+            reason=reason,
+            context=context,
+        )
+        return result.model_dump() if hasattr(result, "model_dump") else result
+    except ConnectorError as exc:
+        return _error_payload(exc)
+
+
+@tool("get_onedata_api_params", parse_docstring=True)
+async def get_onedata_api_params_tool(runtime: Runtime, connector_id: str, api_id: int) -> dict:
+    """Get the declared request parameters and call URL for one authorized OneData API.
+
+    Use this after listing OneData APIs. Pass the numeric API id exactly as
+    returned by onedata.list_apis.
+
+    Args:
+        connector_id: OneData connector id returned by list_connectors.
+        api_id: Numeric API id, for example 639 for PH pocket sales.
+    """
+    try:
+        context = _context(runtime)
+        _ensure_selected(context, connector_id)
+        result = await make_connector_service().execute_connector_action(
+            connector_id,
+            capability=ONEDATA_GET_PARAMS,
+            args={"apiId": api_id},
+            reason=f"Inspect OneData API {api_id} parameters",
+            context=context,
+        )
+        return result.model_dump() if hasattr(result, "model_dump") else result
+    except ConnectorError as exc:
+        return _error_payload(exc)
+
+
+@tool("call_onedata_api", parse_docstring=True)
+async def call_onedata_api_tool(
+    runtime: Runtime,
+    connector_id: str,
+    api_id: int,
+    param_data: dict | None = None,
+    reason: str = "",
+    page_size: int | None = None,
+    page_num: int | None = None,
+    order_by: str | None = None,
+    max_size: int | None = None,
+    has_total: bool | None = None,
+) -> dict:
+    """Call an authorized OneData API by id without manually copying its callUrl.
+
+    First use get_onedata_api_params to inspect the exact request parameter
+    names and types. Preserve JSON types in param_data: arrays must be arrays,
+    not bracketed or comma-separated strings.
+
+    Args:
+        connector_id: OneData connector id returned by list_connectors.
+        api_id: Numeric API id, for example 639 for PH pocket sales.
+        param_data: Request parameters using the exact names from get_onedata_api_params.
+        reason: Short reason for audit logging.
+        page_size: Optional OneData page size.
+        page_num: Optional OneData page number.
+        order_by: Optional OneData order-by expression.
+        max_size: Optional OneData maximum result size.
+        has_total: Whether OneData should calculate a total count.
+    """
+    try:
+        context = _context(runtime)
+        _ensure_selected(context, connector_id)
+        action_args: dict = {"apiId": api_id, "paramData": param_data or {}}
+        for target, value in (
+            ("pageSize", page_size),
+            ("pageNum", page_num),
+            ("orderBy", order_by),
+            ("maxSize", max_size),
+            ("hasTotal", has_total),
+        ):
+            if value is not None:
+                action_args[target] = value
+        result = await make_connector_service().execute_connector_action(
+            connector_id,
+            capability=ONEDATA_CALL_API,
+            args=action_args,
             reason=reason,
             context=context,
         )

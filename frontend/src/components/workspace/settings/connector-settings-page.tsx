@@ -65,6 +65,8 @@ import { cn } from "@/lib/utils";
 import { SettingsSection } from "./settings-section";
 
 type ConnectorAuthMode = "env" | "inline";
+type OneDataAuthMode = "legacy_raw" | "hmac_sha256";
+type OneDataResponseMode = "raw" | "strict";
 
 type ConnectorForm = {
   id: string | null;
@@ -76,6 +78,8 @@ type ConnectorForm = {
   database: string;
   ssl: boolean;
   authMode: ConnectorAuthMode;
+  oneDataAuthMode: OneDataAuthMode;
+  oneDataResponseMode: OneDataResponseMode;
   credentialRef: string;
   username: string;
   password: string;
@@ -94,6 +98,8 @@ const emptyForm: ConnectorForm = {
   database: "",
   ssl: false,
   authMode: "env",
+  oneDataAuthMode: "legacy_raw",
+  oneDataResponseMode: "raw",
   credentialRef: "",
   username: "",
   password: "",
@@ -172,6 +178,14 @@ function connectorToForm(
     database: stringValue(connector.config.database),
     ssl: booleanValue(connector.config.ssl),
     authMode,
+    oneDataAuthMode:
+      stringValue(connector.config.auth_mode, "legacy_raw") === "hmac_sha256"
+        ? "hmac_sha256"
+        : "legacy_raw",
+    oneDataResponseMode:
+      stringValue(connector.config.response_mode, "raw") === "strict"
+        ? "strict"
+        : "raw",
     credentialRef: authMode === "env" ? (credential?.ref ?? "") : "",
     username: authMode === "inline" ? (credential?.username ?? "") : "",
     // Backend never returns the plaintext password; we keep the field empty
@@ -190,7 +204,10 @@ function buildConfig(
   definition?: ConnectorTypeDefinition,
 ) {
   if (isOneDataType(form.type)) {
-    return {};
+    return {
+      auth_mode: form.oneDataAuthMode,
+      response_mode: form.oneDataResponseMode,
+    };
   }
   const portKey = getPortKey(definition);
   const port = Number.parseInt(form.port, 10);
@@ -394,6 +411,8 @@ export function ConnectorSettingsPage({
         database: "",
         ssl: false,
         authMode: "inline",
+        oneDataAuthMode: "legacy_raw",
+        oneDataResponseMode: "raw",
       });
       return;
     }
@@ -894,6 +913,52 @@ export function ConnectorSettingsPage({
                       }
                     />
                   </Field>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label={copy.oneDataAuthMode}>
+                      <Select
+                        value={form.oneDataAuthMode}
+                        onValueChange={(value) =>
+                          updateForm({
+                            oneDataAuthMode: value as OneDataAuthMode,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent {...connectorSelectContentProps}>
+                          <SelectItem value="legacy_raw">
+                            {copy.oneDataAuthLegacyRaw}
+                          </SelectItem>
+                          <SelectItem value="hmac_sha256">
+                            {copy.oneDataAuthHmacSha256}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label={copy.oneDataResponseMode}>
+                      <Select
+                        value={form.oneDataResponseMode}
+                        onValueChange={(value) =>
+                          updateForm({
+                            oneDataResponseMode: value as OneDataResponseMode,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent {...connectorSelectContentProps}>
+                          <SelectItem value="raw">
+                            {copy.oneDataResponseRaw}
+                          </SelectItem>
+                          <SelectItem value="strict">
+                            {copy.oneDataResponseStrict}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  </div>
                   {form.id ? (
                     <p className="text-muted-foreground text-xs">
                       {copy.credentialUpdateHintInline}
