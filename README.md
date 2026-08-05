@@ -740,6 +740,11 @@ rollback procedures are documented in the
 OneData connector discovery supports both deployed success-code conventions:
 the legacy `-9999800` value and HTTP-style `200`. Successful `list_apis`
 responses preserve the upstream `result` catalog for use by agent tool calls.
+Typed `get_onedata_api_params` and `call_onedata_api` tools expose `api_id`
+directly to models; business calls can now resolve deployed `callUrl` metadata
+automatically instead of relying on the model to copy an opaque URL between
+generic tool calls. OneData connector settings also support legacy raw-key and
+HMAC-SHA256 signatures plus compatible raw or strict business-response modes.
 See the [connector guide](backend/docs/CONNECTORS.md#onedata) for configuration
 and runtime examples.
 

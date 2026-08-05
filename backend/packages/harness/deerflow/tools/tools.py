@@ -149,13 +149,25 @@ def get_available_tools(
         try:
             from deerflow.connectors.tools import (
                 call_connector_action_tool,
+                call_onedata_api_tool,
+                get_onedata_api_params_tool,
                 inspect_connector_tool,
                 list_connectors_tool,
                 query_database_tool,
                 sample_database_table_tool,
             )
 
-            builtin_tools.extend([list_connectors_tool, inspect_connector_tool, query_database_tool, sample_database_table_tool, call_connector_action_tool])
+            builtin_tools.extend(
+                [
+                    list_connectors_tool,
+                    inspect_connector_tool,
+                    query_database_tool,
+                    sample_database_table_tool,
+                    call_connector_action_tool,
+                    get_onedata_api_params_tool,
+                    call_onedata_api_tool,
+                ]
+            )
         except Exception as e:
             logger.warning("Failed to load connector tools: %s", e)
 

@@ -464,6 +464,18 @@ must continue to reject all other application-level codes even when the HTTP
 response itself is 200, while returning the upstream `result` unchanged for
 capability-specific shape validation.
 
+OneData discovery metadata is normalized across deployed `callUrl` and legacy
+`calUrl` spellings. The typed `get_onedata_api_params` and `call_onedata_api`
+tools keep `api_id` visible in the model-facing schema; `call_onedata_api`
+resolves the business URL server-side through `get_params`. The generic
+`call_connector_action` remains available and accepts either `apiId` or
+`api_id`, including automatic URL resolution for `onedata.call_api`.
+OneData connector `config.auth_mode` supports `legacy_raw` (default) and
+`hmac_sha256`; `config.response_mode` supports `raw` (default) and `strict`.
+The adapter accepts camelCase and snake_case request aliases, requires paired
+pagination fields, and strict response handling treats only `-9999800`, `0`,
+and `200` as successful business statuses.
+
 Alembic head after M2: `2026_07_14_agent_audit_principals` (M2 chain:
 `2026_07_14_agent_api_keys → 2026_07_14_agent_conversation_scope →
 2026_07_14_agent_usage_quota → 2026_07_14_agent_audit_principals`).
