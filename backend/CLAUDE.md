@@ -808,6 +808,10 @@ This starts all services and makes the application available at `http://localhos
 | **Dev**  | `./scripts/serve.sh --dev`<br/>`make dev`    | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon`    | `./scripts/docker.sh start`<br/>`make docker-start` | —                                   |
 | **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | —                                                   | `./scripts/deploy.sh`<br/>`make up` |
 
+**Docker Live**（CentOS 只拉代码 + bind-mount 重启，不强制重新 build）：
+- 首次启动：`docker compose -p deer-flow-live -f docker/docker-compose-live.yaml up -d`
+- 更新后重启：`docker compose -p deer-flow-live -f docker/docker-compose-live.yaml restart gateway frontend`
+
 | Action      | Local                                       | Docker Dev                                        | Docker Prod                                |
 | ----------- | ------------------------------------------- | ------------------------------------------------- | ------------------------------------------ |
 | **Stop**    | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |

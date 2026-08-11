@@ -34,6 +34,18 @@ class _TokenCountingModel:
         return len(text)
 
 
+class _BrokenTokenizerModel(_TokenCountingModel):
+    """Simulates OpenAI-compatible gateway models whose tiktoken lookup fails."""
+
+    def get_num_tokens_from_messages(self, messages):
+        del messages
+        raise KeyError("unknown model encoding for yumcode-pro")
+
+    def get_num_tokens(self, text):
+        del text
+        raise KeyError("unknown model encoding for yumcode-pro")
+
+
 class _MessageCountingModel(_TokenCountingModel):
     def get_num_tokens_from_messages(self, messages):
         return len(messages)
@@ -114,6 +126,34 @@ class TestTokenUsageMiddleware:
         bounded = middleware.wrap_model_call(request, lambda value: value)
 
         assert bounded.model_settings["max_tokens"] == 3
+
+    def test_published_run_falls_back_when_tokenizer_unavailable(self, caplog):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=100)
+        request = _ModelRequest(
+            model=_BrokenTokenizerModel(),
+            messages=[HumanMessage(content="你好")],
+            tools=[],
+            model_settings={},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            bounded = middleware.wrap_model_call(request, lambda value: value)
+
+        assert "max_tokens" in bounded.model_settings
+        assert 0 < bounded.model_settings["max_tokens"] <= 100
+        assert any("token preflight fallback" in record.message for record in caplog.records)
+
+    def test_published_run_heuristic_still_exhausts_when_input_too_large(self):
+        middleware = TokenUsageMiddleware(max_tokens_per_run=5)
+        request = _ModelRequest(
+            model=_BrokenTokenizerModel(),
+            messages=[HumanMessage(content="x" * 200)],
+            tools=[],
+            model_settings={},
+        )
+
+        with pytest.raises(PublishedRunTokenLimitError, match="exhausted before model call"):
+            middleware.wrap_model_call(request, lambda value: value)
 
     def test_published_run_rejects_models_without_an_output_token_cap(self):
         middleware = TokenUsageMiddleware(max_tokens_per_run=10)
@@ -421,3 +461,25 @@ class TestTokenUsageMiddleware:
             "output_tokens": 12,
             "total_tokens": 42,
         }
+
+
+def test_serialize_agent_run_allows_token_budget_error():
+    from app.gateway.external.agent_serialization import serialize_agent_run
+    from deerflow.agents.middlewares.token_usage_middleware import PUBLISHED_RUN_TOKEN_BUDGET_ERROR
+    from deerflow.runtime import RunStatus
+
+    class _Row:
+        run_id = "run_1"
+        status = RunStatus.error
+        error = PUBLISHED_RUN_TOKEN_BUDGET_ERROR
+        last_ai_message = None
+        created_at = None
+        updated_at = None
+
+    payload = serialize_agent_run(_Row(), conversation_id="conv_1")
+    assert payload["error"] == PUBLISHED_RUN_TOKEN_BUDGET_ERROR
+
+    class _UnsafeRow(_Row):
+        error = "traceback with /secret/path"
+
+    assert serialize_agent_run(_UnsafeRow(), conversation_id="conv_1")["error"] == "The run failed."

@@ -260,6 +260,17 @@ make up     # Build images and start all production services
 make down   # Stop and remove containers
 ```
 
+**Live update (CentOS-friendly, reuse images)** (bind-mount latest code and restart, no `--build` needed after first time):
+
+```bash
+# export DEER_FLOW_ROOT=/absolute/path/to/deer-flow   (required by AIO DooD mount translation)
+# 首次启动（必要时可补上 --build）：
+docker compose -p deer-flow-live -f docker/docker-compose-live.yaml up -d
+
+# 后续拉代码更新后（必须重启 gateway + frontend，否则不会生效）：
+docker compose -p deer-flow-live -f docker/docker-compose-live.yaml restart gateway frontend
+```
+
 Access: http://localhost:2026
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.

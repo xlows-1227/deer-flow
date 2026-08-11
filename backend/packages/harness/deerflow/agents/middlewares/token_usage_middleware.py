@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -18,6 +20,7 @@ from langgraph.runtime import Runtime
 logger = logging.getLogger(__name__)
 
 TOKEN_USAGE_ATTRIBUTION_KEY = "token_usage_attribution"
+PUBLISHED_RUN_TOKEN_BUDGET_ERROR = "The run exceeded its token budget."
 
 
 class PublishedRunTokenLimitError(RuntimeError):
@@ -316,23 +319,61 @@ class TokenUsageMiddleware(AgentMiddleware):
         raise PublishedRunTokenLimitError(f"published model {type(model).__name__} does not support an enforceable output token cap")
 
     @staticmethod
-    def _request_input_tokens(request: ModelRequest) -> int:
-        messages = list(request.messages)
+    def _heuristic_token_count(text: str) -> int:
+        """Conservative UTF-8 byte estimate (~2 bytes/token) for unknown tokenizers."""
+        return max(1, math.ceil(len(text.encode("utf-8")) / 2)) if text else 0
+
+    @classmethod
+    def _message_text(cls, message: Any) -> str:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+        if content is None:
+            return ""
+        try:
+            return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+        except TypeError:
+            return str(content)
+
+    @classmethod
+    def _heuristic_input_tokens(cls, messages: Sequence[Any], tools: Sequence[Any]) -> int:
+        """Fallback input estimate when provider token counters are unavailable."""
+        count = 0
+        for message in messages:
+            count += cls._heuristic_token_count(cls._message_text(message))
+            # Role / framing overhead so plain-text estimates stay conservative.
+            count += 4
+        if tools:
+            schema_text = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+            count += cls._heuristic_token_count(schema_text) + (8 * len(tools))
+        return max(1, count)
+
+    @classmethod
+    def _request_input_tokens(cls, request: ModelRequest) -> int:
+        messages: list[Any] = list(request.messages)
         if request.system_message is not None:
             messages.insert(0, request.system_message)
+        tools: list[Any] = []
         try:
-            count = int(request.model.get_num_tokens_from_messages(messages))
             tools = [convert_to_openai_tool(tool) for tool in (request.tools or [])]
+            count = int(request.model.get_num_tokens_from_messages(messages))
             if tools:
                 # Model-specific message counters commonly omit bound tool
                 # schemas. Count their canonical JSON separately and include a
                 # small per-tool envelope allowance.
-                import json
-
                 schema_text = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 count += int(request.model.get_num_tokens(schema_text)) + (8 * len(tools))
-        except Exception as exc:
-            raise PublishedRunTokenLimitError(f"cannot preflight published model token usage for {type(request.model).__name__}") from exc
+        except Exception:
+            # Custom OpenAI-compatible gateway models often use names tiktoken
+            # does not recognize. Prefer a conservative heuristic over fail-closed
+            # preflight so Published Runs remain callable; after_model still
+            # enforces the real cumulative budget from provider usage_metadata.
+            logger.warning(
+                "published token preflight fallback for %s; using heuristic input estimate",
+                type(request.model).__name__,
+                exc_info=True,
+            )
+            count = cls._heuristic_input_tokens(messages, tools)
         if count < 0:
             raise PublishedRunTokenLimitError("published model returned an invalid input token estimate")
         return count
