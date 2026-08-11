@@ -80,6 +80,11 @@ class AgentReleaseRepository:
         )
         async with self._sf() as session:
             session.add(row)
+            # Flush the parent before child FK rows. Scalar release_id links
+            # without relationship() are not always topologically sorted before
+            # Query-invoked autoflush / dialect executemany (Postgres production
+            # failure: agent_release_connector_grants_release_id_fkey).
+            await session.flush()
             for entry in skills or []:
                 session.add(
                     AgentReleaseSkillRow(
@@ -135,6 +140,11 @@ class AgentReleaseRepository:
 
         async def _do(sess: AsyncSession) -> dict[str, Any]:
             sess.add(row)
+            # Parent must land before child FK inserts. create_and_point next
+            # calls sess.get(), which autoflushes; without an explicit parent
+            # flush, agent_release_connector_grants can INSERT first and violate
+            # agent_release_connector_grants_release_id_fkey on PostgreSQL.
+            await sess.flush()
             for entry in skills or []:
                 sess.add(
                     AgentReleaseSkillRow(

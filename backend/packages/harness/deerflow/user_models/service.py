@@ -72,8 +72,10 @@ def to_model_config(row: dict[str, Any], *, secret_store: ModelSecretStore | Non
         store = secret_store or ModelSecretStore()
         kwargs["api_key"] = store.decrypt_api_key(api_key_ref)
 
-    if provider == "anthropic":
-        kwargs.setdefault("max_tokens", 8192)
+    # Published Runs need an enforceable output cap on the model instance.
+    # Anthropic requires max_tokens; OpenAI-compatible gateways (openai/gaia)
+    # get the same default so TokenUsageMiddleware can min(remaining, cap).
+    kwargs.setdefault("max_tokens", 8192)
 
     kwargs["supports_thinking"] = bool(row.get("supports_thinking", True))
     kwargs["supports_reasoning_effort"] = bool(row.get("supports_reasoning_effort", True))

@@ -200,6 +200,17 @@ make up     # 构建镜像并启动全部生产服务
 make down   # 停止并移除容器
 ```
 
+**Live 更新（CentOS 友好，复用镜像层）**（只需 `git pull` 后重启，默认不需要 `--build`）：
+
+```bash
+# export DEER_FLOW_ROOT=/absolute/path/to/deer-flow   (required by AIO DooD mount translation)
+# 首次启动（必要时可补上 --build）：
+docker compose -p deer-flow-live -f docker/docker-compose-live.yaml up -d
+
+# 后续拉代码更新后（必须重启 gateway + frontend，否则不会生效）：
+docker compose -p deer-flow-live -f docker/docker-compose-live.yaml restart gateway frontend
+```
+
 完整服务器部署、环境变量、更新、日志和排障流程见 [Docker 生产部署手册](docs/DOCKER_PRODUCTION_DEPLOYMENT_zh.md)。
 
 > [!NOTE]

@@ -80,6 +80,18 @@ fi
 
 # ── Hand off to uvicorn ─────────────────────────────────────────────────────
 
-PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
-    --host 0.0.0.0 --port 8001 \
-    --reload --reload-include='*.yaml .env'
+#
+# Live mode: disable hot reload so `docker compose up -d` can reuse the
+# already-built dependencies image layers without extra churn.
+# - Default: keep reload enabled (dev behavior)
+# - Set UVICORN_RELOAD=0 to disable
+#
+
+if [ "${UVICORN_RELOAD:-1}" = "0" ]; then
+    PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
+        --host 0.0.0.0 --port 8001
+else
+    PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
+        --host 0.0.0.0 --port 8001 \
+        --reload --reload-include='*.yaml .env'
+fi

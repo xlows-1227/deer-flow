@@ -153,6 +153,30 @@ async def test_publish_creates_release_and_switches_pointer(env):
 
 
 @pytest.mark.asyncio
+async def test_publish_with_connector_grants_and_no_skills(env):
+    """Regression: grants-only publish must not FK-fail before parent insert.
+
+    ``create_and_point`` calls ``session.get()`` after staging child rows; that
+    autoflush used to INSERT ``agent_release_connector_grants`` before
+    ``agent_releases``, which PostgreSQL rejects with
+    ``agent_release_connector_grants_release_id_fkey``.
+    """
+    service, draft_service, agent_repo, release_repo = env
+    agent = await _seed_agent(draft_service, skills=False, grants=True)
+
+    result = await service.publish(agent["id"], owner_user_id="user-a")
+
+    assert result["release_no"] == 1
+    refreshed = await agent_repo.get(agent["id"], owner_user_id="user-a")
+    assert refreshed["status"] == "published"
+    releases = await release_repo.list_by_agent(agent["id"], owner_user_id="user-a")
+    assert releases[0]["skills"] == []
+    assert releases[0]["connector_grants"] == [
+        {"connector_instance_id": "conn_1", "capability": "database.query"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_publish_replaces_legacy_draft_tool_groups_with_platform_policy(env):
     service, draft_service, _, release_repo = env
     agent = await _seed_agent(draft_service)

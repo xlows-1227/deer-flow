@@ -6,6 +6,8 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
+from deerflow.agents.middlewares.token_usage_middleware import PUBLISHED_RUN_TOKEN_BUDGET_ERROR
+
 _FORBIDDEN_KEY_PARTS = (
     "owner_user",
     "release_id",
@@ -72,16 +74,30 @@ def _status(value: Any) -> str:
     }.get(raw, raw)
 
 
+# Safe, non-sensitive failure messages that may be returned on the public API.
+_PUBLIC_RUN_ERROR_ALLOWLIST = frozenset(
+    {
+        "The run failed.",
+        PUBLISHED_RUN_TOKEN_BUDGET_ERROR,
+    }
+)
+
+
 def serialize_agent_run(row: Any, *, conversation_id: str) -> dict[str, Any]:
     """Serialize one run without leaking internal runtime authority."""
     getter = (lambda key, default=None: getattr(row, key, default)) if not isinstance(row, dict) else row.get
     status = _status(getter("status"))
+    raw_error = getter("error")
+    if status == "failed":
+        error = raw_error if isinstance(raw_error, str) and raw_error in _PUBLIC_RUN_ERROR_ALLOWLIST else "The run failed."
+    else:
+        error = None
     payload = {
         "run_id": str(getter("run_id")),
         "conversation_id": conversation_id,
         "status": status,
         "answer": getter("last_ai_message") if status == "completed" else None,
-        "error": "The run failed." if status == "failed" else None,
+        "error": error,
         "created_at": getter("created_at"),
         "updated_at": getter("updated_at"),
     }

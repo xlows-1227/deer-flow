@@ -96,6 +96,7 @@ def test_to_model_config_maps_provider_to_use():
     assert config.model == "gpt-4o"
     assert config.base_url == "https://example.com/v1"
     assert config.api_key == "sk-test"
+    assert config.max_tokens == 8192
 
 
 def test_to_model_config_maps_gaia_to_openai_use():
@@ -112,6 +113,7 @@ def test_to_model_config_maps_gaia_to_openai_use():
     assert config.model == "yumcode-pro"
     assert config.base_url == "http://api.llm.prd.yumc.local/v1"
     assert config.api_key == "sk-gaia"
+    assert config.max_tokens == 8192
     assert config.supports_thinking is True
     assert config.supports_reasoning_effort is True
 

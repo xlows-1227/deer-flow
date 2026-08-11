@@ -927,8 +927,16 @@ async def run_agent(
             logger.info("Run %s was cancelled", run_id)
 
     except Exception as exc:
-        error_msg = "Run failed while processing the request."
-        logger.error("Run %s failed with %s", run_id, type(exc).__name__)
+        from deerflow.agents.middlewares.token_usage_middleware import (
+            PUBLISHED_RUN_TOKEN_BUDGET_ERROR,
+            PublishedRunTokenLimitError,
+        )
+
+        if isinstance(exc, PublishedRunTokenLimitError):
+            error_msg = PUBLISHED_RUN_TOKEN_BUDGET_ERROR
+        else:
+            error_msg = "Run failed while processing the request."
+        logger.error("Run %s failed with %s", run_id, type(exc).__name__, exc_info=True)
         await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         await bridge.publish(
             run_id,
