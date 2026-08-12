@@ -329,6 +329,54 @@ async def test_reconciled_running_task_can_execute_at_next_due_time():
 
 
 @pytest.mark.anyio
+async def test_execute_task_disables_when_model_not_in_allowlist():
+    """Config/allowlist drift must stop the task instead of retrying forever."""
+    app = FastAPI()
+    app.state.scheduler_store = MemoryScheduledTaskStore()
+    app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
+    service = SchedulerService(app)
+    now = datetime.now(UTC)
+    task = await app.state.scheduler_store.create(
+        {
+            "id": "task-allowlist",
+            "user_id": str(_USER_ID),
+            "name": "Daily report",
+            "prompt": "Summarize yesterday.",
+            "repeat_type": "daily",
+            "execution_time": "09:30",
+            "timezone": "UTC",
+            "day_of_week": None,
+            "is_enabled": True,
+            "model_name": "minimax-m2.7",
+            "mode": "pro",
+            "reasoning_effort": "medium",
+            "next_run_at": now,
+            "last_run_at": None,
+            "last_run_status": None,
+            "last_run_thread_id": None,
+            "last_run_id": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    with patch.object(
+        service,
+        "_validate_model_name",
+        AsyncMock(side_effect=ValueError("Model 'minimax-m2.7' is not in the configured model allowlist")),
+    ):
+        result = await service.execute_task(task["id"], user_id=str(_USER_ID), automatic=True)
+
+    assert result.found is True
+    assert result.error_message == "Model 'minimax-m2.7' is not in the configured model allowlist"
+    row = await app.state.scheduler_store.get(task["id"], user_id=str(_USER_ID))
+    assert row is not None
+    assert row["last_run_status"] == "error"
+    assert row["is_enabled"] is False
+    assert row["next_run_at"] is None
+
+
+@pytest.mark.anyio
 async def test_stale_run_cannot_overwrite_new_scheduled_execution():
     store = MemoryScheduledTaskStore()
     task = {

@@ -507,7 +507,9 @@ class SchedulerService:
         try:
             await self._validate_model_name(task.get("model_name"), user_id=user_id)
         except ValueError as exc:
-            await self._store.mark_finished(task_id, status="error")
+            # Model removed from config/allowlist after the task was created:
+            # disable so the loop stops retrying; user must edit and re-enable.
+            await self._store.mark_finished(task_id, status="error", disable=True)
             return ExecuteTaskResult(found=True, error_message=str(exc))
 
         thread_id = str(uuid.uuid4())
