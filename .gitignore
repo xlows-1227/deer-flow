@@ -66,3 +66,4 @@ scripts/filebrowser-image-transfer/01-test-package-upload.sh
 scripts/filebrowser-image-transfer/02-local-relay.sh
 .superpowers/
 data/postgres/
+deer-flow-live-images-amd64.tar.gz

@@ -25,3 +25,4 @@ pydot
 networkx
 diagrams
 plantuml
+lark-oapi
