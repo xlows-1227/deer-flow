@@ -5,15 +5,27 @@
 # - Only pull latest git code on the host
 # - Bind-mount code into containers and restart them (no `--build` needed)
 #
+# Prerequisites:
+#   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+#
+# If an old stack is already running (deer-flow-postgres / deer-flow-nginx),
+# stop it first to free ports 5432 and 2026:
+#   docker stop deer-flow-postgres deer-flow-nginx
+#   # or: docker compose -p deer-flow -f docker/docker-compose.yaml down
+#
 # Usage:
-#   1) First time (optional, but recommended):
-#      docker compose -p deer-flow-live -f docker/docker-compose-live.yaml up -d --build
-#   2) Subsequent updates:
-#      docker compose -p deer-flow-live -f docker/docker-compose-live.yaml up -d
+#   1) First time:
+#      docker compose --env-file .env -p deer-flow-live -f docker/docker-compose-live.yaml up -d
+#   2) Subsequent code updates:
+#      git pull
+#      docker compose --env-file .env -p deer-flow-live -f docker/docker-compose-live.yaml restart gateway frontend
+#      # frontend restart will re-run `pnpm build` then `pnpm start` (first request becomes fast after build)
 #
 # Note:
-# - This compose intentionally runs Gateway without `--reload`.
-#   Set UVICORN_RELOAD=0 (default in this file) to disable hot reload.
+# - Gateway runs without `--reload` (UVICORN_RELOAD=0).
+# - Frontend runs production mode (build + start), not `next dev`, for acceptable latency.
+# - Postgres is NOT published to the host by default (avoids 5432 conflicts).
+#   Set POSTGRES_PORT=5432 (or another free port) only if you need host access.
 
 services:
   nginx:
@@ -34,16 +46,19 @@ services:
     restart: unless-stopped
 
   frontend:
-    build:
-      context: ../
-      dockerfile: frontend/Dockerfile
-      target: dev
-      args:
-        PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
-        NPM_REGISTRY: ${NPM_REGISTRY:-}
     image: deer-flow-frontend:live
     container_name: deer-flow-live-frontend
-    command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
+    # Production serve: slower restart (rebuild), much faster page loads than `next dev`.
+    command:
+      - sh
+      - -c
+      - |
+        cd frontend
+        exec >/app/logs/frontend.log 2>&1
+        echo "[frontend] building..."
+        SKIP_ENV_VALIDATION=1 pnpm build
+        echo "[frontend] starting..."
+        exec pnpm start
     volumes:
       - ../frontend/src:/app/frontend/src:cached
       - ../frontend/public:/app/frontend/public:cached
@@ -53,11 +68,10 @@ services:
       - ${PNPM_STORE_PATH:-~/.local/share/pnpm/store}:/root/.local/share/pnpm/store
     working_dir: /app
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
       - NODE_OPTIONS=--max-old-space-size=4096
-      - WATCHPACK_POLLING=true
-      - CHOKIDAR_USEPOLLING=true
       - CI=true
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
       - ../frontend/.env
@@ -75,9 +89,13 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
       POSTGRES_DB: ${POSTGRES_DB:-deerflow}
     volumes:
-      - ${POSTGRES_DATA_DIR:-/data/postgres}:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Prefer a dedicated live data dir so an old stack on /data/postgres
+      # cannot be mounted twice. To reuse existing prod data, stop the old
+      # postgres first and set POSTGRES_DATA_DIR=/data/postgres.
+      - ${POSTGRES_DATA_DIR:-/data/postgres-live}:/var/lib/postgresql/data
+    # Host port is optional. Uncomment / set POSTGRES_PORT only when needed.
+    # ports:
+    #   - "${POSTGRES_PORT:-5432}:5432"
     networks:
       - deer-flow-live
     restart: unless-stopped
@@ -88,18 +106,18 @@ services:
       retries: 5
 
   gateway:
-    build:
-      context: ../
-      dockerfile: backend/Dockerfile
-      target: dev
-      args:
-        APT_MIRROR: ${APT_MIRROR:-}
-        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
-        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
-        UV_EXTRAS: ${UV_EXTRAS:-}
     image: deer-flow-gateway:live
     container_name: deer-flow-live-gateway
     command: ["sh", "/usr/local/bin/dev-entrypoint.sh"]
+    # CentOS/Docker often hits "RuntimeError: can't start new thread" without these.
+    security_opt:
+      - seccomp:unconfined
+    pids_limit: -1
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,12 +148,15 @@ services:
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      # Override host paths from .env — inside the container these are bind-mounted.
+      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
-      - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.210.0/24}
+      - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.220.0/24}
       - UVICORN_RELOAD=0
       - DATABASE_URL=postgresql://${POSTGRES_USER:-deerflow}:${POSTGRES_PASSWORD:-deerflow}@postgres:5432/${POSTGRES_DB:-deerflow}
     env_file:
