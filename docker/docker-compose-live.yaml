@@ -48,23 +48,16 @@ services:
   frontend:
     image: deer-flow-frontend:live
     container_name: deer-flow-live-frontend
-    # Production serve: slower restart (rebuild), much faster page loads than `next dev`.
-    command:
-      - sh
-      - -c
-      - |
-        cd frontend
-        exec >/app/logs/frontend.log 2>&1
-        echo "[frontend] building..."
-        SKIP_ENV_VALIDATION=1 pnpm build
-        echo "[frontend] starting..."
-        exec pnpm start
+    command: ["sh", "/usr/local/bin/frontend-live-entrypoint.sh"]
+    security_opt:
+      - seccomp:unconfined
     volumes:
+      - ./frontend-live-entrypoint.sh:/usr/local/bin/frontend-live-entrypoint.sh:ro
       - ../frontend/src:/app/frontend/src:cached
       - ../frontend/public:/app/frontend/public:cached
       - ../frontend/next.config.js:/app/frontend/next.config.js:ro
       - ../logs:/app/logs
-      - frontend-next-cache:/app/frontend/.next
+      - frontend-next-output:/app/frontend/.next
       - ${PNPM_STORE_PATH:-~/.local/share/pnpm/store}:/root/.local/share/pnpm/store
     working_dir: /app
     environment:
@@ -125,6 +118,8 @@ services:
       - ./dev-entrypoint.sh:/usr/local/bin/dev-entrypoint.sh:ro
       - ../backend/:/app/backend/
       - gateway-venv:/app/backend/.venv
+      # Overlay production runtime dir (must come after backend/ mount).
+      - ${DEER_FLOW_HOME:-/var/lib/deer-flow}:/app/backend/.deer-flow
       - ../config.yaml:/app/config.yaml
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
@@ -151,9 +146,10 @@ services:
       # Override host paths from .env — inside the container these are bind-mounted.
       - DEER_FLOW_CONFIG_PATH=/app/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
+      - AUTH_LOGIN_RSA_PRIVATE_KEY_FILE=/app/backend/.deer-flow/login_rsa_private.pem
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
-      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME:-/var/lib/deer-flow}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.220.0/24}
@@ -170,7 +166,7 @@ services:
 volumes:
   gateway-venv:
   gateway-uv-cache:
-  frontend-next-cache:
+  frontend-next-output:
 
 networks:
   deer-flow-live:
