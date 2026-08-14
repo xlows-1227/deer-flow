@@ -1,5 +1,7 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import { THREAD_SOURCE_SCHEDULED_TASK } from "@/core/threads/utils";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -631,6 +633,7 @@ export function repairDynamicContextUserMessageOrder(
 export function isHiddenFromUIMessage(message: Message) {
   return (
     message.additional_kwargs?.hide_from_ui === true ||
+    message.additional_kwargs?.source === THREAD_SOURCE_SCHEDULED_TASK ||
     isViewImageContextMessage(message) ||
     (typeof message.name === "string" &&
       HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))

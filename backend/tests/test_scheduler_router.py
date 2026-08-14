@@ -412,6 +412,73 @@ async def test_stale_run_cannot_overwrite_new_scheduled_execution():
     assert current["last_run_status"] == "running"
 
 
+@pytest.mark.anyio
+async def test_execute_task_hides_prompt_from_ui():
+    app = FastAPI()
+    app.state.scheduler_store = MemoryScheduledTaskStore()
+    app.state.scheduler_run_store = MemoryScheduledTaskRunStore()
+    captured: dict = {}
+    record = SimpleNamespace(run_id="run-hidden-prompt", task=None)
+
+    async def fake_create_or_reject(*_args, **kwargs):
+        captured["create_kwargs"] = kwargs
+        return record
+
+    app.state.run_manager = SimpleNamespace(
+        create_or_reject=fake_create_or_reject,
+        cancel=AsyncMock(),
+    )
+    app.state.thread_store = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        create=AsyncMock(),
+    )
+    service = SchedulerService(app)
+    now = datetime.now(UTC)
+    task = await app.state.scheduler_store.create(
+        {
+            "id": "task-hidden-prompt",
+            "user_id": str(_USER_ID),
+            "name": "禅道巡检",
+            "prompt": "角色设定\n你是Store禅道平台综合提醒机器人",
+            "repeat_type": "daily",
+            "execution_time": "09:30",
+            "timezone": "UTC",
+            "day_of_week": None,
+            "is_enabled": True,
+            "model_name": None,
+            "mode": "pro",
+            "reasoning_effort": "medium",
+            "next_run_at": now,
+            "last_run_at": None,
+            "last_run_status": None,
+            "last_run_thread_id": None,
+            "last_run_id": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    with (
+        patch.object(service, "_validate_model_name", AsyncMock()),
+        patch.object(service, "_run_task_worker", AsyncMock()) as worker,
+    ):
+        result = await service.execute_task(task["id"], user_id=str(_USER_ID), automatic=True)
+        if record.task is not None:
+            await record.task
+
+    assert result.found is True
+    assert result.error_message is None
+    message = captured["create_kwargs"]["kwargs"]["input"]["messages"][0]
+    assert message["content"] == "角色设定\n你是Store禅道平台综合提醒机器人"
+    assert message["additional_kwargs"]["hide_from_ui"] is True
+    assert message["additional_kwargs"]["source"] == "scheduled_task"
+
+    worker_kwargs = worker.await_args.kwargs
+    graph_message = worker_kwargs["graph_input"]["messages"][0]
+    assert graph_message.content == message["content"]
+    assert graph_message.additional_kwargs.get("hide_from_ui") is True
+
+
 def test_gateway_app_mounts_scheduler_router():
     app = create_app()
     paths = {getattr(route, "path", "") for route in app.routes}

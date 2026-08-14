@@ -358,6 +358,75 @@ function isAlignmentNoiseMessage(message: Message): boolean {
   return isHiddenFromUIMessage(message);
 }
 
+function lastEquivalentIndex(messages: Message[], target: Message): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messagesEquivalent(messages[index]!, target)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function isMessageInHistory(
+  message: Message,
+  historyMessages: Message[],
+): boolean {
+  return historyMessages.some((historyMessage) =>
+    messagesEquivalent(historyMessage, message),
+  );
+}
+
+// When a historical thread is opened, run-event history is loaded newest-run
+// first. That suffix is not a prefix of checkpoint state, so the streaming
+// overlap finder fails and would otherwise prepend the latest turn. Rebuild
+// from the checkpoint prefix that precedes the matched span, then the
+// chronological history suffix.
+function mergeHistoryAsThreadSuffix(
+  historyMessages: Message[],
+  threadMessages: Message[],
+  optimisticMessages: Message[],
+): Message[] | null {
+  if (historyMessages.length === 0 || threadMessages.length === 0) {
+    return null;
+  }
+
+  const lastHistoryHumanIndex = findLastMessageIndex(
+    historyMessages,
+    (message) => message.type === "human" && !isAlignmentNoiseMessage(message),
+  );
+  if (lastHistoryHumanIndex === -1) {
+    return null;
+  }
+
+  const lastHistoryHuman = historyMessages[lastHistoryHumanIndex]!;
+  if (lastEquivalentIndex(threadMessages, lastHistoryHuman) < 0) {
+    return null;
+  }
+
+  const matchIndexes = historyMessages
+    .map((message) => lastEquivalentIndex(threadMessages, message))
+    .filter((index) => index >= 0);
+  if (matchIndexes.length === 0) {
+    return null;
+  }
+
+  const firstMatch = Math.min(...matchIndexes);
+  if (firstMatch <= 0) {
+    return null;
+  }
+
+  const prefix = threadMessages.slice(0, firstMatch);
+  const after = threadMessages
+    .slice(firstMatch)
+    .filter((message) => !isMessageInHistory(message, historyMessages));
+
+  return mergeThreadAndOptimisticMessages(
+    prefix,
+    [...historyMessages, ...after],
+    optimisticMessages,
+  );
+}
+
 function findHistoryThreadOverlap(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -397,6 +466,20 @@ function findHistoryThreadOverlap(
     }
   }
   return { cutoff: historyMessages.length, threadOverlapLen: 0 };
+}
+
+function repairTrailingTurnOrder(messages: Message[]): Message[] {
+  const { established, currentTail } = splitThreadForOptimisticHuman(messages);
+  if (currentTail.length === 0) {
+    return messages;
+  }
+  return [...established, ...currentTail];
+}
+
+function finalizeMergedMessages(messages: Message[]): Message[] {
+  return repairDynamicContextUserMessageOrder(
+    repairTrailingTurnOrder(dedupeMessagesByIdentity(messages)),
+  );
 }
 
 function mergeThreadAndOptimisticMessages(
@@ -529,22 +612,32 @@ export function mergeMessages(
     historyMessages,
     timestampedThreadMessages,
   );
+
+  if (threadOverlapLen === 0) {
+    const suffixMerged = mergeHistoryAsThreadSuffix(
+      historyMessages,
+      timestampedThreadMessages,
+      optimisticMessages,
+    );
+    if (suffixMerged) {
+      return finalizeMergedMessages(suffixMerged);
+    }
+  }
+
   const establishedThreadPrefix = timestampedThreadMessages.slice(
     0,
     threadOverlapLen,
   );
   const threadNewSegment = timestampedThreadMessages.slice(threadOverlapLen);
 
-  return repairDynamicContextUserMessageOrder(
-    dedupeMessagesByIdentity([
-      ...historyMessages.slice(0, cutoff),
-      ...mergeThreadAndOptimisticMessages(
-        establishedThreadPrefix,
-        threadNewSegment,
-        optimisticMessages,
-      ),
-    ]),
-  );
+  return finalizeMergedMessages([
+    ...historyMessages.slice(0, cutoff),
+    ...mergeThreadAndOptimisticMessages(
+      establishedThreadPrefix,
+      threadNewSegment,
+      optimisticMessages,
+    ),
+  ]);
 }
 
 function getMessagesAfterBaseline(

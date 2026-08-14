@@ -607,8 +607,8 @@ uploads:
   # Application-level upload limits enforced by the gateway and exposed to the
   # frontend before file selection.
   max_files: 10
-  max_file_size: 52428800    # 50 MiB
-  max_total_size: 104857600  # 100 MiB
+  max_file_size: 104857600    # 100 MiB
+  max_total_size: 314572800  # 300 MiB
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
@@ -634,7 +634,13 @@ sandbox:
   # port: 8080
 
   # 最大并发 sandbox 容器数（LRU 淘汰，默认 3）
+  # 注意：同一条 thread 只会复用一个容器（名字 deer-flow-sandbox-<hash>），
+  # replicas 限制的是「不同 thread」的并发数，不会给同一会话再开第二个。
   # replicas: 3
+  #
+  # 空闲超时（秒，默认 600）。会话还在跑工具时不会回收；
+  # 进程崩溃产生的 core dump 已在 docker run 时用 --ulimit core=0 禁止。
+  # idle_timeout: 600
 
   # 工具输出截断保留默认即可
   bash_output_max_chars: 20000

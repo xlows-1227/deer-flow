@@ -22,7 +22,7 @@ POST /api/threads/{thread_id}/uploads
 **请求体：** `multipart/form-data`
 - `files`: 一个或多个文件
 
-网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
+网关会在应用层限制上传规模，默认最多 10 个文件、单文件 100 MiB、单次请求总计 300 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
 **响应：**
 ```json
@@ -61,8 +61,8 @@ GET /api/threads/{thread_id}/uploads/limits
 ```json
 {
   "max_files": 10,
-  "max_file_size": 52428800,
-  "max_total_size": 104857600
+  "max_file_size": 104857600,
+  "max_total_size": 314572800
 }
 ```
 
@@ -224,7 +224,7 @@ backend/.deer-flow/threads/
 
 ## 限制
 
-- 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
+- 最大文件大小：100 MiB；单次请求总计 300 MiB（Nginx `client_max_body_size` 需同步为 300M）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
 - 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
