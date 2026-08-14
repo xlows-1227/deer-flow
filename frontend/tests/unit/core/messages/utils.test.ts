@@ -414,6 +414,51 @@ test("keeps streaming assistant hidden when a hidden control message follows it"
   ).toBe(true);
 });
 
+test("hides scheduled-task prompt after the execution summary", () => {
+  const messages = [
+    {
+      id: "ai-summary",
+      type: "ai",
+      content: "执行总结：巡检完成。",
+    },
+    {
+      id: "turn-1__user",
+      type: "human",
+      content: "角色设定\n你是Store禅道平台综合提醒机器人",
+      additional_kwargs: {
+        hide_from_ui: true,
+        source: "scheduled_task",
+      },
+    },
+  ] as Message[];
+
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "assistant",
+  ]);
+});
+
+test("hides legacy scheduled-task prompts that only carry source metadata", () => {
+  const messages = [
+    {
+      id: "ai-summary",
+      type: "ai",
+      content: "执行总结：巡检完成。",
+    },
+    {
+      id: "turn-1__user",
+      type: "human",
+      content: "角色设定\n你是Store禅道平台综合提醒机器人",
+      additional_kwargs: {
+        source: "scheduled_task",
+      },
+    },
+  ] as Message[];
+
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "assistant",
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // stripUploadedFilesTag — covers the <uploaded_files> AND <referenced_files>
 // injection blocks. Both are produced by backend middlewares and addressed

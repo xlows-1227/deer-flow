@@ -506,6 +506,9 @@ class LocalContainerBackend(SandboxBackend):
         # Docker-specific security options
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
+            # A crashing browser/tool otherwise dumps core into /home/gem and
+            # can fill the host overlay disk (thousands of ~25MB core.* files).
+            cmd.extend(["--ulimit", "core=0"])
 
         if self._runtime == "docker":
             port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"

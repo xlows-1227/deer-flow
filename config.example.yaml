@@ -658,7 +658,15 @@ sandbox:
 #   # Optional: Maximum number of concurrent sandbox containers (default: 3)
 #   # When the limit is reached the least-recently-used sandbox is evicted to
 #   # make room for new ones. Use a positive integer here; omit this field to use the default.
+#   # One thread always reuses one container (deer-flow-sandbox-<hash>); this
+#   # cap is across different threads, not extra replicas of the same session.
 #   # replicas: 3
+#
+#   # Optional: Idle timeout in seconds before an unused sandbox is destroyed
+#   # (default: 600). Set 0 to disable. Does not evict a sandbox that is still
+#   # receiving tool calls. Docker sandboxes also start with `--ulimit core=0`
+#   # so a crashing process cannot fill the host disk with core dumps.
+#   # idle_timeout: 600
 #
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox

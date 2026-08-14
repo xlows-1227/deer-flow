@@ -222,7 +222,37 @@ def test_start_container_binds_ipv6_sandbox_host_to_ipv6_loopback(monkeypatch):
     assert captured_cmd[captured_cmd.index("-p") + 1] == "[::1]:18080:8080"
 
 
+def test_start_container_disables_core_dumps_for_docker(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    ulimit_idx = captured_cmd.index("--ulimit")
+    assert captured_cmd[ulimit_idx + 1] == "core=0"
+
+
+def test_start_container_skips_core_ulimit_for_apple_container(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+
+    assert "--ulimit" not in captured_cmd
+
+
 def test_start_container_keeps_apple_container_port_format(monkeypatch):
+
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,

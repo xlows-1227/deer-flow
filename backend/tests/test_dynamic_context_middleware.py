@@ -65,6 +65,30 @@ def test_injects_system_reminder_into_first_human_message():
     assert user_msg.content == "Hello"
 
 
+def test_preserves_hide_from_ui_on_split_user_copy():
+    """Scheduled-task prompts stay hidden after the reminder/user ID split."""
+    mw = _make_middleware()
+    state = {
+        "messages": [
+            HumanMessage(
+                content="角色设定\n你是Store禅道平台综合提醒机器人",
+                id="msg-1",
+                additional_kwargs={"hide_from_ui": True, "source": "scheduled_task"},
+            )
+        ]
+    }
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is not None
+    user_msg = result["messages"][1]
+    assert user_msg.content == "角色设定\n你是Store禅道平台综合提醒机器人"
+    assert user_msg.additional_kwargs.get("hide_from_ui") is True
+    assert user_msg.additional_kwargs.get("source") == "scheduled_task"
+
+
 def test_memory_included_when_present():
     mw = _make_middleware()
     state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}

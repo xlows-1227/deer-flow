@@ -751,3 +751,144 @@ test("mergeMessages repairs dynamic context user copy order from checkpoint stat
     ).map((message) => message.id),
   ).toEqual(["turn-1", "turn-1__user", "ai-1", "turn-2"]);
 });
+
+test("mergeMessages keeps older checkpoint turns before a newest-run history suffix", () => {
+  // Opening a historical thread loads the latest run first. That suffix must
+  // not be prepended in front of the fuller checkpoint conversation.
+  const olderHuman = {
+    id: "human-1",
+    type: "human",
+    content: "先看一下项目列表",
+    additional_kwargs: { timestamp: "2026-08-14T10:00:00+08:00" },
+  } as Message;
+  const olderAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "这是项目列表。",
+    additional_kwargs: { timestamp: "2026-08-14T10:01:00+08:00" },
+  } as Message;
+  const latestHuman = {
+    id: "human-2",
+    type: "human",
+    content: "查看项目面板",
+    additional_kwargs: { timestamp: "2026-08-14T10:15:45+08:00" },
+  } as Message;
+  const latestAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "已生成交互式 HTML 看板。",
+    additional_kwargs: { timestamp: "2026-08-14T10:42:35+08:00" },
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [latestHuman, latestAi],
+      [olderHuman, olderAi, latestHuman, latestAi],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["human-1", "ai-1", "human-2", "ai-2"]);
+});
+
+test("mergeMessages uses history order when the checkpoint inverts the latest turn", () => {
+  const olderHuman = {
+    id: "human-1",
+    type: "human",
+    content: "先看一下项目列表",
+  } as Message;
+  const olderAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "这是项目列表。",
+  } as Message;
+  const latestHuman = {
+    id: "human-2",
+    type: "human",
+    content: "查看项目面板",
+    additional_kwargs: { timestamp: "2026-08-14T10:15:45+08:00" },
+  } as Message;
+  const latestAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "已生成交互式 HTML 看板。",
+    additional_kwargs: { timestamp: "2026-08-14T10:42:35+08:00" },
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [latestHuman, latestAi],
+      [olderHuman, olderAi, latestAi, latestHuman],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["human-1", "ai-1", "human-2", "ai-2"]);
+});
+
+test("mergeMessages aligns a newest-run suffix when checkpoint ids differ but content matches", () => {
+  const olderHuman = {
+    id: "ckpt-human-1",
+    type: "human",
+    content: "先看一下项目列表",
+  } as Message;
+  const olderAi = {
+    id: "ckpt-ai-1",
+    type: "ai",
+    content: "这是项目列表。",
+  } as Message;
+  const historyHuman = {
+    id: "event-human-2",
+    type: "human",
+    content: "查看项目面板",
+    additional_kwargs: { timestamp: "2026-08-14T10:15:45+08:00" },
+  } as Message;
+  const historyAi = {
+    id: "event-ai-2",
+    type: "ai",
+    content: "已生成交互式 HTML 看板。",
+  } as Message;
+  const checkpointHuman = {
+    id: "ckpt-human-2",
+    type: "human",
+    content: "查看项目面板",
+  } as Message;
+  const checkpointAi = {
+    id: "ckpt-ai-2",
+    type: "ai",
+    content: "已生成交互式 HTML 看板。",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [historyHuman, historyAi],
+      [olderHuman, olderAi, checkpointHuman, checkpointAi],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["ckpt-human-1", "ckpt-ai-1", "event-human-2", "event-ai-2"]);
+});
+
+test("mergeMessages repairs inverted last turn when only checkpoint state is available", () => {
+  const olderHuman = {
+    id: "human-1",
+    type: "human",
+    content: "先看一下项目列表",
+  } as Message;
+  const olderAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "这是项目列表。",
+  } as Message;
+  const latestHuman = {
+    id: "human-2",
+    type: "human",
+    content: "查看项目面板",
+  } as Message;
+  const latestAi = {
+    id: "ai-2",
+    type: "ai",
+    content: "已生成交互式 HTML 看板。",
+  } as Message;
+
+  expect(
+    mergeMessages([], [olderHuman, olderAi, latestAi, latestHuman], []).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["human-1", "ai-1", "human-2", "ai-2"]);
+});

@@ -524,7 +524,7 @@ class SchedulerService:
                 {
                     "role": "user",
                     "content": task["prompt"],
-                    "additional_kwargs": metadata,
+                    "additional_kwargs": {**metadata, "hide_from_ui": True},
                 }
             ]
         }
