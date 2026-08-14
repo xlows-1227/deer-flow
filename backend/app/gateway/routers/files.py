@@ -21,7 +21,7 @@ from deerflow.uploads.manager import claim_unique_filename, normalize_filename, 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 METADATA_FILENAME = ".deerflow-files.json"
 # System collections are frontend-only synthetic roots. Reserve their virtual
 # paths, not their display names, so existing user folders with localized

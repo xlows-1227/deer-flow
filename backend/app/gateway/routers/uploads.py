@@ -35,8 +35,8 @@ router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
 
 UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
-DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
-DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
+DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024
+DEFAULT_MAX_TOTAL_SIZE = 300 * 1024 * 1024
 
 
 class UploadResponse(BaseModel):
