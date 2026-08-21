@@ -95,6 +95,16 @@ class DraftService:
         self._skills = skills_index
         self._connectors = connector_repo
 
+    async def _resolve_agent_id(self, agent_id: str, *, owner_user_id: str) -> str | None:
+        existing = await self._agents.get(agent_id, owner_user_id=owner_user_id)
+        if existing is not None:
+            return existing["id"]
+        agents = await self._agents.list_by_owner(owner_user_id)
+        for a in agents:
+            if a.get("slug") == agent_id:
+                return a["id"]
+        return None
+
     async def setup_authoring_bundle(
         self,
         *,
@@ -197,13 +207,26 @@ class DraftService:
         )
 
     async def get_agent(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
-        return await self._agents.get(agent_id, owner_user_id=owner_user_id)
+        result = await self._agents.get(agent_id, owner_user_id=owner_user_id)
+        if result is not None:
+            return result
+        agents = await self._agents.list_by_owner(owner_user_id)
+        for a in agents:
+            if a.get("slug") == agent_id:
+                return a
+        return None
 
     async def list_agents(self, owner_user_id: str) -> list[dict[str, Any]]:
         return await self._agents.list_by_owner(owner_user_id)
 
     async def get_draft(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
-        return await self._drafts.get(agent_id, owner_user_id=owner_user_id)
+        draft = await self._drafts.get(agent_id, owner_user_id=owner_user_id)
+        if draft is not None:
+            return draft
+        agent = await self.get_agent(agent_id, owner_user_id=owner_user_id)
+        if agent is not None and agent.get("id") != agent_id:
+            return await self._drafts.get(agent["id"], owner_user_id=owner_user_id)
+        return None
 
     def list_selectable_skills(self, *, owner_user_id: str) -> list[dict[str, Any]]:
         """Return the authoritative owner-visible skill catalog for Studio.
@@ -310,6 +333,10 @@ class DraftService:
         before the revision-checked ``update_draft``, leaving sub-tables mutated
         on a 409.
         """
+        resolved_id = await self._resolve_agent_id(agent_id, owner_user_id=owner_user_id)
+        if resolved_id is None:
+            raise DraftConflictError("agent not found")
+        agent_id = resolved_id
         # Pre-validate skills and connectors before touching the DB so a 422 is
         # raised without any write, and a 409 leaves everything unchanged.
         # The skill ``source`` is derived authoritatively from the index, never

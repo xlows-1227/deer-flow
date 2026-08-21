@@ -41,10 +41,13 @@ import { userFileUrl } from "@/core/files/api";
 import type { ReferencedFile } from "@/core/files/type";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  detectToolOmissions,
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   formatMessageTime,
   getMessageTimestamp,
+  getToolCalls,
+  isAiMessage,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -54,6 +57,8 @@ import { humanMessagePlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
+
+import { ToolCallOmissionBanner } from "./tool-call-omission-banner";
 
 import { MarkdownContent } from "./markdown-content";
 
@@ -132,6 +137,7 @@ export function MessageListItem({
   runId,
   threadId,
   showCopyButton = true,
+  precomputedToolNames,
 }: {
   className?: string;
   message: Message;
@@ -140,6 +146,7 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  precomputedToolNames?: string[][];
 }) {
   const isHuman = message.type === "human";
   const timestamp = formatMessageTime(getMessageTimestamp(message));
@@ -153,6 +160,7 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        precomputedToolNames={precomputedToolNames}
       />
       {timestamp && (
         <div
@@ -230,11 +238,13 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
+  precomputedToolNames,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  precomputedToolNames?: string[][];
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
@@ -302,6 +312,19 @@ function MessageContent_({
     return rawContent ?? "";
   }, [rawContent, isHuman]);
 
+  const toolOmissionResult = useMemo(() => {
+    if (isHuman || (!contentToDisplay && !(isAiMessage(message) && getToolCalls(message).length > 0))) {
+      return { count: 0, toolNames: [] as string[][], content: contentToDisplay };
+    }
+    // 如果有预计算的工具名，使用预计算的名称，但仍需清理内容中的标记
+    if (precomputedToolNames && precomputedToolNames.length > 0) {
+      const { cleaned } = detectToolOmissions(contentToDisplay, [message]);
+      return { count: precomputedToolNames.length, toolNames: precomputedToolNames, content: cleaned };
+    }
+    const { count, toolNames, cleaned } = detectToolOmissions(contentToDisplay, [message]);
+    return { count, toolNames, content: cleaned };
+  }, [contentToDisplay, isHuman, message, precomputedToolNames]);
+
   const filesList =
     files && files.length > 0 ? (
       <RichFilesList files={files} threadId={threadId} />
@@ -367,8 +390,11 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
+      {toolOmissionResult.count > 0 && (
+        <ToolCallOmissionBanner count={toolOmissionResult.count} toolNames={toolOmissionResult.toolNames} />
+      )}
       <MarkdownContent
-        content={contentToDisplay}
+        content={toolOmissionResult.content}
         isLoading={isLoading}
         rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
         className="my-3"

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from deerflow.persistence.external_idempotency import ExternalIdempotencyRepository
     from deerflow.persistence.invite_code import InviteCodeRepository
     from deerflow.persistence.published_agent import PublishedAgentRepository
+    from deerflow.persistence.skill_share.store import SkillShareRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.publishing.quota import QuotaLedger
     from deerflow.publishing.resolver import PublishedAgentResolver
@@ -175,9 +176,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.api_key_repo = APIKeyRepository(sf)
             from app.gateway.external.config import get_external_api_config
 
+            external_api_cfg = get_external_api_config()
             app.state.agent_api_key_repo = AgentAPIKeyRepository(
                 sf,
-                pepper=get_external_api_config().api_key_pepper,
+                pepper=external_api_cfg.api_key_pepper,
             )
             app.state.agent_channel_repo = AgentChannelRepository(sf)
             app.state.channel_mapping_store = DbMappingStore(sf)
@@ -188,6 +190,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.external_idempotency_repo = ExternalIdempotencyRepository(sf)
             app.state.external_audit_repo = ExternalAuditRepository(sf)
             app.state.invite_code_repo = InviteCodeRepository(sf)
+            from deerflow.persistence.skill_share.store import SkillShareRepository
+            app.state.skill_share_repo = SkillShareRepository(sf)
 
             from deerflow.connectors.service import make_connector_service
             from deerflow.persistence.agent_release import AgentReleaseRepository
@@ -356,6 +360,7 @@ get_external_conversation_repo: Callable[[Request], ExternalConversationReposito
 get_external_idempotency_repo: Callable[[Request], ExternalIdempotencyRepository] = _require("external_idempotency_repo", "External API persistence")
 get_external_audit_repo: Callable[[Request], ExternalAuditRepository] = _require("external_audit_repo", "External API persistence")
 get_invite_code_repo: Callable[[Request], InviteCodeRepository] = _require("invite_code_repo", "Invite code")
+get_skill_share_repo: Callable[[Request], SkillShareRepository] = _require("skill_share_repo", "Skill share grants")
 
 
 def get_store(request: Request):

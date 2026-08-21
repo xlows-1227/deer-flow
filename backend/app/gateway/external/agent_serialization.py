@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
@@ -21,6 +22,23 @@ _FORBIDDEN_KEY_PARTS = (
     "thread_id",
     "configurable",
 )
+
+_SYSTEM_REMINDER_RE = re.compile(r"<system-rem>.*?</system-rem>", re.DOTALL)
+_TOOL_CALL_SECTION_RE = re.compile(r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>", re.DOTALL)
+_SINGLE_MARKER_RE = re.compile(r"<\|[^>]+\|>")
+_INTERNAL_MARKERS = ["[工具调用已省略]", "[内部消息]"]
+
+
+def _clean_content_for_public(content: str) -> str:
+    """Remove internal markers from content before exposing to public API."""
+    if not content:
+        return content
+    cleaned = _SYSTEM_REMINDER_RE.sub("", content)
+    cleaned = _TOOL_CALL_SECTION_RE.sub("", cleaned)
+    cleaned = _SINGLE_MARKER_RE.sub("", cleaned)
+    for marker in _INTERNAL_MARKERS:
+        cleaned = cleaned.replace(marker, "")
+    return cleaned.strip()
 
 
 def assert_public_payload_safe(value: Any, *, path: str = "$") -> None:
@@ -131,11 +149,16 @@ def serialize_agent_run(row: Any, *, conversation_id: str) -> dict[str, Any]:
         error = raw_error if isinstance(raw_error, str) and raw_error in _PUBLIC_RUN_ERROR_ALLOWLIST else "The run failed."
     else:
         error = None
+    answer = getter("last_ai_message") if status == "completed" else None
+    if isinstance(answer, str):
+        answer = _clean_content_for_public(answer)
+    elif answer is None:
+        pass
     payload = {
         "run_id": str(getter("run_id")),
         "conversation_id": conversation_id,
         "status": status,
-        "answer": getter("last_ai_message") if status == "completed" else None,
+        "answer": answer,
         "error": error,
         "created_at": getter("created_at"),
         "updated_at": getter("updated_at"),
@@ -148,7 +171,15 @@ def sanitize_stream_payload(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool, datetime, date)):
         return value.isoformat() if isinstance(value, (datetime, date)) else value
     if isinstance(value, (list, tuple)):
-        return [sanitize_stream_payload(item) for item in value]
+        result = []
+        for item in value:
+            cleaned = sanitize_stream_payload(item)
+            # If item had a content field that was cleaned to empty string, filter it
+            if isinstance(cleaned, dict) and "content" in cleaned and cleaned["content"] == "":
+                # Skip items where content was fully cleaned (e.g., tool call markers only)
+                continue
+            result.append(cleaned)
+        return result
     if not isinstance(value, dict):
         return str(value)
     allowed = {
@@ -163,7 +194,29 @@ def sanitize_stream_payload(value: Any) -> Any:
         "messages",
         "delta",
     }
-    sanitized = {str(key): sanitize_stream_payload(item) for key, item in value.items() if str(key) in allowed}
+    sanitized = {}
+    for key, item in value.items():
+        if str(key) not in allowed:
+            continue
+        cleaned_item = sanitize_stream_payload(item)
+        if str(key) == "content" and isinstance(cleaned_item, str):
+            cleaned_item = _clean_content_for_public(cleaned_item)
+        elif str(key) == "content" and isinstance(cleaned_item, list):
+            # Handle list-type content (e.g., list of text blocks)
+            cleaned_list = []
+            for block in cleaned_item:
+                if isinstance(block, str):
+                    cleaned_block = _clean_content_for_public(block)
+                    if cleaned_block:
+                        cleaned_list.append(cleaned_block)
+                elif isinstance(block, dict) and "text" in block:
+                    cleaned_text = _clean_content_for_public(str(block["text"]))
+                    if cleaned_text:
+                        cleaned_list.append({**block, "text": cleaned_text})
+                else:
+                    cleaned_list.append(block)
+            cleaned_item = cleaned_list
+        sanitized[str(key)] = cleaned_item
     assert_public_payload_safe(sanitized)
     return sanitized
 

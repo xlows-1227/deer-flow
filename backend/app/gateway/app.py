@@ -39,12 +39,14 @@ from app.gateway.routers import (
     scheduler,
     shares,
     skills,
+    skills_external,
     suggestions,
     thread_runs,
     threads,
     tools,
     uploads,
     user_models,
+    users,
 )
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.config.app_config import apply_logging_level
@@ -593,6 +595,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
 
+    # External Skills API is mounted at /api/v1/skills
+    app.include_router(skills_external.router)
+
     # Scheduler API is mounted at /api/scheduler
     app.include_router(scheduler.router)
 
@@ -634,6 +639,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
+
+    # User listing API (share pickers, ownership chips). Mounted at /api/users.
+    app.include_router(users.router)
 
     # Browser-session management API for External API Keys.
     app.include_router(api_keys.router)

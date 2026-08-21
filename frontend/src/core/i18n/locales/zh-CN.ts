@@ -1,4 +1,4 @@
-﻿import {
+import {
   CompassIcon,
   GraduationCapIcon,
   ImageIcon,
@@ -742,6 +742,10 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    toolCallOmitted: (count: number) => `执行了 ${count} 条工具调用`,
+    toolCallOmittedDetail: "以下内容为模型内部工具调用摘要",
+    expandToolCalls: "展开详情",
+    collapseToolCalls: "收起",
   },
 
   uploads: {

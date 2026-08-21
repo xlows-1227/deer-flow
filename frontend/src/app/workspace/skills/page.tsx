@@ -10,6 +10,7 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
   SearchIcon,
+  Share2Icon,
   SparklesIcon,
   Trash2Icon,
   UploadIcon,
@@ -39,6 +40,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SkillDetailDialog } from "@/components/workspace/skills/skill-detail-dialog";
+import { SkillShareDialog } from "@/components/workspace/skills/skill-share-dialog";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { isAdminUser } from "@/core/auth/types";
 import {
@@ -65,6 +67,7 @@ export default function WorkspaceSkillsPage() {
   const [filter, setFilter] =
     useState<(typeof FILTERS)[number]["value"]>("all");
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
+  const [shareSkill, setShareSkill] = useState<Skill | null>(null);
 
   const visibleSkills = useMemo(
     () =>
@@ -276,7 +279,9 @@ export default function WorkspaceSkillsPage() {
                         <Badge variant="outline">{skill.license}</Badge>
                       ) : null}
                     </div>
-                    {skill.category === "custom" ? (
+                    {skill.category === "custom" &&
+                    user &&
+                    skill.owner_user_id?.toLowerCase() === user.id.toLowerCase() ? (
                       <div onClick={(event) => event.stopPropagation()}>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
@@ -310,6 +315,12 @@ export default function WorkspaceSkillsPage() {
                               <Trash2Icon className="size-4" />
                               删除
                             </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => setShareSkill(skill)}
+                            >
+                              <Share2Icon className="size-4" />
+                              共享
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -325,6 +336,14 @@ export default function WorkspaceSkillsPage() {
       <SkillDetailDialog
         skill={selectedSkill}
         onClose={() => setSelectedSkill(null)}
+      />
+
+      <SkillShareDialog
+        skillName={shareSkill?.name ?? null}
+        skillDisplayName={shareSkill?.display_name ?? shareSkill?.name ?? null}
+        ownerUserId={shareSkill?.owner_user_id ?? null}
+        open={!!shareSkill}
+        onClose={() => setShareSkill(null)}
       />
     </div>
   );

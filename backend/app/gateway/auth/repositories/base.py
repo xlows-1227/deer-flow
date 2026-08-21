@@ -94,9 +94,19 @@ class UserRepository(ABC):
 
         Args:
             provider: OAuth provider name (e.g. 'github', 'google')
-            oauth_id: User ID from the OAuth provider
+            oauth_id: User ID from OAuth provider
 
         Returns:
             User if found, None otherwise
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_users(self) -> list[User]:
+        """Return all registered users ordered by email ascending.
+
+        Used for sharee picker UIs and admin user listings.  Callers
+        should further filter the result set when showing only users
+        that are eligible for a specific share relationship.
         """
         raise NotImplementedError

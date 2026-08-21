@@ -103,6 +103,23 @@ class LocalSkillStorage(SkillStorage):
             return current_user_id == DEFAULT_USER_ID
         return bool(owner_id) and owner_id == current_user_id
 
+    def _resolve_skill_owner_hook(
+        self,
+        category: SkillCategory,
+        skill_dir: Path,
+    ) -> str | None:
+        """Return owner identity for custom skills using the on-disk metadata.
+
+        Public skills and custom skills with no owner metadata both resolve
+        to ``None``; callers treat ``None`` as "unowned legacy skill".
+        """
+        if category != SkillCategory.CUSTOM:
+            return None
+        raw = self._read_custom_skill_owner(skill_dir)
+        # Empty string historically means "invalid metadata"; surface as None
+        # so downstream comparisons remain deterministic.
+        return raw or None
+
     def _write_custom_skill_owner(self, skill_dir: Path) -> None:
         skill_dir.mkdir(parents=True, exist_ok=True)
         owner_file = self._owner_file(skill_dir)

@@ -19,6 +19,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TOOL_CALL_SECTION_RE = re.compile(r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>", re.DOTALL)
+_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call_begin\|>.*?<\|tool_call_end\|>", re.DOTALL)
+_TOOL_CALL_ARG_RE = re.compile(r"<\|tool_call_argument_begin\|>.*?<\|tool_call_argument_end\|>", re.DOTALL)
+_SINGLE_MARKER_RE = re.compile(r"<\|[a-z_]+\|>")
+_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+
+_INTERNAL_MARKERS = [
+    "[工具调用已省略]",
+]
+
 
 class TitleMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
@@ -76,17 +86,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if state.get("title"):
             return False
 
-        # Check if this is the first turn (has at least one user message and one assistant response)
+        # Check if this is the first turn (has at least one user message)
         messages = state.get("messages", [])
-        if len(messages) < 2:
+        if len(messages) < 1:
             return False
 
-        # Count user and assistant messages
+        # Count user messages
         user_messages = [m for m in messages if self._is_user_message_for_title(m)]
-        assistant_messages = [m for m in messages if m.type == "ai"]
-
-        # Generate title after first complete exchange
-        return len(user_messages) == 1 and len(assistant_messages) >= 1
+        
+        # Generate title after first user message
+        return len(user_messages) == 1
 
     def _build_title_prompt(self, state: TitleMiddlewareState) -> tuple[str, str]:
         """Extract user/assistant messages and build the title prompt.
@@ -99,8 +108,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg_content = next((m.content for m in messages if self._is_user_message_for_title(m)), "")
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
-        user_msg = self._normalize_content(user_msg_content)
-        assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
+        user_msg = self._clean_internal_markers(self._normalize_content(user_msg_content))
+        assistant_msg = self._clean_internal_markers(
+            self._strip_think_tags(self._normalize_content(assistant_msg_content))
+        )
 
         prompt = config.prompt_template.format(
             max_words=config.max_words,
@@ -112,6 +123,18 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
     def _strip_think_tags(self, text: str) -> str:
         """Remove <think>...</think> blocks emitted by reasoning models (e.g. minimax, DeepSeek-R1)."""
         return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
+    def _clean_internal_markers(self, text: str) -> str:
+        """Remove internal markers and tool-call traces that should not appear in a title."""
+        cleaned = _TOOL_CALL_SECTION_RE.sub("", text)
+        cleaned = _TOOL_CALL_BLOCK_RE.sub("", cleaned)
+        cleaned = _TOOL_CALL_ARG_RE.sub("", cleaned)
+        cleaned = _SINGLE_MARKER_RE.sub("", cleaned)
+        cleaned = _SYSTEM_REMINDER_RE.sub("", cleaned)
+        for marker in _INTERNAL_MARKERS:
+            cleaned = cleaned.replace(marker, "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     def _parse_title(self, content: object) -> str:
         """Normalize model output into a clean title string."""
@@ -144,40 +167,20 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return config
 
     def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Generate a local fallback title without blocking on an LLM call."""
+        """Generate title using first user message."""
         if not self._should_generate_title(state):
             return None
 
-        _, user_msg = self._build_title_prompt(state)
+        messages = state.get("messages", [])
+        user_msg_content = next(
+            (m.content for m in messages if self._is_user_message_for_title(m)), ""
+        )
+        user_msg = self._clean_internal_markers(self._normalize_content(user_msg_content))
         return {"title": self._fallback_title(user_msg)}
 
     async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Generate a title asynchronously and fall back locally on failure."""
-        if not self._should_generate_title(state):
-            return None
-
-        config = self._get_title_config()
-        prompt, user_msg = self._build_title_prompt(state)
-
-        try:
-            # attach_tracing=False because ``_get_runnable_config()`` inherits
-            # the graph-level RunnableConfig (set in ``_make_lead_agent``) whose
-            # callbacks already carry tracing handlers; binding them again at
-            # the model level would emit duplicate spans.
-            model_kwargs = {"thinking_enabled": False, "attach_tracing": False}
-            if self._app_config is not None:
-                model_kwargs["app_config"] = self._app_config
-            if config.model_name:
-                model = create_chat_model(name=config.model_name, **model_kwargs)
-            else:
-                model = create_chat_model(**model_kwargs)
-            response = await model.ainvoke(prompt, config=self._get_runnable_config())
-            title = self._parse_title(response.content)
-            if title:
-                return {"title": title}
-        except Exception:
-            logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
-        return {"title": self._fallback_title(user_msg)}
+        """Generate title using first user message asynchronously."""
+        return self._generate_title_result(state)
 
     @override
     def after_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:

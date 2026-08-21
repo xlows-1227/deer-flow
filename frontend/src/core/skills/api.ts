@@ -6,7 +6,10 @@ import type {
   Skill,
   SkillFileContent,
   SkillFileEntry,
+  SkillSharedUser,
+  SkillShareState,
   SkillVersion,
+  UserInfo,
 } from "./type";
 
 async function readErrorData(response: Response) {
@@ -500,4 +503,67 @@ export async function restoreCustomSkillVersion(
     );
   }
   return response.json() as Promise<{ version: SkillVersion }>;
+}
+
+// ── Users & share management ──────────────────────────────────────────
+
+export async function listUsers(): Promise<UserInfo[]> {
+  const response = await fetch(`${getBackendBaseURL()}/api/users`, {
+    headers: getCsrfHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, "Failed to list users"));
+  }
+  const json = await response.json();
+  return (json?.users ?? []) as UserInfo[];
+}
+
+export async function listSkillShares(skillName: string): Promise<SkillShareState> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}/shares`,
+    { headers: getCsrfHeaders() },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to load share list"),
+    );
+  }
+  return (await response.json()) as SkillShareState;
+}
+
+export async function replaceSkillShares(
+  skillName: string,
+  sharedWithUserIds: string[],
+): Promise<SkillShareState> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}/shares`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...getCsrfHeaders(),
+      },
+      body: JSON.stringify({ shared_with_user_ids: sharedWithUserIds }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to update share list"),
+    );
+  }
+  const json = await response.json();
+  // Normalize sharees to SkillSharedUser for type safety.
+  const sharees: SkillSharedUser[] = Array.isArray(json.sharees)
+    ? json.sharees.map((s: { id: string; email: string; system_role?: "admin" | "user" }) => ({
+        id: s.id,
+        email: s.email,
+        system_role: s.system_role,
+      }))
+    : [];
+  return {
+    skill_name: json.skill_name,
+    owner_user_id: json.owner_user_id,
+    owner_email: json.owner_email,
+    sharees,
+  };
 }

@@ -352,6 +352,8 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
     messages = await redact_thread_event_rows(event_store, messages, thread_id=thread_id)
+    from app.gateway.message_patch import patch_event_rows
+    messages = patch_event_rows(messages)
 
     # Attach feedback to the last AI message of each run
     feedback_repo = get_feedback_repo(request)
@@ -414,6 +416,8 @@ async def list_run_messages(
         thread_id=thread_id,
         run_id=run_id,
     )
+    from app.gateway.message_patch import patch_event_rows
+    safe_rows = patch_event_rows(safe_rows)
     data = safe_rows[:limit] if has_more else safe_rows
     return {"data": data, "has_more": has_more}
 

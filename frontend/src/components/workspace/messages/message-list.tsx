@@ -18,6 +18,7 @@ import {
   type TokenUsageInlineMode,
 } from "@/core/messages/usage-model";
 import {
+  detectToolOmissions,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
@@ -29,9 +30,12 @@ import {
   getMessageRenderKey,
   getMessageTimestamp,
   getStreamingMessageLookup,
+  getToolCalls,
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  hasToolCalls,
+  isAiMessage,
   isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
@@ -49,6 +53,7 @@ import { MarkdownContent } from "./markdown-content";
 import { MessageChoiceOptions } from "./message-choice-options";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
+import { ToolCallOmissionBanner } from "./tool-call-omission-banner";
 import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
@@ -302,14 +307,15 @@ export function MessageList({
     for (const group of groupedMessages) {
       if (group.type !== "assistant:subagent") continue;
       for (const message of group.messages) {
-        if (message.type === "ai") {
-          for (const toolCall of message.tool_calls ?? []) {
+        if (isAiMessage(message)) {
+          for (const toolCall of getToolCalls(message)) {
             if (toolCall.name === "task") {
+              const args = toolCall.args as { subagent_type: string; description: string; prompt: string };
               tasksToUpdate.push({
                 id: toolCall.id!,
-                subagent_type: toolCall.args.subagent_type,
-                description: toolCall.args.description,
-                prompt: toolCall.args.prompt,
+                subagent_type: args.subagent_type,
+                description: args.description,
+                prompt: args.prompt,
                 status: "in_progress",
               });
             }
@@ -438,6 +444,17 @@ export function MessageList({
                 )}
               >
                 {group.messages.map((msg, messageIndex) => {
+                  // 预计算：如果有[工具调用已省略]标记，从整个thread的messages中提取工具名
+                  let precomputedToolNames: string[][] | undefined = undefined;
+                  if (isAiMessage(msg)) {
+                    const rawContent = extractContentFromMessage(msg);
+                    if (rawContent && rawContent.includes("[工具调用")) {
+                      const { toolNames } = detectToolOmissions(rawContent, messages);
+                      if (toolNames.length > 0) {
+                        precomputedToolNames = toolNames;
+                      }
+                    }
+                  }
                   return (
                     <MessageListItem
                       key={getMessageRenderKey(
@@ -450,6 +467,7 @@ export function MessageList({
                       isLoading={thread.isLoading}
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
+                      precomputedToolNames={precomputedToolNames}
                     />
                   );
                 })}
@@ -475,13 +493,14 @@ export function MessageList({
               const parsedChoices = group.id
                 ? parsedChoicesByGroupId.get(group.id)
                 : undefined;
+              const rawContent = parsedChoices?.prompt ?? extractContentFromMessage(message);
+              // 传入整个thread的messages，确保从processing组消息中也能找到tool_calls
+              const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message, ...messages]);
               return (
                 <div key={groupKey} className="w-full">
+                  {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                   <MarkdownContent
-                    content={
-                      parsedChoices?.prompt ??
-                      extractContentFromMessage(message)
-                    }
+                    content={cleaned}
                     isLoading={thread.isLoading}
                     rehypePlugins={rehypePlugins}
                   />
@@ -510,14 +529,22 @@ export function MessageList({
             }
             return (
               <div className="w-full" key={groupKey}>
-                {group.messages[0] && hasContent(group.messages[0]) && (
-                  <MarkdownContent
-                    content={extractContentFromMessage(group.messages[0])}
-                    isLoading={thread.isLoading}
-                    rehypePlugins={rehypePlugins}
-                    className="mb-4"
-                  />
-                )}
+                {group.messages[0] && (hasContent(group.messages[0]) || hasToolCalls(group.messages[0])) && (() => {
+                  const rawContent = extractContentFromMessage(group.messages[0]);
+                  // 传入整个thread的messages，确保从processing组消息中也能找到tool_calls
+                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [...group.messages, ...messages]);
+                  return (
+                    <>
+                      {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                      <MarkdownContent
+                        content={cleaned}
+                        isLoading={thread.isLoading}
+                        rehypePlugins={rehypePlugins}
+                        className="mb-4"
+                      />
+                    </>
+                  );
+                })()}
                 <ArtifactFileList files={files} threadId={threadId} />
                 {renderTokenUsage({
                   messages: group.messages,
@@ -529,14 +556,15 @@ export function MessageList({
           } else if (group.type === "assistant:subagent") {
             const tasks = new Set<Subtask>();
             for (const message of group.messages) {
-              if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
+              if (isAiMessage(message)) {
+                for (const toolCall of getToolCalls(message)) {
                   if (toolCall.name === "task") {
+                    const args = toolCall.args as { subagent_type: string; description: string; prompt: string };
                     const task: Subtask = {
                       id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
+                      subagent_type: args.subagent_type,
+                      description: args.description,
+                      prompt: args.prompt,
                       status: "in_progress",
                     };
                     tasks.add(task);
@@ -585,8 +613,8 @@ export function MessageList({
               } else if (message.id) {
                 subagentDebugMessageIds.push(message.id);
               }
-              const taskIds = message.tool_calls
-                ?.filter((toolCall) => toolCall.name === "task")
+              const taskIds = getToolCalls(message)
+                .filter((toolCall) => toolCall.name === "task")
                 .map((toolCall) => toolCall.id);
               for (const taskId of taskIds ?? []) {
                 results.push(
@@ -613,8 +641,26 @@ export function MessageList({
               </div>
             );
           }
+          // 处理 assistant:processing / 其他组 - 显示工具调用横幅 + ChainOfThought
+          const processingContent = (() => {
+            // 合并所有 AI 消息的内容
+            const contents: string[] = [];
+            for (const m of group.messages) {
+              if (isAiMessage(m)) {
+                const c = extractContentFromMessage(m);
+                if (c) contents.push(c);
+              }
+            }
+            const combinedRawContent = contents.join("\n\n");
+            // 传入整个thread的messages，确保跨组也能找到tool_calls
+            const { count, toolNames, cleaned } = detectToolOmissions(combinedRawContent, [...group.messages, ...messages]);
+            return { count, toolNames, cleaned, hasAnyContent: combinedRawContent.trim().length > 0 };
+          })();
           return (
             <div key={`group-${groupKey}`} className="w-full">
+              {processingContent.count > 0 && (
+                <ToolCallOmissionBanner count={processingContent.count} toolNames={processingContent.toolNames} />
+              )}
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}
@@ -625,6 +671,14 @@ export function MessageList({
                 )}
                 showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
               />
+              {processingContent.hasAnyContent && processingContent.cleaned.trim().length > 0 && (
+                <MarkdownContent
+                  content={processingContent.cleaned}
+                  isLoading={thread.isLoading}
+                  rehypePlugins={rehypePlugins}
+                  className="mb-4"
+                />
+              )}
               {renderTokenUsage({
                 messages: group.messages,
                 turnUsageMessages,

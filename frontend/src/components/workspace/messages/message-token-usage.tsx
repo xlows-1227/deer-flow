@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { useI18n } from "@/core/i18n/hooks";
 import { accumulateUsage, formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
+import { isAiMessage } from "@/core/messages/utils";
 import { cn } from "@/lib/utils";
 
 function TokenUsageSummary({
@@ -66,7 +67,7 @@ export function MessageTokenUsageList({
     return null;
   }
 
-  const aiMessages = messages.filter((message) => message.type === "ai");
+  const aiMessages = messages.filter((message) => isAiMessage(message));
 
   if (aiMessages.length === 0) {
     return null;

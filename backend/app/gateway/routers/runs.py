@@ -159,6 +159,8 @@ async def run_messages(
         thread_id=run["thread_id"],
         run_id=run_id,
     )
+    from app.gateway.message_patch import patch_event_rows
+    safe_rows = patch_event_rows(safe_rows)
     data = safe_rows[:limit] if has_more else safe_rows
     return {"data": data, "has_more": has_more}
 

@@ -79,6 +79,16 @@ export default function UploadSkillPage() {
     }
   }
 
+  function onUploadClick(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    void handleUpload(false);
+  }
+
+  function onForceUploadClick(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    void handleUpload(true);
+  }
+
   function selectFile(nextFile: File | null) {
     if (isUploading) return;
     setFile(nextFile);
@@ -109,7 +119,7 @@ export default function UploadSkillPage() {
             </p>
           </div>
         </div>
-        <Button disabled={!canUpload} onClick={() => void handleUpload()}>
+        <Button type="button" disabled={!canUpload} onClick={onUploadClick}>
           {isUploading ? (
             <Loader2Icon className="h-4 w-4 animate-spin" />
           ) : (
@@ -179,6 +189,7 @@ export default function UploadSkillPage() {
               className="mt-6"
               disabled={isUploading}
               onClick={(event) => {
+                event.preventDefault();
                 event.stopPropagation();
                 openFilePicker();
               }}
@@ -226,7 +237,7 @@ export default function UploadSkillPage() {
                       variant="outline"
                       className="border-red-300 bg-white text-red-900 hover:bg-red-100"
                       disabled={!file || isUploading}
-                      onClick={() => void handleUpload(true)}
+                      onClick={onForceUploadClick}
                     >
                       {isUploading && isForceUpload ? (
                         <Loader2Icon className="h-4 w-4 animate-spin" />

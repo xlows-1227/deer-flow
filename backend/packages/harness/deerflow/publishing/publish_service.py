@@ -191,6 +191,13 @@ class PublishService:
         return effective, snapshots
 
     async def publish(self, agent_id: str, *, owner_user_id: str) -> dict[str, Any]:
+        existing = await self._agents.get(agent_id, owner_user_id=owner_user_id)
+        if existing is None:
+            agents = await self._agents.list_by_owner(owner_user_id)
+            for a in agents:
+                if a.get("slug") == agent_id:
+                    agent_id = a["id"]
+                    break
         get_snapshot = getattr(self._drafts, "get_publish_snapshot", self._drafts.get)
         draft = await get_snapshot(agent_id, owner_user_id=owner_user_id)
         if draft is None:
@@ -389,6 +396,9 @@ class PublishService:
     # ------------------------------------------------------------------
 
     async def rollback(self, agent_id: str, *, owner_user_id: str, release_no: int) -> dict[str, Any]:
+        resolved = await self._resolve_agent_id(agent_id, owner_user_id=owner_user_id)
+        if resolved is not None:
+            agent_id = resolved
         release = await self._releases.get_by_release_no(agent_id, release_no=release_no, owner_user_id=owner_user_id)
         if release is None:
             raise ReleaseNotFoundError(f"release {release_no} not found for agent {agent_id}")
@@ -399,7 +409,20 @@ class PublishService:
     # reads
     # ------------------------------------------------------------------
 
+    async def _resolve_agent_id(self, agent_id: str, *, owner_user_id: str) -> str | None:
+        existing = await self._agents.get(agent_id, owner_user_id=owner_user_id)
+        if existing is not None:
+            return existing["id"]
+        agents = await self._agents.list_by_owner(owner_user_id)
+        for a in agents:
+            if a.get("slug") == agent_id:
+                return a["id"]
+        return None
+
     async def list_releases(self, agent_id: str, *, owner_user_id: str) -> list[dict[str, Any]]:
+        resolved = await self._resolve_agent_id(agent_id, owner_user_id=owner_user_id)
+        if resolved is not None:
+            agent_id = resolved
         return await self._releases.list_by_agent(agent_id, owner_user_id=owner_user_id)
 
     async def get_release(
@@ -409,4 +432,7 @@ class PublishService:
         owner_user_id: str,
         release_no: int,
     ) -> dict[str, Any] | None:
+        resolved = await self._resolve_agent_id(agent_id, owner_user_id=owner_user_id)
+        if resolved is not None:
+            agent_id = resolved
         return await self._releases.get_by_release_no(agent_id, release_no=release_no, owner_user_id=owner_user_id)

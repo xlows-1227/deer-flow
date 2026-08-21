@@ -77,7 +77,13 @@ def parse_connector_requirements(raw: object, skill_file: Path) -> list[Connecto
     return requirements
 
 
-def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
+def parse_skill_file(
+    skill_file: Path,
+    category: SkillCategory,
+    relative_path: Path | None = None,
+    *,
+    owner_user_id: str | None = None,
+) -> Skill | None:
     """Parse a SKILL.md file and extract metadata.
 
     Args:
@@ -85,6 +91,9 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         category: Category of the skill.
         relative_path: Relative path from the category root to the skill
             directory.  Defaults to the skill directory name when omitted.
+        owner_user_id: Optional owner identity.  Only populated for
+            ``SkillCategory.CUSTOM`` skills where the storage layer has
+            already resolved ownership from the on-disk metadata.
 
     Returns:
         Skill object if parsing succeeds, None otherwise.
@@ -149,6 +158,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             allowed_tools=allowed_tools,
             connector_requirements=connector_requirements,
             enabled=True,  # Actual state comes from the extensions config file.
+            owner_user_id=owner_user_id,
         )
 
     except Exception:

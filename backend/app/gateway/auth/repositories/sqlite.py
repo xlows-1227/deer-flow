@@ -137,3 +137,10 @@ class SQLiteUserRepository(UserRepository):
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
+
+    async def list_users(self) -> list[User]:
+        stmt = select(UserRow).order_by(UserRow.email.asc())
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [self._row_to_user(row) for row in rows]
