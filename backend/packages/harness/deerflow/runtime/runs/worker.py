@@ -109,12 +109,23 @@ def _clean_model_text(text: str) -> str:
     text = _TOOL_CALL_BLOCK_RE.sub("", text)
     text = _TOOL_CALL_ARG_RE.sub("", text)
     text = _SINGLE_MARKER_RE.sub("", text)
+    # Clean up any previously added tool call markers (from earlier code versions)
+    text = _TOOL_OMISSION_NAMED_REGEX.sub("", text)  # [工具调用: name1, name2]
+    text = re.sub(_TOOL_OMISSION_MARKER_RE, "", text)   # [工具调用已省略]
     text = text.strip()
     return text
 
 
-def _clean_aimessage_content(obj: Any) -> Any:
-    """Recursively strip raw tool-call markers from AIMessage/AIMessageChunk content."""
+def _clean_aimessage_content(obj: Any, is_streaming_chunk: bool = False) -> Any:
+    """Recursively strip raw tool-call markers from AIMessage/AIMessageChunk content.
+    
+    Args:
+        obj: The message object to clean
+        is_streaming_chunk: If True, this is a streaming AIMessageChunk. 
+            In streaming mode, do NOT add [工具调用已省略] markers to empty chunks,
+            as these markers will be accumulated into the final AI message content.
+            Markers should only be added to the final complete AIMessage in values mode.
+    """
     if obj is None:
         return None
     if isinstance(obj, str):
@@ -130,12 +141,14 @@ def _clean_aimessage_content(obj: Any) -> Any:
                     for item in v
                 ]
             else:
-                cleaned[k] = _clean_aimessage_content(v)
+                cleaned[k] = _clean_aimessage_content(v, is_streaming_chunk=is_streaming_chunk)
         return cleaned
     if isinstance(obj, (list, tuple)):
-        return [_clean_aimessage_content(item) for item in obj]
+        return [_clean_aimessage_content(item, is_streaming_chunk=is_streaming_chunk) for item in obj]
     if hasattr(obj, "content"):
         try:
+            msg_type = getattr(obj, "type", "unknown")
+            msg_id = getattr(obj, "id", None) or getattr(obj, "lc_id", None) or f"id_{id(obj)}"
             content = obj.content
             # Extract tool names BEFORE cleaning (from raw text markers)
             raw_text = ""
@@ -144,6 +157,10 @@ def _clean_aimessage_content(obj: Any) -> Any:
             elif isinstance(content, list):
                 raw_text = "".join(item for item in content if isinstance(item, str))
             extracted_names = _extract_tool_names_from_text(raw_text)
+
+            logger.info(f"[TOOL_CALL_DEBUG] _clean_aimessage_content: msg_type={msg_type}, msg_id={msg_id}")
+            logger.info(f"[TOOL_CALL_DEBUG]   raw_text (first 200): {raw_text[:200] if raw_text else '(empty)'}")
+            logger.info(f"[TOOL_CALL_DEBUG]   extracted_names from text markers: {extracted_names}")
 
             if isinstance(content, str):
                 obj.content = _clean_model_text(content)
@@ -160,25 +177,73 @@ def _clean_aimessage_content(obj: Any) -> Any:
                 )
             else:
                 cleaned_content = ""
-            if not cleaned_content.strip():
-                tc_names = list(extracted_names)
-                # Also try tool_calls/tool_call_chunks attributes
-                if hasattr(obj, "tool_calls") and obj.tool_calls:
-                    for tc in obj.tool_calls:
-                        name = _tool_call_display_name(tc)
-                        if name and name not in tc_names:
-                            tc_names.append(name)
-                if hasattr(obj, "tool_call_chunks") and obj.tool_call_chunks:
-                    for tcc in obj.tool_call_chunks:
-                        name = _tool_call_display_name(tcc)
-                        if name and name not in tc_names:
-                            tc_names.append(name)
-                if tc_names:
-                    obj.content = "[工具调用: " + ", ".join(tc_names) + "]"
-                else:
+            logger.info(f"[TOOL_CALL_DEBUG]   cleaned_content (first 200): {cleaned_content[:200] if cleaned_content else '(empty)'}")
+
+            # Collect tool names from all sources
+            tc_names = list(extracted_names)
+            # Also try tool_calls/tool_call_chunks attributes
+            tool_calls_list = getattr(obj, "tool_calls", None)
+            tool_call_chunks_list = getattr(obj, "tool_call_chunks", None)
+            logger.info(f"[TOOL_CALL_DEBUG]   tool_calls count: {len(tool_calls_list) if tool_calls_list else 0}")
+            logger.info(f"[TOOL_CALL_DEBUG]   tool_call_chunks count: {len(tool_call_chunks_list) if tool_call_chunks_list else 0}")
+            
+            if tool_calls_list:
+                for tc in tool_calls_list:
+                    name = _tool_call_display_name(tc)
+                    logger.info(f"[TOOL_CALL_DEBUG]     tool_call name: {getattr(tc, 'name', '?')} -> display: {name}")
+                    if name and name not in tc_names:
+                        tc_names.append(name)
+            if tool_call_chunks_list:
+                for tcc in tool_call_chunks_list:
+                    name = _tool_call_display_name(tcc)
+                    logger.info(f"[TOOL_CALL_DEBUG]     tool_call_chunk name: {getattr(tcc, 'name', '?')} -> display: {name}")
+                    if name and name not in tc_names:
+                        tc_names.append(name)
+            logger.info(f"[TOOL_CALL_DEBUG]   final tc_names: {tc_names}")
+
+            # If there are tool calls, always add markers with names
+            if tc_names:
+                marker = "[工具调用: " + ", ".join(tc_names) + "]"
+                logger.info(f"[TOOL_CALL_DEBUG]   adding marker: {marker}, is_streaming_chunk={is_streaming_chunk}")
+                if isinstance(obj.content, str):
+                    current_content = obj.content
+                    if current_content.strip():
+                        # Append marker to existing content
+                        obj.content = current_content + "\n" + marker
+                    else:
+                        # Replace empty content with marker
+                        obj.content = marker
+                    logger.info(f"[TOOL_CALL_DEBUG]   final content (first 300): {obj.content[:300]}")
+                elif isinstance(obj.content, list):
+                    # For list-type content, append a text block with the marker
+                    has_text = False
+                    for item in obj.content:
+                        if isinstance(item, str) and item.strip():
+                            has_text = True
+                            break
+                        elif isinstance(item, dict) and item.get("text", "").strip():
+                            has_text = True
+                            break
+                    if has_text:
+                        obj.content = obj.content + [{"type": "text", "text": marker}]
+                    else:
+                        obj.content = [{"type": "text", "text": marker}]
+                    logger.info(f"[TOOL_CALL_DEBUG]   final content list length: {len(obj.content)}")
+            elif not cleaned_content.strip():
+                # In streaming mode, do NOT add generic markers to empty chunks.
+                # These markers would be accumulated into the final AI message content,
+                # causing duplicate tool call displays.
+                if not is_streaming_chunk:
                     obj.content = "[工具调用已省略]"
-        except Exception:
-            pass
+                    logger.info(f"[TOOL_CALL_DEBUG]   using generic marker (no tool names found, content empty, NOT streaming)")
+                else:
+                    # In streaming mode, keep empty chunks empty
+                    obj.content = "" if isinstance(obj.content, str) else obj.content
+                    logger.info(f"[TOOL_CALL_DEBUG]   keeping empty chunk empty in streaming mode, is_streaming_chunk={is_streaming_chunk}")
+            else:
+                logger.info(f"[TOOL_CALL_DEBUG]   content has text but no tool names, keeping original content")
+        except Exception as e:
+            logger.exception(f"[TOOL_CALL_DEBUG] Exception in _clean_aimessage_content: {e}")
     if hasattr(obj, "additional_kwargs") and isinstance(obj.additional_kwargs, dict):
         if "reasoning_content" in obj.additional_kwargs:
             rc = obj.additional_kwargs["reasoning_content"]
@@ -188,6 +253,8 @@ def _clean_aimessage_content(obj: Any) -> Any:
 
 
 _TOOL_OMISSION_MARKER = "[工具调用已省略]"
+_TOOL_OMISSION_MARKER_RE = re.escape(_TOOL_OMISSION_MARKER)  # for re.sub
+_TOOL_OMISSION_NAMED_REGEX = re.compile(r"\[工具调用:[^\]]*\]")  # [工具调用: name1, name2]
 
 # run_id -> {ai_msg_id: [tool_names]} — shared between values-stream and messages-stream
 _VALUES_AI_TOOL_CACHE: dict[str, dict[str, list[str]]] = {}
@@ -293,6 +360,7 @@ def _cache_and_patch_values_messages(run_id: str, messages: list[Any]) -> None:
             tccs = getattr(m, "tool_call_chunks", None)
             content_attr = getattr(m, "content", "")
             content = content_attr if isinstance(content_attr, str) else ""
+            logger.info(f"[TOOL_CALL_DEBUG] _cache_and_patch: msg#{idx} id={msg_id}, tcs_count={len(tcs) if isinstance(tcs, (list, tuple)) else 'N/A'}, tccs_count={len(tccs) if isinstance(tccs, (list, tuple)) else 'N/A'}, content={content[:100] if content else '(empty)'}")
         names: list[str] = []
         if isinstance(tcs, (list, tuple)):
             for tc in tcs:
@@ -306,6 +374,7 @@ def _cache_and_patch_values_messages(run_id: str, messages: list[Any]) -> None:
                     names.append(n)
         if names:
             cache[str(msg_id)] = names
+            logger.info(f"[TOOL_CALL_DEBUG] _cache_and_patch: cached {len(names)} names for msg {msg_id}: {names}")
         new_content = _patch_one_message_content(m, names, content)
         # Only mutate if actually changed to avoid spurious downstream updates.
         if new_content != content:
@@ -330,7 +399,10 @@ def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> No
     if not isinstance(chunk_dict, dict):
         return
     content = chunk_dict.get("content", "")
+    chunk_id = chunk_dict.get("id", "?")
+    chunk_type = chunk_dict.get("type", "?")
     if not isinstance(content, str):
+        logger.debug(f"[TOOL_CALL_DEBUG] _enrich: skip non-str content (type={chunk_type}, id={chunk_id})")
         return
 
     tool_calls = chunk_dict.get("tool_calls")
@@ -342,7 +414,13 @@ def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> No
         or "工具调用" in content
     )
     if not needs_patch:
+        logger.debug(f"[TOOL_CALL_DEBUG] _enrich: no patch needed (type={chunk_type}, id={chunk_id}, content={content[:100]})")
         return
+
+    logger.info(f"[TOOL_CALL_DEBUG] _enrich: processing (type={chunk_type}, id={chunk_id})")
+    logger.info(f"[TOOL_CALL_DEBUG]   current content (first 200): {content[:200]}")
+    logger.info(f"[TOOL_CALL_DEBUG]   tool_calls count: {len(tool_calls) if isinstance(tool_calls, list) else 0}")
+    logger.info(f"[TOOL_CALL_DEBUG]   tool_call_chunks count: {len(tool_call_chunks) if isinstance(tool_call_chunks, list) else 0}")
 
     names: list[str] = []
     if isinstance(tool_calls, list):
@@ -350,6 +428,7 @@ def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> No
             if not isinstance(tc, dict):
                 continue
             name = _tool_call_display_name(tc)
+            logger.info(f"[TOOL_CALL_DEBUG]     tool_call: name={tc.get('name', '?')} -> display={name}")
             if name and name not in names:
                 names.append(name)
     if isinstance(tool_call_chunks, list):
@@ -357,28 +436,53 @@ def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> No
             if not isinstance(tcc, dict):
                 continue
             name = _tool_call_display_name(tcc)
+            logger.info(f"[TOOL_CALL_DEBUG]     tool_call_chunk: name={tcc.get('name', '?')} -> display={name}")
             if name and name not in names:
                 names.append(name)
 
     # Fallback: streamed AIMessageChunk has no tool_calls/tool_call_chunks,
     # but the values-stream may have already cached the full AI message's
-    # tool_calls keyed by message id (or by last-known position).
+    # tool_calls keyed by message id.
+    # IMPORTANT: Only match by exact msg_id. Do NOT use fallback to last cache
+    # entry, as it would incorrectly apply previous messages' tool names to
+    # the current message.
     if not names and run_id:
         msg_id = chunk_dict.get("id")
         cache = _VALUES_AI_TOOL_CACHE.get(run_id) or {}
+        logger.info(f"[TOOL_CALL_DEBUG]   lookup cache: run_id={run_id}, msg_id={msg_id}, cache_keys={list(cache.keys())}")
         if isinstance(msg_id, str) and msg_id in cache:
             names = list(cache[msg_id])
-        if not names and cache:
-            # Last-resort heuristic: values stream updates arrive *after* the
-            # corresponding message chunks. The messages list in state is in
-            # order, so the cache dict in CPython preserves insertion order.
-            # Take the most recently inserted entry (last AI message).
-            last_key = next(reversed(cache))
-            names = list(cache[last_key])
+            logger.info(f"[TOOL_CALL_DEBUG]   found names in cache by exact msg_id: {names}")
+        else:
+            logger.info(f"[TOOL_CALL_DEBUG]   no exact match in cache for msg_id={msg_id}, skipping fallback to prevent cross-message contamination")
+
+    logger.info(f"[TOOL_CALL_DEBUG]   final names: {names}")
 
     if names:
-        new_content = "[工具调用: " + ", ".join(names) + "]"
-        chunk_dict["content"] = new_content
+        new_marker = "[工具调用: " + ", ".join(names) + "]"
+        # Check if current content already has meaningful text (not just markers)
+        current_content = chunk_dict.get("content", "")
+        if not isinstance(current_content, str):
+            current_content = ""
+        # Remove existing tool call markers to check for actual text content
+        content_without_markers = current_content
+        for marker in ["[工具调用已省略]", "[内部消息]"]:
+            content_without_markers = content_without_markers.replace(marker, "")
+        # Also remove any existing [工具调用: ...] markers
+        content_without_markers = re.sub(r"\[工具调用:[^\]]*\]", "", content_without_markers)
+        has_text = bool(content_without_markers.strip())
+        logger.info(f"[TOOL_CALL_DEBUG]   has_text after removing markers: {has_text}")
+
+        if has_text:
+            # Preserve existing text, append new marker
+            chunk_dict["content"] = current_content + "\n" + new_marker
+            logger.info(f"[TOOL_CALL_DEBUG]   appended marker, final content (first 300): {chunk_dict['content'][:300]}")
+        else:
+            # Replace empty or marker-only content with named marker
+            chunk_dict["content"] = new_marker
+            logger.info(f"[TOOL_CALL_DEBUG]   replaced with marker, final content: {chunk_dict['content']}")
+    else:
+        logger.info(f"[TOOL_CALL_DEBUG]   no names found, keeping original content")
 
 
 def _make_skill_content_redactor(
@@ -1319,6 +1423,7 @@ async def run_agent(
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
             single_mode = lg_modes[0]
+            logger.info(f"[TOOL_CALL_DEBUG] Run {run_id}: starting single-mode stream ({single_mode})")
             async for chunk in agent.astream(graph_input, config=runnable_config, stream_mode=single_mode):
                 if record.abort_event.is_set():
                     logger.info("Run %s abort requested — stopping", run_id)
@@ -1332,10 +1437,22 @@ async def run_agent(
                     if isinstance(msgs, list):
                         _cache_and_patch_values_messages(run_id, msgs)
                         cleaned_chunk["messages"] = msgs
+                        # Log patched messages
+                        for m in msgs:
+                            if isinstance(m, dict) and m.get("type") in ("ai", "AIMessage"):
+                                content = m.get("content", "")
+                                tc_count = len(m.get("tool_calls", []) or [])
+                                logger.info(f"[TOOL_CALL_DEBUG] values stream: msg_id={m.get('id', '?')}, type={m.get('type')}, content_has_marker={'工具调用' in str(content) if content else False}, tool_calls_count={tc_count}")
                 safe_chunk = redactor.redact_stream_payload(single_mode, cleaned_chunk, run_id=run_id)
                 serialized_chunk = serialize(safe_chunk, mode=single_mode)
                 if single_mode == "messages":
                     _enrich_tool_call_content_in_serialized(serialized_chunk, run_id=run_id)
+                    # Log enriched serialized chunk
+                    if isinstance(serialized_chunk, (list, tuple)) and len(serialized_chunk) > 0:
+                        first_part = serialized_chunk[0]
+                        if isinstance(first_part, dict):
+                            content = first_part.get("content", "")
+                            logger.info(f"[TOOL_CALL_DEBUG] messages stream after enrich: id={first_part.get('id', '?')}, content={'工具调用' in str(content) if content else False}")
                 elif single_mode == "values":
                     if isinstance(serialized_chunk, dict):
                         msgs = serialized_chunk.get("messages")
@@ -1344,6 +1461,8 @@ async def run_agent(
                 await bridge.publish(run_id, sse_event, serialized_chunk)
         else:
             # Multiple modes or subgraphs: astream yields tuples
+            logger.info(f"[TOOL_CALL_DEBUG] Run {run_id}: starting multi-mode stream ({lg_modes})")
+            item_count = 0
             async for item in agent.astream(
                 graph_input,
                 config=runnable_config,
@@ -1355,20 +1474,45 @@ async def run_agent(
                     break
 
                 mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                item_count += 1
+                if item_count <= 5 or mode in ("values", "messages"):
+                    logger.info(f"[TOOL_CALL_DEBUG] multi-mode item#{item_count}: mode={mode}, chunk_type={type(chunk).__name__}")
                 if mode is None:
                     continue
 
-                cleaned_chunk = _clean_aimessage_content(chunk) if mode == "messages" else chunk
+                cleaned_chunk = _clean_aimessage_content(chunk, is_streaming_chunk=(mode == "messages")) if mode == "messages" else chunk
                 sse_event = _lg_mode_to_sse_event(mode)
-                if mode == "values" and isinstance(cleaned_chunk, dict):
-                    msgs = cleaned_chunk.get("messages")
-                    if isinstance(msgs, list):
-                        _cache_and_patch_values_messages(run_id, msgs)
-                        cleaned_chunk["messages"] = msgs
+                if mode == "values":
+                    logger.info(f"[TOOL_CALL_DEBUG] values check: isinstance(cleaned_chunk, dict)={isinstance(cleaned_chunk, dict)}, type={type(cleaned_chunk).__name__}")
+                    if isinstance(cleaned_chunk, dict):
+                        msgs = cleaned_chunk.get("messages")
+                        logger.info(f"[TOOL_CALL_DEBUG] values check: msgs_type={type(msgs).__name__}, is_list={isinstance(msgs, list)}, msgs_count={len(msgs) if isinstance(msgs, list) else 'N/A'}")
+                        if isinstance(msgs, list):
+                            # Log message types before processing
+                            for idx, m in enumerate(msgs):
+                                if idx < 10:
+                                    msg_type = type(m).__name__
+                                    has_type_attr = hasattr(m, 'type')
+                                    msg_type_val = getattr(m, 'type', 'N/A') if has_type_attr else (m.get('type', 'N/A') if isinstance(m, dict) else 'N/A')
+                                    logger.info(f"[TOOL_CALL_DEBUG] values msg#{idx}: python_type={msg_type}, msg_type={msg_type_val}, is_dict={isinstance(m, dict)}")
+                            _cache_and_patch_values_messages(run_id, msgs)
+                            cleaned_chunk["messages"] = msgs
+                            # Log patched messages
+                            for m in msgs:
+                                if isinstance(m, dict) and m.get("type") in ("ai", "AIMessage"):
+                                    content = m.get("content", "")
+                                    tc_count = len(m.get("tool_calls", []) or [])
+                                    logger.info(f"[TOOL_CALL_DEBUG] multi-mode values: msg_id={m.get('id', '?')}, type={m.get('type')}, content_has_marker={'工具调用' in str(content) if content else False}, tool_calls_count={tc_count}")
                 safe_chunk = redactor.redact_stream_payload(mode, cleaned_chunk, run_id=run_id)
                 serialized_chunk = serialize(safe_chunk, mode=mode)
                 if mode == "messages":
                     _enrich_tool_call_content_in_serialized(serialized_chunk, run_id=run_id)
+                    # Log enriched serialized chunk
+                    if isinstance(serialized_chunk, (list, tuple)) and len(serialized_chunk) > 0:
+                        first_part = serialized_chunk[0]
+                        if isinstance(first_part, dict):
+                            content = first_part.get("content", "")
+                            logger.info(f"[TOOL_CALL_DEBUG] multi-mode messages after enrich: id={first_part.get('id', '?')}, content={'工具调用' in str(content) if content else False}")
                 elif mode == "values":
                     if isinstance(serialized_chunk, dict):
                         msgs = serialized_chunk.get("messages")

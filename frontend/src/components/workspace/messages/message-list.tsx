@@ -444,12 +444,14 @@ export function MessageList({
                 )}
               >
                 {group.messages.map((msg, messageIndex) => {
-                  // 预计算：如果有[工具调用已省略]标记，从整个thread的messages中提取工具名
+                  // 预计算：如果有[工具调用已省略]标记，从当前消息中提取工具名
+                  // 注意：只传入当前消息，不要传入整个线程的messages，
+                  // 否则会导致其他消息的工具调用被错误地应用到当前消息上
                   let precomputedToolNames: string[][] | undefined = undefined;
                   if (isAiMessage(msg)) {
                     const rawContent = extractContentFromMessage(msg);
                     if (rawContent && rawContent.includes("[工具调用")) {
-                      const { toolNames } = detectToolOmissions(rawContent, messages);
+                      const { toolNames } = detectToolOmissions(rawContent, [msg]);
                       if (toolNames.length > 0) {
                         precomputedToolNames = toolNames;
                       }
@@ -498,7 +500,8 @@ export function MessageList({
               const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message, ...messages]);
               return (
                 <div key={groupKey} className="w-full">
-                  {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                  {/* ToolCallOmissionBanner temporarily hidden */}
+                  {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                   <MarkdownContent
                     content={cleaned}
                     isLoading={thread.isLoading}
@@ -535,7 +538,8 @@ export function MessageList({
                   const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [...group.messages, ...messages]);
                   return (
                     <>
-                      {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                      {/* ToolCallOmissionBanner temporarily hidden */}
+                      {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                       <MarkdownContent
                         content={cleaned}
                         isLoading={thread.isLoading}
@@ -658,7 +662,8 @@ export function MessageList({
           })();
           return (
             <div key={`group-${groupKey}`} className="w-full">
-              {processingContent.count > 0 && (
+              {/* ToolCallOmissionBanner temporarily hidden */}
+              {false && processingContent.count > 0 && (
                 <ToolCallOmissionBanner count={processingContent.count} toolNames={processingContent.toolNames} />
               )}
               <MessageGroup

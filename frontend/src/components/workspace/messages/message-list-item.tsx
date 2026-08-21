@@ -321,8 +321,8 @@ function MessageContent_({
       const { cleaned } = detectToolOmissions(contentToDisplay, [message]);
       return { count: precomputedToolNames.length, toolNames: precomputedToolNames, content: cleaned };
     }
-    const { count, toolNames, cleaned } = detectToolOmissions(contentToDisplay, [message]);
-    return { count, toolNames, content: cleaned };
+    const result = detectToolOmissions(contentToDisplay, [message]);
+    return { count: result.count, toolNames: result.toolNames, content: result.cleaned };
   }, [contentToDisplay, isHuman, message, precomputedToolNames]);
 
   const filesList =
@@ -390,7 +390,9 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {toolOmissionResult.count > 0 && (
+      {/* ToolCallOmissionBanner temporarily hidden — tool usage is already
+          shown via the processing group's "使用xxx工具" display */}
+      {false && toolOmissionResult.count > 0 && (
         <ToolCallOmissionBanner count={toolOmissionResult.count} toolNames={toolOmissionResult.toolNames} />
       )}
       <MarkdownContent
