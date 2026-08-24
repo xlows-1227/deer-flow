@@ -496,11 +496,9 @@ export function MessageList({
                 ? parsedChoicesByGroupId.get(group.id)
                 : undefined;
               const rawContent = parsedChoices?.prompt ?? extractContentFromMessage(message);
-              // 传入整个thread的messages，确保从processing组消息中也能找到tool_calls
-              const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message, ...messages]);
+              const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message]);
               return (
                 <div key={groupKey} className="w-full">
-                  {/* ToolCallOmissionBanner temporarily hidden */}
                   {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                   <MarkdownContent
                     content={cleaned}
@@ -534,11 +532,9 @@ export function MessageList({
               <div className="w-full" key={groupKey}>
                 {group.messages[0] && (hasContent(group.messages[0]) || hasToolCalls(group.messages[0])) && (() => {
                   const rawContent = extractContentFromMessage(group.messages[0]);
-                  // 传入整个thread的messages，确保从processing组消息中也能找到tool_calls
-                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [...group.messages, ...messages]);
+                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [...group.messages]);
                   return (
                     <>
-                      {/* ToolCallOmissionBanner temporarily hidden */}
                       {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                       <MarkdownContent
                         content={cleaned}
@@ -656,13 +652,11 @@ export function MessageList({
               }
             }
             const combinedRawContent = contents.join("\n\n");
-            // 传入整个thread的messages，确保跨组也能找到tool_calls
-            const { count, toolNames, cleaned } = detectToolOmissions(combinedRawContent, [...group.messages, ...messages]);
+            const { count, toolNames, cleaned } = detectToolOmissions(combinedRawContent, group.messages);
             return { count, toolNames, cleaned, hasAnyContent: combinedRawContent.trim().length > 0 };
           })();
           return (
             <div key={`group-${groupKey}`} className="w-full">
-              {/* ToolCallOmissionBanner temporarily hidden */}
               {false && processingContent.count > 0 && (
                 <ToolCallOmissionBanner count={processingContent.count} toolNames={processingContent.toolNames} />
               )}

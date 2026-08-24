@@ -390,8 +390,6 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {/* ToolCallOmissionBanner temporarily hidden — tool usage is already
-          shown via the processing group's "使用xxx工具" display */}
       {false && toolOmissionResult.count > 0 && (
         <ToolCallOmissionBanner count={toolOmissionResult.count} toolNames={toolOmissionResult.toolNames} />
       )}

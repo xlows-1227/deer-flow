@@ -56,7 +56,6 @@ def patch_message_dict(msg: dict[str, Any]) -> bool:
         return False
     msg_id = msg.get("id", "?")
     names = _extract_tool_names(msg)
-    logger.info(f"[TOOL_CALL_DEBUG] patch_message_dict: msg_id={msg_id}, type={msg_type}, tool_names={names}")
     if not names:
         return False
     content_field = msg.get("content")
@@ -69,11 +68,9 @@ def patch_message_dict(msg: dict[str, Any]) -> bool:
     stripped = content_field.strip()
     if not stripped or stripped == _TOOL_OMISSION_MARKER:
         msg["content"] = target
-        logger.info(f"[TOOL_CALL_DEBUG] patch_message_dict: patched msg_id={msg_id}, new_content={target}")
         return True
     # Preserve any textual answer; prepend so detectToolOmissions() still parses it.
     msg["content"] = target + "\n" + content_field
-    logger.info(f"[TOOL_CALL_DEBUG] patch_message_dict: patched msg_id={msg_id}, new_content={msg['content'][:100]}")
     return True
 
 
