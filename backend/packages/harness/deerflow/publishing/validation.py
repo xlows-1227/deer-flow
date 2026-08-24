@@ -114,6 +114,21 @@ def validate_draft_for_publish(
                 field="model_name",
             )
         )
+    # If no explicit model is chosen (inheriting platform default) and no
+    # platform models are configured, publishing will silently produce a
+    # broken release. Catch this early with a clear violation.
+    if not model_name and not model_index:
+        violations.append(
+            PublishViolation(
+                code="NO_MODEL_CONFIGURED",
+                message=(
+                    "No models are configured on this platform. "
+                    "Please configure at least one model in config.yaml or "
+                    "select a specific model for the agent."
+                ),
+                field="model_name",
+            )
+        )
 
     # Resolve grants once. Only an owner-valid instance whose authoritative
     # Connector type actually supports the named capability may cover a Skill
