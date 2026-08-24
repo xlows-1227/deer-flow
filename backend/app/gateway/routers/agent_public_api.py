@@ -186,7 +186,12 @@ async def _resolve_context(
     except AgentSuspendedError as exc:
         raise HTTPException(status_code=410, detail={"code": "agent_suspended"}) from exc
     except AgentNotAvailableError as exc:
-        raise HTTPException(status_code=404, detail={"code": "agent_not_found"}) from exc
+        message = str(exc)
+        detail: dict[str, str] = {"code": "agent_not_found"}
+        # If the error contains actionable detail, include it in the response
+        if "no model configured" in message.lower() or "model" in message.lower():
+            detail["reason"] = message
+        raise HTTPException(status_code=404, detail=detail) from exc
 
 
 async def _conversation_or_404(

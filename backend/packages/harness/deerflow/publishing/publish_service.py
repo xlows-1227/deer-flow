@@ -280,6 +280,24 @@ class PublishService:
             raise PublishError([PublishViolation("RELEASE_RACE", "Could not allocate a release number after retries.")])
         return {"release_id": release["id"], "release_no": release_no, "published_at": release["created_at"]}
 
+    def _resolve_model_name(self, draft: dict[str, Any]) -> str | None:
+        """Return the effective model name for a draft.
+
+        If the draft has an explicit ``model_name``, returns it.
+        Otherwise falls back to the first available platform model.
+        Returns ``None`` when no platform models are configured
+        (the resolver will then surface a clear error).
+        """
+        name = draft.get("model_name")
+        if name and isinstance(name, str) and name.strip():
+            return name.strip()
+        # Fall back to the first platform-available model
+        if self._model_index:
+            return next(iter(self._model_index))
+        # No platform models configured — return None so the resolver
+        # produces an actionable error message instead of silently failing
+        return None
+
     async def _publish_unit_of_work(
         self,
         *,
@@ -320,7 +338,7 @@ class PublishService:
                     "release_no": release_no,
                     "agent_markdown": draft.get("agent_markdown") or "",
                     "soul_markdown": draft.get("soul_markdown") or "",
-                    "model_name": draft.get("model_name"),
+                    "model_name": self._resolve_model_name(draft),
                     "tool_groups": draft.get("tool_groups") or [],
                     "quota_overrides": draft.get("quota_overrides") or {},
                     "manifest_checksum": _manifest_checksum(draft, skill_revision_ids),
@@ -365,7 +383,7 @@ class PublishService:
                         "release_no": release_no,
                         "agent_markdown": draft.get("agent_markdown") or "",
                         "soul_markdown": draft.get("soul_markdown") or "",
-                        "model_name": draft.get("model_name"),
+                        "model_name": self._resolve_model_name(draft),
                         "tool_groups": draft.get("tool_groups") or [],
                         "quota_overrides": draft.get("quota_overrides") or {},
                         "manifest_checksum": _manifest_checksum(draft, skill_revision_ids),

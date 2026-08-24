@@ -145,7 +145,11 @@ class PublishedAgentResolver:
         )
         model_name = release.get("model_name")
         if not isinstance(model_name, str) or not model_name:
-            raise AgentNotAvailableError(agent_id)
+            raise AgentNotAvailableError(
+                f"Agent {agent_id} is published but has no model configured. "
+                f"Please update the draft to use a specific model instead of inheriting platform default, "
+                f"or configure at least one model in the platform config."
+            )
 
         return PublishedAgentContext(
             owner_user_id=owner_user_id,
