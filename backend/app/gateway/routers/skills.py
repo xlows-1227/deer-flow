@@ -1,22 +1,27 @@
+import io
 import json
 import logging
 import re
 import tempfile
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import AuthContext, authenticate, require_permission
-from app.gateway.deps import get_config
+from app.gateway.deps import get_config, get_skill_share_repo
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.models import create_chat_model
+from deerflow.persistence.skill_share.store import SkillShareRepository
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
+from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -66,6 +71,53 @@ class SkillResponse(BaseModel):
     license: str | None = Field(None, description="License information")
     category: SkillCategory = Field(..., description="Category of the skill (public or custom)")
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
+    download_url: str | None = Field(None, description="Download URL for custom skills; public skills do not support download")
+    # Ownership and share metadata.  Only populated for custom skills.
+    owner_user_id: str | None = Field(None, description="Owner user id of a custom skill; null for public skills")
+    owner_email: str | None = Field(None, description="Owner email of a custom skill; null for public skills")
+    shared_with: list[dict] = Field(
+        default_factory=list,
+        description="Custom-skill share recipients (sharees).  Each entry has keys 'id', 'email', 'system_role'.  Empty for public skills.",
+    )
+    can_edit: bool = Field(True, description="Whether the caller may mutate this skill.  Shared custom skills are read-only for sharees.")
+
+
+class SkillShareUserInfo(BaseModel):
+    """Lightweight user view for share lists."""
+
+    id: str = Field(..., description="User id.  Matches auth.users.id.")
+    email: str = Field(..., description="Unique user email.")
+    system_role: str = Field("user", description="Either 'admin' or 'user'.")
+
+
+class SkillShareListResponse(BaseModel):
+    """Full share state of a single custom skill."""
+
+    skill_name: str = Field(..., description="Custom skill name.")
+    owner_user_id: str = Field(..., description="Owner of the custom skill.  Shares may only be edited by this user (or admins).")
+    owner_email: str = Field(..., description="Owner email for convenience display.")
+    sharees: list[SkillShareUserInfo] = Field(default_factory=list, description="Users who currently receive read-only access to the custom skill.")
+
+
+class SkillShareUpdateRequest(BaseModel):
+    """Payload for replacing the entire share list of a custom skill.
+
+    This is a replace, not an append — the server atomically removes any
+    existing share rows not present in ``shared_with_user_ids`` and inserts
+    rows for any newly listed ids.
+    """
+
+    shared_with_user_ids: list[str] = Field(
+        default_factory=list,
+        description="Full replacement list of user ids who receive read-only access.  Pass an empty list to revoke all shares.",
+    )
+
+
+class SkillShareUpdateResponse(BaseModel):
+    skill_name: str
+    owner_user_id: str
+    owner_email: str
+    sharees: list[SkillShareUserInfo]
 
 
 class SkillsListResponse(BaseModel):
@@ -265,8 +317,30 @@ async def _require_system_admin(http_request: Request) -> None:
         raise HTTPException(status_code=403, detail="Permission denied: system:admin")
 
 
-def _skill_to_response(skill: Skill) -> SkillResponse:
-    """Convert a Skill object to a SkillResponse."""
+def _skill_to_response(
+    skill: Skill,
+    *,
+    owner_email: str | None = None,
+    shared_with: list[SkillShareUserInfo] | None = None,
+    can_edit: bool = True,
+) -> SkillResponse:
+    """Convert a Skill object to a SkillResponse, filling in optional share metadata.
+
+    ``owner_email`` / ``shared_with`` / ``can_edit`` are honoured only for
+    ``SkillCategory.CUSTOM`` skills; for public skills those fields are
+    coerced to ``None`` / ``[]`` / ``True`` (admins always edit public).
+    """
+    download_url: str | None = None
+    effective_owner_id: str | None = None
+    effective_owner_email: str | None = None
+    effective_shared_with: list[dict] = []
+    effective_can_edit: bool = True
+    if skill.category == SkillCategory.CUSTOM:
+        download_url = f"/api/skills/custom/{skill.name}/download"
+        effective_owner_id = skill.owner_user_id
+        effective_owner_email = owner_email
+        effective_shared_with = [s.model_dump(mode="json") for s in (shared_with or [])]
+        effective_can_edit = can_edit
     return SkillResponse(
         name=skill.name,
         description=skill.description,
@@ -275,7 +349,197 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
         license=skill.license,
         category=skill.category,
         enabled=skill.enabled,
+        download_url=download_url,
+        owner_user_id=effective_owner_id,
+        owner_email=effective_owner_email,
+        shared_with=effective_shared_with,
+        can_edit=effective_can_edit,
     )
+
+
+async def _user_provider():
+    """Access the auth local provider so routes can resolve id→email lookups.
+
+    Lazily imported because user-listing code only runs in the Gateway
+    process, while the same module is also imported from sandbox workers
+    that do not initialise SQLAlchemy.
+    """
+    from app.gateway.deps import get_local_provider
+
+    return get_local_provider()
+
+
+async def _build_user_email_index(user_ids: set[str]) -> dict[str, tuple[str, str]]:
+    """Return mapping user_id → (email, system_role) for the given ids."""
+    if not user_ids:
+        return {}
+    provider = await _user_provider()
+    users = await provider.repository.list_users()
+    result: dict[str, tuple[str, str]] = {}
+    # Normalise incoming ids to strings in case callers pass UUID objects,
+    # then lower-case both sides so that "ABC..." matches "abc...".
+    normalised_ids = {str(uid).lower() for uid in user_ids}
+    logger.info("_build_user_email_index: looking up %d ids, %d users available", len(normalised_ids), len(users))
+    for u in users:
+        uid_str = str(u.id).lower()
+        if uid_str in normalised_ids:
+            result[uid_str] = (str(u.email), str(getattr(u, "system_role", "user")))
+    matched = len(result)
+    logger.info("_build_user_email_index: matched %d/%d ids", matched, len(normalised_ids))
+    if matched < len(normalised_ids):
+        missing = normalised_ids - set(result.keys())
+        logger.warning("_build_user_email_index: unresolved ids: %s", missing)
+    return result
+
+
+async def _fetch_custom_skill_sharees_and_owner(
+    share_repo: SkillShareRepository,
+    *,
+    skill_names: list[str] | None = None,
+    shared_with_user_id: str | None = None,
+) -> tuple[dict[str, list[SkillShareUserInfo]], dict[str, str]]:
+    """Return (sharees_by_skill_name, owner_email_by_owner_id).
+
+    The share repo uses raw user ids; this helper hydrates those ids to
+    email + system_role using the auth user repository so response payloads
+    are directly renderable by the share dialog UI.
+    """
+    # 1) load relevant share rows from the DB
+    if skill_names is not None:
+        grants = []
+        for name in skill_names:
+            grants.extend(await share_repo.list_sharees_for_skill(name))
+    else:
+        grants = await share_repo.list_shares_for_shared_user(shared_with_user_id or "")
+
+    # 2) collect all distinct user ids we need to resolve
+    sharee_ids: set[str] = set()
+    owner_ids: set[str] = set()
+    for g in grants:
+        if g.shared_with_user_id:
+            sharee_ids.add(g.shared_with_user_id)
+        if g.owner_user_id:
+            owner_ids.add(g.owner_user_id)
+
+    user_email_index = await _build_user_email_index(sharee_ids | owner_ids)
+
+    # 3) group sharees by skill name
+    sharees_by_skill: dict[str, list[SkillShareUserInfo]] = {}
+    owner_email_by_owner_id: dict[str, str] = {}
+    for oid in owner_ids:
+        if oid.lower() in user_email_index:
+            owner_email_by_owner_id[oid] = user_email_index[oid.lower()][0]
+    for g in grants:
+        if not g.shared_with_user_id:
+            continue
+        lookup_key = g.shared_with_user_id.lower()
+        email, role = user_email_index.get(lookup_key, (g.shared_with_user_id, "user"))
+        info = SkillShareUserInfo(id=g.shared_with_user_id, email=email, system_role=role)
+        sharees_by_skill.setdefault(g.skill_name, []).append(info)
+    return sharees_by_skill, owner_email_by_owner_id
+
+
+async def _load_skills_share_aware(
+    *,
+    config: AppConfig,
+    share_repo: SkillShareRepository,
+    user_id: str | None,
+    is_admin: bool,
+) -> list[tuple[Skill, list[SkillShareUserInfo], str | None, bool]]:
+    """Load skills with owner/share-aware visibility.
+
+    Returns list of tuples:
+      ``(skill, sharees_for_this_skill, owner_email, can_edit_for_caller)``.
+
+    The rules match the design v2 permissions matrix:
+
+      * Public skills: visible if enabled (or admin sees disabled too)
+      * Own custom skills: always visible, can_edit=True
+      * Shared-with-me custom skills: visible, can_edit=False
+      * Other users' unshared custom skills: hidden
+    """
+    storage = get_or_new_skill_storage(app_config=config)
+    # Storage-level owner isolation already filters "own custom skills" via
+    # _can_access_custom_skill_dir.  Public skills are all enumerated too.
+    base_skills = storage.load_skills(enabled_only=False)
+
+    # Next, augment base set with "shared with me" custom skills I don't own.
+    if user_id:
+        shared_grants = await share_repo.list_shares_for_shared_user(user_id)
+        owned_names = {s.name for s in base_skills if s.category == SkillCategory.CUSTOM}
+        shared_to_add: list[Skill] = []
+        public_name_set = {s.name for s in base_skills if s.category == SkillCategory.PUBLIC}
+        for grant in shared_grants:
+            if grant.skill_name in owned_names or grant.skill_name in public_name_set:
+                continue
+            skill_dir = storage.get_custom_skill_dir(grant.skill_name)
+            skill_md = skill_dir / SKILL_MD_FILE
+            if not skill_md.exists():
+                # DB state drifted — grant references a skill that no longer
+                # exists on disk.  Skip; cleanup is a separate admin concern.
+                continue
+            parsed = parse_skill_file(
+                skill_md,
+                SkillCategory.CUSTOM,
+                owner_user_id=grant.owner_user_id,
+            )
+            if parsed is None:
+                continue
+            shared_to_add.append(parsed)
+        base_skills.extend(shared_to_add)
+
+    # Merge enabled state the same way storage's native load_skills does.
+    try:
+        extensions_config = ExtensionsConfig.from_file()
+        for skill in base_skills:
+            skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to merge enabled extensions config in share-aware loader: %s", e)
+
+    # Hydrate share+owner metadata for all custom skills in result set.
+    custom_names = [s.name for s in base_skills if s.category == SkillCategory.CUSTOM]
+    sharees_by_skill, owner_email_by_owner_id = await _fetch_custom_skill_sharees_and_owner(
+        share_repo,
+        skill_names=custom_names,
+    )
+    # Also resolve owners of my custom skills (they may have no share rows)
+    unresolved_owner_ids = {
+        s.owner_user_id for s in base_skills if s.category == SkillCategory.CUSTOM and s.owner_user_id
+    }
+    if unresolved_owner_ids - set(owner_email_by_owner_id.keys()):
+        email_index = await _build_user_email_index(unresolved_owner_ids)
+        owner_email_by_owner_id.update({oid: info[0] for oid, info in email_index.items()})
+
+    # Apply final visibility filter and assemble tuples
+    result: list[tuple[Skill, list[SkillShareUserInfo], str | None, bool]] = []
+    for skill in base_skills:
+        # Visibility rule 1: public skills are filtered by enabled unless admin
+        if skill.category == SkillCategory.PUBLIC:
+            if not is_admin and not skill.enabled:
+                continue
+            result.append((skill, [], None, True))
+            continue
+        # Custom skill path
+        owner_id = skill.owner_user_id
+        owner_email = owner_email_by_owner_id.get(owner_id.lower() if owner_id else "") if owner_id else None
+        sharees = sharees_by_skill.get(skill.name, [])
+        if is_admin:
+            can_edit = True
+            visible = True
+        elif owner_id and user_id and owner_id.lower() == user_id.lower():
+            can_edit = True
+            visible = True
+        else:
+            # Shared-with-me (read-only) or invisible
+            is_shared_to_me = any(s.id.lower() == (user_id or "").lower() for s in sharees)
+            can_edit = False
+            visible = is_shared_to_me
+        if not visible:
+            continue
+        result.append((skill, sharees, owner_email, can_edit))
+
+    result.sort(key=lambda r: r[0].name)
+    return result
 
 
 def _is_admin_auth(auth: AuthContext | None) -> bool:
@@ -307,14 +571,35 @@ async def _resolve_auth(request: Request) -> AuthContext:
     "/skills",
     response_model=SkillsListResponse,
     summary="List All Skills",
-    description="Retrieve available skills. Non-admins do not see disabled public skills; admins see the full catalog.",
+    description=(
+        "Retrieve the caller's visible skills.  Public skills appear when "
+        "enabled (admins see disabled public skills too).  Custom skills "
+        "include both the caller's own skills and custom skills shared with "
+        "the caller by another user.  Custom skills that were shared are "
+        "marked ``can_edit=False`` so the UI presents them read-only."
+    ),
 )
-async def list_skills(request: Request, config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+async def list_skills(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+) -> SkillsListResponse:
     try:
         auth = await _resolve_auth(request)
-        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
-        visible = _skills_visible_to_caller(skills, is_admin=_is_admin_auth(auth))
-        return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible])
+        user_id = None if auth.user is None else str(getattr(auth.user, "id", None))
+        is_admin = _is_admin_auth(auth)
+        rows = await _load_skills_share_aware(
+            config=config,
+            share_repo=share_repo,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+        return SkillsListResponse(
+            skills=[
+                _skill_to_response(skill, owner_email=owner_email, shared_with=sharees, can_edit=can_edit)
+                for skill, sharees, owner_email, can_edit in rows
+            ]
+        )
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
@@ -359,10 +644,28 @@ async def install_skill(request: SkillInstallRequest, config: AppConfig = Depend
 
 
 @router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
-async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+async def list_custom_skills(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+) -> SkillsListResponse:
     try:
-        skills = [skill for skill in get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
-        return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
+        auth = await _resolve_auth(request)
+        user_id = None if auth.user is None else str(getattr(auth.user, "id", None))
+        is_admin = _is_admin_auth(auth)
+        rows = await _load_skills_share_aware(
+            config=config,
+            share_repo=share_repo,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+        return SkillsListResponse(
+            skills=[
+                _skill_to_response(skill, owner_email=owner_email, shared_with=sharees, can_edit=can_edit)
+                for skill, sharees, owner_email, can_edit in rows
+                if skill.category == SkillCategory.CUSTOM
+            ]
+        )
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
@@ -461,7 +764,13 @@ async def upload_skill_archive(
         await refresh_skills_system_prompt_cache_async()
         return SkillInstallResponse(**result)
     except SkillAlreadyExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        detail = SkillUploadErrorDetail(
+            code="skill_already_exists",
+            message=str(e),
+            reason="A skill with this name already exists. Please choose a different name or delete the existing skill first.",
+            can_force=False,
+        )
+        raise HTTPException(status_code=409, detail=detail.model_dump())
     except SkillSecurityScanError as e:
         detail = SkillUploadErrorDetail(
             code="security_scan_failed",
@@ -473,10 +782,22 @@ async def upload_skill_archive(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        detail = SkillUploadErrorDetail(
+            code="invalid_archive",
+            message=str(e),
+            reason="The uploaded file is not a valid skill archive.",
+            can_force=False,
+        )
+        raise HTTPException(status_code=400, detail=detail.model_dump())
     except Exception as e:
         logger.error("Failed to upload skill archive: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to upload skill archive: {str(e)}")
+        detail = SkillUploadErrorDetail(
+            code="upload_failed",
+            message=str(e),
+            reason="An unexpected error occurred while processing the uploaded archive.",
+            can_force=False,
+        )
+        raise HTTPException(status_code=500, detail=detail.model_dump())
     finally:
         await file.close()
 
@@ -506,14 +827,54 @@ async def get_public_skill(skill_name: str, request: Request, config: AppConfig 
 
 
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
-async def get_custom_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
+async def get_custom_skill(
+    skill_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
-        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
-        if skill is None:
+        auth = await _resolve_auth(request)
+        user_id = None if auth.user is None else str(getattr(auth.user, "id", None))
+        is_admin = _is_admin_auth(auth)
+        rows = await _load_skills_share_aware(
+            config=config,
+            share_repo=share_repo,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+        match = next(
+            (row for row in rows if row[0].name == skill_name and row[0].category == SkillCategory.CUSTOM),
+            None,
+        )
+        if match is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=get_or_new_skill_storage(app_config=config).read_custom_skill(skill_name))
+        skill, sharees, owner_email, can_edit = match
+
+        # Read SKILL.md content.  Owners go through the validated
+        # storage.read_custom_skill path; sharees / admins bypass the
+        # owner-isolation check and read straight off disk since we have
+        # already confirmed visibility via the share-aware loader.
+        storage = get_or_new_skill_storage(app_config=config)
+        try:
+            content = storage.read_custom_skill(skill_name)
+        except FileNotFoundError:
+            # storage enforces owner isolation → fall back to direct read.
+            skill_dir = storage.get_custom_skill_dir(skill_name)
+            skill_md = skill_dir / SKILL_MD_FILE
+            if not skill_md.exists():
+                raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+            content = skill_md.read_text(encoding="utf-8")
+        return CustomSkillContentResponse(
+            **_skill_to_response(
+                skill,
+                owner_email=owner_email,
+                shared_with=sharees,
+                can_edit=can_edit,
+            ).model_dump(),
+            content=content,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -535,6 +896,269 @@ async def list_custom_skill_files(skill_name: str, config: AppConfig = Depends(g
     except Exception as e:
         logger.error("Failed to list files for custom skill %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list custom skill files: {str(e)}")
+
+
+def _collect_skill_files_internal(skill_dir: Path) -> list[tuple[str, Path]]:
+    files: list[tuple[str, Path]] = []
+    for path in sorted(skill_dir.rglob("*")):
+        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(skill_dir).parts):
+            arcname = str(path.relative_to(skill_dir))
+            files.append((arcname, path))
+    return files
+
+
+def _build_skill_zip_internal(skill_dir: Path) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, filepath in _collect_skill_files_internal(skill_dir):
+            zf.write(filepath, arcname)
+    return buf.getvalue()
+
+
+@router.get("/skills/custom/{skill_name}/download", summary="Download Custom Skill")
+@require_permission("skills", "read")
+async def download_custom_skill(
+    skill_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+):
+    """Download a custom skill as a .skill (ZIP) archive.
+
+    Only the owner of the custom skill (or an admin) can download it.  Public
+    skills intentionally do not support download.
+    """
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        auth = await _resolve_auth(request)
+        storage = get_or_new_skill_storage(app_config=config)
+        skills = storage.load_skills(enabled_only=False)
+        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+        if skill is None:
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        # Owner visibility: non-admins only see their own custom skills via the
+        # owner-isolated storage, so we just double-check the visibility rule.
+        visible = _skills_visible_to_caller([skill], is_admin=_is_admin_auth(auth))
+        if not visible:
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        skill_dir = storage.get_custom_skill_dir(skill_name)
+        if not skill_dir.exists() or not skill_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' has no files on disk")
+        zip_bytes = _build_skill_zip_internal(skill_dir)
+        filename = f"{skill_name}.zip"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return StreamingResponse(io.BytesIO(zip_bytes), media_type="application/zip", headers=headers)
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to download custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to download custom skill: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Custom-skill share grants
+# ---------------------------------------------------------------------------
+
+
+async def _enforce_share_admin(
+    request: Request,
+    skill_name: str,
+    *,
+    config: AppConfig,
+) -> tuple[str, AuthContext, str]:
+    """Return (skill_name, auth, owner_user_id) for share-admin operations.
+
+    Only the owner of the custom skill or a system admin may mutate shares.
+    The function intentionally raises 404 (not 403) for skills the caller
+    can't administer so existence of arbitrary custom skills is not leaked.
+    """
+    auth = await _resolve_auth(request)
+    is_admin = _is_admin_auth(auth)
+    caller_id = None if auth.user is None else str(getattr(auth.user, "id", None))
+    logger.info("_enforce_share_admin: skill_name=%s, caller_id=%s, is_admin=%s",
+                skill_name, caller_id, is_admin)
+    storage = get_or_new_skill_storage(app_config=config)
+    all_skills = storage.load_skills(enabled_only=False)
+    logger.info("_enforce_share_admin: loaded %d skills total", len(all_skills))
+    # Owner path: storage native access succeeds
+    owned_skills = [s for s in all_skills
+                    if s.name == skill_name and s.category == SkillCategory.CUSTOM]
+    logger.info("_enforce_share_admin: owned_skills count=%d, names=%s",
+                len(owned_skills), [s.name for s in owned_skills])
+    if owned_skills:
+        owner_id = owned_skills[0].owner_user_id
+        logger.info("_enforce_share_admin: owner_id=%s, owner_id_type=%s",
+                    owner_id, type(owner_id).__name__)
+        if owner_id is None:
+            logger.info("_enforce_share_admin: owner_id is None, is_admin=%s", is_admin)
+            if is_admin:
+                return skill_name, auth, ""
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        logger.info("_enforce_share_admin: checking ownership: caller_id=%s vs owner_id=%s (matched=%s)",
+                    caller_id, owner_id, caller_id and caller_id.lower() == owner_id.lower())
+        if is_admin or (caller_id and caller_id.lower() == owner_id.lower()):
+            return skill_name, auth, owner_id
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+    logger.info("_enforce_share_admin: owned_skills empty, is_admin=%s, caller_id=%s", is_admin, caller_id)
+    # Fallback: try direct disk-based ownership check (handles cases where
+    # enforce_owner_isolation filtered out the skill due to contextvar issues)
+    skill_dir = storage.get_custom_skill_dir(skill_name)
+    if not skill_dir.exists() or not (skill_dir / SKILL_MD_FILE).exists():
+        if not is_admin:
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        return skill_name, auth, ""
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    owner_id = None
+    if isinstance(storage, LocalSkillStorage):
+        raw = storage._read_custom_skill_owner(skill_dir)
+        owner_id = raw or ""
+    logger.info("_enforce_share_admin: fallback disk check: owner_id=%s, caller_id=%s", owner_id, caller_id)
+    if is_admin:
+        return skill_name, auth, owner_id or ""
+    # Non-admin: verify ownership via disk metadata
+    if caller_id and owner_id and caller_id.lower() == owner_id.lower():
+        return skill_name, auth, owner_id
+    raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+
+
+@router.get(
+    "/skills/custom/{skill_name}/shares",
+    response_model=SkillShareListResponse,
+    summary="List Sharees of a Custom Skill",
+    description=(
+        "Return the custom skill's current sharees.  Requires ownership "
+        "(or system:admin).  Used by the share dialog to pre-populate the "
+        "right-hand (already shared) column."
+    ),
+)
+async def list_custom_skill_shares(
+    skill_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+) -> SkillShareListResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        logger.info("list_custom_skill_shares: skill_name=%s", skill_name)
+        _skill_name, _auth, owner_user_id = await _enforce_share_admin(request, skill_name, config=config)
+        logger.info("list_custom_skill_shares: owner_user_id=%s", owner_user_id)
+        user_email_index = await _build_user_email_index({owner_user_id} if owner_user_id else set())
+        owner_email = user_email_index.get(owner_user_id.lower(), ("", ""))[0] if owner_user_id else ""
+        if not owner_email:
+            provider = await _user_provider()
+            user = await provider.repository.get_user_by_id(owner_user_id) if owner_user_id else None
+            if user is not None:
+                owner_email = str(user.email)
+                logger.info("list_custom_skill_shares: resolved owner_email=%s via get_user_by_id", owner_email)
+        sharee_rows = await share_repo.list_sharees_for_skill(skill_name)
+        logger.info("list_custom_skill_shares: found %d sharee rows in DB", len(sharee_rows))
+        for row in sharee_rows:
+            logger.info("list_custom_skill_shares: row skill=%s owner=%s shared_with=%s",
+                        row.skill_name, row.owner_user_id, row.shared_with_user_id)
+        sharee_ids = {r.shared_with_user_id for r in sharee_rows if r.shared_with_user_id}
+        logger.info("Building email index for %d sharee ids: %s", len(sharee_ids), sharee_ids)
+        email_index = await _build_user_email_index(sharee_ids)
+        logger.info("Email index contains %d entries: %s", len(email_index), list(email_index.keys()))
+        sharees = []
+        for r in sharee_rows:
+            if not r.shared_with_user_id:
+                continue
+            lookup_key = r.shared_with_user_id.lower()
+            info = email_index.get(lookup_key, (r.shared_with_user_id, "user"))
+            matched = info[0] != r.shared_with_user_id
+            logger.info("list_custom_skill_shares: sharee id=%s resolved email=%s role=%s (matched=%s)",
+                        r.shared_with_user_id, info[0], info[1], matched)
+            sharees.append(
+                SkillShareUserInfo(
+                    id=r.shared_with_user_id,
+                    email=info[0],
+                    system_role=info[1],
+                )
+            )
+        sharees.sort(key=lambda s: s.email)
+        logger.info("list_custom_skill_shares: returning %d sharees", len(sharees))
+        return SkillShareListResponse(
+            skill_name=skill_name,
+            owner_user_id=owner_user_id,
+            owner_email=owner_email,
+            sharees=sharees,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to list sharees for custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list sharees: {str(e)}")
+
+
+@router.put(
+    "/skills/custom/{skill_name}/shares",
+    response_model=SkillShareUpdateResponse,
+    summary="Replace Share List of a Custom Skill",
+    description=(
+        "Atomically replace the share list.  Pass an empty list to revoke "
+        "all shares.  The requester must be the owner (or a system admin). "
+        "The server rejects any payload that would share the skill with its "
+        "own owner because self-sharing is a no-op at the visibility layer "
+        "and would produce misleading entries in the dialog UI."
+    ),
+)
+async def replace_custom_skill_shares(
+    skill_name: str,
+    payload: SkillShareUpdateRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+) -> SkillShareUpdateResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        _skill_name, auth, owner_user_id = await _enforce_share_admin(request, skill_name, config=config)
+
+        # Resolve all candidate user ids upfront so we can validate they
+        # exist and reject self-sharing with a clear message.
+        raw_ids = list({uid for uid in payload.shared_with_user_ids if uid})
+        provider = await _user_provider()
+        users = await provider.repository.list_users()
+        valid_ids = {str(u.id).lower(): (str(u.email), str(getattr(u, "system_role", "user"))) for u in users}
+        # Validate all ids exist (case-insensitive)
+        missing = [uid for uid in raw_ids if uid.lower() not in valid_ids]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Unknown user id(s): {', '.join(missing)}")
+        # Reject self-sharing
+        if owner_user_id and owner_user_id.lower() in {uid.lower() for uid in raw_ids}:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot share a custom skill with yourself.  Owners already have full access.",
+            )
+        # Replace atomically
+        await share_repo.replace_sharees(
+            skill_name=skill_name,
+            owner_user_id=owner_user_id,
+            sharee_user_ids=set(raw_ids),
+        )
+        sharees = [
+            SkillShareUserInfo(id=uid, email=valid_ids[uid.lower()][0], system_role=valid_ids[uid.lower()][1])
+            for uid in raw_ids
+        ]
+        sharees.sort(key=lambda s: s.email)
+        owner_email = valid_ids.get(owner_user_id.lower(), ("", ""))[0] if owner_user_id else ""
+        if not owner_email and owner_user_id:
+            user = await provider.repository.get_user_by_id(owner_user_id)
+            if user is not None:
+                owner_email = str(user.email)
+        await refresh_skills_system_prompt_cache_async()
+        return SkillShareUpdateResponse(
+            skill_name=skill_name,
+            owner_user_id=owner_user_id,
+            owner_email=owner_email,
+            sharees=sharees,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update shares for custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update shares: {str(e)}")
 
 
 async def _write_custom_skill_support_file(

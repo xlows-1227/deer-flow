@@ -9,15 +9,18 @@ import {
   listCustomSkillFiles,
   listCustomSkillVersionFiles,
   listCustomSkillVersions,
+  listSkillShares,
+  listUsers,
   loadCustomSkill,
   loadCustomSkills,
   loadPublicSkill,
   readCustomSkillFile,
   readCustomSkillVersionFile,
+  replaceSkillShares,
   restoreCustomSkillVersion,
   updateCustomSkill,
 } from "./api";
-import type { Skill, SkillFileEntry, SkillVersion } from "./type";
+import type { Skill, SkillFileEntry, SkillShareState, SkillVersion, UserInfo } from "./type";
 
 import { loadSkills } from ".";
 
@@ -256,6 +259,51 @@ export function useRestoreCustomSkillVersion() {
       });
       void queryClient.invalidateQueries({
         queryKey: [...queryRoot, "custom", variables.skillName, "versions"],
+      });
+    },
+  });
+}
+
+// ── Share picker: users, shares and share mutations ────────────────────
+
+export function useAllUsers() {
+  const { data, isLoading, error, refetch } = useQuery<UserInfo[]>({
+    queryKey: ["users", "all"],
+    queryFn: () => listUsers(),
+  });
+  return { users: data ?? [], isLoading, error, refetch };
+}
+
+export function useSkillShares(skillName: string | null) {
+  const { data, isLoading, error, refetch } = useQuery<SkillShareState | null>({
+    queryKey: ["skills", "shares", skillName],
+    queryFn: async () => {
+      if (!skillName) return null;
+      return listSkillShares(skillName);
+    },
+    enabled: !!skillName,
+  });
+  return { shares: data ?? null, isLoading, error, refetch };
+}
+
+export function useUpdateSkillShares() {
+  const queryClient = useQueryClient();
+  const queryRoot = useSkillQueryRoot();
+  return useMutation({
+    mutationFn: async ({
+      skillName,
+      sharedWithUserIds,
+    }: {
+      skillName: string;
+      sharedWithUserIds: string[];
+    }) => replaceSkillShares(skillName, sharedWithUserIds),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryRoot });
+      void queryClient.invalidateQueries({
+        queryKey: [...queryRoot, "custom", variables.skillName],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["skills", "shares", variables.skillName],
       });
     },
   });

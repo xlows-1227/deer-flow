@@ -28,6 +28,7 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/redoc",
     "/openapi.json",
     "/api/share/",
+    "/api/v1/skills",
 )
 
 # Exact auth paths that are public (login/register/status check).

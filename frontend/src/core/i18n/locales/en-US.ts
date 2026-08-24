@@ -779,6 +779,10 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    toolCallOmitted: (count: number) => `${count} tool call${count === 1 ? "" : "s"} executed`,
+    toolCallOmittedDetail: "The following is a summary of internal tool calls",
+    expandToolCalls: "Show details",
+    collapseToolCalls: "Collapse",
   },
 
   // Subtasks

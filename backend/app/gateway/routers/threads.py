@@ -726,10 +726,13 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
             if is_latest_checkpoint:
                 messages = channel_values.get("messages")
                 if messages:
-                    values["messages"] = redact_channel_values(
+                    redacted = redact_channel_values(
                         {"messages": messages},
                         boundary_id=thread_id,
-                    ).get("messages", [])
+                    )
+                    from app.gateway.message_patch import patch_channel_values_messages
+                    patch_channel_values_messages(redacted)
+                    values["messages"] = redacted.get("messages", [])
             is_latest_checkpoint = False
 
             # Derive next tasks

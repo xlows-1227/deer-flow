@@ -14,6 +14,7 @@
 | [`GET`](#get-api-skills-custom-skill-name) | `/api/skills/custom/{skill_name}` | Get Custom Skill Content |
 | [`PUT`](#put-api-skills-custom-skill-name) | `/api/skills/custom/{skill_name}` | Edit Custom Skill |
 | [`DELETE`](#delete-api-skills-custom-skill-name) | `/api/skills/custom/{skill_name}` | Delete Custom Skill |
+| [`GET`](#get-api-skills-custom-skill-name-download) | `/api/skills/custom/{skill_name}/download` | Download Custom Skill (ZIP) |
 | [`POST`](#post-api-skills-custom-skill-name-directories) | `/api/skills/custom/{skill_name}/directories` | Create Custom Skill Directory |
 | [`GET`](#get-api-skills-custom-skill-name-file) | `/api/skills/custom/{skill_name}/file` | Read Custom Skill File |
 | [`PUT`](#put-api-skills-custom-skill-name-file) | `/api/skills/custom/{skill_name}/file` | Write Custom Skill File |
@@ -22,6 +23,8 @@
 | [`GET`](#get-api-skills-custom-skill-name-history) | `/api/skills/custom/{skill_name}/history` | Get Custom Skill History |
 | [`POST`](#post-api-skills-custom-skill-name-rollback) | `/api/skills/custom/{skill_name}/rollback` | Rollback Custom Skill |
 | [`POST`](#post-api-skills-custom-skill-name-upload) | `/api/skills/custom/{skill_name}/upload` | Upload Custom Skill Files |
+| [`GET`](#get-api-skills-custom-skill-name-shares) | `/api/skills/custom/{skill_name}/shares` | List Sharees of a Custom Skill |
+| [`PUT`](#put-api-skills-custom-skill-name-shares) | `/api/skills/custom/{skill_name}/shares` | Replace Share List of a Custom Skill |
 | [`GET`](#get-api-skills-custom-skill-name-versions) | `/api/skills/custom/{skill_name}/versions` | List Custom Skill Versions |
 | [`POST`](#post-api-skills-custom-skill-name-versions) | `/api/skills/custom/{skill_name}/versions` | Create Custom Skill Version Snapshot |
 | [`GET`](#get-api-skills-custom-skill-name-versions-seq-file) | `/api/skills/custom/{skill_name}/versions/{seq}/file` | Read Custom Skill Version File |
@@ -32,6 +35,16 @@
 | [`POST`](#post-api-skills-upload) | `/api/skills/upload` | Upload Skill Archive |
 | [`GET`](#get-api-skills-skill-name) | `/api/skills/{skill_name}` | Get Skill Details |
 | [`PUT`](#put-api-skills-skill-name) | `/api/skills/{skill_name}` | Update Skill |
+
+### 相关接口
+
+以下接口与技能管理密切相关，供前端集成参考：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/users` | List registered users (for share dialog candidate list) |
+
+---
 
 ## `GET /api/skills`
 
@@ -216,6 +229,36 @@ curl -X PUT '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}'
 
 ```bash
 curl -X DELETE '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}'
+```
+
+---
+
+## `GET /api/skills/custom/{skill_name}/download`
+
+> Download Custom Skill (ZIP Archive)  
+> <a id="get-api-skills-custom-skill-name-download"></a>
+
+Download a custom skill as a `.zip` archive. Only the owner of the custom skill (or a system admin) can download it. Public skills intentionally do not support download.
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `skill_name` | string | 是 |  |
+
+**响应**
+
+- **`200`** Successful Response
+  - 响应体（`application/zip`）：ZIP archive containing the skill files. The response sets `Content-Disposition: attachment; filename="{skill_name}.zip"`.
+- **`404`** Not Found — skill not found, not visible to the caller, or has no files on disk.
+- **`422`** Validation Error
+  - 响应体（`application/json`）：`HTTPValidationError`，字段见 [数据模型](#数据模型)。
+
+**请求示例（cURL）**
+
+```bash
+curl -X GET '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}/download' \
+  -o '{skill_name}.zip'
 ```
 
 ---
@@ -468,6 +511,78 @@ curl -X POST '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}/rollback'
 
 ```bash
 curl -X POST '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}/upload'
+```
+
+---
+
+## `GET /api/skills/custom/{skill_name}/shares`
+
+> List Sharees of a Custom Skill  
+> <a id="get-api-skills-custom-skill-name-shares"></a>
+
+Return the custom skill's current sharees and owner information. Requires ownership (or system admin). Used by the share dialog to pre-populate the already-shared column.
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `skill_name` | string | 是 |  |
+
+**响应**
+
+- **`200`** Successful Response
+  - 响应体（`application/json`）：`SkillShareListResponse`，字段见 [数据模型](#数据模型)。
+- **`404`** Not Found — skill not found or caller is not the owner / admin.
+- **`422`** Validation Error
+  - 响应体（`application/json`）：`HTTPValidationError`，字段见 [数据模型](#数据模型)。
+
+**请求示例（cURL）**
+
+```bash
+curl -X GET '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}/shares'
+```
+
+---
+
+## `PUT /api/skills/custom/{skill_name}/shares`
+
+> Replace Share List of a Custom Skill  
+> <a id="put-api-skills-custom-skill-name-shares"></a>
+
+Atomically replace the share list of a custom skill. Pass an empty list to revoke all shares. The requester must be the owner (or a system admin). The server rejects any payload that would share the skill with its own owner — self-sharing is not allowed.
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `skill_name` | string | 是 |  |
+
+**请求体**（`application/json`）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `shared_with_user_ids` | array\<string\> | 是 | Full replacement list of user ids who receive read-only access. Pass an empty list to revoke all shares. |
+
+**响应**
+
+- **`200`** Successful Response
+  - 响应体（`application/json`）：`SkillShareUpdateResponse`，字段见 [数据模型](#数据模型)。
+- **`400`** Bad Request — unknown user id(s) or self-sharing attempt.
+- **`404`** Not Found — skill not found or caller is not the owner / admin.
+- **`422`** Validation Error
+  - 响应体（`application/json`）：`HTTPValidationError`，字段见 [数据模型](#数据模型)。
+
+**请求示例（cURL）**
+
+```bash
+curl -X PUT '${DEERFLOW_BASE_URL}/api/skills/custom/{skill_name}/shares' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "shared_with_user_ids": [
+      "user-id-1",
+      "user-id-2"
+    ]
+  }'
 ```
 
 ---
@@ -986,6 +1101,51 @@ Response model for skill information.
 | `license` | string | 否 | License information |
 | `category` | SkillCategory | 是 | Category of the skill (public or custom) |
 | `enabled` | boolean | 否 | Whether this skill is enabled |
+| `download_url` | string | 否 | Download URL for custom skills; public skills do not support download |
+| `owner_user_id` | string | 否 | Owner user id of a custom skill; null for public skills |
+| `owner_email` | string | 否 | Owner email of a custom skill; null for public skills |
+| `shared_with` | array\<object\> | 否 | Custom-skill share recipients (sharees). Each entry has keys `id`, `email`, `system_role`. Empty for public skills. |
+| `can_edit` | boolean | 是 | Whether the caller may mutate this skill. Shared custom skills are read-only for sharees. |
+
+### `SkillShareUserInfo`
+
+Lightweight user view for share lists.
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `id` | string | 是 | User id. Matches `auth.users.id`. |
+| `email` | string | 是 | Unique user email. |
+| `system_role` | string | 否 | Either `admin` or `user`. Defaults to `user`. |
+
+### `SkillShareListResponse`
+
+Full share state of a single custom skill.
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `skill_name` | string | 是 | Custom skill name. |
+| `owner_user_id` | string | 是 | Owner of the custom skill. Shares may only be edited by this user (or admins). |
+| `owner_email` | string | 是 | Owner email for convenience display. |
+| `sharees` | array\<SkillShareUserInfo\> | 否 | Users who currently receive read-only access to the custom skill. |
+
+### `SkillShareUpdateRequest`
+
+Payload for replacing the entire share list of a custom skill. This is a replace, not an append — the server atomically removes any existing share rows not present in `shared_with_user_ids` and inserts rows for any newly listed ids.
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `shared_with_user_ids` | array\<string\> | 是 | Full replacement list of user ids who receive read-only access. Pass an empty list to revoke all shares. |
+
+### `SkillShareUpdateResponse`
+
+Response model after updating shares.
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `skill_name` | string | 是 | Custom skill name. |
+| `owner_user_id` | string | 是 | Owner of the custom skill. |
+| `owner_email` | string | 是 | Owner email for convenience display. |
+| `sharees` | array\<SkillShareUserInfo\> | 否 | Updated list of sharees. |
 
 ### `SkillRollbackRequest`
 
@@ -1022,3 +1182,74 @@ ValidationError
 | `type` | string | 是 | Error Type |
 | `input` |  | 否 | Input |
 | `ctx` | object | 否 | Context |
+
+---
+
+## 数据库表：`skill_shares`
+
+技能共享关系表，记录自定义技能所有者与被共享用户之间的授权关系。每行代表一条 "所有者 → 被共享用户" 的授权记录。
+
+### 表结构
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | VARCHAR(36) | PRIMARY KEY | 行唯一标识（UUID） |
+| `skill_name` | VARCHAR(128) | NOT NULL, INDEX | 自定义技能名称（全局唯一） |
+| `owner_user_id` | VARCHAR(36) | NOT NULL, INDEX | 技能所有者用户 ID |
+| `shared_with_user_id` | VARCHAR(36) | NOT NULL, INDEX | 被共享用户 ID（不可等于 `owner_user_id`） |
+| `created_at` | TIMESTAMP WITH TIME ZONE | NOT NULL, DEFAULT NOW() | 创建时间（UTC） |
+
+### 唯一约束
+
+| 约束名 | 字段 | 说明 |
+| --- | --- | --- |
+| `uq_skill_shares_grant` | `skill_name`, `owner_user_id`, `shared_with_user_id` | 防止重复授权，支持幂等写入 |
+
+### 权限矩阵
+
+| 操作 | 技能所有者 | 系统管理员 | 被共享用户 | 其他用户 |
+| --- | :---: | :---: | :---: | :---: |
+| 查看技能列表（含共享技能） | ✅ | ✅ | ✅（仅可见被共享的） | ❌ |
+| 查看技能详情 | ✅ | ✅ | ✅（只读） | ❌ |
+| 编辑/删除技能 | ✅ | ✅ | ❌（只读） | ❌ |
+| 管理共享（GET/PUT shares） | ✅ | ✅ | ❌ | ❌ |
+| 下载技能 | ✅ | ✅ | ❌ | ❌ |
+
+> **注意**：公共技能（public）不支持共享、下载和编辑操作；自定义技能通过 `owner_user_id` 字段标识所有者，通过 `skill_shares` 表实现可见性扩展。
+
+---
+
+## `GET /api/users`
+
+> List Registered Users  
+> <a id="get-api-users"></a>
+
+返回系统中所有已注册用户的列表，用于技能共享对话框的候选人列表。需要已认证的会话。
+
+**响应**
+
+- **`200`** Successful Response
+  - 响应体（`application/json`）：`UsersListResponse`
+- **`401`** Unauthorized — 未登录或会话过期。
+
+**请求示例（cURL）**
+
+```bash
+curl -X GET '${DEERFLOW_BASE_URL}/api/users'
+```
+
+**响应模型**
+
+`UsersListResponse`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `users` | array\<UserListItemResponse\> | 是 | 用户列表 |
+
+`UserListItemResponse`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | :---: | --- |
+| `id` | string | 是 | 用户 UUID |
+| `email` | string | 是 | 唯一邮箱地址 |
+| `system_role` | string | 是 | 系统角色：`admin` 或 `user` |

@@ -2,6 +2,24 @@ import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
 import { THREAD_SOURCE_SCHEDULED_TASK } from "@/core/threads/utils";
 
+/**
+ * Check if a message is an AI-type message.
+ * Runtime data may include "ai", "assistant", "AIMessage", or "AIMessageChunk"
+ * depending on the LangChain/LangGraph version and serialization path.
+ */
+export function isAiMessage(message: Message | { type?: string } | null | undefined): boolean {
+  if (!message) return false;
+  const t = (message as { type?: string }).type;
+  return t === "ai" || t === "assistant" || t === "AIMessage" || t === "AIMessageChunk";
+}
+
+/**
+ * Safely get tool_calls from a message that has been confirmed as an AI message.
+ */
+export function getToolCalls(message: Message): Array<{ name: string; args: Record<string, unknown>; id?: string }> {
+  return ((message as unknown as { tool_calls?: Array<{ name: string; args: Record<string, unknown>; id?: string }> }).tool_calls ?? []);
+}
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -70,8 +88,8 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       }
       for (const groupMessage of group.messages) {
         if (
-          groupMessage.type === "ai" &&
-          groupMessage.tool_calls?.some(
+          isAiMessage(groupMessage) &&
+          getToolCalls(groupMessage).some(
             (toolCall) => toolCall.id === toolCallId,
           )
         ) {
@@ -139,7 +157,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       continue;
     }
 
-    if (message.type === "ai") {
+    if (isAiMessage(message)) {
       if (hasPresentFiles(message)) {
         groups.push({
           id: message.id,
@@ -164,10 +182,15 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         } else {
           lastGroup.messages.push(message);
         }
+        // Message already placed in a processing group — do NOT also add it to
+        // the standalone assistant group below, otherwise the same content will
+        // appear twice (once via the processing group's MarkdownContent and once
+        // via the assistant group's MessageListItem).
+        continue;
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
+      // Only add to the assistant group when the message was NOT already
+      // consumed by a processing group above.
       if (hasContent(message) && !hasToolCalls(message)) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
@@ -234,7 +257,7 @@ export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
     usageMessagesByGroupIndex[index] = groups
       .slice(turnStartIndex, index + 1)
       .flatMap((currentGroup) => currentGroup.messages)
-      .filter((message) => message.type === "ai");
+      .filter((message) => isAiMessage(message));
 
     turnStartIndex = null;
   }
@@ -313,7 +336,7 @@ export function getAssistantTurnCopyData(
   return (
     [...messages]
       .reverse()
-      .filter((message) => message.type === "ai")
+      .filter((message) => isAiMessage(message))
       .map((message) => {
         const content = extractContentFromMessage(message);
         return content ?? extractReasoningContentFromMessage(message) ?? "";
@@ -359,7 +382,7 @@ function splitInlineReasoning(content: string) {
 }
 
 function splitInlineReasoningFromAIMessage(message: Message) {
-  if (message.type !== "ai" || typeof message.content !== "string") {
+  if (!isAiMessage(message) || typeof message.content !== "string") {
     return null;
   }
   return splitInlineReasoning(message.content);
@@ -392,7 +415,7 @@ export function extractContentFromMessage(message: Message) {
 }
 
 export function extractReasoningContentFromMessage(message: Message) {
-  if (message.type !== "ai") {
+  if (!isAiMessage(message)) {
     return null;
   }
   if (
@@ -449,7 +472,7 @@ export function hasContent(message: Message) {
 }
 
 export function hasReasoning(message: Message) {
-  if (message.type !== "ai") {
+  if (!isAiMessage(message)) {
     return false;
   }
   if (typeof message.additional_kwargs?.reasoning_content === "string") {
@@ -468,14 +491,14 @@ export function hasReasoning(message: Message) {
 
 export function hasToolCalls(message: Message) {
   return (
-    message.type === "ai" && message.tool_calls && message.tool_calls.length > 0
+    isAiMessage(message) && getToolCalls(message).length > 0
   );
 }
 
 export function hasPresentFiles(message: Message) {
   return (
-    message.type === "ai" &&
-    message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
+    isAiMessage(message) &&
+    getToolCalls(message).some((toolCall) => toolCall.name === "present_files")
   );
 }
 
@@ -484,16 +507,16 @@ export function isClarificationToolMessage(message: Message) {
 }
 
 export function extractPresentFilesFromMessage(message: Message) {
-  if (message.type !== "ai" || !hasPresentFiles(message)) {
+  if (!isAiMessage(message) || !hasPresentFiles(message)) {
     return [];
   }
   const files: string[] = [];
-  for (const toolCall of message.tool_calls ?? []) {
+  for (const toolCall of getToolCalls(message)) {
     if (
       toolCall.name === "present_files" &&
-      Array.isArray(toolCall.args.filepaths)
+      Array.isArray((toolCall.args as { filepaths?: string[] }).filepaths)
     ) {
-      files.push(...(toolCall.args.filepaths as string[]));
+      files.push(...((toolCall.args as { filepaths: string[] }).filepaths));
     }
   }
   return files;
@@ -539,8 +562,8 @@ export function formatMessageTime(
   }
 }
 
-export function hasSubagent(message: AIMessage) {
-  for (const toolCall of message.tool_calls ?? []) {
+export function hasSubagent(message: Message) {
+  for (const toolCall of getToolCalls(message)) {
     if (toolCall.name === "task") {
       return true;
     }
@@ -758,4 +781,152 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
   }
 
   return files;
+}
+
+/**
+ * Build a user-facing display name from a tool_call entry.
+ *
+ * For normal tools we use the tool name. For the internal ``task`` subagent
+ * tool we show the human description when available, falling back to the
+ * subagent type, so users see what each call actually did.
+ */
+function getToolCallDisplayName(
+  toolCall: { name?: string; args?: Record<string, unknown> },
+): string | null {
+  const rawName = toolCall?.name;
+  if (typeof rawName !== "string" || !rawName) return null;
+  if (rawName !== "task") return rawName;
+  const args = toolCall.args ?? {};
+  const description =
+    typeof args.description === "string" ? args.description.trim() : "";
+  const subagentType =
+    typeof args.subagent_type === "string" ? args.subagent_type.trim() : "";
+  return description || subagentType || rawName;
+}
+
+/**
+ * Detect and strip tool-call-omission markers from message content.
+ *
+ * The backend replaces redacted tool-call content with ``[工具调用已省略]``
+ * or ``[工具调用: name1, name2]`` so that the model output still has
+ * the right number of message turns.
+ * In the UI we surface these as a collapsed banner instead of a
+ * flood of raw markers.
+ */
+export const TOOL_OMISSION_MARKER = "[工具调用已省略]";
+export const TOOL_OMISSION_NAMED_REGEX = /\[工具调用:\s*([^\]]+)\]/g;
+
+export interface ToolOmissionInfo {
+  count: number;
+  toolNames: string[][];
+  cleaned: string;
+}
+
+/**
+ * Extract tool names directly from one or more LangChain Message objects.
+ *
+ * Each individual tool_call → one entry in the returned array (1:1 mapping
+ * with the banner badges).  Skips the internal ``task`` tool used by the
+ * subagent framework because users never see it as a standalone tool call.
+ */
+function _extractToolNamesFromMessages(
+  messages: Message | Message[] | undefined | null,
+): string[][] {
+  if (!messages) return [];
+  const list = Array.isArray(messages) ? messages : [messages];
+  const result: string[][] = [];
+  for (const msg of list) {
+    if (!msg) continue;
+    // Accept all AI-like message types (langgraph may use "ai", "AIMessage", or "AIMessageChunk")
+    if (!isAiMessage(msg)) continue;
+    // Prefer fully merged tool_calls array first (post-stream aggregation).
+    const toolCalls = getToolCalls(msg);
+    for (const tc of toolCalls) {
+      const displayName = getToolCallDisplayName(tc);
+      if (displayName) {
+        result.push([displayName]);
+      }
+    }
+    // Fall back to tool_call_chunks for mid-stream chunks that may not
+    // have a fully merged tool_calls array yet.
+    if (toolCalls.length === 0) {
+      const chunks = (msg as unknown as { tool_call_chunks?: Array<{ name?: string; args?: Record<string, unknown> }> }).tool_call_chunks ?? [];
+      for (const chunk of chunks) {
+        const displayName = getToolCallDisplayName(chunk);
+        if (displayName) {
+          result.push([displayName]);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+export function detectToolOmissions(
+  content: string,
+  messages?: Message | Message[] | null,
+): ToolOmissionInfo {
+  if (!content && !messages) return { count: 0, toolNames: [], cleaned: content ?? "" };
+
+  const toolNamesList: string[][] = [];
+  let cleaned = (content ?? "").toString();
+
+  // First extract named markers: [工具调用: tool1, tool2]
+  cleaned = cleaned.replace(TOOL_OMISSION_NAMED_REGEX, (_match, namesStr: string) => {
+    const names = namesStr
+      .split(",")
+      .map((n: string) => n.trim())
+      .filter(Boolean);
+    toolNamesList.push(names);
+    return "";
+  });
+
+  // Then count unnamed markers: [工具调用已省略]
+  const escaped = TOOL_OMISSION_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const unnamedRegex = new RegExp(escaped, "g");
+  const unnamedMatches = cleaned.match(unnamedRegex) || [];
+  const unnamedCount = unnamedMatches.length;
+  for (let i = 0; i < unnamedCount; i++) {
+    toolNamesList.push([]);
+  }
+  cleaned = cleaned.replace(unnamedRegex, "");
+
+  // Back-fill unnamed markers with tool names from Message.tool_calls.
+  // Each tool_call → one badge entry (1:1 with the #N badges shown).
+  const msgToolNames = _extractToolNamesFromMessages(messages);
+  if (msgToolNames.length > 0) {
+    // Back-fill empty entries first (markers that had no names).
+    let msgIdx = 0;
+    for (let i = 0; i < toolNamesList.length && msgIdx < msgToolNames.length; i++) {
+      if (toolNamesList[i]!.length === 0) {
+        const val = msgToolNames[msgIdx];
+        if (val) {
+          toolNamesList[i] = val;
+        }
+        msgIdx += 1;
+      }
+    }
+    // Also back-fill NAMED entries that only had placeholder names from
+    // [工具调用: xxx] markers — the real tool_calls array is authoritative.
+    for (let i = 0; i < toolNamesList.length && msgIdx < msgToolNames.length; i++) {
+      const val = msgToolNames[msgIdx];
+      if (val) {
+        toolNamesList[i] = val;
+      }
+      msgIdx += 1;
+    }
+    // If there are more individual tool calls than markers (e.g. the
+    // content was fully cleaned but the message object still carries calls),
+    // append the remaining names so the banner count stays accurate.
+    while (msgIdx < msgToolNames.length) {
+      const val = msgToolNames[msgIdx];
+      if (val) {
+        toolNamesList.push(val);
+      }
+      msgIdx += 1;
+    }
+  }
+
+  const count = toolNamesList.length;
+  return { count, toolNames: toolNamesList, cleaned };
 }

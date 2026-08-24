@@ -31,7 +31,7 @@ function ShisanxiangBrand() {
       />
       <span
         aria-hidden="true"
-        className="flex items-center text-[17px] leading-none font-black tracking-[0.04em] text-gray-950"
+        className="flex items-center text-[17px] leading-none font-black tracking-[0.04em] text-gray-950 dark:text-gray-100"
       >
         <span>十三</span>
         <span className="text-[#c93229]">香</span>

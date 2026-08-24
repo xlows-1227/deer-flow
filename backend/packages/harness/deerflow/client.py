@@ -18,6 +18,7 @@ Usage:
 import asyncio
 import json
 import logging
+import re
 import mimetypes
 import os
 import shutil
@@ -331,14 +332,14 @@ class DeerFlowClient:
     def _serialize_message(msg) -> dict:
         """Serialize a LangChain message to a plain dict for values events."""
         if isinstance(msg, AIMessage):
-            d: dict[str, Any] = {"type": "ai", "content": msg.content, "id": getattr(msg, "id", None)}
+            d: dict[str, Any] = {"type": "ai", "content": DeerFlowClient._clean_model_text(msg.content) if isinstance(msg.content, str) else msg.content, "id": getattr(msg, "id", None)}
             if msg.tool_calls:
                 d["tool_calls"] = DeerFlowClient._serialize_tool_calls(msg.tool_calls)
             if getattr(msg, "usage_metadata", None):
                 d["usage_metadata"] = msg.usage_metadata
             if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
                 d["additional_kwargs"] = additional_kwargs
-            return d
+            return DeerFlowClient._ensure_non_empty_content(d)
         if isinstance(msg, ToolMessage):
             d = {
                 "type": "tool",
@@ -362,6 +363,56 @@ class DeerFlowClient:
             return d
         return {"type": "unknown", "content": str(msg), "id": getattr(msg, "id", None)}
 
+    _TOOL_CALL_SECTION_RE = re.compile(
+        r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>", re.DOTALL
+    )
+    _TOOL_CALL_RE = re.compile(
+        r"<\|tool_call_begin\|>.*?<\|tool_call_end\|>", re.DOTALL
+    )
+    _TOOL_CALL_ARG_RE = re.compile(
+        r"<\|tool_call_argument_begin\|>.*?<\|tool_call_argument_end\|>", re.DOTALL
+    )
+
+    @staticmethod
+    def _clean_model_text(text: str) -> str:
+        """Strip raw tool-call markers that some models (e.g. kimi-for-coding)
+        emit as plain text instead of structured tool_calls.
+
+        Removes:
+          <|tool_calls_section_begin|>...<|tool_calls_section_end|>
+          <|tool_call_begin|>...<|tool_call_end|>
+          <|tool_call_argument_begin|>...<|tool_call_argument_end|>
+        """
+        if not text:
+            return text
+        original = text
+        text = DeerFlowClient._TOOL_CALL_SECTION_RE.sub("", text)
+        text = DeerFlowClient._TOOL_CALL_RE.sub("", text)
+        text = DeerFlowClient._TOOL_CALL_ARG_RE.sub("", text)
+        text = text.strip()
+        if not text and original.strip():
+            return ""
+        return text
+
+    @staticmethod
+    def _ensure_non_empty_content(msg_dict: dict[str, Any]) -> dict[str, Any]:
+        """Ensure AI message content is never empty (API rejects empty assistant messages)."""
+        if msg_dict.get("type") == "ai":
+            content = msg_dict.get("content", "")
+            tool_calls = msg_dict.get("tool_calls")
+            if not content or not str(content).strip():
+                tc_names = []
+                if tool_calls:
+                    for tc in tool_calls:
+                        name = tc.get("name", "") or ""
+                        if name and name != "task":
+                            tc_names.append(name)
+                if tc_names:
+                    msg_dict["content"] = "[工具调用: " + ", ".join(tc_names) + "]"
+                else:
+                    msg_dict["content"] = "[工具调用已省略]"
+        return msg_dict
+
     @staticmethod
     def _extract_text(content) -> str:
         """Extract plain text from AIMessage content (str or list of blocks).
@@ -369,14 +420,16 @@ class DeerFlowClient:
         String chunks are concatenated without separators to avoid corrupting
         token/character deltas or chunked JSON payloads. Dict-based text blocks
         are treated as full text blocks and joined with newlines to preserve
-        readability.
+        readability. Raw tool-call markers are stripped to avoid leaking
+        internal protocol tokens to the user.
         """
         if isinstance(content, str):
-            return content
+            return DeerFlowClient._clean_model_text(content)
         if isinstance(content, list):
             if content and all(isinstance(block, str) for block in content):
                 chunk_like = len(content) > 1 and all(isinstance(block, str) and len(block) <= 20 and any(ch in block for ch in '{}[]":,') for block in content)
-                return "".join(content) if chunk_like else "\n".join(content)
+                raw = "".join(content) if chunk_like else "\n".join(content)
+                return DeerFlowClient._clean_model_text(raw)
 
             pieces: list[str] = []
             pending_str_parts: list[str] = []
@@ -393,7 +446,7 @@ class DeerFlowClient:
                     flush_pending_str_parts()
                     text_val = block.get("text")
                     if isinstance(text_val, str):
-                        pieces.append(text_val)
+                        pieces.append(DeerFlowClient._clean_model_text(text_val))
 
             flush_pending_str_parts()
             return "\n".join(pieces) if pieces else ""

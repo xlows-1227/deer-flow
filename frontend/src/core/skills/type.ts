@@ -1,3 +1,15 @@
+export interface UserInfo {
+  id: string;
+  email: string;
+  system_role: "admin" | "user";
+}
+
+export interface SkillSharedUser {
+  id: string;
+  email: string;
+  system_role?: "admin" | "user";
+}
+
 export interface Skill {
   name: string;
   description: string;
@@ -6,10 +18,22 @@ export interface Skill {
   category: string;
   license: string | null;
   enabled: boolean;
+  download_url?: string | null;
+  owner_user_id?: string | null;
+  owner_email?: string | null;
+  shared_with?: SkillSharedUser[];
+  can_edit?: boolean;
 }
 
 export interface CustomSkill extends Skill {
   content: string;
+}
+
+export interface SkillShareState {
+  skill_name: string;
+  owner_user_id: string;
+  owner_email: string;
+  sharees: SkillSharedUser[];
 }
 
 export interface SkillFileEntry {

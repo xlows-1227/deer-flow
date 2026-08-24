@@ -585,6 +585,10 @@ export interface Translations {
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
+    toolCallOmitted: (count: number) => string;
+    toolCallOmittedDetail: string;
+    expandToolCalls: string;
+    collapseToolCalls: string;
   };
 
   // Uploads

@@ -140,6 +140,20 @@ class SkillStorage(ABC):
         ``deerflow.skills.loader.load_skills``.
         """
 
+    def _resolve_skill_owner_hook(
+        self,
+        category: SkillCategory,
+        skill_dir: Path,
+    ) -> str | None:
+        """Optional hook for storage backends to attach owner_user_id.
+
+        Base implementation returns ``None`` (e.g. in-memory or public-only
+        implementations).  File-backed custom-skill stores override this to
+        read the on-disk ownership metadata.  Called once per parsed skill
+        inside :meth:`load_skills`.
+        """
+        return None
+
     @abstractmethod
     def read_custom_skill(self, name: str) -> str:
         """Read SKILL.md content for a custom skill.
@@ -308,10 +322,12 @@ class SkillStorage(ABC):
 
         skills_by_name: dict[str, Skill] = {}
         for category, category_root, md_path in self._iter_skill_files():
+            owner_id = self._resolve_skill_owner_hook(category, md_path.parent)
             skill = parse_skill_file(
                 md_path,
                 category=category,
                 relative_path=md_path.parent.relative_to(category_root),
+                owner_user_id=owner_id,
             )
             if skill:
                 skills_by_name[skill.name] = skill

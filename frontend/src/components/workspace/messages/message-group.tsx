@@ -29,6 +29,8 @@ import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
+  getToolCalls,
+  isAiMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { getToolDisplayPolicy } from "@/core/tools/display-policy";
@@ -724,7 +726,7 @@ type CoTStep = CoTReasoningStep | CoTToolCallStep;
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
   for (const message of messages) {
-    if (message.type === "ai") {
+    if (isAiMessage(message)) {
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
         const step: CoTReasoningStep = {
@@ -735,7 +737,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
-      for (const tool_call of message.tool_calls ?? []) {
+      for (const tool_call of getToolCalls(message)) {
         if (tool_call.name === "task") {
           continue;
         }

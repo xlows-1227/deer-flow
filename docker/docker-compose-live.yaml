@@ -6,7 +6,7 @@
 # - Bind-mount code into containers and restart them (no `--build` needed)
 #
 # Prerequisites:
-#   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+#   export DEER_FLOW_ROOT=/opt/deer-flow
 #
 # If an old stack is already running (deer-flow-postgres / deer-flow-nginx),
 # stop it first to free ports 5432 and 2026:
@@ -82,10 +82,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deerflow}
       POSTGRES_DB: ${POSTGRES_DB:-deerflow}
     volumes:
-      # Prefer a dedicated live data dir so an old stack on /data/postgres
-      # cannot be mounted twice. To reuse existing prod data, stop the old
-      # postgres first and set POSTGRES_DATA_DIR=/data/postgres.
-      - ${POSTGRES_DATA_DIR:-/data/postgres-live}:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_DIR:-/data/postgres}:/var/lib/postgresql/data
     # Host port is optional. Uncomment / set POSTGRES_PORT only when needed.
     # ports:
     #   - "${POSTGRES_PORT:-5432}:5432"
@@ -150,7 +147,7 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME:-/var/lib/deer-flow}
-      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT:-/opt/deer-flow}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       - GATEWAY_TRUSTED_PROXIES=${GATEWAY_TRUSTED_PROXIES:-192.168.220.0/24}
       - UVICORN_RELOAD=0

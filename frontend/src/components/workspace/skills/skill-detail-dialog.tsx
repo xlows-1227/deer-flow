@@ -1,10 +1,11 @@
 "use client";
 
-import { FileLockIcon } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
+import { DownloadIcon, FileLockIcon, Share2Icon } from "lucide-react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +14,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { toast } from "sonner";
+import { SkillShareDialog } from "@/components/workspace/skills/skill-share-dialog";
 import { stripSkillFrontmatter } from "@/components/workspace/skills/skill-create-utils";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { isAdminUser } from "@/core/auth/types";
@@ -64,11 +67,17 @@ export function SkillDetailDialog({
   const isCustom = skill?.category === "custom";
   const isPublic = skill?.category === "public";
   const canViewContent = isCustom || (isPublic && isAdmin);
+  const isOwner = isCustom && user && skill?.owner_user_id === user.id;
+  const canShare = isCustom && (isOwner || isAdmin);
+  const canDownload = isCustom && !!skill?.download_url && (isOwner || isAdmin);
+
+  const [shareOpen, setShareOpen] = useState(false);
 
   const {
     skill: customSkill,
     isLoading: isCustomLoading,
     error: customError,
+    refetch: refetchCustom,
   } = useCustomSkill(isCustom ? skill.name : null);
   const {
     skill: publicSkill,
@@ -89,8 +98,34 @@ export function SkillDetailDialog({
     [contentSkill?.content],
   );
 
+  function handleDownload(event: React.MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const url = displaySkill?.download_url;
+    if (!url) return;
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${displaySkill?.name ?? "skill"}.zip`;
+      a.rel = "noopener noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      toast.success("开始下载 Skill 压缩包");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "下载失败");
+    }
+  }
+
+  function handleOpenShare(event: React.MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    setShareOpen(true);
+  }
+
   return (
-    <Dialog open={!!skill} onOpenChange={(open) => !open && onClose()}>
+    <Fragment>
+      <Dialog open={!!skill} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="flex h-[86vh] max-h-[980px] w-[calc(100vw-2rem)] max-w-none flex-col overflow-hidden p-0 sm:max-w-6xl">
         <DialogHeader className="shrink-0 border-b border-gray-100 bg-white px-6 py-4 sm:px-8">
           <DialogTitle className="text-lg font-semibold tracking-tight sm:text-xl">
@@ -141,6 +176,63 @@ export function SkillDetailDialog({
                         {displaySkill.enabled ? "已启用" : "已禁用"}
                       </div>
                     </SidebarSection>
+                    {(isCustom && displaySkill?.owner_email) || canDownload || canShare ? (
+                      <SidebarSection label="归属">
+                        {isCustom && displaySkill?.owner_email && (
+                          <div className="mb-3 flex items-center gap-2 text-sm text-gray-700">
+                            <span className="text-xs uppercase tracking-wider text-gray-400">
+                              创建者：
+                            </span>
+                            <span className="truncate">{displaySkill.owner_email}</span>
+                          </div>
+                        )}
+                        {isCustom && (displaySkill as Skill).shared_with !== undefined && ((displaySkill as Skill).shared_with?.length ?? 0) > 0 && (
+                          <div className="mb-3">
+                            <div className="text-xs uppercase tracking-wider text-gray-400 mb-1">
+                              已共享给：
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              {(displaySkill as Skill).shared_with!.slice(0, 6).map((u) => (
+                                <Badge key={u.id} variant="outline" className="text-[10px] font-normal">
+                                  {u.email}
+                                </Badge>
+                              ))}
+                              {(displaySkill as Skill).shared_with!.length > 6 && (
+                                <Badge variant="outline" className="text-[10px] font-normal">
+                                  +{(displaySkill as Skill).shared_with!.length - 6}
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex flex-col gap-2">
+                          {canDownload && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={handleDownload}
+                              className="w-full justify-start"
+                            >
+                              <DownloadIcon className="mr-2 size-3.5" />
+                              下载 Skill
+                            </Button>
+                          )}
+                          {canShare && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={handleOpenShare}
+                              className="w-full justify-start"
+                            >
+                              <Share2Icon className="mr-2 size-3.5" />
+                              管理共享
+                            </Button>
+                          )}
+                        </div>
+                      </SidebarSection>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -203,5 +295,16 @@ export function SkillDetailDialog({
         </div>
       </DialogContent>
     </Dialog>
+
+    <SkillShareDialog
+      skillName={isCustom ? skill?.name ?? null : null}
+      skillDisplayName={
+        isCustom ? (displaySkill?.display_name ?? displaySkill?.name ?? null) : null
+      }
+      ownerUserId={isCustom ? (displaySkill as Skill).owner_user_id ?? null : null}
+      open={shareOpen}
+      onClose={() => setShareOpen(false)}
+    />
+    </Fragment>
   );
 }

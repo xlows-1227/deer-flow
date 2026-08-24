@@ -21,6 +21,11 @@ class LocalAuthProvider(AuthProvider):
         """
         self._repo = repository
 
+    @property
+    def repository(self) -> UserRepository:
+        """Expose the underlying repository for user-listing and lookup helpers."""
+        return self._repo
+
     async def authenticate(self, credentials: dict) -> User | None:
         """Authenticate with email and password.
 

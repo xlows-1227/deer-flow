@@ -27,7 +27,7 @@ from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-_RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+_RETRIABLE_STATUS_CODES = {403, 408, 409, 425, 429, 500, 502, 503, 504}
 _BUSY_PATTERNS = (
     "server busy",
     "temporarily unavailable",
@@ -37,6 +37,8 @@ _BUSY_PATTERNS = (
     "overloaded",
     "high demand",
     "rate limit",
+    "concurrent",
+    "access_terminated",
     "负载较高",
     "服务繁忙",
     "稍后重试",
@@ -174,21 +176,20 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
     def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
         seconds = max(1, round(wait_ms / 1000))
-        reason_text = "provider is busy" if reason == "busy" else "provider request failed temporarily"
-        return f"LLM request retry {attempt}/{self.retry_max_attempts}: {reason_text}. Retrying in {seconds}s."
+        reason_text = "服务繁忙" if reason == "busy" else "服务暂时不可用"
+        return f"LLM 请求第 {attempt}/{self.retry_max_attempts} 次重试：{reason_text}。{seconds} 秒后重试。"
 
     def _build_circuit_breaker_message(self) -> str:
-        return "The configured LLM provider is currently unavailable due to continuous failures. Circuit breaker is engaged to protect the system. Please wait a moment before trying again."
+        return "服务连续失败过多，熔断器已触发，请稍后再试。"
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
-        detail = _extract_error_detail(exc)
         if reason == "quota":
-            return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
+            return "当前模型账户额度不足，请联系管理员充值后重试。"
         if reason == "auth":
-            return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
+            return "当前模型账户认证失败，请检查 API Key 是否正确。"
         if reason in {"busy", "transient"}:
-            return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
-        return f"LLM request failed: {detail}"
+            return "服务暂时繁忙，请稍后重试。"
+        return "抱歉，服务暂时不可用，请稍后重试。"
 
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
         try:

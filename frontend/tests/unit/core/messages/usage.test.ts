@@ -64,10 +64,8 @@ test("keeps header and per-turn aggregation consistent for duplicated UI groups"
   expect(groups.map((group) => group.type)).toEqual([
     "human",
     "assistant:processing",
-    "assistant",
   ]);
   expect(turnUsageMessages?.map((message) => message.id)).toEqual([
-    "ai-1",
     "ai-1",
   ]);
   expect(accumulateUsage(messages)).toEqual(

@@ -450,13 +450,14 @@ async def create_draft_sandbox_run(
     agent = await service.get_agent(agent_id, owner_user_id=owner)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    draft = await service.get_draft(agent_id, owner_user_id=owner)
+    resolved_id = str(agent["id"])
+    draft = await service.get_draft(resolved_id, owner_user_id=owner)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
     snapshot = build_draft_sandbox_context(
         owner_user_id=owner,
-        agent_id=agent_id,
+        agent_id=resolved_id,
         agent=agent,
         draft=draft,
     )
@@ -465,7 +466,7 @@ async def create_draft_sandbox_run(
         assistant_id="lead_agent",
         input={"messages": [{"role": "user", "content": payload.message}]},
         metadata=draft_sandbox_thread_metadata(
-            agent_id=agent_id,
+            agent_id=resolved_id,
             draft_revision=snapshot.draft_revision,
         )
         | {

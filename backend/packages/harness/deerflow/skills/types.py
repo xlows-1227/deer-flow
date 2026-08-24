@@ -38,6 +38,10 @@ class Skill:
     display_name: str | None = None
     description_zh: str | None = None
     connector_requirements: list[ConnectorRequirement] | None = None
+    # For custom skills the owner user id, populated from the on-disk
+    # ownership metadata.  Public skills always have None.  Used by the
+    # share-aware visibility filter and the SkillResponse builder.
+    owner_user_id: str | None = None
 
     @property
     def skill_path(self) -> str:
