@@ -35,6 +35,9 @@ extensions_config.json
 coverage.xml
 coverage/
 .deer-flow/
+*.db-shm
+*.db-wal
+temp/
 .claude/
 skills/custom/*
 logs/

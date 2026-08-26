@@ -7,12 +7,21 @@ returned regardless of psid.
 The ``psid`` is the user's email address. We resolve it to the internal user UUID
 and then match against the custom skill owner metadata stored in ``.owners/*.json``.
 
+All endpoints require a ``sign`` parameter — a Fernet-encrypted token whose
+plaintext is ``psid|timestamp``. The gateway decrypts it and verifies that:
+
+1. The psid inside the sign matches the psid query parameter.
+2. The request is within 30 minutes of the embedded timestamp.
+
+Use ``app.gateway.skill_sign.generate_sign(psid)`` to generate the sign on the
+caller side (requires the shared ``SKILL_API_SIGN_KEY`` environment variable).
+
 Interfaces:
-- GET /api/v1/skills?psid=xxx
+- GET /api/v1/skills?psid=xxx&sign=xxx
     List all public skills + custom skills owned by psid.
-- GET /api/v1/skills/{skill_id}?psid=xxx
+- GET /api/v1/skills/{skill_id}?psid=xxx&sign=xxx
     Skill detail + version list + download URLs.
-- GET /api/v1/skills/{skill_id}/download?psid=xxx&version=N
+- GET /api/v1/skills/{skill_id}/download?psid=xxx&sign=xxx&version=N
     Download a specific version of the skill as .skill (ZIP).
 """
 
@@ -29,6 +38,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.gateway.skill_sign import verify_sign
 from deerflow.skills import Skill
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.types import SkillCategory
@@ -55,6 +65,22 @@ def _require_psid(psid: str | None) -> str:
             detail={"code": "missing_psid", "message": "The 'psid' query parameter is required."},
         )
     return psid.strip()
+
+
+def _verify_sign(psid: str, sign: str | None) -> None:
+    """Validate the sign parameter: decrypt, check psid match, check expiry."""
+    if not sign:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "missing_sign", "message": "The 'sign' query parameter is required."},
+        )
+    try:
+        verify_sign(sign, psid)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "invalid_sign", "message": str(exc)},
+        ) from exc
 
 
 async def _resolve_user_uuid(psid: str) -> str | None:
@@ -319,13 +345,15 @@ def _get_skill_dir(skill: Skill) -> Path:
     "/skills",
     response_model=ExternalSkillsListResponse,
     summary="List Skills",
-    description="Returns all public skills plus custom skills owned by or shared with the given psid. No authentication required.",
+    description="Returns all public skills plus custom skills owned by or shared with the given psid. A valid sign is required.",
 )
 async def list_skills(
     request: Request,
     psid: str = Query(..., description="User PSID (email) for filtering custom skills"),
+    sign: str = Query(..., description="Encrypted sign: Fernet(psid|timestamp)"),
 ) -> ExternalSkillsListResponse:
-    _require_psid(psid)
+    psid = _require_psid(psid)
+    _verify_sign(psid, sign)
     user_uuid = await _resolve_user_uuid(psid)
     skills = await _filter_skills_for_psid(psid)
 
@@ -370,14 +398,16 @@ async def list_skills(
     "/skills/{skill_id}",
     response_model=ExternalSkillDetailResponse,
     summary="Get Skill Detail",
-    description="Get skill information including version list and per-version download URLs. No authentication required.",
+    description="Get skill information including version list and per-version download URLs. A valid sign is required.",
 )
 async def get_skill_detail(
     skill_id: str,
     request: Request,
     psid: str = Query(..., description="User PSID (email) for access control"),
+    sign: str = Query(..., description="Encrypted sign: Fernet(psid|timestamp)"),
 ) -> ExternalSkillDetailResponse:
-    _require_psid(psid)
+    psid = _require_psid(psid)
+    _verify_sign(psid, sign)
     skill = await _skill_accessible_to_psid(skill_id, psid)
     if skill is None:
         raise HTTPException(
@@ -395,7 +425,7 @@ async def get_skill_detail(
             for v in raw_versions:
                 seq = v.get("seq", 0)
                 label = v.get("label") or f"v{seq}"
-                download_url = f"/api/v1/skills/{skill.name}/download?psid={psid}&version={seq}"
+                download_url = f"/api/v1/skills/{skill.name}/download?psid={psid}&sign={sign}&version={seq}"
                 versions.append(
                     SkillVersionInfo(
                         seq=seq,
@@ -431,15 +461,17 @@ async def get_skill_detail(
 @router.get(
     "/skills/{skill_id}/download",
     summary="Download Skill",
-    description="Download a skill as a .skill (ZIP) file. For custom skills, specify version parameter. No authentication required.",
+    description="Download a skill as a .skill (ZIP) file. For custom skills, specify version parameter. A valid sign is required.",
 )
 async def download_skill(
     skill_id: str,
     request: Request,
     psid: str = Query(..., description="User PSID (email) for access control"),
+    sign: str = Query(..., description="Encrypted sign: Fernet(psid|timestamp)"),
     version: int | None = Query(None, description="Version sequence number (required for custom skills)"),
 ):
-    _require_psid(psid)
+    psid = _require_psid(psid)
+    _verify_sign(psid, sign)
     skill = await _skill_accessible_to_psid(skill_id, psid)
     if skill is None:
         raise HTTPException(
