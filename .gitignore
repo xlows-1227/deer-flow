@@ -67,3 +67,8 @@ scripts/filebrowser-image-transfer/02-local-relay.sh
 .superpowers/
 data/postgres/
 deer-flow-live-images-amd64.tar.gz
+docker/sandbox/tools/google-chrome-stable_current_x86_64.rpm
+docs/reports/
+.playwright-cli/
+output/
+

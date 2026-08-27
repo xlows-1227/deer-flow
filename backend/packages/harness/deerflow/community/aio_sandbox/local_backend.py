@@ -568,7 +568,14 @@ class LocalContainerBackend(SandboxBackend):
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
 
     def _stop_container(self, container_id: str) -> None:
-        """Stop a container (--rm ensures automatic removal)."""
+        """Stop a container and make sure it is really gone.
+
+        ``--rm`` usually removes the container on exit, but the daemon can fail
+        that auto-removal (overlay2 ``device or resource busy`` is common on
+        CentOS).  A container left behind keeps its whole writable layer on
+        disk and no longer shows up in ``docker ps``, so nothing else in the
+        provider will ever reclaim it.  Force-remove as a fallback.
+        """
         try:
             subprocess.run(
                 [self._runtime, "stop", container_id],
@@ -579,6 +586,85 @@ class LocalContainerBackend(SandboxBackend):
             logger.info(f"Stopped container {container_id} using {self._runtime}")
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to stop container {container_id}: {e.stderr}")
+
+        self._force_remove_container(container_id)
+
+    def _force_remove_container(self, container_id: str) -> None:
+        """Force-remove a container and its anonymous volumes.
+
+        The common case is that ``--rm`` already reclaimed the container, which
+        surfaces as "No such container"; that is success, not a failure.
+        """
+        if self._runtime != "docker":
+            return
+        try:
+            result = subprocess.run(
+                [self._runtime, "rm", "-f", "-v", container_id],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning(f"Failed to force-remove container {container_id}: {e}")
+            return
+
+        if result.returncode == 0:
+            logger.info(f"Force-removed leftover container {container_id}")
+            return
+
+        stderr = (result.stderr or "").strip()
+        stderr_lower = stderr.lower()
+        if "no such container" in stderr_lower or "is already in progress" in stderr_lower:
+            return
+        logger.warning(f"Failed to force-remove container {container_id}: {stderr or '<empty>'}")
+
+    def prune_dead_containers(self) -> int:
+        """Remove sandbox containers that stopped without being reclaimed.
+
+        Only ``exited`` and ``dead`` containers are considered: ``created`` and
+        ``removing`` are transient states that a concurrent create or an
+        in-flight daemon removal owns.
+
+        Returns:
+            The number of containers a removal was attempted for.
+        """
+        if self._runtime != "docker":
+            return 0
+
+        try:
+            result = subprocess.run(
+                [
+                    self._runtime,
+                    "ps",
+                    "-a",
+                    "--filter",
+                    f"name={self._container_prefix}-",
+                    "--filter",
+                    "status=exited",
+                    "--filter",
+                    "status=dead",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning(f"Failed to list dead sandbox containers: {e}")
+            return 0
+
+        if result.returncode != 0:
+            logger.warning("Failed to list dead sandbox containers (stderr=%s)", (result.stderr or "").strip() or "<empty>")
+            return 0
+
+        # Docker's --filter name= is substring-based; re-check the exact prefix.
+        names = [name.strip() for name in (result.stdout or "").splitlines() if name.strip().startswith(self._container_prefix + "-")]
+        for name in names:
+            self._force_remove_container(name)
+        if names:
+            logger.info(f"Pruned {len(names)} dead sandbox container(s)")
+        return len(names)
 
     def _is_container_running(self, container_name: str) -> bool:
         """Check if a named container is currently running.

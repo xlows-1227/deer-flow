@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 from types import SimpleNamespace
 
 from deerflow.community.aio_sandbox import backend as sandbox_backend
@@ -265,6 +266,126 @@ def test_start_container_keeps_apple_container_port_format(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
 
     assert captured_cmd[captured_cmd.index("-p") + 1] == "18080:8080"
+
+
+def _make_backend(prefix: str = "deer-flow-sandbox") -> LocalContainerBackend:
+    return LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix=prefix,
+        config_mounts=[],
+        environment={},
+    )
+
+
+def _record_subprocess(monkeypatch, responses: dict[str, SimpleNamespace] | None = None) -> list[list[str]]:
+    """Capture every subprocess command, replying per docker subcommand."""
+    calls: list[list[str]] = []
+    responses = responses or {}
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return responses.get(cmd[1], SimpleNamespace(stdout="", stderr="", returncode=0))
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    return calls
+
+
+def test_stop_container_force_removes_after_stop(monkeypatch):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    calls = _record_subprocess(monkeypatch)
+
+    backend._stop_container("deer-flow-sandbox-abc123")
+
+    assert calls == [
+        ["docker", "stop", "deer-flow-sandbox-abc123"],
+        ["docker", "rm", "-f", "-v", "deer-flow-sandbox-abc123"],
+    ]
+
+
+def test_stop_container_force_removes_even_when_stop_fails(monkeypatch):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[1] == "stop":
+            raise subprocess.CalledProcessError(1, cmd, stderr="daemon busy")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend._stop_container("deer-flow-sandbox-abc123")
+
+    assert ["docker", "rm", "-f", "-v", "deer-flow-sandbox-abc123"] in calls
+
+
+def test_force_remove_container_tolerates_already_reclaimed(monkeypatch, caplog):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    _record_subprocess(
+        monkeypatch,
+        {"rm": SimpleNamespace(stdout="", stderr="Error: No such container: x", returncode=1)},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.aio_sandbox.local_backend"):
+        backend._force_remove_container("deer-flow-sandbox-abc123")
+
+    assert caplog.records == []
+
+
+def test_force_remove_container_is_docker_only(monkeypatch):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "container")
+    calls = _record_subprocess(monkeypatch)
+
+    backend._force_remove_container("deer-flow-sandbox-abc123")
+
+    assert calls == []
+
+
+def test_prune_dead_containers_removes_exited_and_dead(monkeypatch):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    calls = _record_subprocess(
+        monkeypatch,
+        {"ps": SimpleNamespace(stdout="deer-flow-sandbox-aaa\ndeer-flow-sandbox-bbb\n", stderr="", returncode=0)},
+    )
+
+    assert backend.prune_dead_containers() == 2
+
+    ps_cmd = calls[0]
+    assert "-a" in ps_cmd
+    assert "status=exited" in ps_cmd
+    assert "status=dead" in ps_cmd
+    assert "status=created" not in ps_cmd
+    assert calls[1:] == [
+        ["docker", "rm", "-f", "-v", "deer-flow-sandbox-aaa"],
+        ["docker", "rm", "-f", "-v", "deer-flow-sandbox-bbb"],
+    ]
+
+
+def test_prune_dead_containers_ignores_substring_prefix_matches(monkeypatch):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    calls = _record_subprocess(
+        monkeypatch,
+        {"ps": SimpleNamespace(stdout="other-deer-flow-sandbox-aaa\ndeer-flow-sandbox-bbb\n", stderr="", returncode=0)},
+    )
+
+    assert backend.prune_dead_containers() == 1
+    assert calls[1:] == [["docker", "rm", "-f", "-v", "deer-flow-sandbox-bbb"]]
+
+
+def test_prune_dead_containers_is_docker_only(monkeypatch):
+    backend = _make_backend()
+    monkeypatch.setattr(backend, "_runtime", "container")
+    calls = _record_subprocess(monkeypatch)
+
+    assert backend.prune_dead_containers() == 0
+    assert calls == []
 
 
 def test_create_uses_localhost_sandbox_url_on_bare_metal(monkeypatch):

@@ -190,3 +190,15 @@ class SandboxBackend(ABC):
             A list of SandboxInfo for all currently running sandboxes.
         """
         return []
+
+    def prune_dead_containers(self) -> int:
+        """Reclaim sandboxes that stopped without releasing their resources.
+
+        The default implementation is a no-op, which is correct for backends
+        that don't manage local containers (e.g., RemoteSandboxBackend
+        delegates lifecycle to the provisioner).
+
+        Returns:
+            The number of sandboxes a removal was attempted for.
+        """
+        return 0
