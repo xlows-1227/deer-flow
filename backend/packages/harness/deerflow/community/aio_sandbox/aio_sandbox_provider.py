@@ -500,6 +500,10 @@ class AioSandboxProvider(SandboxProvider):
                 self._reconcile_orphans()
                 if idle_timeout > 0:
                     self._cleanup_idle_sandboxes(idle_timeout)
+                # Containers that died on their own (crash, OOM kill, failed
+                # --rm) are invisible to every path above, which only looks at
+                # running containers, yet still hold their writable layer.
+                self._backend.prune_dead_containers()
             except Exception as e:
                 logger.error(f"Error in idle checker loop: {e}")
 

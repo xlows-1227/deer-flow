@@ -22,15 +22,19 @@ echo "Cleaning up sandbox containers with prefix: ${PREFIX}"
 cleanup_docker() {
     if command -v docker &> /dev/null; then
         echo -n "Checking Docker containers... "
-        DOCKER_CONTAINERS=$(docker ps -q --filter "name=${PREFIX}" 2>/dev/null || echo "")
+        # -a so that containers whose `--rm` auto-removal failed are covered
+        # too; they still hold their writable layer but never show in `docker ps`.
+        DOCKER_CONTAINERS=$(docker ps -aq --filter "name=${PREFIX}" 2>/dev/null || echo "")
 
         if [ -n "$DOCKER_CONTAINERS" ]; then
             echo ""
             echo "Found Docker containers to clean up:"
-            docker ps --filter "name=${PREFIX}" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+            docker ps -a --filter "name=${PREFIX}" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Size}}"
             echo "Stopping Docker containers..."
             echo "$DOCKER_CONTAINERS" | xargs docker stop 2>/dev/null || true
-            echo -e "${GREEN}✓ Docker containers stopped${NC}"
+            echo "Removing Docker containers..."
+            echo "$DOCKER_CONTAINERS" | xargs docker rm -f -v 2>/dev/null || true
+            echo -e "${GREEN}✓ Docker containers stopped and removed${NC}"
         else
             echo -e "${GREEN}none found${NC}"
         fi
