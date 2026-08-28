@@ -41,7 +41,6 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
-  allowedDevOrigins: ["127.0.0.1", "::1"],
   // API rewrites proxy multipart uploads to Gateway; default proxy buffer is too small.
   proxyClientMaxBodySize: "100mb",
   webpack: (config, { dev }) => {
