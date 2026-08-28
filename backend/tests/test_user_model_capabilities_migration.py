@@ -50,7 +50,7 @@ def test_user_model_capabilities_migration_on_sqlite(tmp_path: Path) -> None:
     url = asyncio.run(_prepare_sqlite_db(tmp_path / "migration.db"))
     engine = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     cols, version = engine
-    assert version == "2026_07_30_widen_cred_ref"
+    assert version == "2026_08_21_skill_shares"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
 
@@ -393,7 +393,7 @@ def test_user_model_capabilities_migration_on_postgres_if_available() -> None:
 
     asyncio.run(_prepare_postgres_db(url))
     cols, version = asyncio.run(_run_migration_and_inspect(url, backend="postgres"))
-    assert version == "2026_07_30_widen_cred_ref"
+    assert version == "2026_08_21_skill_shares"
     assert "supports_thinking" in cols
     assert "supports_reasoning_effort" in cols
     channel_columns = asyncio.run(_agent_channel_columns(url, backend="postgres"))
@@ -480,7 +480,7 @@ def test_migrated_schema_accepts_full_length_ids(tmp_path):
     # migration) and inspect the resulting head.
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_30_widen_cred_ref"
+    assert version == "2026_08_21_skill_shares"
     import sqlalchemy as sa
 
     engine_schema = create_async_engine(url)
@@ -569,7 +569,7 @@ def test_widen_migration_collapses_duplicate_public_revisions(tmp_path):
     # Run the widen migration; it must collapse duplicates and reach the new head.
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_30_widen_cred_ref"
+    assert version == "2026_08_21_skill_shares"
 
     engine_check = create_async_engine(url)
 
@@ -673,7 +673,7 @@ def test_old_long_revision_stamp_upgrades_to_current_head(tmp_path):
     asyncio.run(engine_seed.dispose())
     cols_version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
     _, version = cols_version
-    assert version == "2026_07_30_widen_cred_ref", f"old stamp must upgrade to current head, got {version}"
+    assert version == "2026_08_21_skill_shares", f"old stamp must upgrade to current head, got {version}"
 
 
 def test_file_shares_revision_stamp_upgrades_to_current_head(tmp_path: Path) -> None:
@@ -708,5 +708,5 @@ def test_file_shares_revision_stamp_upgrades_to_current_head(tmp_path: Path) -> 
             await engine.dispose()
 
     version, columns = asyncio.run(_inspect_upgrade())
-    assert version == "2026_07_30_widen_cred_ref"
+    assert version == "2026_08_21_skill_shares"
     assert {"runtime_generation", "health_revision", "delete_previous_status"} <= columns
