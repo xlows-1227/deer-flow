@@ -101,6 +101,820 @@ def _tool_call_display_name(tool_call: Any) -> str | None:
     return description or subagent_type or name
 
 
+def _restore_english_spaces(text: str) -> str:
+    """Re-insert missing spaces between English words when a model produces
+    concatenated output (e.g. "Itseemsthemessage" instead of "It seems the
+    message"). This is a last-line-of-defence fix for system prompts that
+    accidentally instruct the model to eliminate whitespace in multilingual
+    output.
+
+    Two complementary strategies are applied inside each "plain" (non-fenced,
+    non-URL, non-inline-code) chunk:
+
+    1. CamelCase / TitleCase boundaries — lower→upper letter splits.  These are
+       extremely reliable and create 0 false negatives, but cannot help with
+       all-lowercase glued runs like ``awarmwelcomein``.
+    2. Dictionary-based longest-match DP split using a compact built-in list
+       of ~1200 of the most common English words.  This handles the
+       all-lowercase runs without needing an external dependency.
+    """
+    if not text:
+        return text
+
+    # Fast-path: there must be at least 5 consecutive Latin letters somewhere
+    # to be worth processing.  A purely numeric / CJK / very short input can
+    # just go through untouched.
+    if not re.search(r"[A-Za-z]{5,}", text):
+        return text
+
+    # Split the text into protected segments (code fences, inline code,
+    # markdown links, urls) so we never touch their contents.  Everything
+    # outside is "plain" and subject to restoration.
+    segments: list[tuple[bool, str]] = []
+    pattern = re.compile(
+        r"(```[\s\S]*?```)"  # fenced code block
+        r"|(`[^`\n]+`)"  # inline code
+        r"|(https?://\S+)"  # URL
+        r"|(\[[^\]]+\]\([^)]+\))",  # markdown link [text](url)
+        flags=re.MULTILINE,
+    )
+    last_end = 0
+    for match in pattern.finditer(text):
+        start, end = match.span()
+        if start > last_end:
+            segments.append((False, text[last_end:start]))
+        segments.append((True, match.group(0)))
+        last_end = end
+    if last_end < len(text):
+        segments.append((False, text[last_end:]))
+
+    _WORD_PREFIXES = (
+        "un", "dis", "mis", "re", "pre", "post", "non", "anti", "over", "under",
+        "out", "sub", "super", "inter", "trans", "auto", "bi", "co", "de", "ex",
+        "extra", "hyper", "in", "im", "il", "ir", "infra", "intra", "macro",
+        "mega", "meta", "micro", "mid", "mini", "mono", "multi", "neo", "non",
+        "out", "over", "peri", "poly", "post", "pre", "pro", "proto", "pseudo",
+        "quasi", "semi", "sub", "super", "supra", "tele", "thermo", "trans",
+        "tri", "ultra", "uni", "vice",
+    )
+
+    def _looks_like_prefix(window: str) -> bool:
+        """Return True when a CamelCase split should NOT be made.
+
+        ``window`` ends at the character we are considering (an uppercase
+        letter).  We inspect the very tail of ``window`` to see if the last
+        few lowercase chars + final uppercase spell a word like "iPhone",
+        "DeSantis", "eBay" or "McDonald" — the recognised pattern is a short
+        English-derivational prefix (in-, re-, un-, pre-, …) immediately
+        followed by a capitalised base word, or one of the handful of
+        brand/proper-noun patterns.
+
+        The old buggy implementation checked ``window.startswith(p)`` which
+        caused false positives for any window that *began* with a prefix
+        letter-combination (e.g. ``comeinE`` was rejected because it starts
+        with ``co``).  We now test only the tail.
+        """
+        if len(window) < 2:
+            return False
+        low = window.lower()
+        # last char is the uppercase letter we'd split on
+        tail_upper = low[-1]
+        # Proper-noun exceptions (Mc-, Mac-, O-, N-, etc.)
+        for fixed in ("mc", "mac", "o'"):
+            if len(low) > len(fixed) and low.endswith(fixed + tail_upper):
+                return True
+        # Derivational prefixes: 2-4 lowercase letters + [capital start of
+        # the base word].  We only match prefixes of length exactly equal to
+        # the candidate so "comeinE" (prefix_candidate = "in", last 2 lower
+        # chars before final letter) is correctly identified as the in-E
+        # boundary while "comeinE" doesn't accidentally match co- because
+        # the co- is 13 chars before the split point.
+        for p in _WORD_PREFIXES:
+            L = len(p)
+            if len(low) - 1 == L and low[:L] == p:
+                # window exactly matches prefix + capital-letter
+                return True
+            if len(low) - 1 > L:
+                last_segment = low[-(L + 1):]
+                if last_segment.startswith(p) and last_segment.endswith(tail_upper):
+                    return True
+        return False
+
+    def _split_plain(plain: str) -> str:
+        n = len(plain)
+        if n < 3:
+            return plain
+
+        # ---------------------------------------------------------------
+        # Step 0: split the plain chunk into LATIN-RUNS (letters + ') vs
+        # everything-else (digits, punctuation, markdown punctuation,
+        # existing whitespace).  Non-Latin substrings are emitted
+        # verbatim with their original characters; only the LATIN-RUNS
+        # get the CamelCase + dictionary treatment.
+        #
+        # We never introduce a space between a punctuation character and
+        # the adjacent word unless it was already there.  This avoids the
+        # "Sure ! Here's" / "! :" type of regressions.
+        # ---------------------------------------------------------------
+        out_parts: list[str] = []
+        run_start = 0
+        i = 0
+        while i < n:
+            c = plain[i]
+            is_latin = (("A" <= c <= "Z") or ("a" <= c <= "z") or c == "'")
+            run_is_latin = (("A" <= plain[run_start] <= "Z") or
+                            ("a" <= plain[run_start] <= "z") or
+                            plain[run_start] == "'")
+            if is_latin != run_is_latin:
+                sub = plain[run_start:i]
+                if run_is_latin:
+                    out_parts.append(_split_one_latin_run(sub))
+                else:
+                    out_parts.append(sub)
+                run_start = i
+            i += 1
+        # Flush tail
+        sub = plain[run_start:]
+        tail_is_latin = bool(sub) and (
+            ("A" <= sub[0] <= "Z") or ("a" <= sub[0] <= "z") or sub[0] == "'"
+        )
+        if tail_is_latin:
+            out_parts.append(_split_one_latin_run(sub))
+        else:
+            out_parts.append(sub)
+        return "".join(out_parts)
+
+    def _split_one_latin_run(frag: str) -> str:
+        """Apply CamelCase flags + dict-DP to a single contiguous run of
+        Latin letters/apostrophes.  Never called with punctuation/whitespace.
+        """
+        n = len(frag)
+        if n < 3:
+            return frag
+        flags = [False] * n  # True -> insert space BEFORE char i
+
+        # ---------- Pass 1: CamelCase / TitleCase boundaries ----------
+        # Split every lower→upper letter boundary.  Derivational prefixes
+        # (iPhone, DeSantis, eBay) will split into e.g. "i Phone", which is
+        # an acceptable cosmetic tradeoff — the *vast* majority of
+        # lowercase→uppercase transitions in glued model output are
+        # legitimate word boundaries (HereAre, UserTable, QueryResults).
+        i = 1
+        while i < n:
+            ch = frag[i]
+            prev = frag[i - 1]
+            if ch.isupper() and prev.isalpha() and prev.islower():
+                flags[i] = True
+                i += 1
+                continue
+            i += 1
+        # Single-letter uppercase starters ("IDon'tKnow" → "I Don't Know")
+        for i in range(1, min(n, 6)):
+            if frag[i].isupper() and frag[i - 1].isupper() and i + 1 < n and frag[i + 1].islower():
+                head = frag[:i]
+                if len(head) == 1 and head in ("I", "A"):
+                    flags[i] = True
+                    break
+
+        # ---------- Pass 2: dict-DP on each CamelCase subfragment ----------
+        boundaries: list[int] = [0]
+        for i in range(1, n):
+            if flags[i]:
+                boundaries.append(i)
+        boundaries.append(n)
+
+        rebuilt: list[str] = []
+        for k in range(len(boundaries) - 1):
+            b_start = boundaries[k]
+            b_end = boundaries[k + 1]
+            rebuilt.append(_dict_split_latin_run(frag[b_start:b_end]))
+
+        spaced = " ".join(r for r in rebuilt if r)
+        return re.sub(r"  +", " ", spaced)
+
+    result_parts: list[str] = []
+    for is_protected, chunk in segments:
+        if is_protected:
+            result_parts.append(chunk)
+        else:
+            result_parts.append(_split_plain(chunk))
+    return "".join(result_parts)
+
+
+# ---------------------------------------------------------------------------
+# Dictionary splitter for lowercase / mixed-case glued Latin runs.
+#
+# The word list is a curated, intentionally small top-frequency subset
+# (~1200 words) so the dictionary never produces truly absurd splits.  Words
+# shorter than 2 letters (except "a", "i", and a few) are avoided — we bias
+# the split towards longer words to minimise junk tokens.
+# ---------------------------------------------------------------------------
+_COMMON_EN_WORDS_RAW = """\
+a about above across after again against ago all almost alone along already also
+always am among amount an and another any anyone anything anywhere apart are
+area areas around as ask asked asking asks at away back backed backing backs
+be because been before began begin beginning behind being believe below between
+big bill billion both brought but by called came can case cases cause caused
+causes certain certainly change changed changes children city cities clear clearly
+come comes common community company compared complete condition conditions continue
+continued continues control could country countries couple course created day days
+development did different difference difficulties do does done down during each
+early earth economy education either else end ended ending ends enough entire
+especially even ever every everybody everyone everything everywhere except example
+executive experience fact facts fall family far fast father feel felt few fewer
+field fight figures final finally find fine first five follow followed following
+food for force form former forward four free friend from full further future game
+gave general generally get girl give given gives go going good got great greater
+group groups grow had half hand hands happen happened happens hard have having he
+head health hear heard help helped helping her here herself high him himself his
+history hold home hope hoped hour hours house how however huge human hundred i
+idea ideas if important in include included including including indeed increase
+increased individual industry instead interest into is it its itself just keep
+kept kind knew know known knowledge large last late later latest law laws lay lead
+leader learn learned least leave leaving left less let letter letters level life
+light like line lines list little live lived living long look looked looking lose
+lost lot love made main make makes man many may me mean means meant measure meet
+member members men might million mind miss money month months more morning most
+mother much must my myself name nation national natural near nearly necessary need
+needed needs never new news next night no none nor north not note nothing now
+number numbers of off offer offered office often oh oil old on once one only open
+opened opinion opportunity order ordered other others our out outside over own
+owned owner page paper part particular particularly parts party pass passed past
+pay peace people per perhaps person personal phone physical pick picture piece
+place plan plant play played player point points police policy political possible
+power practice present president pressure pretty price private probably problem
+problems process produce product production program project property protect proved
+provide provided public put question questions quite rate rather reach read ready
+real really reason reasons receive received recent recently red region relate
+remember remove report represent republic require required research research resource
+resources rest result results return returned right rights river road room rule
+rules run running said same saw say says school science second sections see seem
+seemed segment sense separate series serious several shall she short should show
+shown shows side significant similar since single sister sit site six size small
+social society some someone something sometimes somewhere soon sort sound sounds
+source south space special specific speech spend spent spoke stage stand start
+started state states stay still stop stopped story street strong structure such
+suddenly suggest summer support sure surface system table take taken takes talk
+talked tall tax team technology tell ten term terms test than thank that the their
+them then there these they thing things think thinking this those thought three
+through thus time times to today together told too took top toward town trade
+traditional training travel tried trouble true truth try trying turn turned two
+under understand unit united until up upon us use used useful uses usual usually
+value various very victim view violence visit voice wait walk want wanted war was
+watch water way ways we week weeks well went were west what when where whether
+which while white who whole why wide wife will win wind window wish with within
+without woman women won word words work working works world would write wrote year
+years yes yet you young your yourself
+ability accept according account achieve actually address administration admit
+adopt advance advantage advice affect afford afraid again agency agent agree ahead
+agree air airport all allow allows alone already alternative always among amount
+analysis analyze ancient animal announce annual answer anyone anything apart
+apparent apparently appeal appear appearance apple apply approach appropriate area
+argue argument arrival artist article artistic arts assume attempt attend audience
+author available avoid award aware balance beautiful beauty because become before
+began beginning behalf behavior behind believe benefit benefits beside beyond bill
+billion biological birth black blood blue board boat body book border born both
+bottle bottom box brain brand break breakfast breath bridge bright bring broadcast
+brother brown brush bunch budget build building built business busy buy cake call
+calm camera camp campaign cancer candidate cap cap cards career carry cash catch
+cause caused celebrate century certain challenge chance change chapter character
+charge chart cheap check chemical chest chief child childhood choice choose church
+citizen city civil claim class classic clean clear clearly clever climate clock
+close clothes cloud coast code coffee cold college collection combination come
+comfort command comment commercial commission commit committee common communicate
+community company compare compete competition complete complex computer concept
+concern conclude condition conduct conference confidence confirm conflict congress
+connection consequence consider consist contain content contest context continue
+contract control controversy conversation convince correct cost could country couple
+courage court cover create crime crisis critical cross cultural culture cup cure
+current customer cut dance danger dark data date daughter day dead deal dear death
+debate debt decade decide decision declare decrease deep defeat defend defense
+define degree delay deliver demand democratic demonstrate deny depart depend deputy
+derive describe desert design despite detail detect determine develop device devote
+diet differ difficult dinner direct director disability disagree disappear disaster
+discuss display distance distinct district divide divine doctor document domestic
+dominant door double doubt draft dragon drama draw drink drive drop drug dry due
+during each early ease east easy eat economic economy edge edit educate education
+effect effective effort egg either election electrical electricity eliminate else
+emerge emotion emotional employ employee employer empty enable encounter encourage
+end endpoint enemy energy enforce engage engine engineer enhance enjoy entire
+environment episode equal equip equipment equivalent error escape especially essay
+essence establish estate estimate ethical evaluate evidence evolve exact example
+excellent except exchange exciting executive exercise exhibit exist existence
+expansion expect experience experiment expert explain exploit explore express
+extend extensive extreme eye face facility fact factor factory fail fair faith
+fall false familiar family famous fancy farm farmer fashion fast fatal father
+fault favor fear feature federal fee feed feel female fiction field fierce fight
+figure fill film final finally finance financial find fine finish fire firm first
+fish fit fix flag flat flexible flight float floor flow flower fly focus follow
+food foot football force foreign forest forever forget forgive formal former
+formula forth fortune forum forward four fourth fox frame freedom freeze frequent
+fresh friend frog from front fruit fuel full fund furniture furthermore future
+gain gallery game garden gave gay generally generate generation gentle genuine
+gift girl give glad glass global glory go goal going golden good got govern
+government grab grace grade gradual graduate grand grant grateful grave great
+green greet grey/gray grocery ground group grow guard guess guest guide guilty
+habit hair half hand handle handsome hang happen happiness happy harbor hard harm
+hat hate have having he heal health heart heat heaven heavy hell help her here
+herself hey high highway hill him himself hip his history hit hold holiday home
+honest honey hope horizon horror horse hospital host hotel hour house however
+huge human humble humor hundred hunt hurry hurt husband ice idea ideal identify
+ignore ill illegal illness image imagine immediately impact imply import important
+impose improve impulse in inch incident include income increase indeed indicate
+individual indoor industry infant influence inform information initial initiate
+injury inside insight insist instance instant instead institute institution
+instruction insurance intellectual intelligence intend intention interact interest
+interfere internal international internet interpret into invest invite involve
+iron island isolate issue item itself jacket jail jealous jeans jewel job join
+joint joke journal journey joy judge jump jungle junior junk jury just justice
+keen keep kept key kick kid kill kind kingdom kitchen knee knife knock know
+knowledge lab/aboratory lack lady lake lamp language large last late laugh lawyer
+lay lead leader leak learn leave lecture left leg legal legendary lemon lend lens
+lesson let letter level lie life lifestyle lift light like likely limit line link
+lion lip liquid list listen literary literature little live lively living load
+loan local locate lock logical lonely long look loose lose loss lost lot love
+loyal lucky lunch lung luxury machine magazine magic maid mail main maintain major
+make male mall man manage manager mandate mango manner manufacture many map
+march margin mark market marriage marry mask mass master match material math
+matters maximum maybe mayor meal mean measure meat mechanism media medicine meet
+melody memory mention mercy merge merit merry message metal meter method middle
+might mile military million mind minimal minister minor minute miracle mirror
+miss mission mistake mix mixed mobile mode model modify moment money monitor
+monster moral morning mostly mother motion motor mount mountain mouse mouth move
+movement movie much mud multiply murder muscle museum music musician must my
+myself mystery myth nail naked name narrow nasty nation national native natural
+nature navy near neat necessary neck need negative neighbor neither nerve net
+network neutral never new news newspaper next nice night noble noise nomination
+normal north notable note nothing notice novel now nuclear nude number nurse
+object observe observe obtain obvious occasion occur ocean odd off offer office
+official often oil okay old olive once one online only open opera operate opinion
+oppose option orange orbit order ordinary organic organize origin other otherwise
+ounce outdoor outer output outside oval oven overall overcome own oxygen pact page
+paint pair palace pale pan panic pants paper parade parallel parasite parcel
+parent park part participate particular particularly partner party pass passage
+passenger passive past paste path patient pattern pause payment peace peculiar
+penalty pencil penetrate perceive perfect perform perhaps period permanent permit
+person persuade phase phenomenon philosopher phone photo physical pick pie piece
+pile pilot pine pioneer pipe pistol pizza place plain plan planet plant plastic
+plate platform play pleasant pleasure plenty pledge plug plus pocket poem poet
+poetry point poison polar police policy polite political politics pollute pond pool
+popular population porch pose position positive possible postpone potential power
+practice praise precious predict prefer prejudice prepare presence present preserve
+president pressure pretty prevent previous price pride primary priority prison
+private prize probably problem procedure proceed process produce product profile
+profit program project promote promise proof proper property propose prosper
+protect proud provide province public punch purchase purse pure pursue push put
+puzzle pyramid quality quantity queen query quest question quick quiet quit quiz
+quote rabbit race radar radio raise rally ramp ranch random range rapid rarely
+rate rather raw razor reach react ready reality reason rebel recall receive recent
+recipe recognize recommend record recover red reflect reform refuse region regret
+regular relate relation relax release relief religion rely remain remedy remind
+remote remove render renew repair repeat replace reply report represent require
+rescue resemble reserve reside resign resist resolve resort respect respond
+response rest restore restrict result retire retreat return reveal reverse review
+revolution reward rhythm rib ribbon rice rich ride ridge rifle right rigid ring
+riot rip rise risk ritual rival river road roast rob robot rocket romance roof
+rookie room root rope rotate rotten rough round route royal rubber rude rugby rule
+ruler run rural sacred sadness safe sail salad salmon salon salt sample sand sane
+satisfy sauce sausage save saw say scanner scarce scatter scene scheme scholar
+science scratch screen script sea seal search season seat second secret section
+sector secure see seed seek seem segment select self senate sense sentence separate
+sequence series serve session set settle settle several severe shade shadow shake
+shall shallow shame shape share shark sharp she sheep sheet shelf shell shelter
+shift shine ship shiver shock shoot shop shore short shoulder shove show shrink
+shut sick side siege sight sign signal silence silver similar simple since sincere
+sing sink sister site situate six size ski skill skin skull sky slam sleep slice
+slide slight slim slow small smart smell smile smoke smooth snack snake snow so
+soccer social society sock soft soil solar soldier solid solution solve someone
+something sometimes somewhere soon sore sort soul sound soup source south space
+spare speak special specific speed spell spend spirit split spoil sponsor spoon
+sport spot spray spread spring spy square stable stage stain stair start state
+station statue status stay steak steal steam steel step stick still sting stock
+stomach stone stop store storm story stove straight strange stranger straw stream
+street stretch strike strip stroke strong structure struggle student stuff style
+subject submit succeed success such sudden suffer sugar suggest suit sum summer
+sun supply support suppose supreme sure surface surge surprise surrender survey
+survival survive suspect sustain swallow swan swap sweat sweep sweet swim swing
+sword symmetric symptom syrup system table tackle talent tank tap tape target task
+taste tax teach team tear technical technique technique technology teen telephone
+television tell temperature temple tenant tense term terrace territory terror
+test text than thank that theater theatre theme theory therefore therapy they
+thick thin thing think third this those thought threat three thrive throw thumb
+thus tide tidy tie tiger tight timber time tiny tissue title toast tobacco today
+toe together told tomato tomorrow ton tone tongue tonight too top topic torch
+tornado tortoise toss total touch tough tour toward towards tower town toy trace
+track trade tradition traffic tragic train transfer translate transport trap trash
+travel treat tree tremble trial tribe trick trigger trip triumph trouble truck
+true truly trust truth try tube tuition tumor tune tunnel turtle twist two type
+typical ugly umbrella uncle under underground unique unit universe unknown unless
+unlikely until unusual update up upon urban urge urgent use useful usually utility
+vacuum vague valid valuable value vanish variety various vast vault vehicle veil
+venture verify version very veteran vessel viable vibrant vicious victim victory
+video view village vintage violin virtual virtue virus visa visit visual vital
+vivid voice volume vote voyage wage wait wake walk wall want war wardrobe warm
+warrior wash waste watch water wave wealth weapon wear weather week weird weigh
+welcome welfare well were west western wet what whatever wheat wheel when where
+whereas whether which while whip whisper white whole whoever why wide width wife
+wild will win wind window wine wing winner winter wipe wire wisdom wise wish
+witness wolf woman wonder wooden wool word work world worry worse worst worth
+wrap wreck writer writing wrong yard year yellow yes yesterday yet you young your
+yourself youth zero zone
+hello welcome interface database assistant variety design validate behavior
+select insert update delete query schema table column row join where from into
+values limit order group having union index trigger procedure function view
+begin commit rollback grant revoke alter drop create truncate comment grant
+mysql postgresql sqlite oracle server connect connection api endpoint document
+file files record records instance instances request response payload result
+results summary overview contain contains containing contained container
+include includes including included application applies apply applied
+permission permissions latest late later connect connected connecting
+assist assisted assisting assisting assist assistant containing department
+departments depart assistant's here's there's let's i'd you'd we'd they'd
+it's i'm you're we're they're don't can't won't isn't aren't wasn't weren't
+hasn't haven't hadn't wouldn't shouldn't couldn't didn't doesn't i'll you'll
+we'll they'll he'll she'll it'll that's who's what's where's when's why's
+how's there'll you've we've they've i've couldn't should've would've must've
+departments permissions instances records conditions applications stations
+queries schemas schema functions triggers indexes procedures languages
+messages methods objects projects modules systems tasks levels users
+chinese japanese spanish french german latin korean vietnamese italian
+portuguese dutch russian hindi arabic english
+today tomorrow yesterday morning afternoon evening tonight
+database databases schema endpoint endpoints payload payloads api apis
+document documents file files instance instances result results
+summary overview overview behavior testing write test write tests
+latest tech entire ly keep things chinese french spanish german
+just let me know right on it keep things in chinese keep things
+lat latest latest tech and inspect inspect inspect the and inspect
+queries and inspect the schema schemz schema queries
+standpoint independent strategy
+seems jumps makes takes works shows gives
+finds calls needs keeps sees sends starts
+leaves runs holds uses helps asks means
+becomes remains offers allows appears expects
+suggests provides creates moves lives changes
+continues receives follows reaches returns
+speaks reads walks writes sits stands pays
+plays turns learns feels points builds
+falls meets knows thinks comes goes does
+has says
+brown fox lazy quick dog over warm welcome
+order orders user users id ids
+data table tables schema schemas
+file files name names page pages
+type types code codes role roles
+group groups field fields step steps
+date dates form forms model models
+value values param params input inputs
+output outputs class classes line lines
+item items mode modes
+"""
+
+# Build sets: full lowercase set for longest-match; also a title-case set so
+# fragments like "QueryResults" that survive Pass-1 still get a second chance.
+_EN_WORD_SET: set[str] = {w.lower() for w in _COMMON_EN_WORDS_RAW.split() if w.strip()}
+# Maximum word length to search; used to cap inner DP lookahead.
+_MAX_EN_WORD_LEN = max((len(w) for w in _EN_WORD_SET), default=16)
+
+# Common contractions — treated as suffixes on pronouns/auxiliary verbs.
+_CONTRACTIONS = ("s", "re", "ve", "d", "ll", "m", "t")
+
+# Two-tier ambiguous prefix guard.
+#
+# Tier 1 — DERIVATIONAL / INFLECTIONAL prefixes that also happen to be
+#          legitimate 2-letter dictionary words (re, un, im, de, ex, bi,
+#          co, en, as, at, be, by, my, so, we, on, up, me, no, go, if,
+#          he).  These are ALWAYS forbidden mid-run because otherwise
+#          "understand" → "un de rs t and", "assistant" → "as s is t ant".
+# Tier 2 — genuine FUNCTION WORDS (in, is, it, an).  They must be
+#          allowed mid-run for glued SENTENCES ("thisisatest" → "this is
+#          a test") but must still be blocked when the entire fragment
+#          is itself a single dictionary word (so "island", "industry",
+#          "instance", "interest", "independent" don't shred).
+_DICT_SPLIT_AMBIGUOUS_PREFIXES = frozenset({
+    "as", "he", "at", "be", "so", "we", "on", "up", "me", "no", "go", "if",
+    "my", "by", "re", "un", "im", "de", "ex", "bi", "co", "en",
+})
+# Function-word 2-letter tokens — only blocked when the whole fragment
+# is a single dictionary word.
+_DICT_SPLIT_FUNCTION_WORDS_TIER2 = frozenset({"in", "is", "it", "an"})
+
+
+def _dict_split_latin_run(frag: str) -> str:
+    """Split a single Latin run into space-separated dictionary words.
+
+    Strategy: DP that maximises a combined score where:
+      * A dictionary match of length ``L`` contributes ``L * L + L*2`` points
+        (≈ favour longer, legitimate words).
+      * If the ENTIRE fragment is itself a dictionary word (length >= 5) it
+        receives a "full match" guard score so "standpoint" beats
+        "stand point", "strategy" beats "st rate gy", etc.
+      * A matched contraction ("here's") contributes the same as its parent
+        word plus a tiny bonus.
+      * Any **unmatched** (OOV) single character is carried forward with a
+        small per-char bonus (base 1 + +2 per subsequent char in the run)
+        so OOV acronyms/names stay glued instead of being shredded into
+        2-letter junk words.
+
+    Fragments that already have spaces or are shorter than 5 letters are
+    returned untouched.
+    """
+    if not frag:
+        return frag
+    has_alpha = any(("A" <= c <= "Z") or ("a" <= c <= "z") for c in frag)
+    if not has_alpha or len(frag) < 5 or " " in frag:
+        return frag
+
+    low = frag.lower()
+    n = len(frag)
+    # Fragment-level flag used by Tier-2 function-word gating.  When the
+    # whole fragment is already a real dictionary word we tighten the gating
+    # so 2-letter function words inside ("is", "it", "in", "an") do NOT
+    # cause internal shredding.
+    frag_is_full_word: bool = (n >= 5) and (low in _EN_WORD_SET)
+
+    # ---------- DP that also tracks the kind of transition that landed us
+    # here, so we can penalise "fragmented output": jumping back and forth
+    # between dictionary words and OOV runs.
+    #
+    # State shape: dp[i][k] = best score arriving at position i, where k is
+    #   0 -> the last action was a DICTIONARY / contraction split,
+    #   1 -> the last action was an OOV carry-forward (or i == 0).
+    # Each cell stores (score, prev_pos, prev_kind, len_of_prev_run).
+    INF_NEG = -(1 << 30)
+    # Switch penalty: crossing between a dict-split boundary and an OOV run
+    # costs this many points.  This strongly favours "keep OOV together" over
+    # the opportunistic "pick a 2-letter dict word, carry one char OOV, pick
+    # another 2-letter dict word…" style of shredding.
+    _SWITCH_PENALTY = 6
+    _RUN_BONUS_BASE = 1    # first char of an OOV run
+    _RUN_BONUS_CONT = 2    # each subsequent char of the same OOV run
+    dp: list[list[tuple[int, int, int, int]]] = [
+        [(INF_NEG, -1, -1, 0), (INF_NEG, -1, -1, 0)] for _ in range(n + 1)
+    ]
+    dp[0][1] = (0, -1, -1, 0)  # begin as if "previous" is OOV
+
+    for i in range(n):
+        ch = low[i]
+        for last_kind in (0, 1):
+            base_score, _, _, prev_run_len = dp[i][last_kind]
+            if base_score <= INF_NEG:
+                continue
+
+            if not (("a" <= ch <= "z") or ch == "'"):
+                # punctuation — just forward, inheriting last_kind unchanged
+                ns = base_score
+                if ns > dp[i + 1][last_kind][0]:
+                    dp[i + 1][last_kind] = (ns, i, last_kind, prev_run_len + 1)
+                continue
+
+            # 1) OOV carry forward for this char.
+            switch_cost = 0 if (last_kind == 1) else _SWITCH_PENALTY
+            # Run-length booster: every subsequent char in the same OOV run
+            # gets +2 so a 6-char OOV still peaks around 1 + 2*5 = 11 pts
+            # and can't beat a legitimate 3-word dict split like "i+can+do"
+            # (3+15+8 = 26 pts).
+            run_bonus = (
+                _RUN_BONUS_CONT
+                if (last_kind == 1 and prev_run_len >= 1)
+                else _RUN_BONUS_BASE
+            )
+            ns_oov = base_score + run_bonus - switch_cost
+            if ns_oov > dp[i + 1][1][0]:
+                new_run_len = prev_run_len + 1 if last_kind == 1 else 1
+                dp[i + 1][1] = (ns_oov, i, last_kind, new_run_len)
+
+            # 2) Dictionary / contraction matches starting at i.
+            end_limit = min(n, i + _MAX_EN_WORD_LEN)
+            j = i + 1
+            while j <= end_limit:
+                nxt = low[j - 1]
+                if not (("a" <= nxt <= "z") or nxt == "'"):
+                    break
+                candidate = low[i:j]
+                word_len = j - i
+                score_add = 0
+                if candidate in _EN_WORD_SET:
+                    score_add = word_len * word_len + 2 * word_len
+                    # Two-tier prefix guard (see module-level frozensets):
+                    if word_len <= 3:
+                        next_char_is_latin = (j < n) and (
+                            ("a" <= low[j] <= "z") or (low[j] == "'")
+                        )
+                        if next_char_is_latin:
+                            if candidate in _DICT_SPLIT_AMBIGUOUS_PREFIXES:
+                                # Tier 1: always block mid-run.
+                                score_add = 0
+                            elif (candidate in _DICT_SPLIT_FUNCTION_WORDS_TIER2
+                                  and frag_is_full_word):
+                                # Tier 2: block mid-run ONLY when the whole
+                                # fragment is already a real dictionary word.
+                                score_add = 0
+                elif "'" in candidate:
+                    tick = candidate.index("'")
+                    head = candidate[:tick]
+                    tail = candidate[tick + 1:]
+                    if head in _EN_WORD_SET and tail in _CONTRACTIONS:
+                        score_add = (tick * tick + 2 * tick) + 4
+                if score_add:
+                    # Switch cost between OOV-kind and dict-kind.  Special
+                    # waiver: when i==0 and the starting "OOV-kind" run is
+                    # empty (which is the standard initial state), we have
+                    # not actually consumed any OOV content, so charging 6
+                    # points just to start the fragment with a dictionary
+                    # word is unfair (it caused "Icando" to be kept as an
+                    # OOV run because 20-6 < 21 for 6 chars of pure OOV).
+                    if i == 0 and last_kind == 1 and prev_run_len == 0:
+                        switch = 0
+                    else:
+                        switch = 0 if (last_kind == 0) else _SWITCH_PENALTY
+                    new_total = base_score + score_add - switch
+                    if new_total > dp[j][0][0]:
+                        dp[j][0] = (new_total, i, last_kind, word_len)
+                j += 1
+
+    # 3) Full-word bonus: if the whole fragment is itself a dictionary word
+    # of length >= 5, compare against a synthetic "keep as one token" score
+    # so legitimate compound words (standpoint, strategy, independent, …)
+    # defeat whatever internal split scores the DP found.  Using >= makes
+    # ties resolve in favour of not-splitting (safer for real words).
+    if frag_is_full_word:
+        full_word_score = n * n + 2 * n
+        if full_word_score >= max(dp[n][0][0], dp[n][1][0]):
+            return frag
+
+    # Pick whichever kind gives the best final score, then reconstruct by
+    # walking back through prev_pos / prev_kind pointers.
+    final_score_0, _, _, _ = dp[n][0]
+    final_score_1, _, _, _ = dp[n][1]
+    if max(final_score_0, final_score_1) <= INF_NEG:
+        return frag
+    best_kind = 0 if final_score_0 >= final_score_1 else 1
+
+    pieces: list[str] = []
+    pos = n
+    kind = best_kind
+    # Track where the current OOV run ends, so we can emit a single chunk
+    # instead of one token per character (they all have prev_pos == pos - 1).
+    oov_run_end = -1
+    while pos > 0:
+        score, prev_pos, prev_kind, _run_len = dp[pos][kind]
+        if score <= INF_NEG or prev_pos < 0:
+            break
+        if kind == 1:
+            # OOV cell: just walk back, remember the rightmost end of this
+            # run (the one with the largest pos that's still OOV).
+            if oov_run_end == -1:
+                oov_run_end = pos
+            pos = prev_pos
+            kind = prev_kind
+            # If we've left the OOV kind (or hit the start), flush the run.
+            if kind != 1 or pos == 0:
+                start = pos
+                end = oov_run_end
+                if end - start > 0:
+                    pieces.append(frag[start:end])
+                oov_run_end = -1
+        else:
+            # Dictionary / contraction cell — prev_pos is the real start of
+            # this word, so the slice is a complete token.
+            span = frag[prev_pos:pos]
+            if span:
+                pieces.append(span)
+            kind = prev_kind
+            pos = prev_pos
+    # Edge: if we ended at pos==0 with an un-flushed OOV run starting at 0.
+    if oov_run_end > 0 and pos == 0:
+        pieces.append(frag[0:oov_run_end])
+    pieces.reverse()
+    return " ".join(p for p in pieces if p)
+
+
+# Heuristic language detection.  We deliberately avoid a runtime dependency on
+# `langdetect` so it only does something simple: measure ratio of
+# Latin-letter-based tokens vs CJK characters.  This is enough to decide
+# whether we want to add the "English whitespace preservation" system rule.
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df\U0002a700-\U0002b73f\U0002b740-\U0002b81f\U0002b820-\U0002ceaf\u3040-\u30ff\u31f0-\u31ff\ua960-\ua97f\U0001b000-\U0001b12f\u1100-\u11ff\uac00-\ud7af\ud7b0-\ud7ff\ud800-\udbff]")
+_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+
+
+def _detect_input_is_english_like(text: str, *, latin_ratio_threshold: float = 0.55) -> bool:
+    """Return True if the input is dominated by space-delimited Latin words.
+
+    The rule is intentionally conservative for Chinese and aggressive for pure
+    English.  It will also trigger for German/French/Spanish text, which is
+    fine — those scripts equally need whitespace.
+    """
+    if not text:
+        return False
+    latin_letters = sum(1 for ch in text if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+    cjk_chars = len(_CJK_RE.findall(text))
+    digits = sum(1 for ch in text if ch.isdigit())
+    other_graphic = sum(
+        1 for ch in text if ch.isprintable() and not ch.isspace() and not ch.isascii() and not _CJK_RE.search(ch)
+    )
+    total_graphic = max(1, latin_letters + cjk_chars + digits + other_graphic)
+    latin_ratio = latin_letters / total_graphic
+    cjk_ratio = cjk_chars / total_graphic
+
+    # ---- Conservative CJK-short-circuit gates --------------------------------
+    # (a) Absolute short-circuit: if the user wrote 6 or more actual CJK
+    #     ideograms / kana / hangul chars, the turn is almost certainly CJK-led
+    #     regardless of any mixed-in SQL, URLs, brand names or ASCII symbol
+    #     tables.  Do NOT inject so the model behaves naturally for replies.
+    if cjk_chars >= 6:
+        return False
+    # (b) Ratio short-circuit: >= 20% CJK content still points to a CJK-led
+    #     turn even with a long tail of Latin/ASCII code.
+    if cjk_ratio >= 0.20:
+        return False
+
+    # Pure short English: "show me some english", "speak some english", etc.
+    if cjk_chars == 0 and latin_letters >= 3:
+        return True
+    # Mixed turn — default gate requires 55% Latin, but if ANY CJK character
+    # shows up we raise the bar dramatically (72 %) so "a few CJK words + a
+    # long SQL snippet" still reads as a Chinese user who happened to paste
+    # code — not someone wanting an English answer.
+    threshold = latin_ratio_threshold if cjk_chars == 0 else 0.72
+    if latin_ratio >= threshold:
+        return True
+    return False
+
+
+def _message_text_content(m: Any) -> str:
+    """Extract the textual content of a LangChain message, regardless of whether
+    its content is a plain string or a list of multimodal blocks.
+    """
+    content = getattr(m, "content", None)
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict):
+                t = block.get("text")
+                if isinstance(t, str):
+                    text_parts.append(t)
+            elif hasattr(block, "text") and isinstance(block.text, str):
+                text_parts.append(block.text)
+        return " ".join(text_parts)
+    return ""
+
+
+_ENGLISH_WHITESPACE_RULE = (
+    "## Mandatory Whitespace Preservation (this turn only)\n"
+    "The user message for this turn is written in English.  You MUST keep a "
+    "single ASCII space character between every English/Latin word.  Never "
+    "concatenate English words together.  Even if you compress output, never "
+    "remove spaces between English words.  This rule is strictly enforced for "
+    "English/Latin text; Chinese/CJK text needs no spaces."
+)
+
+
+def _inject_english_whitespace_rule_if_needed(graph_input: dict) -> None:
+    """If the latest human message looks English-ish, prepend a short System
+    reminder that forces whitespace preservation.
+
+    Mutates ``graph_input["messages"]`` in place.
+    """
+    if not isinstance(graph_input, dict):
+        return
+    msgs = graph_input.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return
+
+    # Walk backwards to find the most recent human message — in a single turn
+    # it's usually msgs[-1].
+    last_human_idx = -1
+    for idx in range(len(msgs) - 1, -1, -1):
+        msg = msgs[idx]
+        if getattr(msg, "type", "") == "human":
+            last_human_idx = idx
+            break
+    if last_human_idx < 0:
+        return
+    last_human = msgs[last_human_idx]
+    text = _message_text_content(last_human)
+    if not _detect_input_is_english_like(text):
+        return
+
+    try:
+        from langchain_core.messages import SystemMessage
+    except Exception:  # pragma: no cover — safety net
+        return
+
+    rule_message = SystemMessage(content=_ENGLISH_WHITESPACE_RULE)
+    # Insert right before the last human so it's immediately contextualised
+    # against the incoming English query, but earlier system messages remain
+    # untouched.
+    msgs.insert(last_human_idx, rule_message)
+
+
 def _clean_model_text(text: str) -> str:
     if not text:
         return text
@@ -112,6 +926,7 @@ def _clean_model_text(text: str) -> str:
     # Clean up any previously added tool call markers (from earlier code versions)
     text = _TOOL_OMISSION_NAMED_REGEX.sub("", text)  # [工具调用: name1, name2]
     text = re.sub(_TOOL_OMISSION_MARKER_RE, "", text)   # [工具调用已省略]
+    text = _restore_english_spaces(text)
     text = text.strip()
     return text
 
@@ -1377,6 +2192,13 @@ async def run_agent(
                                     m.content = "[工具调用: " + ", ".join(tc_names) + "]"
                     cleaned_msgs.append(m)
                 cleaned_graph_input["messages"] = cleaned_msgs
+
+                # Inject whitespace preservation rule when the last user message
+                # is written primarily in English / space-delimited Latin
+                # scripts.  This overrides any token-saving bias the model may
+                # have picked up for multilingual turns, without affecting
+                # Chinese / CJK turns.
+                _inject_english_whitespace_rule_if_needed(cleaned_graph_input)
 
                 graph_input = cleaned_graph_input
 

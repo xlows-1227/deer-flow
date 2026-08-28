@@ -46,7 +46,7 @@ class ExternalAuditMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         """Audit managed external routes without recording request contents."""
-        managed_path = request.url.path.startswith("/api/v1/external/") or request.url.path.startswith("/api/v1/api-keys/") or request.url.path.startswith("/api/v1/agents/")
+        managed_path = request.url.path.startswith("/api/v1/external/") or request.url.path.startswith("/api/v1/api-keys/") or request.url.path.startswith("/api/v1/agents/") or request.url.path.startswith("/api/v1/skills")
         if not managed_path:
             return await call_next(request)
 

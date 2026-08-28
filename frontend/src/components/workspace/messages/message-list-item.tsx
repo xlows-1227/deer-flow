@@ -16,6 +16,7 @@ import {
   type ImgHTMLAttributes,
 } from "react";
 import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 
 import { Loader } from "@/components/ai-elements/loader";
 import {
@@ -390,13 +391,13 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {false && toolOmissionResult.count > 0 && (
+      {toolOmissionResult.count > 0 && (
         <ToolCallOmissionBanner count={toolOmissionResult.count} toolNames={toolOmissionResult.toolNames} />
       )}
       <MarkdownContent
         content={toolOmissionResult.content}
         isLoading={isLoading}
-        rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+        rehypePlugins={[rehypeRaw, ...rehypePlugins, [rehypeKatex, { output: "html" }]]}
         className="my-3"
         components={components}
       />

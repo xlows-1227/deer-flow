@@ -89,7 +89,7 @@ class SQLiteUserRepository(UserRepository):
             return self._row_to_user(row) if row is not None else None
 
     async def get_user_by_email(self, email: str) -> User | None:
-        stmt = select(UserRow).where(UserRow.email == email)
+        stmt = select(UserRow).where(func.lower(UserRow.email) == email.lower())
         async with self._sf() as session:
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()

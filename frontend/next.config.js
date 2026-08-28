@@ -21,6 +21,9 @@ const withNextra = nextra({
 
 /** @type {import("next").NextConfig} */
 const config = {
+  // Allow 127.0.0.1 (Next 16 blocks this origin from accessing dev resources
+  // e.g. fonts / HMR WebSocket by default).
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   // Pin the workspace root so Next.js doesn't pick up stray lockfiles
   // outside the repo (e.g. ~/pnpm-lock.yaml), which bloats file tracing.
   outputFileTracingRoot: import.meta.dirname,
