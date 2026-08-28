@@ -99,8 +99,8 @@ def verify_sign(sign: str, psid: str) -> SignPayload:
     if sign_key != _load_key():
         raise ValueError("Invalid sign: key mismatch")
 
-    # 2. Verify psid
-    if sign_psid != psid:
+    # 2. Verify psid (case-insensitive, email addresses are not case-sensitive)
+    if sign_psid.lower() != psid.lower():
         raise ValueError("Sign psid does not match the provided psid")
 
     # 3. Verify timestamp

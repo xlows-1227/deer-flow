@@ -27,6 +27,154 @@ _SYSTEM_REMINDER_RE = re.compile(r"<system-rem>.*?</system-rem>", re.DOTALL)
 _TOOL_CALL_SECTION_RE = re.compile(r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>", re.DOTALL)
 _SINGLE_MARKER_RE = re.compile(r"<\|[^>]+\|>")
 _INTERNAL_MARKERS = ["[工具调用已省略]", "[内部消息]"]
+# Match: [工具调用: tool_name]  or  [工具调用已省略]  — 完整中文字符 + 括号内容
+_TOOL_OMISSION_NAMED_RE = re.compile(r"\[工具调用:[^\]]*\]")
+# Also strip inline Chinese tool-call markers like "[工具调用: query_database]..." that appear multiple times
+_TOOL_INLINE_CHINESE_RE = re.compile(r"【工具调用[：:][^】]*】")
+
+# --- Pretty-print helpers for public answer text ---------------------------------
+# Heading markers: ## / ###  followed by digits or Chinese, e.g. "###1." "### 标题"
+# Anchor at a non-whitespace or punctuation char so we don't match partial
+# markdown link syntax or headings that are already on their own line.
+_HEADING_LINE_RE = re.compile(r"(?<![\n#])(#{2,3}\s*\d*[\.\s、、]*[^\n#]{1,80})")
+# Markdown table *block*: a contiguous pipe-heavy substring with at least one
+# `---` separator (meaning it is a real markdown table, not a random pipe
+# chain inside sentence text).  Greedy + dotall on a single source line.
+_TABLE_BLOCK_RE = re.compile(
+    r"(\|(?:[^|\n]*\|)+(?:\|-{2,}){2,}\|(?:[^|\n]*\|)+)",
+)
+# Table separator row fragment, used later inside a block.
+_TABLE_SEP_FRAGMENT_RE = re.compile(r"(\|(?:\s*:?-+:?\s*\|){2,})")
+# SQL fence markers for markdown code blocks
+_SQL_FENCE_RE = re.compile(r"```sql", re.IGNORECASE)
+
+
+def _format_public_answer(text: str) -> str:
+    """Insert line breaks around markdown structural markers so the raw JSON
+    string is readable even without a markdown renderer (e.g. Postman Raw view).
+
+    Safe for downstream markdown consumers: we only *add* newlines around
+    structural markers that are already intended to break lines; we never
+    remove content or join lines.
+    """
+    if not text:
+        return text
+    s = text
+
+    # 1. Ensure heading markers (##title, ###1.标题) sit on their own lines.
+    #    We match text captured by _HEADING_LINE_RE and prepend newline unless
+    #    already preceded by a newline (negative lookbehind in the regex).
+    def _pad_heading(match: re.Match[str]) -> str:
+        chunk = match.group(1)
+        if chunk.startswith("\n"):
+            return chunk
+        return "\n" + chunk
+
+    s = _HEADING_LINE_RE.sub(_pad_heading, s)
+
+    # 2. Process markdown table blocks: a single "flattened" substring like
+    #    `|A|B||---|---||1|2||3|4|` becomes 4 separate lines:
+    #        |A|B|
+    #        |---|---|
+    #        |1|2|
+    #        |3|4|
+    def _format_table_block(match: re.Match[str]) -> str:
+        block = match.group(1).strip()
+        # Split pipe-separated tokens; cells are everything between '|'s.
+        raw_cells = block.split("|")
+        # Remove leading & trailing empties (they come from block opening/closing |)
+        cells: list[str] = []
+        if raw_cells and raw_cells[0] == "":
+            raw_cells = raw_cells[1:]
+        if raw_cells and raw_cells[-1] == "":
+            raw_cells = raw_cells[:-1]
+        cells = raw_cells
+
+        # Infer column count from the first separator fragment (|---:---|---|).
+        # The separator row has (column_count + 1) pipe characters in its
+        # standalone form but here appears inline as a consecutive sequence of
+        # `---` fragments separated by pipes.
+        sep_indices = [
+            i for i, c in enumerate(cells) if re.fullmatch(r"\s*:?-+:?\s*", c)
+        ]
+        # Columns = number of consecutive separator cells we find
+        if sep_indices:
+            # Group consecutive indices
+            groups: list[list[int]] = []
+            current_group: list[int] = [sep_indices[0]]
+            for idx in sep_indices[1:]:
+                if idx == current_group[-1] + 1:
+                    current_group.append(idx)
+                else:
+                    groups.append(current_group)
+                    current_group = [idx]
+            groups.append(current_group)
+            col_count = max((len(g) for g in groups), default=0)
+        else:
+            col_count = 0
+
+        rows: list[list[str]] = []
+        current_row: list[str] = []
+
+        def flush_row() -> None:
+            if current_row:
+                rows.append(list(current_row))
+                current_row.clear()
+
+        idx = 0
+        while idx < len(cells):
+            cell = cells[idx]
+            if cell == "" and current_row:
+                # Empty cell = row boundary (two consecutive rows share the
+                # same pipe, creating the `||` join).
+                flush_row()
+                idx += 1
+                continue
+            current_row.append(cell)
+            # If we have a known column count and the row is full, emit it.
+            if col_count > 0 and len(current_row) == col_count:
+                flush_row()
+                # Advance past the following empty cell if present (which is
+                # the explicit boundary).  Skip it so we don't emit an empty
+                # row on the next iteration.
+                if idx + 1 < len(cells) and cells[idx + 1] == "":
+                    idx += 2
+                    continue
+            idx += 1
+        flush_row()
+
+        if not rows:
+            return "\n" + block + "\n"
+
+        lines = ["|" + "|".join(r) + "|" for r in rows]
+        return "\n" + "\n".join(lines) + "\n"
+
+    s = _TABLE_BLOCK_RE.sub(_format_table_block, s)
+
+    # 3. Ensure SQL fences (```sql ... ```) are preceded & followed by newlines.
+    def _pad_sql_start(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return ("\n" if not s[: match.start()].endswith("\n") else "") + token + "\n"
+
+    s = _SQL_FENCE_RE.sub(_pad_sql_start, s)
+    # Prefix close-fence with newline unless already has one; postfix too.
+    # We only touch ``` that closes a fenced block: look for closing markers.
+    s = re.sub(
+        r"(?<!\n)```(?=\s*[^`]|$)",
+        lambda m: "\n" + m.group(0),
+        s,
+    )
+    s = re.sub(
+        r"```(?!\s*\n)",
+        lambda m: m.group(0) + "\n",
+        s,
+    )
+
+    # 5. Collapse runs of 3+ newlines to exactly 2 newlines.
+    s = re.sub(r"\n{3,}", "\n\n", s)
+
+    # 6. Remove leading whitespace-only blank lines, keep trailing single newline.
+    return s.strip()
 
 
 def _clean_content_for_public(content: str) -> str:
@@ -36,9 +184,20 @@ def _clean_content_for_public(content: str) -> str:
     cleaned = _SYSTEM_REMINDER_RE.sub("", content)
     cleaned = _TOOL_CALL_SECTION_RE.sub("", cleaned)
     cleaned = _SINGLE_MARKER_RE.sub("", cleaned)
+    # Remove [工具调用: tool_name] markers
+    cleaned = _TOOL_OMISSION_NAMED_RE.sub("", cleaned)
+    # Remove 【工具调用:xxx】 markers (both full-width and half-width colon)
+    cleaned = _TOOL_INLINE_CHINESE_RE.sub("", cleaned)
     for marker in _INTERNAL_MARKERS:
         cleaned = cleaned.replace(marker, "")
-    return cleaned.strip()
+    # Restore spaces between English words if the model produced concatenated
+    # output (e.g. "Itseemsthemessage").  Must run BEFORE markdown pretty-print
+    # so separator/header detection works on properly spaced text.
+    from deerflow.runtime.runs.worker import _restore_english_spaces
+
+    cleaned = _restore_english_spaces(cleaned)
+    cleaned = _format_public_answer(cleaned)
+    return cleaned
 
 
 def assert_public_payload_safe(value: Any, *, path: str = "$") -> None:

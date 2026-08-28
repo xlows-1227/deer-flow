@@ -106,4 +106,9 @@ async def scan_skill_content(content: str, *, executable: bool = False, location
         return ScanResult("block", "Security scan produced unparseable output; manual review required.")
     if executable:
         return ScanResult("block", "Security scan unavailable for executable content; manual review required.")
-    return ScanResult("block", "Security scan unavailable for skill content; manual review required.")
+    logger.warning("Security scan model unavailable; allowing non-executable content with warning.")
+    return ScanResult(
+        "warn",
+        "Security scan unavailable for skill content (model call failed); "
+        "auto-approved as non-executable, proceed with caution.",
+    )

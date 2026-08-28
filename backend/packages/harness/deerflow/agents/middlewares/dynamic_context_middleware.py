@@ -331,11 +331,25 @@ class DynamicContextMiddleware(AgentMiddleware):
             id=stable_id,
             additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
         )
+        # Create user_msg with original content, but ensure it does NOT inherit
+        # hide_from_ui or view_image_context flags that should only apply to
+        # system/injected messages. This prevents the user's original message
+        # from being incorrectly hidden in the UI.
+        original_kwargs = original.additional_kwargs if isinstance(original.additional_kwargs, dict) else {}
+        user_kwargs = {
+            k: v for k, v in original_kwargs.items()
+            if k not in ("hide_from_ui", "view_image_context", _DYNAMIC_CONTEXT_REMINDER_KEY)
+        }
         user_msg = HumanMessage(
             content=original.content,
             id=f"{stable_id}__user",
             name=original.name,
-            additional_kwargs=original.additional_kwargs,
+            additional_kwargs=user_kwargs,
+        )
+        logger.info(
+            "DynamicContextMiddleware._make_reminder_and_user_messages: stable_id=%r, "
+            "user_msg_id=%r, user_kwargs=%r, original_kwargs=%r",
+            stable_id, user_msg.id, user_kwargs, original_kwargs,
         )
         return reminder_msg, user_msg
 

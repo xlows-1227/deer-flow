@@ -188,6 +188,7 @@ class DraftSandboxThreadResponse(BaseModel):
     draft_revision: int
     skill_names: list[str]
     connector_ids: list[str]
+    model_name: str | None = None
     billable: Literal[False] = False
 
 
@@ -524,6 +525,7 @@ async def get_draft_sandbox_thread(
         draft_revision=snapshot.draft_revision,
         skill_names=list(snapshot.skill_names),
         connector_ids=list(snapshot.connector_ids),
+        model_name=snapshot.model_name,
         billable=False,
     )
 

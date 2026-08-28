@@ -10,12 +10,12 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any, Literal, Union
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.gateway.deps import (
     get_checkpointer,
@@ -81,18 +81,223 @@ class AgentConversationCreateRequest(_PublicModel):
         return _validate_metadata(value)
 
 
-class AgentRunCreateRequest(_PublicModel):
-    """Public fields accepted when starting a published-Agent run."""
+class _PublicModel(BaseModel):
+    """Common Pydantic settings for public request/response models."""
 
-    message: str = Field(min_length=1, max_length=200_000)
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="forbid",
+        use_attribute_docstrings=True,
+        json_encoders={bytes: lambda v: v.decode("utf-8")},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multimodal content parts (attachments via public API)
+# ---------------------------------------------------------------------------
+
+
+class TextContentPart(BaseModel):
+    """A plain text part within a multimodal message."""
+
+    type: Literal["text"] = "text"
+    text: str = Field(min_length=1, max_length=200_000)
+
+
+class _ImageUrlNested(BaseModel):
+    url: str = Field(
+        min_length=1,
+        max_length=5_000,
+        description=(
+            "Either a publicly reachable HTTP(S) URL, or a RFC 2397 data URI such as "
+            "``data:image/png;base64,<base64-bytes>``."
+        ),
+    )
+    detail: Literal["auto", "low", "high"] = Field(default="auto")
+
+
+class ImageUrlContentPart(BaseModel):
+    """A single image part within a multimodal message (remote URL or data URI)."""
+
+    type: Literal["image_url"] = "image_url"
+    image_url: _ImageUrlNested
+
+
+class FilePathContentPart(BaseModel):
+    """Reference to a file already uploaded via ``POST /api/threads/{thread_id}/uploads``.
+
+    Use this shape when you first upload files through the internal uploads
+    endpoint and receive a server-side ``path`` back.  The referenced path
+    MUST belong to the thread that backs this agent conversation, otherwise
+    the agent runtime will reject it as unreadable.
+    """
+
+    type: Literal["file_path"] = "file_path"
+    path: str = Field(min_length=1, max_length=1_000)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    content_type: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+ContentPart = Annotated[
+    Union[TextContentPart, ImageUrlContentPart, FilePathContentPart],
+    Field(discriminator="type"),
+]
+
+_MAX_MESSAGE_PARTS = 32
+_MAX_MESSAGE_BYTES = 4_000_000  # 4 MB — covers images as data URIs or long text+image payloads
+
+
+def _content_part_sizes(part: Any) -> int:
+    """Upper-bound byte size estimate for a single multimodal part."""
+    if isinstance(part, TextContentPart):
+        return len(part.text.encode("utf-8"))
+    if isinstance(part, ImageUrlContentPart):
+        return len(part.image_url.url.encode("utf-8"))
+    if isinstance(part, FilePathContentPart):
+        return len((part.path or "").encode("utf-8")) + len((part.name or "").encode("utf-8"))
+    # Fallback — serialise to JSON to guarantee boundedness
+    try:
+        return len(json.dumps(part, ensure_ascii=False, separators=(",", ":")).encode())
+    except Exception:  # noqa: BLE001
+        return 8192
+
+
+class AgentRunCreateRequest(_PublicModel):
+    """Public fields accepted when starting a published-Agent run.
+
+    ``message`` accepts either:
+
+    * a plain ``string`` (original behaviour), OR
+    * a **list of ContentPart objects** (multimodal) combining ``text``,
+      ``image_url`` (public URL or data:…/base64) and ``file_path``
+      (server-side uploaded file references) into a single user turn.
+
+    Multimodal example body::
+
+        {
+          "message": [
+            {"type": "text", "text": "请描述这张图片的内容"},
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.com/photo.jpg",
+                "detail": "auto"
+              }
+            }
+          ]
+        }
+    """
+
+    message: Union[str, list[ContentPart]] = Field(
+        min_length=1,
+        max_length=_MAX_MESSAGE_PARTS,
+        description="Plain text, or an ordered list of multimodal content parts.",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_json_list(cls, value: Any) -> Any:
+        # Some form/multipart legacy callers may send JSON-encoded message as
+        # a string; decode it early so the Union discriminator can dispatch.
+        if isinstance(value, dict) and isinstance(value.get("message"), str):
+            raw = value["message"].strip()
+            if raw.startswith("[") and raw.endswith("]"):
+                try:
+                    value = {**value, "message": json.loads(raw)}
+                except Exception:  # noqa: BLE001
+                    pass
+        return value
 
     @field_validator("message")
     @classmethod
-    def _message_not_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("message must not be blank")
-        return value
+    def _message_not_blank_and_bounded(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("message must not be blank")
+            if len(value.encode("utf-8")) > _MAX_MESSAGE_BYTES:
+                raise ValueError(f"message exceeds {_MAX_MESSAGE_BYTES} bytes")
+            return value
+        if isinstance(value, list):
+            if not value:
+                raise ValueError("message parts list must not be empty")
+            if len(value) > _MAX_MESSAGE_PARTS:
+                raise ValueError(f"message has more than {_MAX_MESSAGE_PARTS} parts")
+            total_bytes = 0
+            has_text = False
+            for p in value:
+                if isinstance(p, TextContentPart):
+                    if not p.text.strip():
+                        raise ValueError("message contains a blank text part")
+                    has_text = True
+                total_bytes += _content_part_sizes(p)
+                if total_bytes > _MAX_MESSAGE_BYTES:
+                    raise ValueError(f"message exceeds {_MAX_MESSAGE_BYTES} bytes")
+            # If every part is image-only (no text) → keep to the same strict
+            # behaviour the Web UI has always enforced at submission time:
+            # pure-image inputs are rejected up-front so the caller doesn't
+            # waste a turn waiting for the model to throw "text content is
+            # empty".
+            if not has_text:
+                raise ValueError(
+                    "message must include at least one non-blank text part when sending attachments"
+                )
+            return value
+        raise ValueError("message must be a string or a list of content parts")
+
+    def message_as_graph_input(self) -> Any:
+        """Render ``message`` into the graph ``input.messages[].content`` shape.
+
+        * scalar strings → returned as-is (legacy path)
+        * part lists → normalised to LangChain-style content arrays where a
+          single trailing text part may still collapse to scalar; image_url /
+          file_path parts are preserved as dicts so multimodal code paths in
+          the worker recognise them correctly.
+        """
+        if isinstance(self.message, str):
+            return self.message
+        parts: list[dict[str, Any]] = []
+        scalar_text_only: TextContentPart | None = None
+        for p in self.message:
+            if isinstance(p, TextContentPart):
+                parts.append({"type": "text", "text": p.text})
+                scalar_text_only = p if len(self.message) == 1 else None
+            elif isinstance(p, ImageUrlContentPart):
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": p.image_url.url,
+                            **(
+                                {"detail": p.image_url.detail}
+                                if p.image_url.detail != "auto"
+                                else {}
+                            ),
+                        },
+                    }
+                )
+            elif isinstance(p, FilePathContentPart):
+                entry: dict[str, Any] = {"type": "file_path", "path": p.path}
+                if p.name:
+                    entry["name"] = p.name
+                if p.content_type:
+                    entry["content_type"] = p.content_type
+                parts.append(entry)
+        # Scalar collapse mirrors what the worker normaliser expects for
+        # pure-text turns so we don't accidentally force multimodal decoding
+        # on simple strings.
+        if scalar_text_only is not None:
+            return scalar_text_only.text
+        return parts
+
+    def message_utf8_bytes(self) -> int:
+        """Quoted size for quota accounting (same upper bound as validator)."""
+        if isinstance(self.message, str):
+            return len(self.message.encode("utf-8"))
+        total = 0
+        for p in self.message:
+            total += _content_part_sizes(p)
+        return total
 
     @field_validator("metadata")
     @classmethod
@@ -256,7 +461,7 @@ def _internal_run_request(
     }
     return RunCreateRequest(
         assistant_id="lead_agent",
-        input={"messages": [{"role": "user", "content": body.message}]},
+        input={"messages": [{"role": "user", "content": body.message_as_graph_input()}]},
         metadata=metadata,
         stream_mode=["values", "messages-tuple", "custom"],
         on_disconnect="continue",
@@ -557,7 +762,7 @@ async def _reserve_quota(
     run_id: str,
 ) -> Reservation:
     quota = context.effective_quota
-    if len(body.message.encode("utf-8")) > quota.max_input_bytes:
+    if body.message_utf8_bytes() > quota.max_input_bytes:
         raise HTTPException(status_code=413, detail={"code": "input_too_large"})
     try:
         return await ledger.reserve(
@@ -956,6 +1161,55 @@ async def get_agent_conversation(
         scope=_request_scope(request, agent_id=agent_id, conversation_id=conversation_id),
     )
     return serialize_agent_conversation(row)
+
+
+@router.post("/conversations/{conversation_id}/uploads")
+async def upload_files_to_agent_conversation(
+    agent_id: str,
+    conversation_id: str,
+    request: Request,
+    files: list[UploadFile] = File(...),
+    repository: ExternalConversationRepository = Depends(get_external_conversation_repo),
+    resolver: PublishedAgentResolver = Depends(get_published_agent_resolver),
+    config: AppConfig = Depends(get_config),
+):
+    """Upload files attached to a published-Agent conversation (Agent Key auth).
+
+    The returned ``files[].path`` can be passed straight into the
+    ``message`` list of a subsequent run request as a ``file_path`` content
+    part::
+
+        {"message": [
+          {"type": "text", "text": "请分析附件"},
+          {"type": "file_path", "path": "<returned path>", "name": "photo.jpg"}
+        ]}
+    """
+    # Resolve + validate context up-front → 404 / 410 / agent_not_found for
+    # bad agent_id before any filesystem write takes place.
+    await _resolve_context(
+        resolver=resolver,
+        agent_id=agent_id,
+        request=request,
+        conversation_scope=conversation_id,
+    )
+    scope = _request_scope(request, agent_id=agent_id, conversation_id=conversation_id)
+    row = await _conversation_or_404(
+        repository,
+        scope=scope,
+    )
+    # ExternalConversationRepository rows expose the internal thread id that
+    # already backs this conversation.  Uploads go directly there so both the
+    # UI thread-view and the runtime worker's uploads path resolve to the
+    # same filesystem location.
+    thread_id = row["thread_id"] if isinstance(row, dict) else getattr(row, "thread_id")
+    from app.gateway.routers.uploads import UploadContext, perform_upload_for_thread
+
+    ctx = UploadContext(
+        thread_id=str(thread_id),
+        effective_user_id=str(scope.owner_user_id),
+        app_config=config,
+    )
+    return await perform_upload_for_thread(ctx=ctx, files=files)
 
 
 @router.post("/conversations/{conversation_id}/runs", status_code=202)

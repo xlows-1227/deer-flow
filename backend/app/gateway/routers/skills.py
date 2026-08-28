@@ -672,14 +672,14 @@ async def list_custom_skills(
 
 
 @router.post("/skills/custom", response_model=CustomSkillContentResponse, summary="Create Custom Skill")
-async def create_custom_skill(request: CustomSkillCreateRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
+async def create_custom_skill(request: Request, body: CustomSkillCreateRequest, config: AppConfig = Depends(get_config), share_repo: SkillShareRepository = Depends(get_skill_share_repo)) -> CustomSkillContentResponse:
     try:
         storage = get_or_new_skill_storage(app_config=config)
-        skill_name = storage.validate_skill_name(request.name)
+        skill_name = storage.validate_skill_name(body.name)
         if storage.custom_skill_exists(skill_name) or storage.public_skill_exists(skill_name):
             raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
 
-        content = request.content or _build_default_skill_content(skill_name, request.description.strip(), request.allowed_tools)
+        content = body.content or _build_default_skill_content(skill_name, body.description.strip(), body.allowed_tools)
         storage.validate_skill_markdown_content(skill_name, content)
         scan = await scan_skill_content(content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
         if scan.decision == "block":
@@ -709,7 +709,7 @@ async def create_custom_skill(request: CustomSkillCreateRequest, config: AppConf
         except Exception as e:
             logger.warning("Failed to create create-version snapshot for %s: %s", skill_name, e, exc_info=True)
         await refresh_skills_system_prompt_cache_async()
-        return await get_custom_skill(skill_name, config)
+        return await _get_custom_skill_response(skill_name, request, config, share_repo)
     except SkillAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except HTTPException:
@@ -717,7 +717,7 @@ async def create_custom_skill(request: CustomSkillCreateRequest, config: AppConf
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error("Failed to create custom skill %s: %s", request.name, e, exc_info=True)
+        logger.error("Failed to create custom skill %s: %s", body.name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create custom skill: {str(e)}")
 
 
@@ -826,13 +826,19 @@ async def get_public_skill(skill_name: str, request: Request, config: AppConfig 
         raise HTTPException(status_code=500, detail=f"Failed to get public skill: {str(e)}")
 
 
-@router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
-async def get_custom_skill(
+async def _get_custom_skill_response(
     skill_name: str,
     request: Request,
-    config: AppConfig = Depends(get_config),
-    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+    config: AppConfig,
+    share_repo: SkillShareRepository,
 ) -> CustomSkillContentResponse:
+    """Internal helper: load and return a custom skill's full response.
+
+    Used by the GET route handler AND by create/edit/rollback flows that
+    need to return the freshly-written skill.  Taking ``share_repo`` as
+    an explicit argument avoids FastAPI DI resolution issues when the
+    helper is called from inside another route handler.
+    """
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         auth = await _resolve_auth(request)
@@ -852,15 +858,10 @@ async def get_custom_skill(
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
         skill, sharees, owner_email, can_edit = match
 
-        # Read SKILL.md content.  Owners go through the validated
-        # storage.read_custom_skill path; sharees / admins bypass the
-        # owner-isolation check and read straight off disk since we have
-        # already confirmed visibility via the share-aware loader.
         storage = get_or_new_skill_storage(app_config=config)
         try:
             content = storage.read_custom_skill(skill_name)
         except FileNotFoundError:
-            # storage enforces owner isolation → fall back to direct read.
             skill_dir = storage.get_custom_skill_dir(skill_name)
             skill_md = skill_dir / SKILL_MD_FILE
             if not skill_md.exists():
@@ -880,6 +881,16 @@ async def get_custom_skill(
     except Exception as e:
         logger.error("Failed to get custom skill %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get custom skill: {str(e)}")
+
+
+@router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
+async def get_custom_skill(
+    skill_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    share_repo: SkillShareRepository = Depends(get_skill_share_repo),
+) -> CustomSkillContentResponse:
+    return await _get_custom_skill_response(skill_name, request, config, share_repo)
 
 
 @router.get("/skills/custom/{skill_name}/files", response_model=CustomSkillFilesResponse, summary="List Custom Skill Files")
@@ -1366,17 +1377,17 @@ async def upload_custom_skill_files(
 
 
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
-async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
+async def update_custom_skill(skill_name: str, req: Request, body: CustomSkillUpdateRequest, config: AppConfig = Depends(get_config), share_repo: SkillShareRepository = Depends(get_skill_share_repo)) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = get_or_new_skill_storage(app_config=config)
         storage.ensure_custom_skill_is_editable(skill_name)
-        storage.validate_skill_markdown_content(skill_name, request.content)
-        scan = await scan_skill_content(request.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
+        storage.validate_skill_markdown_content(skill_name, body.content)
+        scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
         prev_content = storage.read_custom_skill(skill_name) if storage.custom_skill_exists(skill_name) else None
-        storage.write_custom_skill(skill_name, SKILL_MD_FILE, request.content)
+        storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
         storage.append_history(
             skill_name,
             {
@@ -1385,12 +1396,12 @@ async def update_custom_skill(skill_name: str, request: CustomSkillUpdateRequest
                 "thread_id": None,
                 "file_path": SKILL_MD_FILE,
                 "prev_content": prev_content,
-                "new_content": request.content,
+                "new_content": body.content,
                 "scanner": {"decision": scan.decision, "reason": scan.reason},
             },
         )
         await refresh_skills_system_prompt_cache_async()
-        return await get_custom_skill(skill_name, config)
+        return await _get_custom_skill_response(skill_name, req, config, share_repo)
     except HTTPException:
         raise
     except FileNotFoundError as e:
@@ -1547,7 +1558,7 @@ async def restore_custom_skill_version(skill_name: str, seq: int, config: AppCon
 
 
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
-async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
+async def rollback_custom_skill(skill_name: str, req: Request, body: SkillRollbackRequest, config: AppConfig = Depends(get_config), share_repo: SkillShareRepository = Depends(get_skill_share_repo)) -> CustomSkillContentResponse:
     try:
         storage = get_or_new_skill_storage(app_config=config)
         if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
@@ -1555,7 +1566,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, 
         history = storage.read_history(skill_name)
         if not history:
             raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
-        record = history[request.history_index]
+        record = history[body.history_index]
         target_content = record.get("prev_content")
         if target_content is None:
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
@@ -1579,7 +1590,7 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, 
         storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
         storage.append_history(skill_name, history_entry)
         await refresh_skills_system_prompt_cache_async()
-        return await get_custom_skill(skill_name, config)
+        return await _get_custom_skill_response(skill_name, req, config, share_repo)
     except HTTPException:
         raise
     except IndexError:

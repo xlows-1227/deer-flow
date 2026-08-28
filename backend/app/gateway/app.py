@@ -509,8 +509,18 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     @app.exception_handler(HTTPException)
     async def external_http_exception_handler(request: Request, exc: HTTPException):
-        if not request.url.path.startswith("/api/v1/external/"):
+        path = request.url.path
+        is_external = path.startswith("/api/v1/external/")
+        is_skill = path.startswith("/api/v1/skills")
+        if not is_external and not is_skill:
             return await http_exception_handler(request, exc)
+        request_id = getattr(request.state, "request_id", None)
+        if is_skill:
+            # Skill external API: keep {"detail": {...}} format, inject request_id
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            content = {"request_id": request_id, "detail": detail}
+            return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
+        # External API (agents / api-keys): wrap in {"error": {...}} with request_id
         detail = exc.detail if isinstance(exc.detail, dict) else {}
         raw_error = detail["error"] if isinstance(detail.get("error"), dict) else detail
         code = str(raw_error.get("code") or "external_api_error")
@@ -521,13 +531,17 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         safe_details = {key: raw_error[key] for key in ("conversation_id", "run_id") if key in raw_error}
         if safe_details:
             error["details"] = safe_details
-        error["request_id"] = getattr(request.state, "request_id", None)
+        error["request_id"] = request_id
         return JSONResponse(status_code=exc.status_code, content={"error": error}, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def external_validation_exception_handler(request: Request, exc: RequestValidationError):
-        if not request.url.path.startswith("/api/v1/external/"):
+        path = request.url.path
+        is_external = path.startswith("/api/v1/external/")
+        is_skill = path.startswith("/api/v1/skills")
+        if not is_external and not is_skill:
             return await request_validation_exception_handler(request, exc)
+        request_id = getattr(request.state, "request_id", None)
         details = [
             {
                 "location": list(error.get("loc") or []),
@@ -536,13 +550,23 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             }
             for error in exc.errors()
         ]
+        if is_skill:
+            content = {
+                "request_id": request_id,
+                "detail": {
+                    "code": "invalid_request",
+                    "message": "Request validation failed.",
+                    "details": details,
+                },
+            }
+            return JSONResponse(status_code=422, content=content)
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
                     "code": "invalid_request",
                     "message": "Request validation failed.",
-                    "request_id": getattr(request.state, "request_id", None),
+                    "request_id": request_id,
                     "details": details,
                 }
             },

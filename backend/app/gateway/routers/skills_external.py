@@ -4,14 +4,21 @@ No authentication required. The ``psid`` query parameter identifies the caller's
 account scope and controls visibility of custom skills. Public skills are always
 returned regardless of psid.
 
-The ``psid`` is the user's email address. We resolve it to the internal user UUID
-and then match against the custom skill owner metadata stored in ``.owners/*.json``.
+The ``psid`` supports multiple identifier formats:
+- Full email: "jialong.wang@yumchina.com"
+- Email prefix: "jialong.wang"  (auto-resolved via fuzzy match)
+- SSO/LDAP account: "wcj8902"  (resolved via oauth_id lookup)
 
-All endpoints require a ``sign`` parameter — a Fernet-encrypted token whose
-plaintext is ``psid|timestamp``. The gateway decrypts it and verifies that:
+We resolve the psid to the internal user UUID and then match against the
+custom skill owner metadata stored in ``.owners/*.json``.
+
+All endpoints require a ``sign`` parameter — a Base64-encoded token whose
+plaintext is ``psid|timestamp|SKILL_API_SIGN_KEY``. The gateway decodes it
+and verifies that:
 
 1. The psid inside the sign matches the psid query parameter.
-2. The request is within 30 minutes of the embedded timestamp.
+2. The key inside the sign matches the server's SKILL_API_SIGN_KEY.
+3. The request is within 30 minutes of the embedded timestamp.
 
 Use ``app.gateway.skill_sign.generate_sign(psid)`` to generate the sign on the
 caller side (requires the shared ``SKILL_API_SIGN_KEY`` environment variable).
@@ -35,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.skill_sign import verify_sign
@@ -84,11 +91,12 @@ def _verify_sign(psid: str, sign: str | None) -> None:
 
 
 async def _resolve_user_uuid(psid: str) -> str | None:
-    """Resolve psid (email or account identifier) to internal user UUID.
+    """Resolve psid (email, oauth_id, or account identifier) to internal user UUID.
 
-    Tries multiple lookup strategies:
-    1. Exact email match
-    2. Email prefix match (the part before '@')
+    Tries multiple lookup strategies in order:
+    1. Exact email match (e.g. "jialong.wang@yumchina.com")
+    2. Email prefix match (the part before '@', e.g. "jialong.wang")
+    3. oauth_id match — lookup by LDAP/SSO account name (e.g. "wcj8902")
 
     Returns the user's UUID string, or None if the user is not found.
     """
@@ -97,14 +105,14 @@ async def _resolve_user_uuid(psid: str) -> str | None:
 
         provider = get_local_provider()
 
+        # 1. Exact email match
         user = await provider.get_user_by_email(psid)
         if user is not None:
             return str(user.id)
 
-        # Try prefix match: extract the part before '@' from psid
+        # 2. Email prefix match: extract the part before '@' from psid
         if "@" in psid:
             prefix = psid.split("@")[0].lower()
-            from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
             from deerflow.persistence.engine import get_session_factory
 
             sf = get_session_factory()
@@ -120,16 +128,43 @@ async def _resolve_user_uuid(psid: str) -> str | None:
                     row = result.scalar_one_or_none()
                     if row is not None:
                         logger.info(
-                            "Resolved psid '%s' to user '%s' via prefix match",
+                            "Resolved psid '%s' to user '%s' via email prefix match",
                             psid,
                             row.email,
                         )
                         return row.id
 
-        logger.warning("No user found for psid '%s'", psid)
+        # 3. oauth_id match: treat psid as an LDAP/SSO account identifier
+        #    (e.g. "wcj8902") and look it up in the oauth_id column.
+        #    This supports deployments where users log in with their SSO
+        #    account name instead of full email.
+        oauth_user = await provider.get_user_by_oauth("ldap", psid)
+        if oauth_user is not None:
+            logger.info(
+                "Resolved psid '%s' to user '%s' via oauth_id match",
+                psid,
+                oauth_user.email,
+            )
+            return str(oauth_user.id)
+
+        logger.warning("No user found for psid '%s' via any lookup strategy", psid)
     except Exception:
         logger.warning("Failed to resolve psid '%s' to user UUID", psid, exc_info=True)
     return None
+
+
+async def _require_existing_user(psid: str) -> str:
+    """Resolve psid to user UUID or raise 401 if account does not exist."""
+    user_uuid = await _resolve_user_uuid(psid)
+    if user_uuid is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "account_not_found",
+                "message": f"No account found for psid '{psid}'. The psid must match an existing user in the system.",
+            },
+        )
+    return user_uuid
 
 
 def _read_custom_skill_owner_id(skill_dir: Path) -> str | None:
@@ -354,7 +389,7 @@ async def list_skills(
 ) -> ExternalSkillsListResponse:
     psid = _require_psid(psid)
     _verify_sign(psid, sign)
-    user_uuid = await _resolve_user_uuid(psid)
+    user_uuid = await _require_existing_user(psid)
     skills = await _filter_skills_for_psid(psid)
 
     # Determine shared skill names for marking
@@ -408,6 +443,7 @@ async def get_skill_detail(
 ) -> ExternalSkillDetailResponse:
     psid = _require_psid(psid)
     _verify_sign(psid, sign)
+    user_uuid = await _require_existing_user(psid)
     skill = await _skill_accessible_to_psid(skill_id, psid)
     if skill is None:
         raise HTTPException(
@@ -472,6 +508,7 @@ async def download_skill(
 ):
     psid = _require_psid(psid)
     _verify_sign(psid, sign)
+    user_uuid = await _require_existing_user(psid)
     skill = await _skill_accessible_to_psid(skill_id, psid)
     if skill is None:
         raise HTTPException(

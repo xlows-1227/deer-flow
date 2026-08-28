@@ -27,7 +27,11 @@ from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-_RETRIABLE_STATUS_CODES = {403, 408, 409, 425, 429, 500, 502, 503, 504}
+# NOTE: 403 is intentionally excluded — it is ambiguous between auth failures
+# (invalid key, forbidden) and concurrency limits (Kimi "concurrent request
+# limit").  Concurrency-related 403s are retried via _BUSY_PATTERNS below;
+# auth-related 403s fall through to _AUTH_PATTERNS and are not retried.
+_RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 _BUSY_PATTERNS = (
     "server busy",
     "temporarily unavailable",
@@ -145,25 +149,44 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         lowered = detail.lower()
         error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
+        exc_name = exc.__class__.__name__.lower()
 
         if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
             return False, "quota"
+
+        # Kimi (Moonshot) concurrency limit: returns 403 with
+        # error.message containing "concurrent request limit" wrapped in
+        # PermissionDeniedError / APIError. The str(exc) may be the JSON
+        # body or just the class name, so we also inspect status_code +
+        # exception class name as a fallback to catch this reliably.
+        #
+        # Priority: check busy BEFORE auth because Kimi's 403 for concurrency
+        # is a PermissionDeniedError (contains "permission" in class name)
+        # which would otherwise be misclassified as "auth".
+        if _matches_any(lowered, _BUSY_PATTERNS):
+            return True, "busy"
+        if status_code == 403 and ("concurrent" in lowered or "concurrent" in exc_name):
+            return True, "busy"
+        # Kimi SDK sometimes wraps 403 as PermissionDeniedError with the
+        # actual JSON body in an `error` attribute — check that too.
+        if status_code == 403 and "permissiondenied" in exc_name:
+            # Extract nested error message if available
+            nested_msg = _extract_nested_error_message(exc)
+            if nested_msg and "concurrent" in nested_msg.lower():
+                return True, "busy"
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
 
-        exc_name = exc.__class__.__name__
         if exc_name in {
-            "APITimeoutError",
-            "APIConnectionError",
-            "InternalServerError",
-            "ReadError",  # httpx.ReadError: connection dropped mid-stream
-            "RemoteProtocolError",  # httpx: server closed connection unexpectedly
+            "apitimeouterror",
+            "apiconnectionerror",
+            "internalservererror",
+            "readerror",  # httpx.ReadError: connection dropped mid-stream
+            "remoteprotocolerror",  # httpx: server closed connection unexpectedly
         }:
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
-        if _matches_any(lowered, _BUSY_PATTERNS):
-            return True, "busy"
 
         return False, "generic"
 
@@ -196,6 +219,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             from langgraph.config import get_stream_writer
 
             writer = get_stream_writer()
+            if writer is None:
+                logger.debug(
+                    "No stream writer available — llm_retry event (attempt %d) skipped",
+                    attempt,
+                )
+                return
             writer(
                 {
                     "type": "llm_retry",
@@ -218,7 +247,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return AIMessage(content=self._build_circuit_breaker_message())
 
-        attempt = 1
+        retry_count = 0
         while True:
             try:
                 response = handler(request)
@@ -234,22 +263,22 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                if retriable and attempt < self.retry_max_attempts:
-                    wait_ms = self._build_retry_delay_ms(attempt, exc)
+                if retriable and retry_count < self.retry_max_attempts:
+                    retry_count += 1
+                    wait_ms = self._build_retry_delay_ms(retry_count, exc)
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
-                        attempt,
+                        "Transient LLM error (retry %d/%d); retrying in %dms: %s",
+                        retry_count,
                         self.retry_max_attempts,
                         wait_ms,
                         _extract_error_detail(exc),
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason)
+                    self._emit_retry_event(retry_count, wait_ms, reason)
                     time.sleep(wait_ms / 1000)
-                    attempt += 1
                     continue
                 logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
-                    attempt,
+                    "LLM call failed after %d retries: %s",
+                    retry_count,
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
@@ -266,7 +295,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return AIMessage(content=self._build_circuit_breaker_message())
 
-        attempt = 1
+        retry_count = 0
         while True:
             try:
                 response = await handler(request)
@@ -282,22 +311,22 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                if retriable and attempt < self.retry_max_attempts:
-                    wait_ms = self._build_retry_delay_ms(attempt, exc)
+                if retriable and retry_count < self.retry_max_attempts:
+                    retry_count += 1
+                    wait_ms = self._build_retry_delay_ms(retry_count, exc)
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
-                        attempt,
+                        "Transient LLM error (retry %d/%d); retrying in %dms: %s",
+                        retry_count,
                         self.retry_max_attempts,
                         wait_ms,
                         _extract_error_detail(exc),
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason)
+                    self._emit_retry_event(retry_count, wait_ms, reason)
                     await asyncio.sleep(wait_ms / 1000)
-                    attempt += 1
                     continue
                 logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
-                    attempt,
+                    "LLM call failed after %d retries: %s",
+                    retry_count,
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
@@ -374,3 +403,42 @@ def _extract_error_detail(exc: BaseException) -> str:
     if isinstance(message, str) and message.strip():
         return message.strip()
     return exc.__class__.__name__
+
+
+def _extract_nested_error_message(exc: BaseException) -> str | None:
+    """Try to pull the JSON ``error.message`` out of SDK-wrapped exceptions.
+
+    Kimi / Moonshot SDK often wraps the raw HTTP error (JSON body) inside
+    a top-level exception (``PermissionDeniedError``, ``APIError``, …).
+    The nested body contains the canonical error message that our
+    pattern-matching logic relies on.
+    """
+    # Walk a common nesting pattern: exc.error is a pydantic model or dict
+    error_obj = getattr(exc, "error", None)
+    if error_obj is not None:
+        # Pydantic model
+        msg = getattr(error_obj, "message", None)
+        if isinstance(msg, str):
+            return msg
+        # dict
+        if isinstance(error_obj, dict):
+            msg = error_obj.get("message")
+            if isinstance(msg, str):
+                return msg
+    # Some SDKs expose the raw response body
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            body = resp.json() if hasattr(resp, "json") else None
+            if isinstance(body, dict):
+                err = body.get("error")
+                if isinstance(err, dict):
+                    msg = err.get("message")
+                    if isinstance(msg, str):
+                        return msg
+                msg = body.get("message")
+                if isinstance(msg, str):
+                    return msg
+        except Exception:
+            pass
+    return None

@@ -47,6 +47,12 @@ def _extract_tool_names(obj: Mapping[str, Any]) -> list[str]:
 def patch_message_dict(msg: dict[str, Any]) -> bool:
     """Patch a single serialized LangChain message dict in-place.
 
+    Two things are done for AI messages:
+    1. (If tool calls are present) inject a human-readable ``[工具调用: …]``
+       banner so the frontend displays the real tool names.
+    2. Apply English-space restoration to the textual content so glued
+       model output such as "Hereissometext" shows correctly with spaces.
+
     Returns ``True`` if ``msg["content"]`` was changed.
     """
     if not isinstance(msg, Mapping):
@@ -54,24 +60,38 @@ def patch_message_dict(msg: dict[str, Any]) -> bool:
     msg_type = msg.get("type")
     if msg_type not in ("ai", "AIMessage", "AIMessageChunk"):
         return False
-    msg_id = msg.get("id", "?")
-    names = _extract_tool_names(msg)
-    if not names:
-        return False
+    changed = False
+
+    # --- Space restoration for AI text --------------------------------
     content_field = msg.get("content")
-    if not isinstance(content_field, str):
-        # Content could be a list of content parts (text/image); we don't patch those.
-        return False
-    target = _marker_from_names(names)
-    if target in content_field:
-        return False
-    stripped = content_field.strip()
-    if not stripped or stripped == _TOOL_OMISSION_MARKER:
-        msg["content"] = target
-        return True
-    # Preserve any textual answer; prepend so detectToolOmissions() still parses it.
-    msg["content"] = target + "\n" + content_field
-    return True
+    if isinstance(content_field, str) and content_field:
+        try:
+            from deerflow.runtime.runs.worker import _restore_english_spaces
+
+            restored = _restore_english_spaces(content_field)
+            if restored != content_field:
+                msg["content"] = restored
+                changed = True
+        except Exception:
+            logger.debug("patch_message_dict: space restoration skipped", exc_info=True)
+
+    # --- Tool-call display name banner ---------------------------------
+    names = _extract_tool_names(msg)
+    if names:
+        content_field2 = msg.get("content")
+        if not isinstance(content_field2, str):
+            return changed
+        target = _marker_from_names(names)
+        if target in content_field2:
+            return changed
+        stripped = content_field2.strip()
+        if not stripped or stripped == _TOOL_OMISSION_MARKER:
+            msg["content"] = target
+            return True
+        # Preserve any textual answer; prepend so detectToolOmissions() still parses it.
+        msg["content"] = target + "\n" + content_field2
+        changed = True
+    return changed
 
 
 def patch_event_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:

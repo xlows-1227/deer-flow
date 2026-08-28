@@ -455,6 +455,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
 - Language Consistency: Keep using the same language as user's
+- **Whitespace Preservation (CRITICAL)**: When writing English, Latin-script, or any space-delimited language you MUST preserve the single space character between words. NEVER eliminate, collapse, or concatenate English words to save tokens. Chinese / CJK text needs no separator — this rule applies ONLY to English and other languages that normally use spaces.
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """

@@ -129,8 +129,33 @@ async def generate_suggestions(
     user_content = f"Conversation Context:\n{conversation}\n\nGenerate {n} follow-up questions"
 
     try:
-        model = create_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
-        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config={"run_name": "suggest_agent"})
+        from deerflow.models.factory import get_cached_chat_model
+
+        model = get_cached_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
+        last_exc = None
+        for attempt in range(3):
+            try:
+                response = await model.ainvoke(
+                    [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
+                    config={"run_name": "suggest_agent"},
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                exc_str = str(exc).lower()
+                if "concurrent" in exc_str or "access_terminated" in exc_str:
+                    if attempt < 2:
+                        wait_ms = 1000 * (2 ** attempt)
+                        logger.warning(
+                            "Suggestions LLM rate-limited (retry %d/3); retrying in %dms",
+                            attempt + 1, wait_ms,
+                        )
+                        import asyncio
+                        await asyncio.sleep(wait_ms / 1000)
+                        continue
+                raise
+        else:
+            raise last_exc  # type: ignore[misc]
         raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]

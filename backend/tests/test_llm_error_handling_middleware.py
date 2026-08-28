@@ -96,7 +96,7 @@ def test_async_model_call_returns_user_message_for_quota_errors() -> None:
     result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
     assert isinstance(result, AIMessage)
-    assert "out of quota" in str(result.content)
+    assert "额度不足" in str(result.content)
 
 
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,7 +362,7 @@ def test_sync_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) ->
     result = middleware.wrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
-    assert "temporarily unavailable" in result.content
+    assert "服务暂时繁忙" in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -386,13 +386,15 @@ async def test_async_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPa
     result = await middleware.awrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
-    assert "temporarily unavailable" in result.content
+    assert "服务暂时繁忙" in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
 
 @pytest.mark.anyio
-async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_circuit_breaker_trips_after_threshold_failures_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify async version of circuit breaker correctly handles state transitions."""
     waits: list[float] = []
 
