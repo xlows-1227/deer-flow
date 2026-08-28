@@ -27,7 +27,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   useAgentKeys,
   useCreateAgentKey,
@@ -68,11 +67,7 @@ function ApiExample({ title, code }: { title: string; code: string }) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
-    const ok = await copyTextToClipboard(code);
-    if (!ok) {
-      toast.error(t.publishedAgents.integrations.copyKeyUnavailable);
-      return;
-    }
+    await navigator.clipboard.writeText(code);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1_500);
   }
@@ -162,16 +157,16 @@ export function ApiKeysPanel({
   }
 
   async function copyApiKey(keyId: string, apiKey: string) {
-    const ok = await copyTextToClipboard(apiKey);
-    if (!ok) {
-      toast.error(t.publishedAgents.integrations.copyKeyUnavailable);
-      return;
+    try {
+      await navigator.clipboard.writeText(apiKey);
+      setCopiedKeyId(keyId);
+      window.setTimeout(
+        () => setCopiedKeyId((current) => (current === keyId ? null : current)),
+        1_500,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
     }
-    setCopiedKeyId(keyId);
-    window.setTimeout(
-      () => setCopiedKeyId((current) => (current === keyId ? null : current)),
-      1_500,
-    );
   }
 
   async function confirmDelete() {

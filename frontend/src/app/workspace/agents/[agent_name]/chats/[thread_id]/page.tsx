@@ -2,7 +2,7 @@
 
 import { BotIcon } from "lucide-react";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
@@ -22,21 +22,17 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import {
-  useDraftSandboxThread,
-  usePublishedAgent,
-} from "@/core/published-agents";
-import type { PublishedAgentDetail } from "@/core/published-agents/types";
+import { useDraftSandboxThread } from "@/core/published-agents";
 import {
   copyThreadSettings,
   useLocalSettings,
   useThreadSettings,
 } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
-import type { AgentThreadContext } from "@/core/threads/types";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -49,18 +45,7 @@ export default function AgentChatPage() {
     agent_name: string;
   }>();
 
-  const { agent: publishedAgent } = usePublishedAgent(agent_name);
-  const agent = useMemo<{
-    name: string;
-    description?: string;
-  } | null>(() => {
-    const pa = publishedAgent as PublishedAgentDetail | null | undefined;
-    if (!pa) return null;
-    return {
-      name: pa.display_name || pa.slug || agent_name,
-      description: pa.description ?? undefined,
-    };
-  }, [publishedAgent, agent_name]);
+  const { agent } = useAgent(agent_name);
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
@@ -75,36 +60,6 @@ export default function AgentChatPage() {
     isNewThread || isMock ? undefined : threadId,
   );
   const sandboxScope = sandboxScopeQuery.sandbox;
-
-  // Track whether the user has explicitly overridden the model selection.
-  // This allows the user to test with a different model from the agent's config.
-  const userModelOverrideRef = useRef<string | undefined>(undefined);
-
-  // Override onContextChange to detect and track user model changes
-  const handleContextChange = useCallback(
-    (context: Partial<AgentThreadContext>) => {
-      // If the user changed the model from the authoritative one, track it
-      const authoritativeModel = sandboxScope?.model_name ?? publishedAgent?.draft?.model_name;
-      if (
-        context.model_name &&
-        authoritativeModel &&
-        context.model_name !== authoritativeModel &&
-        context.model_name !== userModelOverrideRef.current
-      ) {
-        userModelOverrideRef.current = context.model_name;
-      } else if (
-        context.model_name &&
-        authoritativeModel &&
-        context.model_name === authoritativeModel
-      ) {
-        // User reset back to the authoritative model
-        userModelOverrideRef.current = undefined;
-      }
-      setSettings("context", context);
-    },
-    [setSettings, sandboxScope, publishedAgent],
-  );
-
   const effectiveContext = useMemo(() => {
     const selectedSkillName =
       typeof settings.context.skill_name === "string"
@@ -116,26 +71,9 @@ export default function AgentChatPage() {
             typeof connectorId === "string",
         )
       : undefined;
-
-    // Determine model_name with proper priority:
-    // 1. User's explicit override (via model selector)
-    // 2. Sandbox thread's model (from backend, for existing threads)
-    // 3. Agent's draft model (for new threads or when sandbox not available)
-    // 4. Thread's saved model (from localStorage, lowest priority)
-    const agentDraftModelName = publishedAgent?.draft?.model_name ?? undefined;
-    const threadModelName = settings.context.model_name;
-    const userOverride = userModelOverrideRef.current;
-    const resolvedModelName =
-      userOverride ??
-      sandboxScope?.model_name ??
-      agentDraftModelName ??
-      threadModelName ??
-      undefined;
-
     if (!sandboxScope) {
       return {
         ...settings.context,
-        model_name: resolvedModelName,
         skill_name: selectedSkillName,
         connector_ids: selectedConnectorIds,
       };
@@ -147,7 +85,6 @@ export default function AgentChatPage() {
     );
     return {
       ...settings.context,
-      model_name: resolvedModelName,
       skill_name:
         selectedSkillName && allowedSkills.has(selectedSkillName)
           ? selectedSkillName
@@ -155,7 +92,7 @@ export default function AgentChatPage() {
       connector_ids:
         connectorIds && connectorIds.length > 0 ? connectorIds : undefined,
     };
-  }, [sandboxScope, settings.context, publishedAgent, isNewThread]);
+  }, [sandboxScope, settings.context]);
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
     isNewThread || isMock ? undefined : threadId,
@@ -390,7 +327,7 @@ export default function AgentChatPage() {
                     sandboxScopeQuery.isLoading ||
                     Boolean(sandboxScopeQuery.error)
                   }
-                  onContextChange={handleContextChange}
+                  onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />

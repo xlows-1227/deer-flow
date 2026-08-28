@@ -196,25 +196,6 @@ export function MessageList({
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
-  
-  // Debug: store grouped messages to window for troubleshooting
-  if (typeof window !== 'undefined') {
-    const debugInfo = groupedMessages.map(g => ({
-      type: g.type,
-      id: g.id,
-      messages: g.messages.map(m => ({
-        type: m.type,
-        id: m.id,
-        content: typeof m.content === 'string' ? m.content.substring(0, 100) : JSON.stringify(m.content).substring(0, 100),
-        hiddenFromUI: m.additional_kwargs?.hide_from_ui,
-        messageName: m.name,
-        hasContent: hasContent(m),
-      }))
-    }));
-    (window as any).__lastGroupedMessages = debugInfo;
-    // Always log to console for debugging
-    console.log('[DEBUG] Message groups:', debugInfo);
-  }
   const parsedChoicesByGroupId = useMemo(() => {
     const parsed = new Map<string, ParsedMessageChoiceOptions>();
 
@@ -518,7 +499,7 @@ export function MessageList({
               const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message]);
               return (
                 <div key={groupKey} className="w-full">
-                  {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                  {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                   <MarkdownContent
                     content={cleaned}
                     isLoading={thread.isLoading}
@@ -551,10 +532,10 @@ export function MessageList({
               <div className="w-full" key={groupKey}>
                 {group.messages[0] && (hasContent(group.messages[0]) || hasToolCalls(group.messages[0])) && (() => {
                   const rawContent = extractContentFromMessage(group.messages[0]);
-                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, group.messages[0] ? [group.messages[0]] : []);
+                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [...group.messages]);
                   return (
                     <>
-                      {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                      {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                       <MarkdownContent
                         content={cleaned}
                         isLoading={thread.isLoading}
@@ -672,18 +653,11 @@ export function MessageList({
             }
             const combinedRawContent = contents.join("\n\n");
             const { count, toolNames, cleaned } = detectToolOmissions(combinedRawContent, group.messages);
-            // Processing groups render concrete tool cards via <MessageGroup/> —
-            // the omission banner would be a redundant repeat of the same info,
-            // so suppress it when any AI message in the group has tool_calls.
-            const hasAnyConcreteToolCalls = group.messages.some(
-              (m) => isAiMessage(m) && getToolCalls(m).length > 0,
-            );
-            const visibleCount = hasAnyConcreteToolCalls ? 0 : count;
-            return { count: visibleCount, toolNames, cleaned, hasAnyContent: combinedRawContent.trim().length > 0 };
+            return { count, toolNames, cleaned, hasAnyContent: combinedRawContent.trim().length > 0 };
           })();
           return (
             <div key={`group-${groupKey}`} className="w-full">
-              {processingContent.count > 0 && (
+              {false && processingContent.count > 0 && (
                 <ToolCallOmissionBanner count={processingContent.count} toolNames={processingContent.toolNames} />
               )}
               <MessageGroup
@@ -718,12 +692,4 @@ export function MessageList({
       </ConversationContent>
     </Conversation>
   );
-}
-
-// Attach debug helper to window for troubleshooting user message display issues
-if (typeof window !== 'undefined') {
-  (window as any).__debugMessageGroups = () => {
-    // This will be populated by the MessageList component
-    return (window as any).__lastGroupedMessages || [];
-  };
 }
