@@ -102,6 +102,7 @@ export interface DraftSandboxThread {
   draft_revision: number;
   skill_names: string[];
   connector_ids: string[];
+  model_name?: string | null;
   billable: false;
 }
 

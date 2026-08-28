@@ -246,6 +246,7 @@ def _inject_draft_sandbox_context(
     configurable["connector_capabilities"] = connector_capabilities
     configurable["__agent_draft_sandbox_context"] = snapshot
     runtime_context["agent_name"] = snapshot.agent_slug
+    runtime_context["model_name"] = snapshot.model_name
     runtime_context["connector_ids"] = list(snapshot.connector_ids)
     runtime_context["connector_capabilities"] = connector_capabilities
 
@@ -461,7 +462,25 @@ async def _start_run_scoped(
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
     body_context = getattr(body, "context", None) or {}
-    model_name = published_context.model_name if published_context is not None else draft_sandbox_context.model_name if draft_sandbox_context is not None else body_context.get("model_name")
+
+    # Resolve model_name with proper priority:
+    # 1. Published agent (API): always use the configured model, never allow override
+    # 2. Draft sandbox (owner testing): allow user's explicit model selection
+    #    from the request body to override the draft's configured model
+    # 3. Fall back to draft's model or body's model
+    if published_context is not None:
+        model_name = published_context.model_name
+    elif draft_sandbox_context is not None:
+        # For sandbox, user's explicit model selection takes priority over draft
+        body_model_name = body_context.get("model_name")
+        if body_model_name and body_model_name != draft_sandbox_context.model_name:
+            # User explicitly selected a different model in the UI
+            model_name = body_model_name
+        else:
+            # Use draft's model (or body's model if draft has none)
+            model_name = draft_sandbox_context.model_name or body_model_name
+    else:
+        model_name = body_context.get("model_name")
 
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
@@ -541,6 +560,14 @@ async def _start_run_scoped(
         inject_authenticated_user_context(config, request)
         if draft_sandbox_context is not None:
             _inject_draft_sandbox_context(config, draft_sandbox_context)
+
+        # Apply the resolved model_name (which may differ from the draft's model
+        # if the user explicitly selected a different model in the UI).
+        if model_name is not None:
+            configurable = config.setdefault("configurable", {})
+            runtime_context = config.setdefault("context", {})
+            configurable["model_name"] = model_name
+            runtime_context["model_name"] = model_name
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

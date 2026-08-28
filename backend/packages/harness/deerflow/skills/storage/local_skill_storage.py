@@ -23,7 +23,7 @@ from deerflow.skills.types import SkillCategory
 logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
-MAX_SKILL_VERSION_SNAPSHOTS = 5
+MAX_SKILL_VERSION_SNAPSHOTS = 20
 CUSTOM_SKILL_OWNER_FILE = ".owner.json"
 
 
@@ -473,6 +473,26 @@ class LocalSkillStorage(SkillStorage):
         if not skill_dir.exists():
             raise FileNotFoundError(f"Custom skill '{normalized_name}' not found.")
 
+        # Check if content has changed compared to latest version
+        current_skill_md = self.read_custom_skill(normalized_name)
+        latest_record = self._get_latest_version_record(normalized_name)
+        if latest_record is not None:
+            latest_seq = latest_record.get("seq")
+            if isinstance(latest_seq, int):
+                latest_version_dir = self.get_skill_versions_dir(normalized_name) / str(latest_seq)
+                latest_skill_md_path = latest_version_dir / SKILL_MD_FILE
+                if latest_skill_md_path.exists():
+                    latest_skill_md = latest_skill_md_path.read_text(encoding="utf-8")
+                    if current_skill_md.strip() == latest_skill_md.strip():
+                        # Content unchanged — return existing record instead of creating a duplicate
+                        import logging as _logging
+                        _logger = _logging.getLogger(__name__)
+                        _logger.info(
+                            "Skipping version snapshot for skill '%s': content unchanged since v%d",
+                            normalized_name, latest_seq,
+                        )
+                        return latest_record
+
         seq = self._next_version_seq(normalized_name)
         version_dir = self.get_skill_versions_dir(normalized_name) / str(seq)
         if version_dir.exists():
@@ -486,7 +506,7 @@ class LocalSkillStorage(SkillStorage):
         make_skill_path_sandbox_readable(version_dir)
 
         # Metadata
-        skill_md = self.read_custom_skill(normalized_name)
+        skill_md = current_skill_md
         label = self._extract_frontmatter_version_label(skill_md)
         file_count, size_bytes = self._walk_dir_stats(version_dir)
         created_at = datetime.now(UTC).isoformat()
@@ -508,6 +528,17 @@ class LocalSkillStorage(SkillStorage):
         if prune_after:
             self._prune_skill_versions(normalized_name)
         return record
+
+    def _get_latest_version_record(self, name: str) -> dict | None:
+        """Get the latest version record for a skill, or None if no versions exist."""
+        try:
+            records = self._read_versions_index_records_oldest_first(name)
+            if not records:
+                return None
+            # Records are ordered oldest-first, so the last one is the latest
+            return records[-1]
+        except Exception:
+            return None
 
     def create_skill_version(
         self,

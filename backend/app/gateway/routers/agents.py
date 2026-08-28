@@ -5,9 +5,10 @@ import re
 import shutil
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.routers.published_agents import get_draft_service
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
@@ -161,18 +162,30 @@ async def check_agent_name(name: str) -> dict:
     summary="Get Custom Agent",
     description="Retrieve details and SOUL.md content for a specific custom agent.",
 )
-async def get_agent(name: str) -> AgentResponse:
+async def get_agent(
+    name: str,
+    request: Request,
+    draft_service: "DraftService" = Depends(get_draft_service),
+) -> AgentResponse:
     """Get a specific custom agent by name.
+
+    Falls back to a Published Agent lookup by ``slug`` when no file-backed
+    custom agent exists, so Studio Sandbox pages at ``/agents/<slug>/chats/``
+    can reuse this legacy endpoint without a 404.
 
     Args:
         name: The agent name.
+        request: Current request (required for DraftService dependency scope).
+        draft_service: Injected DraftService for Published Agent fallback.
 
     Returns:
         Agent details including SOUL.md content.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if agent not found in either registry.
     """
+    from deerflow.publishing.draft_service import DraftService as _DS
+
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
@@ -182,7 +195,48 @@ async def get_agent(name: str) -> AgentResponse:
         agent_cfg = load_agent_config(name, user_id=user_id)
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+        # --- Published Agent fallback (slug-based lookup via DraftService) ---
+        try:
+            published = await draft_service.get_agent(name, owner_user_id=str(user_id))
+            if published is None:
+                raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+            primary_id = published.get("id")
+            draft = await draft_service.get_draft(primary_id, owner_user_id=str(user_id)) if primary_id else None
+
+            description: str = published.get("description") or ""
+            model_name: str | None = draft.get("model_name") if draft else None
+            soul: str = draft.get("soul_markdown") if draft and draft.get("soul_markdown") else ""
+
+            tool_groups: list[str] | None = None
+            skills: list[str] | None = None
+            if draft:
+                raw_tg = draft.get("tool_groups")
+                if isinstance(raw_tg, list) and raw_tg:
+                    tool_groups = [str(x) for x in raw_tg]
+                skill_mode = draft.get("skill_mode")
+                raw_skills = draft.get("skills")
+                if skill_mode == "explicit":
+                    if isinstance(raw_skills, list):
+                        skills = [
+                            s["skill_name"]
+                            for s in raw_skills
+                            if isinstance(s, dict) and isinstance(s.get("skill_name"), str)
+                        ]
+                    else:
+                        skills = []
+            return AgentResponse(
+                name=published.get("slug") or published.get("id") or name,
+                description=description,
+                model=model_name,
+                tool_groups=tool_groups,
+                skills=skills,
+                soul=soul,
+            )
+        except HTTPException:
+            raise
+        except Exception as fb:
+            logger.error(f"Published-agent fallback failed for '{name}': {fb}", exc_info=True)
+            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found") from fb
     except Exception as e:
         logger.error(f"Failed to get agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get agent: {str(e)}")

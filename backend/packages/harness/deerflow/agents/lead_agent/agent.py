@@ -28,9 +28,10 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
+from langgraph.runtime import Runtime  # noqa: F401  (used inside middleware class)
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
@@ -407,6 +408,132 @@ def _build_middlewares(
     """
     resolved_app_config = app_config or get_app_config()
     middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+
+    # Multimodal normalization MUST be the very first middleware to run before
+    # any token-usage / tool-filtering middleware inspects messages, because
+    # providers such as Kimi/Moonshot reject multimodal human messages that
+    # contain an empty `{"type": "text", "text": ""}` block (even when a valid
+    # image_url block follows it).  Normalizer lives in the runtime worker
+    # module — see docstring there for full behaviour.
+    #
+    # The middleware is defined inline here to avoid a circular runtime import.
+    class _MultimodalNormalizerMiddleware(AgentMiddleware[AgentState]):  # type: ignore[valid-type, misc]
+        async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:  # type: ignore[override]
+            import logging as _logging
+            import json as _json
+
+            from deerflow.runtime.runs.worker import (
+                _normalize_human_multimodal_content_for_provider,
+            )
+
+            _log = _logging.getLogger(__name__)
+            messages = state.get("messages")
+            if not isinstance(messages, (list, tuple)) or not messages:
+                return None
+            normalized = [
+                _normalize_human_multimodal_content_for_provider(m) for m in messages
+            ]
+            changed = not all(
+                a is b for a, b in zip(normalized, messages, strict=False)
+            )
+            if changed:
+                # Log only the *last* human message preview (95% of the time
+                # this is what triggered a provider-side 'text content is
+                # empty' / schema 400).  Keep a small preview (not the full
+                # list) so the log lines stay readable.
+                last_human_idx = next(
+                    (
+                        i
+                        for i in range(len(normalized) - 1, -1, -1)
+                        if getattr(normalized[i], "type", "") == "human"
+                    ),
+                    -1,
+                )
+                try:
+                    last_content = (
+                        normalized[last_human_idx].content
+                        if last_human_idx >= 0
+                        else None
+                    )
+                    if isinstance(last_content, list):
+                        preview = ", ".join(
+                            f"type={_blk.get('type') if isinstance(_blk, dict) else type(_blk).__name__}"
+                            + (
+                                f" text[:40]={str(_blk.get('text'))[:40]!r}"
+                                if isinstance(_blk, dict) and _blk.get("type") == "text"
+                                else ""
+                            )
+                            for _blk in last_content[:6]
+                        )
+                    else:
+                        preview = str(last_content)[:160]
+                    _log.info(
+                        "[LLM_INPUT_PREVIEW] GRAPH path last_human idx=%s changed=%s preview=%s",
+                        last_human_idx,
+                        changed,
+                        preview,
+                    )
+                except Exception:  # noqa: BLE001 — logging is strictly best-effort
+                    pass
+                # NOTE: we intentionally DO NOT return {"messages": normalized}.
+                # The multimodal normalisation (incl. default-text injection
+                # for media-only messages) is applied at the model wrapper
+                # layer (see deerflow.models.factory) which creates fresh
+                # copies via model_copy() and never mutates the checkpoint
+                # state.  Returning the normalised list here would persist
+                # the injected default prompts into the conversation
+                # history, making them visible to the user in the UI.
+                #
+                # HOWEVER — the model wrapper layer's monkey-patching can
+                # silently fail on some Pydantic v2 models.  As a safety
+                # net, we ALSO inject default text here for media-only
+                # messages.  We use model_copy() to avoid mutating the
+                # checkpoint state — the injected text only lives for this
+                # single model call.
+                if changed:
+                    _log.info(
+                        "Multimodal normaliser injected default text at %s points for model call",
+                        sum(1 for m in normalized if getattr(m, "__deerflow_normalized__", False)),
+                    )
+                    return {"messages": normalized}
+                return None
+
+            # Even if nothing changed, dump the last human preview once per
+            # model call so operators can confirm the text / images that are
+            # actually about to be sent downstream.
+            try:
+                last_human_idx = next(
+                    (
+                        i
+                        for i in range(len(messages) - 1, -1, -1)
+                        if getattr(messages[i], "type", "") == "human"
+                    ),
+                    -1,
+                )
+                if last_human_idx >= 0:
+                    lc = messages[last_human_idx].content
+                    if isinstance(lc, list):
+                        preview = ", ".join(
+                            f"type={_blk.get('type') if isinstance(_blk, dict) else type(_blk).__name__}"
+                            + (
+                                f" text[:40]={str(_blk.get('text'))[:40]!r}"
+                                if isinstance(_blk, dict) and _blk.get("type") == "text"
+                                else ""
+                            )
+                            for _blk in lc[:6]
+                        )
+                    else:
+                        preview = str(lc)[:160]
+                    _log.info(
+                        "[LLM_INPUT_PREVIEW] GRAPH path last_human idx=%s unchanged preview=%s",
+                        last_human_idx,
+                        preview,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+
+    middlewares.insert(0, _MultimodalNormalizerMiddleware())
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
