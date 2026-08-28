@@ -317,11 +317,22 @@ def _restore_english_spaces(text: str) -> str:
         if tlen == 0:
             return True
         if tlen < 3:
-            # 1-2 char fragment can't stand alone unless it's exactly a
-            # single recognised 1-letter word ("a"/"I") — caller-level
-            # guards already prevent standalone 2-char fragments from
-            # being a whole remainder.
-            return tlen == 1 and low_tail in _ONE_LETTER_ALLOWED
+            # 1-2 char fragment at the very end of the glued run.  Two
+            # shapes are SAFE (downstream Pass 2 / Pass 3 of the greedy
+            # cursor will consume them as final tokens):
+            #   * exactly a recognised 1-letter word ("a"/"I"), OR
+            #   * exactly a recognised 2-letter function glue word
+            #     ("on", "in", "to", "is", "of", …).  This was previously
+            #     rejected as "unsafe standalone", which caused the whole
+            #     splitter to fall over on runs like "foxwenton": when
+            #     Pass 1 matched "went" (L=4) leaving tail "on", this
+            #     gate returned False, so no candidate boundary was ever
+            #     pushed for "fox" either, and the entire run fell
+            #     through unsplit.
+            if tlen == 1:
+                return low_tail in _ONE_LETTER_ALLOWED
+            # tlen == 2
+            return low_tail in _TWO_LETTER_FUNCTION_WORDS
         # Option A: tail itself is a single inflected word
         if _is_single_word(low_tail):
             return True
@@ -337,7 +348,22 @@ def _restore_english_spaces(text: str) -> str:
                     return True
                 if len(nxt) >= 3:
                     return True  # greedily trusts that the next iteration handles it
-                # len(nxt) == 2: unsafe standalone
+                # len(nxt) == 2: previously "unsafe standalone" and we skipped
+                # this wlen — but that was TOO conservative.  When the exact
+                # 2-letter remainder is a recognised glue word (on, in, at,
+                # to, of, by, ...), the greedy cursor's Pass 2 (final-
+                # position 2-letter glue token) will correctly consume it as
+                # the very last token of the run.  E.g. "foxwenton" =
+                # fox(3) + went(4) + on(2).  Without this relaxation,
+                # _tail_has_safe_start("wenton") returned False at "went"
+                # because nxt="on" was rejected as "unsafe standalone 2-letter
+                # fragment", so no candidate boundary for "fox" existed, and
+                # the entire glued phrase fell through as unsplit.
+                if len(nxt) == 2 and nxt in _TWO_LETTER_FUNCTION_WORDS:
+                    return True
+                # len(nxt) == 2 of non-glue letters → still unsafe; keep
+                # searching for a (shorter) initial word whose own tail
+                # remainder can be wholly consumed.
         # Option C: tail starts with a 2-letter function word AND what's
         # left after that is ≥3 chars AND itself has a safe start.
         if tlen >= 5 and low_tail[:2] in _TWO_LETTER_FUNCTION_WORDS:
@@ -388,15 +414,17 @@ def _restore_english_spaces(text: str) -> str:
         "ability", "ibility", "fulness", "lessness", "mental", "lessly",
         "ology", "graphy", "craft", "ness", "ment", "ship", "hood", "ward",
         "wards",
-        "ious", "eous", "ical", "tion", "sion", "ction", "ssion", "xion",
+        "ious", "eous", "ical",
+        # 4+ character endings are IMMUNE to the mid-sentence absorb bug that
+        # plagued 3-letter "-ise".  Restore them to STRICT for broad coverage:
+        "tion", "sion", "ction", "ssion", "xion",
         "ance", "ence", "ancy", "ency",
         "ual", "ial", "ative", "itive", "ally", "ially", "ier", "iest",
-        "ity", "ing", "edly", "edly", "ant", "ent",
-        "ize", "ise", "ify",
-        "ies", "ing", "edly", "ed", "es", "ly", "er", "ior",
+        "ing", "edly", "antly", "ently",
+        "ies", "ingly", "ed", "es", "ly", "er", "ior",
         "al", "en", "ten", "den",
-        "ure", "ture", "sure",
-        "dom", "ism",
+        "ture", "sure",
+        "ism",
         "ted", "ded",
         "s", "d",
     )
@@ -413,13 +441,18 @@ def _restore_english_spaces(text: str) -> str:
         "ity",  # standalone (slang) 'ity' rare.  Keep ambiguous to double-check
                 # against dict as combined since suffixes like -ability already
                 # cover most cases.
-        "ate", "ite", "ure",  # all have standalone homonyms: 'ate' (eat past),
-                # 'ite' (mineral suffix but also less-common as standalone;
-                # 'ure' = unit of resistivity).  Ambiguous.
-        "ion", "tion",  # both too common as glued fragments (e.g. 'ion' as a
-                # science prefix when glued? Actually "ion" itself can glue
-                # behind 'miss' → 'mission' but case(a) handles; safer as
-                # ambiguous to avoid absorbing.).
+        "ate", "ite",  # standalone homonyms: 'ate' (eat past), 'ite' (mineral).
+        "ure",  # unit of resistivity (ambiguous standalone homonym).
+        "ion",  # 3-letter ending.  "tion" is 4+ chars and restored to STRICT
+                # (it is unambiguous and the suffix engine needs it for broad
+                # coverage), but plain "ion" can still collide mid-sentence so
+                # stays AMBIG with case-(a) dict-only gate.
+        # ---- Moved from STRICT (see note above) ----
+        # 3-letter verbal / nominal endings that can masquerade as glued
+        # mid-sentence tokens when paired with the case-(c) chaining engine
+        # (which used to build "isessen" out of "ise"+"s"+"en", absorbing the
+        # start of "is essential" after "what" and killing the whole split).
+        "ize", "ise", "ify",
     })
     _INFLECT_SHORT = tuple(dict.fromkeys((*_INFLECT_STRICT, *_INFLECT_AMBIGUOUS_AS_SUFFIX)))
 
@@ -1825,6 +1858,22 @@ till until till
 endure enduring endured endures endurance
 # Other frequent short prepositions / glue words missing from dictionary:
 onto toward towards till unto per sans via
+# --- The Little Prince / classic-literature vocabulary (2026-08-28) ---
+# Missing words caused whole glued sentences to be returned unsplit because
+# the greedy cursor could not form a valid boundary when it reached them.
+essential essence essentially prince princes princess royal kingdom
+waste wasted wastes wasting rightly rose thorn volcano sheep
+# "the little prince repeated" — without 'repeated' the sentence-shape guard
+# still succeeds via repeat+ed inflection, but add the flat form anyway so
+# the greedy 3+ cursor can see it on first pass.
+repeat repeated repeats repeating repeatedly
+# --- Other frequent adjectives / nouns missing after regression probes ---
+simple simpler simplest secret secrets heartily honestly vainly
+# --- Common -able / -less / -like / -tion compounds whose base+suffix case(a)
+# check would FAIL because they are not listed individually elsewhere but are
+# extremely frequent in everyday prose (regression probes 2026-08-28):
+reasonable hopeless childlike attention
+
 """
 
 # Build sets: full lowercase set for longest-match; also a title-case set so
