@@ -503,6 +503,9 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
     refetch: refetchVersions,
   } = useCustomSkillVersions(versionsOpen ? skillName : null);
   const restoreVersionMutation = useRestoreCustomSkillVersion();
+  // Latest version (first in sorted list, since backend returns newest-first)
+  const latestVersionSeq = versions[0]?.seq ?? null;
+  const isSelectedCurrent = selectedVersionSeq !== null && selectedVersionSeq === latestVersionSeq;
   const versionChanges = useMemo(
     () =>
       versionDraft && baselineDraft
@@ -1434,12 +1437,22 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
                             <span className="min-w-0 text-sm leading-5 font-medium break-words text-gray-800">
                               {formatVersionLabel(version)}
                             </span>
-                            <Badge
-                              variant="outline"
-                              className="shrink-0 rounded-full text-[10px]"
-                            >
-                              v{version.seq}
-                            </Badge>
+                            <div className="flex shrink-0 items-center gap-1">
+                              {version.seq === latestVersionSeq && (
+                                <Badge
+                                  variant="secondary"
+                                  className="rounded-full text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200"
+                                >
+                                  当前
+                                </Badge>
+                              )}
+                              <Badge
+                                variant="outline"
+                                className="rounded-full text-[10px]"
+                              >
+                                v{version.seq}
+                              </Badge>
+                            </div>
                           </div>
                           <div className="mt-1 text-xs text-gray-400">
                             {formatVersionTime(version.created_at)}
@@ -1455,16 +1468,23 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
                 <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-gray-100 px-4">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium text-gray-900">
-                      {selectedVersionSeq
-                        ? `v${selectedVersionSeq} 与当前版本对比`
-                        : "请选择一个版本"}
+                      {selectedVersionSeq === null
+                        ? "请选择一个版本"
+                        : isSelectedCurrent
+                          ? `当前版本 (v${selectedVersionSeq})`
+                          : `v${selectedVersionSeq} 与当前版本对比`}
                     </div>
                     <div className="mt-0.5 text-xs text-gray-400">
-                      左侧为历史版本，右侧为当前版本
+                      {isSelectedCurrent
+                        ? "这是技能的最新版本"
+                        : "左侧为历史版本，右侧为当前版本"}
                     </div>
                   </div>
                   {selectedVersionSeq !== null ? (
-                    <Badge variant="outline" className="rounded-full">
+                    <Badge
+                      variant={isSelectedCurrent ? "secondary" : "outline"}
+                      className={`rounded-full ${isSelectedCurrent ? "bg-emerald-50 text-emerald-700 border-emerald-200" : ""}`}
+                    >
                       v{selectedVersionSeq}
                     </Badge>
                   ) : null}
@@ -1478,6 +1498,16 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
                   <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
                     <Loader2Icon className="mr-2 size-4 animate-spin" />
                     加载版本文件...
+                  </div>
+                ) : isSelectedCurrent ? (
+                  <div className="flex flex-1 items-center justify-center text-sm text-gray-400 bg-[#fbfbfb]">
+                    <div className="text-center">
+                      <HistoryIcon className="mx-auto mb-3 size-8 text-gray-300" />
+                      <div>当前版本</div>
+                      <div className="mt-1 text-xs text-gray-400">
+                        {versions.find(v => v.seq === selectedVersionSeq)?.message || "最新的技能状态"}
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <div className="flex min-h-0 flex-1 flex-col">

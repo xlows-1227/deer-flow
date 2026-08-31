@@ -422,9 +422,9 @@ export function MessageList({
 
   return (
     <Conversation
-      className={cn("flex size-full flex-col justify-center", className)}
+      className={cn("flex size-full flex-col", className)}
     >
-      <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
+      <ConversationContent className="mx-auto flex min-h-full w-full max-w-(--container-width-md) flex-col justify-end pt-8">
         <LoadMoreHistoryIndicator
           isLoading={isHistoryLoading}
           hasMore={hasMoreHistory}
