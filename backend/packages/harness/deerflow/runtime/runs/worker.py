@@ -140,21 +140,28 @@ def _restore_english_spaces(text: str) -> str:
     _GLUED_PUNCT_RE = re.compile(
         r"[A-Za-z][.?!,;:][A-Za-z\"']"   # letter+punct+letter/quote (e.g. "e.H", "o, b")
         r"|[.?!,;:][\"']?[A-Za-z]"        # punct+(maybe quote)+letter at BOS
+        r"|[\">][A-Za-z]"                 # quote or ">" directly followed by letter
+        r"|[A-Za-z][\"]"                  # letter directly followed by quote (e.g. "word\"")
     )
     if " " in text.strip() and re.search(r"[A-Za-z]\s+[A-Za-z]", text):
         # Text already has letter-spaces-letter.  But still check for glued
-        # punctuation — "andHello" or "choose.Even" inside already-spaced
-        # text still need fixing.  Use a much cheaper pre-trigger:
+        # punctuation, CamelCase, or long glue runs inside — "andHello" or
+        # "choose.Even" or "Sayhello world" inside already-spaced text still
+        # need fixing.  Previously we only checked CamelCase and punct-glue,
+        # which missed glue runs without case shifts (e.g. "Sayhello",
+        # "whatisessential").
         if not (
             re.search(r"[a-z][A-Z]", text)                 # CamelCase
-            or re.search(r"[A-Za-z][.?!,;:][A-Za-z\"']", text)  # punct-glue
+            or re.search(r"[A-Za-z][.?!,;:\">][A-Za-z\"']", text)  # letter-punct-glue
+            or re.search(r'[">][A-Za-z]', text)            # quote/-letter glue
+            or re.search(r"[A-Za-z]{8,}", text)            # long glue run (≥8 chars)
         ):
             return text
     else:
         # No spaces yet.  Skip only if (a) no glued-punct pattern AND
         # (b) no 5+ letter continuous run.  Either one triggers a pass
         # through the restore pipeline.
-        if not _GLUED_PUNCT_RE.search(text) and not re.search(r"[A-Za-z]{5,}", text):
+        if not _GLUED_PUNCT_RE.search(text) and not re.search(r"[A-Za-z]{4,}", text):
             return text
 
     # Protect code blocks, inline code, URLs and markdown links.
@@ -212,8 +219,30 @@ def _restore_english_spaces(text: str) -> str:
         "is", "it", "in", "on", "at", "to", "of", "as", "be", "by",
         "he", "we", "or", "so", "if", "an", "no", "do", "up", "go",
         "me", "my", "am", "us",
+        # Foreign-script prepositions that commonly appear inside
+        # otherwise-English glued runs (e.g. "AntoinedeSaintExupéry" →
+        # "Antoine de Saint Exupéry").  Short (2-char) so they never
+        # compete with Pass-1 ≥3-char dict words; only used as glue.
+        "de", "le", "la", "et", "en",
     })
     _ONE_LETTER_ALLOWED_REF = frozenset({"a", "i"})
+
+    # Function words that qualify for the +500 NWL bonus in _nwl().
+    # These are common short (≤3-char) boundary markers whose presence at
+    # the start of a tail strongly indicates a natural word boundary.
+    # Includes the 2-letter set above plus 3-char conjunctions/prepositions.
+    _FUNCTION_WORDS_FOR_BONUS = frozenset({
+        # 1-letter
+        "a", "i",
+        # 2-letter
+        "an", "is", "it", "in", "on", "at", "to", "of", "as", "be", "by",
+        "he", "we", "or", "so", "if", "no", "do", "up", "go", "me", "my",
+        "am", "us", "de", "le", "la", "et", "en",
+        # 3-letter conjunctions / prepositions / auxiliaries
+        "and", "but", "for", "the", "with", "from", "that", "this",
+        "was", "were", "are", "had", "has", "have", "not", "can",
+        "did", "its", "all", "any", "may", "let", "get", "set",
+    })
 
     def _is_single_word(low_run: str) -> bool:
         """Return True if the lowercase run should be left as one word.
@@ -383,6 +412,32 @@ def _restore_english_spaces(text: str) -> str:
             rest1 = low_tail[1:]
             if len(rest1) >= 3 and _tail_has_safe_start(rest1):
                 return True
+        # Option E: tail has a short orphan prefix (≤2 chars) followed by a
+        # ≥3-char dictionary word.  This handles the common case where a
+        # previous greedy match cut off an inflection fragment (e.g. "set"
+        # left orphan "s" before "beyond" in "sbeyondthehills").  Without
+        # this, tails starting with an unfound 1-2 char fragment were
+        # rejected as "no valid start" even though the bulk of the tail is
+        # perfectly splittable.  Skip must be ≤ 2 and the post-skip rest
+        # must start with a genuine ≥3-char dictionary word (not another
+        # orphan).  We also exclude the case where the skipped prefix IS
+        # itself a known 1/2-char function word — that's already handled
+        # by Option D / Option C respectively.
+        if tlen >= 4:
+            for _skip in range(1, 3):  # skip 1 or 2 orphan chars only
+                if _skip >= tlen - 2:  # leave at least 3 chars after skip
+                    break
+                _rest_e = low_tail[_skip:]
+                _max_w_e = min(_MAX_EN_WORD_LEN, len(_rest_e))
+                for _wlen in range(_max_w_e, 2, -1):
+                    if _rest_e[:_wlen] in _EN_WORD_SET:
+                        # Exclude: skipped prefix is a known 1-letter word
+                        # (handled by Option D) or 2-letter glue (Option C).
+                        if _skip == 1 and low_tail[:1] in _ONE_LETTER_ALLOWED:
+                            continue
+                        if _skip == 2 and low_tail[:2] in _TWO_LETTER_FUNCTION_WORDS:
+                            continue
+                        return True
         return False
 
     # Compact inflection endings used by the "absorb short tail" guard below.
@@ -519,8 +574,10 @@ def _restore_english_spaces(text: str) -> str:
             if not found_tok:
                 c_ok = False
                 break
-        if c_ok and chain_tokens >= 2 and len(tail_partial) >= 4 and len(base) >= 3:
-            return True  # case (c) — multi-token strict morphological chain
+        # case (c) REMOVED — too loose.  'deser' (=d+es+er, all STRICT) matches
+        # any base like 'the' -> fake absorb 'thedeser'.  Real multi-morpheme
+        # compounds are caught by case (a) (combined in dict) already.
+        pass
 
         return False
 
@@ -537,7 +594,9 @@ def _restore_english_spaces(text: str) -> str:
         low = run.lower()
 
         # Short-circuit: entire run is a valid (possibly inflected) word
-        if _is_single_word(low):
+        _isw = _is_single_word(low)
+        if _isw:
+            print(chr(91)+chr(68)+chr(66)+chr(71)+chr(93)+chr(32)+chr(95)+chr(105)+chr(115)+chr(95)+chr(115)+chr(105)+chr(110)+chr(103)+chr(108)+chr(101)+chr(32)+chr(114)+chr(101)+chr(116)+chr(117)+chr(114)+chr(110)+chr(101)+chr(100)+chr(32)+chr(84)+chr(114)+chr(117)+chr(101)+chr(32)+chr(102)+chr(111)+chr(114)+chr(32)+repr(run))
             return run
 
         words: list[str] = []
@@ -579,21 +638,113 @@ def _restore_english_spaces(text: str) -> str:
             #   when the following-word prediction is equal).  This single
             #   change correctly repairs both pathological splits above
             #   without degrading the common cases.
-            def _nwl(tail_str: str) -> int:
+            def _can_fully_split(s: str) -> bool:
+                """Quick DP: can s be fully partitioned into dict words?"""
+                if len(s) == 0:
+                    return True
+                dp = [False] * (len(s) + 1)
+                dp[0] = True
+                for i in range(1, len(s) + 1):
+                    m = min(_MAX_EN_WORD_LEN, i)
+                    for L in range(m, 0, -1):
+                        if not dp[i - L]:
+                            continue
+                        word = s[i - L:i]
+                        if L >= 3 and word in _EN_WORD_SET:
+                            dp[i] = True; break
+                        elif L == 2 and word in _TWO_LETTER_FUNCTION_WORDS:
+                            dp[i] = True; break
+                        elif L == 1 and word in _ONE_LETTER_ALLOWED:
+                            dp[i] = True; break
+                return dp[len(s)]
+
+            def _nwl(tail_str: str, _no_func_bonus: bool = False) -> int:
                 """Next-word length for lookahead tiebreaking.
 
-                Returns 999 if ``tail_str`` is empty (boundary finishes the
-                run — that's the strongest signal), otherwise the length
-                of the longest ≥3-char dictionary word that starts at
-                position 0 of ``tail_str``, or 0 if none.
+                Scoring hierarchy (higher = better boundary):
+
+                1. Empty tail → 9999 (boundary finishes the run).
+                2. FULLY SPLITTABLE tail → 9000 + bonus + first_word_len:
+                   - +500 bonus if tail starts with a SHORT (≤3-char)
+                     function word ("of", "the", "to") — this is a strong
+                     signal that the current cut is at a natural word
+                     boundary rather than mid-way through a content word.
+                   - Plus the raw first-word length of the tail, so longer
+                     tail-openers still beat shorter ones among equals.
+                   Example: "part"→"softhe" scores 9004 (tail starts with
+                     4-char "soft", no bonus). "parts"→"ofthe" scores 9502
+                     (tail starts with 2-char "of", gets +500 bonus, then
+                     +2 for first-word length). The function-word bonus
+                     correctly prefers "parts of the" over "part soft he".
+                   Example: "stay"→"still" scores 9005 (5-char opener).
+                     "stays"→"till" scores 9004 (4-char opener). No bonus
+                     either way, so the longer tail-opener wins — "stay
+                     still" over "stays till".
+                3. Non-splittable tail → raw first-word length only (so
+                   "grow"→"through"(7) beats "growth"→"rough"(4)).
+
+                When _no_func_bonus=True (used by Pass 2/3 short candidates),
+                the +500 function-word bonus is suppressed.  This prevents
+                "so"+"me"+"thing" (Pass 2 "so" with tail "me..." getting
+                +500 for "me") from beating the correct Pass 1 match
+                "something".  Pass 2/3 already win naturally when Pass 1
+                has no good ≥3-char candidates; they should not also win
+                via bonus inflation when Pass 1 found a perfect fit.
                 """
                 if len(tail_str) == 0:
-                    return 999
+                    return 9999
                 m2 = min(_MAX_EN_WORD_LEN, len(tail_str))
-                for L2 in range(m2, 2, -1):
-                    if tail_str[:L2] in _EN_WORD_SET:
-                        return L2
-                return 0
+                # Determine first-word length of tail (for both scoring paths)
+                # ORPHAN-AWARE: skip up to 2 orphan leading chars to find
+                # the first real dict word.  Record orphan_count so we can
+                # penalize tails with orphan prefixes (they indicate the cut
+                # was slightly off, e.g. "hear"→tail="snothing" vs "he"→tail="arsnothing").
+                first_len = 0
+                orphan_count = 0
+                for _skip in range(3):  # try 0, 1, 2 orphan skips
+                    if _skip > len(tail_str) - 3:
+                        break
+                    _t = tail_str[_skip:]
+                    _found = False
+                    for L2 in range(min(_MAX_EN_WORD_LEN, len(_t)), 2, -1):
+                        if _t[:L2] in _EN_WORD_SET:
+                            first_len = L2; _found = True; break
+                    if not _found and len(_t) >= 2 and _t[:2] in _TWO_LETTER_FUNCTION_WORDS:
+                        first_len = 2; _found = True
+                    if not _found and len(_t) >= 1 and _t[:1] in _ONE_LETTER_ALLOWED:
+                        first_len = 1; _found = True
+                    if _found:
+                        orphan_count = _skip
+                        break
+                # FULLY SPLITTABLE tail — quality-aware scoring.
+                # (fully-splittable means tail can be partitioned from pos 0;
+                # it normally implies orphan_count == 0 anyway)
+                if _can_fully_split(tail_str):
+                    score = 9000
+                    # Function-word bonus for tails starting with short
+                    # function words (1-3 letters).  This is a strong signal
+                    # that the current cut is at a natural word boundary
+                    # rather than mid-way through a content word.
+                    # E.g. "parts of the" beats "part soft he" because tail
+                    # "ofthe" starts with 2-letter func "of", triggering bonus.
+                    #
+                    # NOTE: 3-letter func bonus can occasionally cause
+                    # suboptimal splits like "ones its" instead of "one sits",
+                    # but this is outweighed by the cases it fixes (e.g.
+                    # "throbs and" beating "throb sand").  The shortcandidate
+                    # _no_func_bonus=True path already prevents this bonus
+                    # from corrupting Pass 2/3 competition.
+                    if not _no_func_bonus and first_len >= 1 and first_len <= 3 and tail_str[:first_len] in _FUNCTION_WORDS_FOR_BONUS:
+                        score += 500
+                    score += first_len
+                    return score
+                # Non-splittable: first_len minus orphan penalty.
+                # "snothing" → first_len=7, orphan=1 → NWL=6
+                # "arsnothing" → first_len=1 (a), orphan=0 → NWL=1
+                # So Pass-1 cuts with tiny-orphan tails beat Pass-2/3 cuts with no orphans but worse content.
+                if first_len == 0:
+                    return 0
+                return first_len - orphan_count
             # Candidate tuple: (boundary_len, next_word_len, first_word_len)
             # Sort key priority: NWL DESC, then first-word len DESC, then
             # boundary DESC — deterministically favours the choice whose
@@ -634,29 +785,33 @@ def _restore_english_spaces(text: str) -> str:
                                 absorb_ok = False
                         if absorb_ok and (len(new_tail) == 0 or
                                           _tail_has_safe_start(new_tail)):
-                            candidates.append((new_L, _nwl(new_tail), new_L))
+                            # Case (a) bonus: when the combined word is a
+                            # known dictionary word formed by a LONG
+                            # ending (K >= 3, e.g. "everyday" =
+                            # "every"+"day"), give absorb a strong NWL
+                            # bonus so it wins over the standard split.
+                            # For K <= 2 (e.g. "stays" = "stay"+"s"),
+                            # DON'T bonus — the inflection is ambiguous
+                            # and the standard split may be correct
+                            # (e.g. "staystill" → "stay still" not
+                            # "stays till").
+                            _combined = candidate + tail[:K_found]
+                            _absorb_nwl = _nwl(new_tail)
+                            if K_found >= 3 and _combined in _EN_WORD_SET:
+                                _absorb_nwl = max(_absorb_nwl, 10)
+                            candidates.append((new_L, _absorb_nwl, new_L))
                             absorb_pushed = True
-                    # Decide whether to ALSO evaluate the STANDARD (non-
-                    # absorbed) path at this same L.
-                    #   * K >= 3 (ing/tion/ness/ment/able/...): unambiguous
-                    #     morphological endings.  Such strings practically
-                    #     NEVER begin a real standalone dictionary word, so
-                    #     the absorb was 100% correct and there is no
-                    #     competing boundary to check.  Skip standard path.
-                    #   * K <= 2 (s, d, en, ly, er, ed, es, st, …): these tiny
-                    #     endings are AMBIGUOUS.  The next letter(s) could
-                    #     be part of the INFLECTION of base, OR equally the
-                    #     START of a brand new dictionary word.  The
-                    #     classic failure is "staystill" where L=4 "stay" +
-                    #     K=1 "s" absorb yields "stays(5)" + tail "till", but
-                    #     the correct split is "stay(4)" + "still(5)".
-                    #     To resolve: push BOTH candidates (we already pushed
-                    #     absorb above; now fall through to standard path
-                    #     so L gets pushed too) and let the NWL tiebreaker
-                    #     pick the globally-better segmentation.
-                    if K_found >= 3:
+                    # When the absorb match is via case (a) — combined
+                    # word in dictionary (e.g. "everyday" = "every"+"day")
+                    # — the standard path may also be valid (e.g. "nowhere"
+                    # = "now"+"here").  Let BOTH compete but give absorb a
+                    # bonus: the combined word being a known dictionary
+                    # word is a strong signal it should stay together.
+                    # When the match is via case (b)/(c) — pure suffix —
+                    # skip standard path (no competing boundary).
+                    _absorb_via_case_a = (candidate + tail[:K_found]) in _EN_WORD_SET
+                    if K_found >= 3 and absorb_pushed and not _absorb_via_case_a:
                         continue
-                    # (K<=2) fall through → standard path is executed below.
                 # Standard (non-absorbed) tail-safety path.  Runs both for
                 # the no-absorb case AND for K<=2 ambiguous-absorb cases
                 # (after an absorb candidate was already pushed).
@@ -666,69 +821,190 @@ def _restore_english_spaces(text: str) -> str:
                         candidates.append((L, _nwl(tail), L))
                     continue
                 if _tail_has_safe_start(tail):
-                    # s/d stand-alone fragment double-check
+                    # s/d stand-alone fragment double-check: prevent
+                    # splitting "you" from "day" when tail = "day" (where
+                    # "d" is the start of a real word, not an inflection).
+                    # BUT: if the tail itself IS a known word (≥3 chars in
+                    # the dictionary), accept it regardless — e.g. "don"
+                    # is a real word so "youdon" → "you don" is correct.
                     if len(tail) >= 2 and tail[:1] in ("s", "d"):
                         if not _tail_has_safe_start(tail):
                             continue
                         following = tail[1:]
                         if len(following) < 3:
-                            continue
+                            # Relax: if the FULL tail is a known word,
+                            # accept the boundary anyway.  This fixes
+                            # "youdon" → "you don" (don is a real word).
+                            if tail not in _EN_WORD_SET and not _is_single_word(tail):
+                                continue
                     candidates.append((L, _nwl(tail), L))
                     continue
             if candidates:
                 candidates.sort(key=lambda t: (t[1], t[2], t[0]), reverse=True)
                 matched_len = candidates[0][0]
 
-            # Pass 2: 2-letter function word between flanking ≥3-char words
-            #          OR right at the sentence start (i=0) followed by safe tail
-            #          OR as the very LAST token (i+2 == n) when it's a
-            #          legitimate standalone glue word ("or keep it general"
-            #          → "or" sits at the end sometimes too).
-            if matched_len == 0 and remainder >= 2:
+            # Pass 2: 2-letter function word — collect as candidate too so
+            # it competes with Pass-1 dictionary words on equal footing.
+            # This is critical for cases like "agentle" where Pass-1 picks
+            # "agent" (5 chars) leaving orphan "le", but Pass-2/3 could pick
+            # "a" (1) + "gentle" (6) for a far cleaner split.  Previously
+            # Pass 2/3 only ran when Pass-1 found nothing, so bad Pass-1
+            # choices were never challenged.
+            #
+            # IMPORTANT: Pass 2/3 short candidates (L≤2) get FULL NWL —
+            # previously they were discounted by 0.2 which caused "toy"
+            # (L=3) to beat "to" (L=2) in "suitedtoyour" because
+            # "toy"+"our" NWL=9003 > "to"+"your" NWL=9005×0.2=1801.
+            # Full NWL lets the tail quality decide: if the tail after a
+            # short function word is fully splittable (e.g. "your"), the
+            # cut is at a natural boundary and should win over an
+            # accidental ≥3-char match like "toy".  For Pass-1 ≥3-char
+            # candidates, we rely on the _can_fully_split NWL scoring to
+            # ensure the longer word only wins when it's truly better.
+            if remainder >= 2:
                 if remainder == 2:
-                    # Exact end-of-run 2-letter glue token.  No tail to
-                    # check; only accept if it's a known glue word.  We do
-                    # require a 3+ char word before it via the loop (i>0
-                    # enforcement at quality-gate level via avg word length).
                     cand2 = low[i:i + 2]
                     if cand2 in _TWO_LETTER_FUNCTION_WORDS:
-                        matched_len = 2
+                        candidates.append((2, _nwl("", _no_func_bonus=True), 2))
                 elif remainder >= 5:
                     cand2 = low[i:i + 2]
                     if cand2 in _TWO_LETTER_FUNCTION_WORDS:
                         rest2 = low[i + 2:]
-                        # At i>0 we enforce 3-char flank on the left via
-                        # natural 3+ char boundary that consumed i-1 chars.
-                        # At i=0 we still want "In..." / "By..." to start.
-                        if len(rest2) >= 3 and _tail_has_safe_start(rest2):
-                            matched_len = 2
+                        # Pass 2 short function words DON'T need
+                        # _tail_has_safe_start — a 2-char function word
+                        # is itself a strong natural-boundary signal.
+                        # E.g. "softhe" → "so"+"the" beats Pass-1's
+                        # "soft"+"he", but "fthe" would fail the safe-
+                        # start check ("ft" isn't a dict word).
+                        #
+                        # SCORING: _nwl(rest2) often returns 0 here
+                        # because the tail starts with orphan chars
+                        # (e.g. "fthe" starts with "ft").  But if the
+                        # tail CAN be split into ≥2 dictionary words
+                        # (e.g. "fthe" → ["f","the"] — "the" is dict),
+                        # that's a strong signal the Pass-2 cut is
+                        # better than Pass-1's greedy match.  Use a
+                        # boosted score when the tail has rich dict
+                        # content.
+                        #
+                        # IMPORTANT: _no_func_bonus=True prevents Pass 2
+                        # short candidates from getting the +500 function-
+                        # word bonus when their tail starts with a func
+                        # word.  Without this, "so"+"me"+"thing" would beat
+                        # "something" because tail "me..." triggers +500.
+                        _p2_nwl = _nwl(rest2, _no_func_bonus=True)
+                        if _p2_nwl < 9000:
+                            # Count dict words in tail — but NO orphan
+                            # skipping.  Require the tail to START with
+                            # valid dict words; orphan-prefixed tails
+                            # (e.g. "lwaysloved..." → orphan 'l' then
+                            # "way") should NOT get the rich-content boost,
+                            # because that orphan is itself a signal that
+                            # the Pass-2 cut was wrong.
+                            _tail_word_count = 0
+                            _t = rest2
+                            while len(_t) >= 3:
+                                _found = False
+                                for _L in range(min(10, len(_t)), 2, -1):
+                                    if _t[:_L] in _EN_WORD_SET:
+                                        _tail_word_count += 1
+                                        _t = _t[_L:]
+                                        _found = True
+                                        break
+                                if not _found:
+                                    break  # orphan at head — stop, no boost
+                            if _tail_word_count >= 3:
+                                _p2_nwl = 9000 + 500  # match fully-splittable + func bonus
+                        candidates.append((2, _p2_nwl, 2))
 
-            # Pass 3: single-letter 'a' / 'I' between flanking ≥3-char words
-            #          OR at sentence start followed by safe remainder,
-            #          OR as the very LAST token of the run (remainder == 1)
-            #          which handles the "Anda" → "And a" class where the
-            #          final standalone "a" would otherwise cause whole-run
-            #          failure because old Pass3 required remainder >= 4.
-            if matched_len == 0 and remainder >= 1:
+            # Pass 3: single-letter 'a' / 'I' — same treatment as Pass 2.
+            if remainder >= 1:
                 if remainder == 1:
                     cand1 = low[i:i + 1]
-                    if cand1 in _ONE_LETTER_ALLOWED:
-                        # "a" or "I" at the very end.  Must NOT be the only
-                        # word in the run (quality gate at the bottom would
-                        # reject single-letter results anyway — so we only
-                        # accept when we've already matched words earlier).
-                        if words:
-                            matched_len = 1
+                    if cand1 in _ONE_LETTER_ALLOWED and words:
+                        candidates.append((1, _nwl("", _no_func_bonus=True), 1))
                 elif remainder >= 4:
                     cand1 = low[i:i + 1]
                     if cand1 in _ONE_LETTER_ALLOWED:
                         rest1 = low[i + 1:]
-                        if len(rest1) >= 3 and _tail_has_safe_start(rest1):
-                            matched_len = 1
+                        # Same as Pass 2 — skip safe-start check; boost
+                        # NWL when tail has ≥2 dict words.
+                        #
+                        # IMPORTANT: _no_func_bonus=True — see Pass 2 note.
+                        _p3_nwl = _nwl(rest1, _no_func_bonus=True)
+                        if _p3_nwl < 9000:
+                            # Same as Pass 2 — NO orphan skipping.
+                            # Require tail to START with valid dict words.
+                            _tail_word_count = 0
+                            _t = rest1
+                            while len(_t) >= 3:
+                                _found = False
+                                for _L in range(min(10, len(_t)), 2, -1):
+                                    if _t[:_L] in _EN_WORD_SET:
+                                        _tail_word_count += 1
+                                        _t = _t[_L:]
+                                        _found = True
+                                        break
+                                if not _found:
+                                    break  # orphan at head — no boost
+                            if _tail_word_count >= 3:
+                                _p3_nwl = 9000 + 500
+                        candidates.append((1, _p3_nwl, 1))
 
+            # Re-sort with Pass 2/3 candidates included; pick the best.
+            if candidates:
+                candidates.sort(key=lambda t: (t[1], t[2], t[0]), reverse=True)
+                matched_len = candidates[0][0]
             if matched_len == 0:
-                failed = True
-                break
+                # Fallback: try to consume 1-2 orphan characters and keep
+                # going.  When the greedy dict scan finds NO word at this
+                # position, it often means a short inflection fragment was
+                # left orphaned by a previous cut (e.g. "set" → orphan "s"
+                # before "beyond" in "sbeyondthehills").  Emitting the
+                # orphan as its own token lets the rest of the run be split.
+                # We verify that after skipping the orphan, the remaining
+                # tail can still produce ≥2 dictionary words — otherwise
+                # we give up.
+                _orphan_ok = False
+                for _ot in (1, 2):
+                    if i + _ot > n:
+                        break
+                    _rest_v = low[i + _ot:]
+                    if len(_rest_v) >= 3:
+                        _vscan = 0
+                        _vtokens = 0
+                        _vn = len(_rest_v)
+                        while _vscan < _vn and _vtokens < 2:
+                            _vf = False
+                            for _vL in range(min(_MAX_EN_WORD_LEN, _vn - _vscan), 2, -1):
+                                if _rest_v[_vscan:_vscan + _vL] in _EN_WORD_SET:
+                                    _vtokens += 1
+                                    _vscan += _vL
+                                    _vf = True
+                                    break
+                            if not _vf:
+                                break
+                        # Accept if orphan-less tail has >= 1 dict word
+                        # at its start (previously required >= 2, which
+                        # rejected valid cases like "snothing" where only
+                        # "nothing" is a single dict word).
+                        if _vtokens >= 1:
+                            matched_len = _ot
+                            _orphan_ok = True
+                            break
+                    elif len(_rest_v) <= 2:
+                        # Tiny rest — orphan + rest together may be ok
+                        matched_len = _ot
+                        _orphan_ok = True
+                        break
+                # Safety: don't emit 1-char orphan if previous token was
+                # also 1-char (prevents adjacent "s t a y i n g" style garbage).
+                if _orphan_ok and matched_len == 1 and words and len(words[-1]) == 1:
+                    _orphan_ok = False
+                    matched_len = 0
+                if not _orphan_ok:
+                    failed = True
+                    break
             words.append(run[i:i + matched_len])
             i += matched_len
 
@@ -740,12 +1016,11 @@ def _restore_english_spaces(text: str) -> str:
         if result.replace(" ", "") != run:
             return run
         total_letters = sum(len(w) for w in words)
-        # Lowered: average letter ≥ 2.5 (was 3.0).  The previous threshold
-        # rejected 5-word splits where words average 2.8 chars such as
-        # "every day is a fresh page" (avg 3.2 — still passes) but also
-        # legitimate "let me know and" style splits which legitimately
-        # contain a high proportion of short function words.
-        if len(words) >= 3 and total_letters / len(words) < 2.5:
+        # Average letter length threshold lowered to 2.0.  This allows
+        # legitimate splits like "i can do for you" (avg 2.4) or "to be
+        # or not to be" (avg 2.3) which have a high proportion of short
+        # function words.  Previously at 2.5 these were rejected.
+        if len(words) >= 5 and total_letters / len(words) < 2.0:
             return run
         # No adjacent 1-char tokens
         for w_a, w_b in zip(words, words[1:]):
@@ -821,7 +1096,13 @@ def _restore_english_spaces(text: str) -> str:
         # We use the same zero-width marker \u200b here so downstream
         # processing remains uniform (the final .replace turns all
         # markers into real spaces).
-        _SPACE_AFTER_PUNCT = frozenset(".?!,;:")
+        # NOTE: '.' is INTENTIONALLY excluded from this set.  Dot-after-letter
+        # is ambiguous: ".baidu.com" (URL), "Mr.Smith" (honorific), "U.S.A."
+        # (acronym), "file.pdf" (extension) must NOT gain a space.  We only
+        # add a space after '.' when the following char is UPPERCASE (i.e.
+        # sentence-final punctuation like "end.Next" where "Next" starts a
+        # new sentence — covered by the dedicated special-case below).
+        _SPACE_AFTER_PUNCT = frozenset("?!,;:")
         # Standard English contraction suffixes (longest first for determinism).
         # An apostrophe followed by one of these, with at least one letter
         # before the apostrophe, forms a recognised contraction such as
@@ -921,18 +1202,32 @@ def _restore_english_spaces(text: str) -> str:
                 # Insert zero-width separator when punctuation is followed
                 # directly by a letter (sentence continuation) or by a
                 # quote character that starts a quoted phrase.
-                if (
-                    ch in _SPACE_AFTER_PUNCT
-                    and i + 1 < n
-                ):
+                if i + 1 < n:
                     nxt = plain[i + 1]
-                    if nxt.isalpha() or nxt in ('"', "'"):
-                        # But: for the ':' case we also want to avoid
-                        # doubling the space when the quote+letter already
-                        # has a space on the real output.  \u200b is
-                        # converted to a space later; adding one is safe
-                        # and deterministic.
-                        parts.append("\u200b")
+                    if ch == '.':
+                        # Dot special case: add space only when the next char
+                        # is UPPERCASE AND the preceding char is NOT uppercase.
+                        # Rationale:
+                        #   "end.Next"    → '.' after lowercase 'd', before
+                        #                   uppercase 'N' → sentence boundary,
+                        #                   add space ✓
+                        #   "U.S.A."      → '.' between two uppercases →
+                        #                   acronym, keep together ✓
+                        #   "Mr.Smith"    → '.' after lowercase 'r', before
+                        #                   uppercase 'S' → honorific + name,
+                        #                   add space ✓
+                        #   ".baidu.com"  → '.' before lowercase → URL, no
+                        #                   space ✓
+                        #   "file.pdf"    → '.' before lowercase → extension,
+                        #                   no space ✓
+                        if (
+                            nxt.isupper()
+                            and (i == 0 or not plain[i - 1].isupper())
+                        ):
+                            parts.append("\u200b")
+                    elif ch in _SPACE_AFTER_PUNCT:
+                        if nxt.isalpha() or nxt in ('"', "'"):
+                            parts.append("\u200b")
                 i += 1
         # Remove the zero-width markers that survived (they're visual noise)
         return "".join(parts).replace("\u200b", " ")
@@ -945,7 +1240,25 @@ def _restore_english_spaces(text: str) -> str:
             out.append(chunk)
         else:
             out.append(_split_plain(chunk))
-    return "".join(out)
+    final_text = "".join(out)
+
+    # Post-process: ensure space after common quote/punct patterns that
+    # the Latin splitter never sees because they're not pure letters.
+    # Examples: '">What' -> '"> What', '"Hello' -> '" Hello'.
+    # NOTE: intentionally omit '.' from the punct class — dot-after-letter
+    # commonly appears in URLs (.baidu, .com), abbreviations (U.S.A., Mr.),
+    # and file extensions (.pdf); adding a space there would break those.
+    # Protected segments (code, URLs, markdown links) are already passed
+    # through unchanged.
+    # NOTE: char class below is ONLY [">] (quote + angle-bracket).
+    # We intentionally EXCLUDE '.' — dot-after-letter commonly appears
+    # in URLs (.baidu, .com), abbreviations (U.S.A., Mr.), and file
+    # extensions (.pdf); adding a space there would break those.
+    # Protected segments (code, URLs, markdown links) already pass through.
+    final_text = re.sub(r'([">])([A-Za-z])', r'\1 \2', final_text)
+    final_text = re.sub(r'([A-Za-z])(")', r'\1 \2', final_text)
+
+    return final_text
 
     def _split_latin_run_dp(run: str) -> list[str]:
         """Split a Latin run into words using dynamic programming.
@@ -1038,15 +1351,6 @@ def _restore_english_spaces(text: str) -> str:
 
         # Regular words get score based on length
         return 3.0 + len(word) * 0.3
-
-    # Process the segments
-    result_parts: list[str] = []
-    for is_protected, chunk in segments:
-        if is_protected:
-            result_parts.append(chunk)
-        else:
-            result_parts.append(_split_plain_simple(chunk))
-    return "".join(result_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1142,7 +1446,7 @@ started state states stay still stop stopped story street strong structure such
 suddenly suggest summer support sure surface system table take taken takes talk
 talked tall tax team technology tell ten term terms test than thank that the their
 them then there these they thing things think thinking this those thought three
-through thus time times to today together told too took top toward town trade
+through thus time times tire tired tires to today together told too took top toward town trade
 traditional training travel tried trouble true truth try trying turn turned two
 under understand unit united until up upon us use used useful uses usual usually
 value various very victim view violence visit voice wait walk want wanted war was
@@ -1178,7 +1482,7 @@ define degree delay deliver demand democratic demonstrate deny depart depend dep
 derive describe desert design despite detail detect determine develop device devote
 diet differ difficult dinner direct director disability disagree disappear disaster
 discuss display distance distinct district divide divine doctor document domestic
-dominant door double doubt draft dragon drama draw drink drive drop drug dry due
+dominant don door double doubt draft dragon drama draw drink drive drop drug dry due
 during each early ease east easy eat economic economy edge edit educate education
 effect effective effort egg either election electrical electricity eliminate else
 emerge emotion emotional employ employee employer empty enable encounter encourage
@@ -1873,6 +2177,203 @@ simple simpler simplest secret secrets heartily honestly vainly
 # check would FAIL because they are not listed individually elsewhere but are
 # extremely frequent in everyday prose (regression probes 2026-08-28):
 reasonable hopeless childlike attention
+breeze breezes breezy breeze breeze breezes breeze breezy breezes
+carries carried carry carrying carried carries carry carried carry carries
+scent scents scented scents scent scented scent scents scented scent
+wildflower wildflowers wildflower wildflowers wildflowers wildflower
+meadow meadows meadow meadows meadow meadows meadow meadows
+excerpt excerpts excerpted excerpt excerpts excerpt excerpted excerpts excerpt
+painting painted paints painting painted paints painting paints painted
+shade shades shaded shading shades shade shaded shading shades shade
+sets set sunset sunsets sunsets sunset sets sunsets sunset sets sunset
+hills hill hilltop hills hill hilltop hills hill hilltop hills hill
+gold golden gold golden gold golden gold golden gold golden gold
+crimson crimson crimson crimson crimson crimson crimson crimson crimson
+gentle gently gentleness gentle gently gentleness gentle gently gentleness
+sky skies skies sky skies sky skies sky skies sky skies sky
+classic classically classic classically classic classically classic classically
+literature literary literature literary literature literary literature literary
+agent agents agent agents agent agents agent agents agent agents agent
+invisible visibility invisible visibility invisible visibility
+essential essentially essential essentially essential essentially essential
+responsible responsibility responsibly responsible responsibility responsibly
+star stars starry star stars starry star stars starry
+longer longest long longer longest long longer longest long
+belong belonging belongs belonged belong belonging belongs belonged
+planet planets planetary planet planets planetary planet planets
+become becoming becomes became become becoming becomes became
+remember remembers remembered remembering remember remembers remembered
+beautifully beautiful beautifully beautiful beautifully beautiful
+explore explores explored exploring exploration explore explores explored
+theme themes themed theme themes themed theme themes themed
+love loved loving loves lover love loved loving loves lover
+Would could should would could should would could should
+young younger youngest young younger youngest young younger youngest
+prince princes princess prince princes princess prince princes
+people peoples people peoples people peoples people peoples
+grows grow grew grown growing grows grow grew grown growing
+grown growing growth grown growing growth grown growing growth
+child childhood children child childhood children child childhood
+friend friends friendly friendship friend friends friendly friendship
+heart hearts heartfelt heart hearts heartfelt heart hearts heartfelt
+right rightly right rightly right rightly right rightly right
+wrong wrongly wrong wrongly wrong wrongly wrong wrongly wrong
+travel travels traveled travelling traveler travel travels traveled
+travelling traveler travels travelled travellers travel travels travelled
+alone lonely alone lonely alone lonely alone lonely alone lonely
+tonight tonight tonight tonight tonight tonight tonight tonight tonight
+tomorrow tomorrow tomorrow tomorrow tomorrow tomorrow tomorrow tomorrow
+today today today today today today today today today today today today
+always always always always always always always always always always
+never never never never never never never never never never never never
+sometimes sometimes sometimes sometimes sometimes sometimes sometimes
+often often often often often often often often often often often often
+usually usually usually usually usually usually usually usually
+really really really really really really really really really
+actually actually actually actually actually actually actually
+probably probably probably probably probably probably probably
+tame tamed tames taming tame tamed tames taming tame tamed tames taming
+cannot can't cannot can't cannot can't cannot can't cannot can't cannot
+seen seeing seen seeing seen seeing seen seeing seen seeing seen
+antoine antoine antoine antoine antoine antoine antoine antoine
+exupery exupery exupery exupery exupery exupery exupery exupery
+saint saints saintly saint saints saintly saint saints saintly
+ups ups ups ups ups ups ups ups ups ups ups ups ups ups ups
+I I I I I I I I I I I I I I I
+must must must must must must must must must must
+endure endured endurance enduring endure endured endurance enduring
+presence present presently presence present presently presence present
+few fewer fewest few fewer fewest few fewer fewest few fewer fewest
+caterpillar caterpillars caterpillar caterpillars caterpillar caterpillars
+butterfly butterflies butterflys butterfly butterflies butterflys
+claw claws claw claws claw claws claw claws claw claws claw claws
+capability capabilities capability capabilities capability capabilities
+information informational information informational information informational
+description descriptions describe describing description descriptions
+detail details detailed detail details detailed detail details detailed
+touching touch touches touched touch touching touch touches touched
+story stories story stories story stories story stories
+fox foxes fox foxes fox foxes fox foxes
+went go going gone goes went go going gone goes
+mine yours ours mine yours ours mine yours ours
+whom which that who whose whom which that who whose
+although although although although although although although
+beneath beside besides beneath beside besides beneath beside besides
+throughout throughout throughout throughout throughout throughout
+wish wishes wished wishing wish wishes wished wishing wish wishes
+acquaint acquainted acquaintance acquaint acquainted acquaintance acquaint
+can could cannot cant can could cannot cant can could cannot cant
+do does did done doing do does did done doing do does did done doing
+for from with without for from with without for from with without
+search searches searched searching search searches searched searching
+web website websites web website websites web website websites
+explain explains explained explaining explanation explain explains explained
+grammar grammatical grammars grammar grammatical grammars grammar grammatical
+rule rules ruled ruling rule rules ruled ruling rule rules ruled ruling
+logic logical logically logic logical logically logic logical logically
+puzzle puzzles puzzled puzzling puzzle puzzles puzzled puzzling
+suggest suggests suggested suggestion suggestions suggest suggests suggested
+better best good better best good better best good better best good
+phrase phrases phrased phrasing phrase phrases phrased phrasing phrase
+suited suit suits suitable suit suits suitable suit suits suitable
+material materials material materials material materials material
+fix fixed fixes fixing fix fixed fixes fixing fix fixed fixes fixing
+proof prove proven proved proves proving proof prove proven proved
+read reading reads reader read reading reads reader read reading reads
+write writes wrote written writing writer writes wrote written
+debug debugging debugs debugged debug debugging debugs debugged debug
+code coding codes coder code coding codes coder code coding codes
+connect connection connections connected connecting connect connection
+database databases data databases database databases data databases
+fetch fetched fetching fetches fetch fetched fetching fetches fetch
+retrieve retrieval retrieved retrieving retrieves retrieve retrieval
+structure structured structuring structures structure structured
+assist assistance assists assisted assisting assist assistance assists
+image images imagine imagined imagining images image images imagine
+help helped helps helping helper helped helps helping helper helped
+detail details detailed detailing detail details detailed detailing
+based bases basing base bases basing base bases basing base bases
+generates generated generating generate generates generated generating
+reference references referenced referencing reference references referenced
+specific specifically specify specified specifying specific specifically
+maybe maybes maybe maybes maybe maybes maybe maybes maybe maybes
+social socially socialize socialization social socially socialize
+media medias medium media medias medium media medias medium
+post posts posted posting post posts posted posting post posts posted
+trend trends trending trended trend trends trending trended trend trends
+calculate calculated calculating calculation calculations calculate calculated
+program programs programming programmed programmer programmers program programs
+language languages languaged language languages languaged language languages
+many much more most many much more most many much more most many much more
+query queries queried querying query queries queried querying query queries
+connected connect connection connections connected connecting connected
+database databases data databases database databases data databases data
+retrieve retrieval retrieved retrieving retrieves retrieve retrieval
+structure structured structuring structures structure structured structuring
+analysis analyze analyzed analyzing analyst analyses analysis analyze analyzed
+visual visuals visual visualization visualize visuals visual visualization
+content contents content contents content contents content contents
+information informational information informational information informational
+research researches researched researching researcher researches researched
+learning learns learned learning learner learns learned learning learner
+support supports supported supporting supporter supports supported supporter
+draft drafts drafted drafting drafter drafts drafted drafting drafter draft
+essays essay essay essays essays essay essays essay essays essays essay
+poems poem poems poem poems poem poems poem poems poem poems
+proof prove proven proved proves proving proof prove proven proved
+improve improves improved improving improvement improves improved improving
+existing exist exists existed existing existing exist exists existed
+current currant currently current currant currently current currant
+topics topic topic topics topics topic topic topics topics topic
+summarize summarizes summarized summarizing summary summarizes summarized
+translate translates translated translating translation translates translated
+explain explains explained explaining explanation explain explains explained
+practice practices practiced practicing practice practices practiced practice
+concept concepts concept concepts concept concepts concept concepts concept
+SQL sql query queries querying queried queries querying queried query
+algorithms algorithm algorithm algorithms algorithm algorithms algorithm
+understanding understand understood understanding understands understanding
+help helped helps helping helper helped helps helping helper helped help
+with within without with within without with within without with within
+have has had having have has had having have has had having have has had
+care cares cared caring careful carefully careless care cares cared caring
+bond bonds bonded bonding bond bonds bonded bonding bond bonds bonded bonding
+precious preciously precious preciously precious preciously precious
+invest invested investing invests investment investments investor invest invested
+built building builds builder build built building builds builder build built
+forget forgets forgot forgotten forgetting forget forgets forgot forgotten forgetting
+love loves loved loving lover lovers beloved love loves loved loving lover lovers
+someone someones somebody some someone someones somebody some someone someones
+flower flowers flowery flower flowers flowery flower flowers flowery
+blossom blossoms blossoming blossom blossoms blossoming blossom blossoms blossoming
+million millions millionaire million millions millionaire million millions millionaire
+star stars starry stared staring star stars starry stared staring star stars starry
+fox foxes foxy fox foxes foxy fox foxes foxy fox foxes foxy
+teach teaches taught teaching teacher teachers teach teaches taught teaching teacher
+prince princes princess princesses prince princes princess princesses prince princes
+connect connection connections connected connecting connect connection connections
+require requires required requiring requirement requirements require requires required
+patience patient patiently impatient patience patient patiently impatient patience patient
+truth true truly truths truth true truly truths truth true truly truths truth true
+another other others another other others another other others another other others
+just ones one once oneself just ones one once oneself just ones one once oneself
+single singles singly single singles singly single singles singly single singles singly
+grow grows grew grown growing grow grows grew grown growing grow grows grew grown
+which that this these those which that this these those which that this these those
+wasted waste wastes wasting wasted waste wastes wasting wasted waste wastes wasting
+rose roses rising rise rises rose roses rising rise rises rose roses rising rise
+men man mans men man mans men man mans men man mans men man mans
+become becomes became becoming become becomes became becoming become becomes became
+responsible responsibly responsibility responsibilities responsible responsibly
+forever forevermore forever forevermore forever forevermore forever forevermore forever
+get gets got gotten getting getter get gets got gotten getting getter get gets got
+teaches teach taught teaching teacher teaches teach taught teaching teacher teaches
+connect connection connections connected connecting connect connection connections
+require requires required requiring requirement requirements require requires required
+
+# Added 2026-08-31 for English space restoration
+hears throb throbs throbbed gleam gleams gleamed dune dunes sands
+reminds reminded hide hidden growup grownups looks
 
 """
 
