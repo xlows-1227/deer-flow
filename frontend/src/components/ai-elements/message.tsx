@@ -58,6 +58,10 @@ export const MessageContent = ({
       "group-[.is-user]:overflow-hidden",
       "group-[.is-user]:bg-secondary group-[.is-user]:text-foreground group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:px-4 group-[.is-user]:py-3",
       "group-[.is-assistant]:text-foreground",
+      // Ensure long glued words (e.g. concatenated English without spaces)
+      // wrap inside the bubble instead of overflowing horizontally past
+      // the message bubble / thread container boundary.
+      "break-words whitespace-pre-wrap",
       className,
     )}
     {...props}
@@ -331,6 +335,17 @@ export const MessageResponse = memo(
     <Streamdown
       className={cn(
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        // For extremely long glued tokens (LLM output concatenated English
+        // with no spaces), prefer soft breaks at punctuation/whitespace but
+        // fall back to breaking between any letter (word-break: break-all)
+        // so the bubble never grows past its container width.  Code blocks
+        // use overflow-x:auto instead so formatting isn't destroyed.
+        "[&_p]:break-words [&_p]:overflow-x-hidden [&_p]:break-all",
+        "[&_p>span]:break-all",
+        "[&_li]:break-all [&_li]:overflow-x-hidden",
+        "[&_div]:break-words [&_div]:break-all",
+        "[&_blockquote]:break-all",
+        "[&_pre]:overflow-x-auto [&_pre]:break-normal [&_pre]:whitespace-pre",
         className,
       )}
       {...props}
