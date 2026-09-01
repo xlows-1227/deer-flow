@@ -499,7 +499,7 @@ export function MessageList({
               const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message]);
               return (
                 <div key={groupKey} className="w-full">
-                  {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                  {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                   <MarkdownContent
                     content={cleaned}
                     isLoading={thread.isLoading}
@@ -532,10 +532,10 @@ export function MessageList({
               <div className="w-full" key={groupKey}>
                 {group.messages[0] && (hasContent(group.messages[0]) || hasToolCalls(group.messages[0])) && (() => {
                   const rawContent = extractContentFromMessage(group.messages[0]);
-                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [...group.messages]);
+                  const { count, toolNames, cleaned } = detectToolOmissions(rawContent, group.messages[0] ? [group.messages[0]] : []);
                   return (
                     <>
-                      {false && count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
+                      {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                       <MarkdownContent
                         content={cleaned}
                         isLoading={thread.isLoading}
@@ -653,11 +653,18 @@ export function MessageList({
             }
             const combinedRawContent = contents.join("\n\n");
             const { count, toolNames, cleaned } = detectToolOmissions(combinedRawContent, group.messages);
-            return { count, toolNames, cleaned, hasAnyContent: combinedRawContent.trim().length > 0 };
+            // Processing groups render concrete tool cards via <MessageGroup/> —
+            // the omission banner would be a redundant repeat of the same info,
+            // so suppress it when any AI message in the group has tool_calls.
+            const hasAnyConcreteToolCalls = group.messages.some(
+              (m) => isAiMessage(m) && getToolCalls(m).length > 0,
+            );
+            const visibleCount = hasAnyConcreteToolCalls ? 0 : count;
+            return { count: visibleCount, toolNames, cleaned, hasAnyContent: combinedRawContent.trim().length > 0 };
           })();
           return (
             <div key={`group-${groupKey}`} className="w-full">
-              {false && processingContent.count > 0 && (
+              {processingContent.count > 0 && (
                 <ToolCallOmissionBanner count={processingContent.count} toolNames={processingContent.toolNames} />
               )}
               <MessageGroup

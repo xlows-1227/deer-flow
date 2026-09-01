@@ -1,5 +1,9 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
+  AlertTriangleIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CopyIcon,
   ExternalLinkIcon,
   FileIcon,
   LibraryIcon,
@@ -16,6 +20,7 @@ import {
   type ImgHTMLAttributes,
 } from "react";
 import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 
 import { Loader } from "@/components/ai-elements/loader";
 import {
@@ -45,6 +50,7 @@ import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   formatMessageTime,
+  friendlyAiErrorMessage,
   getMessageTimestamp,
   getToolCalls,
   isAiMessage,
@@ -305,24 +311,39 @@ function MessageContent_({
     );
   }, [message.additional_kwargs?.referenced_files]);
 
+  const friendlyErrorResult = useMemo(() => {
+    if (isHuman) return null;
+    const result = friendlyAiErrorMessage(rawContent ?? "");
+    return result.tier === "none" ? null : result;
+  }, [rawContent, isHuman]);
+
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
       return rawContent ? stripUploadedFilesTag(rawContent) : "";
     }
+    if (friendlyErrorResult) {
+      return friendlyErrorResult.message;
+    }
     return rawContent ?? "";
-  }, [rawContent, isHuman]);
+  }, [rawContent, isHuman, friendlyErrorResult]);
 
   const toolOmissionResult = useMemo(() => {
     if (isHuman || (!contentToDisplay && !(isAiMessage(message) && getToolCalls(message).length > 0))) {
       return { count: 0, toolNames: [] as string[][], content: contentToDisplay };
     }
+    // If this AI message already has concrete tool_calls attached,
+    // getMessageGroups will render a dedicated processing group with
+    // real tool cards — don't also emit the omission banner to avoid
+    // showing the same tool call twice.
+    const hasConcreteToolCalls = isAiMessage(message) && getToolCalls(message).length > 0;
+    const effectiveCount = (toolNames: string[][]) => hasConcreteToolCalls ? 0 : toolNames.length;
     // 如果有预计算的工具名，使用预计算的名称，但仍需清理内容中的标记
     if (precomputedToolNames && precomputedToolNames.length > 0) {
       const { cleaned } = detectToolOmissions(contentToDisplay, [message]);
-      return { count: precomputedToolNames.length, toolNames: precomputedToolNames, content: cleaned };
+      return { count: effectiveCount(precomputedToolNames), toolNames: precomputedToolNames, content: cleaned };
     }
     const result = detectToolOmissions(contentToDisplay, [message]);
-    return { count: result.count, toolNames: result.toolNames, content: result.cleaned };
+    return { count: effectiveCount(result.toolNames), toolNames: result.toolNames, content: result.cleaned };
   }, [contentToDisplay, isHuman, message, precomputedToolNames]);
 
   const filesList =
@@ -390,19 +411,120 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {false && toolOmissionResult.count > 0 && (
+      {toolOmissionResult.count > 0 && (
         <ToolCallOmissionBanner count={toolOmissionResult.count} toolNames={toolOmissionResult.toolNames} />
       )}
-      <MarkdownContent
-        content={toolOmissionResult.content}
-        isLoading={isLoading}
-        rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
-        className="my-3"
-        components={components}
-      />
+      {friendlyErrorResult ? (
+        <FriendlyAiErrorBanner
+          tier={friendlyErrorResult.tier as "known" | "fallback"}
+          message={friendlyErrorResult.message}
+          original={friendlyErrorResult.original}
+        />
+      ) : null}
+      {!friendlyErrorResult && contentToDisplay && (
+        <MarkdownContent
+          content={toolOmissionResult.content}
+          isLoading={isLoading}
+          rehypePlugins={[rehypeRaw, ...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+          className="my-3"
+          components={components}
+        />
+      )}
     </AIElementMessageContent>
   );
 }
+/**
+ * Visually highlighted banner for LLM runtime errors detected via
+ * {@link friendlyAiErrorMessage}.  Known errors get a mild warning look;
+ * generic / unmapped errors get a stronger style plus a collapsible
+ * "原始错误详情" section so users and admins can inspect the raw provider
+ * response without ugly Python dict / HTTP body text leaking into the chat.
+ */
+function FriendlyAiErrorBanner({
+  tier,
+  message,
+  original,
+}: {
+  tier: "known" | "fallback";
+  message: string;
+  original?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const isFallback = tier === "fallback";
+  const bannerStyle = isFallback
+    ? "bg-destructive/10 border-destructive/30 text-destructive"
+    : "bg-amber-500/10 border-amber-500/30 text-amber-800 dark:text-amber-300";
+  const Chevron = open ? ChevronDownIcon : ChevronRightIcon;
+  const rawText = (original ?? "").trim();
+  const rawDiffers = Boolean(rawText && rawText !== message);
+
+  const copyRaw = useCallback(async () => {
+    if (!rawText) return;
+    try {
+      await navigator.clipboard.writeText(rawText);
+      setCopied(true);
+      const t = setTimeout(() => setCopied(false), 1500);
+      // no-op cleanup, just clear the visual feedback flag
+      return () => clearTimeout(t);
+    } catch {
+      /* clipboard API may be restricted on some browsers */
+    }
+    return undefined;
+  }, [rawText]);
+
+  return (
+    <div
+      className={cn(
+        "my-3 rounded-lg border px-3 py-2.5 text-sm shadow-sm",
+        bannerStyle,
+      )}
+      role={isFallback ? "alert" : "status"}
+    >
+      <div className="flex items-start gap-2.5">
+        <AlertTriangleIcon className="mt-0.5 size-[18px] shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold leading-snug">
+              {isFallback ? "模型请求出错" : "请求提示"}
+            </span>
+          </div>
+          <p className="mt-1 leading-relaxed whitespace-pre-wrap break-words">
+            {message}
+          </p>
+          {rawDiffers && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium opacity-80 transition-opacity hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10"
+              >
+                <Chevron className="size-3.5" />
+                {open ? "收起详情" : "查看原始错误详情"}
+              </button>
+              <button
+                type="button"
+                onClick={copyRaw}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium opacity-70 transition-opacity hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10"
+                aria-label="复制原始错误文本"
+              >
+                <CopyIcon className="size-3.5" />
+                {copied ? "已复制" : "复制"}
+              </button>
+            </div>
+          )}
+          {open && rawDiffers && (
+            <pre className="mt-2 max-h-48 overflow-auto rounded border bg-black/5 p-2 text-[11px] leading-relaxed dark:bg-white/10 font-mono opacity-90 whitespace-pre-wrap break-all select-text">
+              {rawText}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 
 /**
  * Get file extension and check helpers
