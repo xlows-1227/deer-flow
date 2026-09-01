@@ -401,6 +401,22 @@
   }
 }
 
+@layer components {
+  .assistant-prose {
+    @apply text-[15px] leading-7;
+  }
+
+  .assistant-prose [data-streamdown="inline-code"] {
+    @apply bg-secondary/70 rounded-md px-1 py-0.5 font-mono text-[0.88em] font-medium;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+
+  .assistant-prose [data-streamdown="paragraph"] {
+    @apply text-pretty;
+  }
+}
+
 :root {
   --container-width-xs: calc(var(--spacing) * 72);
   --container-width-sm: calc(var(--spacing) * 144);

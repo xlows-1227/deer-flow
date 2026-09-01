@@ -144,6 +144,7 @@ export function MessageListItem({
   threadId,
   showCopyButton = true,
   precomputedToolNames,
+  showTimestamp = true,
 }: {
   className?: string;
   message: Message;
@@ -153,6 +154,7 @@ export function MessageListItem({
   runId?: string;
   showCopyButton?: boolean;
   precomputedToolNames?: string[][];
+  showTimestamp?: boolean;
 }) {
   const isHuman = message.type === "human";
   const timestamp = formatMessageTime(getMessageTimestamp(message));
@@ -168,10 +170,10 @@ export function MessageListItem({
         threadId={threadId}
         precomputedToolNames={precomputedToolNames}
       />
-      {timestamp && (
+      {showTimestamp && timestamp && (
         <div
           className={cn(
-            "mt-0.5 text-[10px] text-slate-400",
+            "text-muted-foreground/65 mt-1 font-mono text-[10px] tracking-tight tabular-nums",
             isHuman ? "text-right" : "text-left",
           )}
         >
@@ -385,8 +387,11 @@ function MessageContent_({
   }
 
   if (isHuman) {
+    const isShortSingleLineMessage =
+      contentToDisplay.length <= 12 && !contentToDisplay.includes("\n");
     const messageResponse = contentToDisplay ? (
       <AIElementMessageResponse
+        className={cn(isShortSingleLineMessage && "whitespace-nowrap")}
         remarkPlugins={humanMessagePlugins.remarkPlugins}
         rehypePlugins={humanMessagePlugins.rehypePlugins}
         components={components}
@@ -400,7 +405,14 @@ function MessageContent_({
         {filesList}
         {referencedFilesList}
         {messageResponse && (
-          <AIElementMessageContent className="w-fit">
+          <AIElementMessageContent
+            className="w-fit"
+            style={
+              isShortSingleLineMessage
+                ? { minWidth: `${contentToDisplay.length + 2.5}em` }
+                : undefined
+            }
+          >
             {messageResponse}
           </AIElementMessageContent>
         )}
@@ -426,7 +438,7 @@ function MessageContent_({
           content={toolOmissionResult.content}
           isLoading={isLoading}
           rehypePlugins={[rehypeRaw, ...rehypePlugins, [rehypeKatex, { output: "html" }]]}
-          className="my-3"
+          className="assistant-prose my-3"
           components={components}
         />
       )}

@@ -51,6 +51,13 @@ class AgentChannelRow(Base):
             sqlite_where=text("status = 'active'"),
             postgresql_where=text("status = 'active'"),
         ),
+        Index(
+            "uq_agent_channels_app_id_active",
+            "app_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
         Index("ix_agent_channels_agent_status", "agent_id", "status"),
     )
 

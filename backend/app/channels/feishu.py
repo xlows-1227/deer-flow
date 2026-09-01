@@ -1219,7 +1219,7 @@ class _LarkWebSocketSession:
             event_handler=self._event_handler,
             log_level=lark.LogLevel.INFO,
             domain=self._domain,
-            auto_reconnect=False,
+            auto_reconnect=True,
         )
         self._client = client
 

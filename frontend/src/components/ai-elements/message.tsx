@@ -56,7 +56,7 @@ export const MessageContent = ({
     className={cn(
       "is-user:dark flex w-fit max-w-full min-w-0 flex-col gap-2 overflow-visible",
       "group-[.is-user]:overflow-hidden",
-      "group-[.is-user]:bg-secondary group-[.is-user]:text-foreground group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:px-4 group-[.is-user]:py-3",
+      "group-[.is-user]:bg-secondary/85 group-[.is-user]:text-foreground group-[.is-user]:border-border/60 group-[.is-user]:ml-auto group-[.is-user]:max-w-[min(82%,42rem)] group-[.is-user]:rounded-2xl group-[.is-user]:rounded-br-md group-[.is-user]:border group-[.is-user]:px-4 group-[.is-user]:py-2.5 group-[.is-user]:shadow-[0_12px_32px_-28px_color-mix(in_oklab,var(--foreground)_45%,transparent)]",
       "group-[.is-assistant]:text-foreground",
       // Ensure long glued words (e.g. concatenated English without spaces)
       // wrap inside the bubble instead of overflowing horizontally past

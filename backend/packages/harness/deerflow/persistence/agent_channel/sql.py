@@ -502,6 +502,23 @@ class AgentChannelRepository:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
             if row is None or row.status == "deleting" or row.runtime_stop_requested or row.runtime_lease_token is not None:
                 return None
+            # Pre-check: system-wide app_id uniqueness (Feishu WebSocket allows only one connection per app_id)
+            existing_app_conflict = (
+                (await session.execute(
+                    select(AgentChannelRow).where(
+                        AgentChannelRow.status == "active",
+                        AgentChannelRow.app_id == row.app_id,
+                        AgentChannelRow.id != binding_id,
+                    )
+                ))
+                .scalar_one_or_none()
+            )
+            if existing_app_conflict is not None:
+                raise ActiveAgentChannelConflictError(
+                    f"This Feishu app (app_id={row.app_id}) is already bound to Agent {existing_app_conflict.agent_id}. "
+                    "Feishu WebSocket connections allow only one active binding per app_id. "
+                    "Please stop the other binding first, or use a different Feishu app."
+                )
             row.status = "active"
             row.runtime_stop_requested = False
             row.runtime_lease_token = None
@@ -516,7 +533,9 @@ class AgentChannelRepository:
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
-                raise ActiveAgentChannelConflictError("Agent already has an active channel binding") from exc
+                raise ActiveAgentChannelConflictError(
+                    "Agent already has an active channel binding, or another Agent is already using this Feishu app"
+                ) from exc
             return _to_dict(row)
 
     async def deactivate(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
