@@ -16,6 +16,7 @@ import {
   extractTextFromMessage,
   getMessageTimestamp,
   isHiddenFromUIMessage,
+  parseUploadedFiles,
   repairDynamicContextUserMessageOrder,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -116,6 +117,21 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     if (identity) {
       lastIndexByIdentity.set(identity, index);
     }
+    // For human messages that have no stable `id` (e.g. optimistic UI +
+    // subsequent server echo), also build a secondary key from text and/or
+    // attached files.  The server echo typically has a different id but
+    // semantically represents the same user message.  Without this, sending
+    // a picture (especially one with no accompanying text) renders twice
+    // until next page reload.
+    if (message.type === "human") {
+      const visKey = humanMessageVisibilityKey(message);
+      if (visKey && !visKey.startsWith("message:")) {
+        // secondary keys never override a concrete identity already stored
+        if (!lastIndexByIdentity.has(visKey)) {
+          lastIndexByIdentity.set(visKey, index);
+        }
+      }
+    }
   });
 
   // Keep the earliest position of each message (so history ordering survives
@@ -125,16 +141,42 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const emittedIdentities = new Set<string>();
   const result: Message[] = [];
   for (const message of messages) {
-    const identity = messageIdentity(message);
-    if (!identity) {
+    const primaryIdentity = messageIdentity(message);
+    const secondaryIdentity =
+      message.type === "human"
+        ? (() => {
+            const k = humanMessageVisibilityKey(message);
+            return k && !k.startsWith("message:") ? k : undefined;
+          })()
+        : undefined;
+
+    if (!primaryIdentity && !secondaryIdentity) {
       result.push(message);
       continue;
     }
-    if (emittedIdentities.has(identity)) {
+    // If either identity has been emitted, skip (we already de-duplicated this semantic message).
+    if (
+      (primaryIdentity && emittedIdentities.has(primaryIdentity)) ||
+      (secondaryIdentity && emittedIdentities.has(secondaryIdentity))
+    ) {
       continue;
     }
-    emittedIdentities.add(identity);
-    result.push(messages[lastIndexByIdentity.get(identity)!]!);
+    // Prefer the concrete id over the visibility key for indexing — if the
+    // server echo has a real id, always use its latest copy.
+    const resolvedIdentity =
+      (primaryIdentity && lastIndexByIdentity.has(primaryIdentity)
+        ? primaryIdentity
+        : secondaryIdentity!) ?? primaryIdentity ?? secondaryIdentity!;
+    if (!lastIndexByIdentity.has(resolvedIdentity)) {
+      result.push(message);
+      if (primaryIdentity) emittedIdentities.add(primaryIdentity);
+      if (secondaryIdentity) emittedIdentities.add(secondaryIdentity);
+      continue;
+    }
+    emittedIdentities.add(resolvedIdentity);
+    if (primaryIdentity) emittedIdentities.add(primaryIdentity);
+    if (secondaryIdentity) emittedIdentities.add(secondaryIdentity);
+    result.push(messages[lastIndexByIdentity.get(resolvedIdentity)!]!);
   }
   return result;
 }
@@ -476,9 +518,104 @@ function repairTrailingTurnOrder(messages: Message[]): Message[] {
   return [...established, ...currentTail];
 }
 
+function getMessageSeq(message: Message): number {
+  const seq = (message as unknown as { seq?: unknown }).seq;
+  if (typeof seq === "number" && Number.isFinite(seq)) return seq;
+  const metadataSeq = (message as unknown as { response_metadata?: { seq?: unknown } })
+    .response_metadata?.seq;
+  if (typeof metadataSeq === "number" && Number.isFinite(metadataSeq))
+    return metadataSeq;
+  const additionalSeq = (message as unknown as { additional_kwargs?: { seq?: unknown } })
+    .additional_kwargs?.seq;
+  if (typeof additionalSeq === "number" && Number.isFinite(additionalSeq))
+    return additionalSeq;
+  return -Infinity;
+}
+
+/**
+ * Stable, last-resort ordering for merged messages.
+ *
+ * The merge logic generally preserves source ordering, but when multiple
+ * sources (checkpoint thread state, run-event history, optimistic UI, SSE
+ * live updates) disagree on ordering we can end up with messages whose
+ * rendered timestamps are visibly out-of-sequence (e.g. an older human
+ * message appears below a newer run's AI reply).
+ *
+ * This sort keys by:
+ *   1. `seq` (backend-assigned per-message ordering) if available
+ *   2. parsed timestamp for messages that carry one
+ *   3. original array index as a tiebreaker so the sort remains stable
+ */
+function isOptimisticMessage(message: Message): boolean {
+  const id = message.id || "";
+  return id.startsWith("opt-") || (message.additional_kwargs?.timestamp !== undefined && !message.response_metadata);
+}
+
+function sortMessagesByTime(messages: Message[]): Message[] {
+  if (messages.length <= 1) return messages;
+
+  const optimisticMsgs: Message[] = [];
+  const serverMsgs: Message[] = [];
+  const optimisticIndices: number[] = [];
+
+  messages.forEach((m, index) => {
+    if (isOptimisticMessage(m)) {
+      optimisticMsgs.push(m);
+      optimisticIndices.push(index);
+    } else {
+      serverMsgs.push(m);
+    }
+  });
+
+  const sortedServerMsgs = serverMsgs.map((m, index) => ({ m, index }));
+  sortedServerMsgs.sort((a, b) => {
+    const seqA = getMessageSeq(a.m);
+    const seqB = getMessageSeq(b.m);
+    if (Number.isFinite(seqA) && Number.isFinite(seqB) && seqA !== seqB) {
+      return seqA - seqB;
+    }
+    const tsA = getMessageTimestamp(a.m);
+    const tsB = getMessageTimestamp(b.m);
+    if (tsA && tsB && tsA !== tsB) {
+      return tsA < tsB ? -1 : 1;
+    }
+    return a.index - b.index;
+  });
+
+  if (optimisticMsgs.length === 0) {
+    return sortedServerMsgs.map(({ m }) => m);
+  }
+
+  const result: Message[] = [];
+  let optIdx = 0;
+
+  for (const serverMsg of sortedServerMsgs) {
+    const origIdx = messages.indexOf(serverMsg.m);
+    while (optIdx < optimisticMsgs.length) {
+      const optOrigIdx = optimisticIndices[optIdx]!;
+      if (optOrigIdx < origIdx) {
+        result.push(optimisticMsgs[optIdx]!);
+        optIdx++;
+      } else {
+        break;
+      }
+    }
+    result.push(serverMsg.m);
+  }
+
+  while (optIdx < optimisticMsgs.length) {
+    result.push(optimisticMsgs[optIdx]!);
+    optIdx++;
+  }
+
+  return result;
+}
+
 function finalizeMergedMessages(messages: Message[]): Message[] {
-  return repairDynamicContextUserMessageOrder(
-    repairTrailingTurnOrder(dedupeMessagesByIdentity(messages)),
+  return sortMessagesByTime(
+    repairDynamicContextUserMessageOrder(
+      repairTrailingTurnOrder(dedupeMessagesByIdentity(messages)),
+    ),
   );
 }
 
@@ -519,6 +656,46 @@ function mergeThreadAndOptimisticMessages(
   ];
 }
 
+/**
+ * Build a stable signature for the files attached to a human message.
+ *
+ * The optimistic UI stores files on `message.additional_kwargs.files[]` (or
+ * `message.files[]` for backwards compat).  The server echoes them back via
+ * a `<uploaded_files>…</uploaded_files>` marker inside `message.content`
+ * **and** also populates `additional_kwargs.files[]` on the echoed message
+ * when re-serialized from checkpoint/history.
+ *
+ * To handle both sources we union the two views and then deterministically
+ * serialize `filename|size|path` tuples that survive the round-trip.  The
+ * result is used as part of the human-message visibility key so pure-file
+ * sends (no text) still collapse to a single entry after server echo.
+ */
+function humanMessageFilesSignature(message: Message): string | null {
+  if (message.type !== "human") return null;
+  const rawFiles: FileInMessage[] = [];
+  const fromAdditional = (
+    message as unknown as { additional_kwargs?: { files?: FileInMessage[] } }
+  ).additional_kwargs?.files;
+  if (Array.isArray(fromAdditional)) rawFiles.push(...fromAdditional);
+  const fromDirect = (message as unknown as { files?: FileInMessage[] }).files;
+  if (Array.isArray(fromDirect)) rawFiles.push(...fromDirect);
+  const textContent = extractTextFromMessage(message);
+  if (typeof textContent === "string" && textContent.includes("<uploaded_files>")) {
+    rawFiles.push(...parseUploadedFiles(textContent));
+  }
+  if (rawFiles.length === 0) return null;
+  const signature = rawFiles
+    .map((f) => {
+      const name = f.filename ?? "";
+      const size = typeof f.size === "number" ? String(f.size) : "";
+      const path = f.path ?? "";
+      return `${name}|${size}|${path}`;
+    })
+    .sort()
+    .join(";");
+  return `human-files:${signature}`;
+}
+
 function humanMessageVisibilityKey(message: Message): string | null {
   if (message.type !== "human") {
     return null;
@@ -528,7 +705,10 @@ function humanMessageVisibilityKey(message: Message): string | null {
     return identity;
   }
   const text = normalizeHumanMessageText(message);
-  return text ? `human-content:${text}` : null;
+  if (text) return `human-content:${text}`;
+  // Pure-file sends (no text) fall back to a file-based signature so
+  // server echo can still be matched against the optimistic message.
+  return humanMessageFilesSignature(message);
 }
 
 function getHumanMessageVisibilityKeys(messages: Message[]): Set<string> {
@@ -554,14 +734,23 @@ function hasServerReplacementForOptimisticHuman(
   baselineHumanMessageKeys: ReadonlySet<string>,
   serverMessages: Message[],
 ): boolean {
+  const optimisticHumanMessages = optimisticMessages.filter(
+    (message) => message.type === "human",
+  );
+  if (optimisticHumanMessages.length === 0) return false;
+
   const optimisticHumanTexts = new Set(
-    optimisticMessages
-      .filter((message) => message.type === "human")
+    optimisticHumanMessages
       .map(normalizeHumanMessageText)
       .filter((text) => text.length > 0),
   );
+  const optimisticFileSigs = new Set(
+    optimisticHumanMessages
+      .map(humanMessageFilesSignature)
+      .filter((sig): sig is string => Boolean(sig)),
+  );
 
-  if (optimisticHumanTexts.size === 0) {
+  if (optimisticHumanTexts.size === 0 && optimisticFileSigs.size === 0) {
     return false;
   }
 
@@ -573,7 +762,11 @@ function hasServerReplacementForOptimisticHuman(
     if (key && baselineHumanMessageKeys.has(key)) {
       return false;
     }
-    return optimisticHumanTexts.has(normalizeHumanMessageText(message));
+    const text = normalizeHumanMessageText(message);
+    if (text && optimisticHumanTexts.has(text)) return true;
+    const fileSig = humanMessageFilesSignature(message);
+    if (fileSig && optimisticFileSigs.has(fileSig)) return true;
+    return false;
   });
 }
 
@@ -582,15 +775,17 @@ export function getVisibleOptimisticMessagesForServerMessages(
   baselineHumanMessageKeys: ReadonlySet<string>,
   serverMessages: Message[],
 ): Message[] {
-  if (
-    optimisticMessages.some((message) => message.type === "human") &&
-    hasServerReplacementForOptimisticHuman(
+  const hasHumanOptimistic = optimisticMessages.some((message) => message.type === "human");
+
+  if (hasHumanOptimistic) {
+    const hasReplacement = hasServerReplacementForOptimisticHuman(
       optimisticMessages,
       baselineHumanMessageKeys,
       serverMessages,
-    )
-  ) {
-    return [];
+    );
+    if (hasReplacement) {
+      return [];
+    }
   }
   return optimisticMessages;
 }
@@ -930,8 +1125,14 @@ export function useThreadStream({
         typeof event.message === "string" &&
         event.message.trim()
       ) {
-        const e = event as { type: "llm_retry"; message: string };
-        toast(e.message);
+        const e = event as { type: "llm_retry"; attempt: number; max_attempts: number; message: string };
+        // Don't show intermediate retry toasts — they flicker too fast and
+        // confuse users.  Only surface the FINAL failure via the message
+        // bubble.  Retries are invisible to the user; only the final
+        // result matters.
+        if (e.attempt >= e.max_attempts) {
+          toast("LLM 服务繁忙，已达最大重试次数", { id: "llm-retry-final", duration: 5000 });
+        }
       }
     },
     onError(error) {
@@ -940,6 +1141,7 @@ export function useThreadStream({
         return;
       }
       setOptimisticMessages([]);
+      setIsUploading(false);
       toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -957,6 +1159,13 @@ export function useThreadStream({
       if (!eventThreadId || !isCurrentStreamThread(eventThreadId)) {
         return;
       }
+      // The stream has completed successfully, so any remaining optimistic
+      // messages (human echo placeholder, "uploading files" mock AI, etc.)
+      // have been superseded by actual server-returned messages and should
+      // not be rendered anymore. Without this, pure-file sends had a habit
+      // of lingering because the earlier echo-detection logic required a
+      // non-empty text to match against.
+      setOptimisticMessages([]);
       listeners.current.onFinish?.(state.values);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
