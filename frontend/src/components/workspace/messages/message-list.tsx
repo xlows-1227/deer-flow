@@ -262,7 +262,7 @@ export function MessageList({
       }
 
       return (
-        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div className="ml-auto flex shrink-0 justify-start opacity-0 transition-opacity delay-150 duration-200 group-focus-within/assistant-turn:opacity-100 group-hover/assistant-turn:opacity-100">
           <CopyButton clipboardData={clipboardData} />
         </div>
       );
@@ -418,7 +418,7 @@ export function MessageList({
     <Conversation
       className={cn("flex size-full flex-col justify-center", className)}
     >
-      <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
+      <ConversationContent className="mx-auto w-full max-w-[58rem] gap-7 px-4 pt-8 sm:px-6 lg:px-8">
         <LoadMoreHistoryIndicator
           isLoading={isHistoryLoading}
           hasMore={hasMoreHistory}
@@ -434,7 +434,8 @@ export function MessageList({
                 key={groupKey}
                 className={cn(
                   "w-full",
-                  group.type === "assistant" && "group/assistant-turn",
+                  group.type === "assistant" &&
+                    "group/assistant-turn before:bg-foreground/14 relative max-w-[52rem] pl-4 before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-full sm:pl-5",
                 )}
               >
                 {group.messages.map((msg, messageIndex) => {
@@ -450,23 +451,29 @@ export function MessageList({
                       isLoading={thread.isLoading}
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
+                      showTimestamp={
+                        group.type !== "assistant" ||
+                        tokenUsageInlineMode !== "per_turn"
+                      }
                     />
                   );
                 })}
-                {group.type === "assistant" &&
-                  renderTokenUsage({
-                    messages: group.messages,
-                    turnUsageMessages,
-                    groupId: group.id,
-                  })}
-                {group.type === "assistant" &&
-                  renderAssistantCopyButton(
-                    group.messages,
-                    isAssistantMessageGroupStreaming(
+                {group.type === "assistant" && (
+                  <div className="flex min-h-7 w-full items-center gap-2">
+                    {renderTokenUsage({
+                      messages: group.messages,
+                      turnUsageMessages,
+                      groupId: group.id,
+                    })}
+                    {renderAssistantCopyButton(
                       group.messages,
-                      streamingMessages,
-                    ),
-                  )}
+                      isAssistantMessageGroupStreaming(
+                        group.messages,
+                        streamingMessages,
+                      ),
+                    )}
+                  </div>
+                )}
               </div>
             );
           } else if (group.type === "assistant:clarification") {
@@ -614,7 +621,7 @@ export function MessageList({
             );
           }
           return (
-            <div key={`group-${groupKey}`} className="w-full">
+            <div key={`group-${groupKey}`} className="w-full max-w-[52rem]">
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}
