@@ -47,7 +47,7 @@ function validateNextParam(next: string | null): string | null {
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, refreshUser } = useAuth();
   const { theme, resolvedTheme } = useTheme();
 
   const [identifier, setIdentifier] = useState("");
@@ -162,7 +162,15 @@ export default function LoginPage() {
         return;
       }
 
+      // Login 成功后先同步刷新 user（让 AuthProvider 拿到 user），
+      // 这样跳转 workspace 时客户端可直接渲染，不必等 SSR 里的 /auth/me。
+      try {
+        await refreshUser();
+      } catch {
+        /* ignore — 即使 refresh 失败，依赖 SSR 的 fallback 机制也会兜底 */
+      }
       router.push(redirectPath);
+      router.refresh(); // 让 Next 重拉 workspace layout 的 server component，确保注入 initialUser
     } catch {
       setError("Network error. Please try again.");
     } finally {

@@ -144,9 +144,25 @@ sum_sandbox_container_layer_bytes() {
   echo "$total"
 }
 
+json_escape_string() {
+  # Escape a string for JSON without python/jq (CentOS hosts often lack both).
+  printf '%s' "$1" | awk '
+    BEGIN { ORS="" }
+    {
+      if (NR > 1) printf "\\n"
+      line = $0
+      gsub(/\\/, "\\\\", line)
+      gsub(/"/, "\\\"", line)
+      gsub(/\t/, "\\t", line)
+      gsub(/\r/, "", line)
+      printf "%s", line
+    }
+  '
+}
+
 send_feishu_text() {
   local text="$1"
-  local payload response http_code
+  local payload response http_code body escaped
 
   if [ -z "$FEISHU_WEBHOOK" ]; then
     log "WARN: Feishu webhook empty, skip notify"
@@ -155,7 +171,8 @@ send_feishu_text() {
 
   # Feishu bot/v2 requires msg_type; bare {"text":...} returns code 19002.
   # https://open.feishu.cn/document/client-docs/bot-v2/add-custom-bot
-  payload=$(python3 -c 'import json,sys; print(json.dumps({"msg_type":"text","content":{"text":sys.argv[1]}}, ensure_ascii=False))' "$text")
+  escaped=$(json_escape_string "$text")
+  payload=$(printf '{"msg_type":"text","content":{"text":"%s"}}' "$escaped")
 
   response=$(curl -sS -w "\n%{http_code}" -X POST \
     -H "Content-Type: application/json; charset=utf-8" \

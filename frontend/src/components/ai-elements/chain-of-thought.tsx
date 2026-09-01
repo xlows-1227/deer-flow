@@ -139,19 +139,19 @@ export const ChainOfThoughtStep = memo(
     return (
       <div
         className={cn(
-          "flex gap-2 text-sm",
+          "flex gap-3 text-sm",
           statusStyles[status],
           "fade-in-0 slide-in-from-top-2 animate-in",
           className,
         )}
         {...props}
       >
-        <div className="relative mt-0.5">
+        <div className="bg-muted/70 border-border/50 relative flex size-7 shrink-0 items-center justify-center rounded-lg border">
           {isValidElement(Icon) ? Icon : <Icon className="size-4" />}
-          <div className="bg-border absolute top-7 bottom-0 left-1/2 -mx-px w-px" />
+          <div className="bg-border absolute top-9 bottom-0 left-1/2 -mx-px w-px" />
         </div>
-        <div className="flex-1 space-y-2 overflow-hidden">
-          <div>{label}</div>
+        <div className="min-w-0 flex-1 space-y-2 overflow-hidden pt-0.5">
+          <div className="leading-6">{label}</div>
           {description && (
             <div className="text-muted-foreground text-xs">{description}</div>
           )}

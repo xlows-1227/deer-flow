@@ -44,6 +44,9 @@ RUNTIME_STARTUP_FAILURE_PROJECTION_TIMEOUT_SECONDS = 2.0
 RUNTIME_STOP_TIMEOUT_SECONDS = 10.0
 RUNTIME_LATE_CLAIM_RETRY_SECONDS = 0.05
 RUNTIME_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS = 20.0
+RUNTIME_AUTO_RESTART_DELAY_SECONDS = 3.0
+RUNTIME_AUTO_RESTART_MAX_ATTEMPTS = 5
+RUNTIME_AUTO_RESTART_RESET_WINDOW_SECONDS = 30.0
 
 ConnectionTester = Callable[[str, str], Awaitable[tuple[bool, str]]]
 RuntimeHealthCallback = Callable[[bool, str | None], Awaitable[None]]
@@ -328,6 +331,8 @@ class FeishuSupervisor:
         self._shutting_down = False
         self._shutdown_complete = False
         self._shutdown_lock = asyncio.Lock()
+        self._restart_attempts: dict[str, tuple[int, float]] = {}
+        self._auto_restart_tasks: dict[str, asyncio.Task[None]] = {}
 
     @asynccontextmanager
     async def _binding_lifecycle(self, binding_id: str) -> AsyncIterator[_BindingLockEntry]:
@@ -1439,7 +1444,8 @@ class FeishuSupervisor:
         *,
         generation: object,
     ) -> None:
-        """Remove one failed runtime and persist unhealthy without touching peers."""
+        """Remove one failed runtime and persist unhealthy, then auto-restart if still desired."""
+        should_auto_restart = False
         async with self._binding_lifecycle(binding_id):
             current = self._running.get(binding_id)
             if current is None or current.generation is not generation:
@@ -1464,6 +1470,60 @@ class FeishuSupervisor:
                 health="unhealthy",
                 detail=detail,
                 running=False,
+            )
+            if row["status"] == "active" and not self._shutting_down:
+                should_auto_restart = True
+
+        if should_auto_restart:
+            self._schedule_auto_restart(binding_id, detail)
+
+    def _schedule_auto_restart(self, binding_id: str, detail: str) -> None:
+        """Schedule a delayed auto-restart with backoff tracking."""
+        now = time.monotonic()
+        prev_count, prev_time = self._restart_attempts.get(binding_id, (0, 0.0))
+        if now - prev_time > RUNTIME_AUTO_RESTART_RESET_WINDOW_SECONDS:
+            prev_count = 0
+        count = prev_count + 1
+        if count > RUNTIME_AUTO_RESTART_MAX_ATTEMPTS:
+            logger.error(
+                "Feishu binding exceeded auto-restart limit (%d), giving up",
+                RUNTIME_AUTO_RESTART_MAX_ATTEMPTS,
+                extra={"binding_id": binding_id, "reason": detail},
+            )
+            return
+        self._restart_attempts[binding_id] = (count, now)
+        delay = RUNTIME_AUTO_RESTART_DELAY_SECONDS * (2 ** (count - 1))
+        delay = min(delay, 30.0)
+        logger.warning(
+            "Feishu WebSocket lost (%s), auto-restart #%d in %.1fs",
+            detail,
+            count,
+            delay,
+            extra={"binding_id": binding_id},
+        )
+        existing = self._auto_restart_tasks.pop(binding_id, None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(self._run_auto_restart(binding_id, delay))
+        self._auto_restart_tasks[binding_id] = task
+        task.add_done_callback(lambda done: self._auto_restart_tasks.pop(binding_id, None))
+
+    async def _run_auto_restart(self, binding_id: str, delay: float) -> None:
+        """Wait for the backoff delay then attempt restart."""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        try:
+            await self.start_binding(binding_id)
+            logger.info("Feishu auto-restart succeeded", extra={"binding_id": binding_id})
+            self._restart_attempts.pop(binding_id, None)
+        except Exception as exc:
+            logger.warning(
+                "Feishu auto-restart failed: %s",
+                exc,
+                extra={"binding_id": binding_id},
             )
 
     async def _handle_runtime_health(

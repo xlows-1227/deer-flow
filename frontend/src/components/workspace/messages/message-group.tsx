@@ -229,7 +229,10 @@ export function MessageGroup({
 
   return (
     <ChainOfThought
-      className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
+      className={cn(
+        "bg-card/70 border-border/70 w-full gap-2 rounded-xl border p-1 shadow-[0_12px_36px_-32px_color-mix(in_oklab,var(--foreground)_45%,transparent)] backdrop-blur-sm",
+        className,
+      )}
       defaultOpen={true}
     >
       {aboveLastToolCallSteps.length > 0 && (
@@ -259,7 +262,7 @@ export function MessageGroup({
         </Button>
       )}
       {lastToolCallStep && (
-        <ChainOfThoughtContent className="px-4 pb-2">
+        <ChainOfThoughtContent className="m-0 space-y-3 px-3 py-2.5">
           {showAbove &&
             aboveLastToolCallSteps.flatMap((step) => {
               const stepIndex = steps.indexOf(step);
@@ -303,7 +306,7 @@ export function MessageGroup({
           )}
           <Button
             key={lastReasoningStep.id}
-            className="w-full items-start justify-start text-left"
+            className="h-auto w-full items-start justify-start rounded-lg px-2 py-1.5 text-left"
             variant="ghost"
             onClick={() => setShowLastThinking(!showLastThinking)}
           >
@@ -339,7 +342,7 @@ export function MessageGroup({
             </div>
           </Button>
           {showLastThinking && (
-            <ChainOfThoughtContent className="px-4 pb-2">
+            <ChainOfThoughtContent className="mt-1 px-3 pb-2">
               <ChainOfThoughtStep
                 key={lastReasoningStep.id}
                 label={

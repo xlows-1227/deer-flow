@@ -26,25 +26,27 @@ function TokenUsageSummary({
   return (
     <div
       className={cn(
-        "text-muted-foreground border-border/60 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t pt-2 text-[11px]",
+        "text-muted-foreground mt-2 flex min-h-7 min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-1 text-[10.5px]",
         className,
       )}
     >
-      <span className="inline-flex items-center gap-1 font-medium">
-        <CoinsIcon className="size-3" />
+      <span className="bg-muted/60 border-border/50 inline-flex items-center gap-1.5 rounded-full border px-2 py-1 font-medium">
+        <CoinsIcon className="size-3 opacity-70" />
         {t.tokenUsage.label}
       </span>
-      <span>
+      <span className="hidden sm:inline">
         {t.tokenUsage.input}: {formatTokenCount(inputTokens ?? 0)}
       </span>
-      <span>
+      <span className="hidden sm:inline">
         {t.tokenUsage.output}: {formatTokenCount(outputTokens ?? 0)}
       </span>
-      <span className="font-medium">
+      <span className="text-foreground/70 font-medium">
         {t.tokenUsage.total}: {formatTokenCount(totalTokens ?? 0)}
       </span>
       {timestamp && (
-        <span className="ml-auto text-slate-400">{timestamp}</span>
+        <span className="text-muted-foreground/60 ml-auto font-mono tracking-tight tabular-nums">
+          {timestamp}
+        </span>
       )}
     </div>
   );
@@ -112,12 +114,12 @@ export function MessageTokenUsageDebugList({
   }
 
   return (
-    <div className={cn("border-border/60 mt-1 border-t pt-2", className)}>
+    <div className={cn("mt-2", className)}>
       <div className="space-y-2">
         {steps.map((step) => (
           <div
             key={step.id}
-            className="bg-muted/30 border-border/50 flex items-start justify-between gap-3 rounded-md border px-3 py-2"
+            className="bg-card/60 border-border/60 flex items-start justify-between gap-3 rounded-lg border px-3 py-2.5"
           >
             <div className="min-w-0 flex-1 space-y-1">
               <div className="text-foreground flex items-center gap-2 text-xs font-medium">
