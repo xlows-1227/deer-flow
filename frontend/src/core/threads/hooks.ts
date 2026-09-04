@@ -12,15 +12,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import {
-  extractTextFromMessage,
-  getMessageTimestamp,
-  isHiddenFromUIMessage,
-  parseUploadedFiles,
-  repairDynamicContextUserMessageOrder,
-  stripUploadedFilesTag,
-  type FileInMessage,
-} from "../messages/utils";
+import { getMessageTimestamp, type FileInMessage } from "../messages/utils";
 import { sandboxFilesQueryKey } from "../sandbox";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
@@ -28,12 +20,30 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage } from "./api";
+import {
+  dedupeMessagesByIdentity,
+  getHumanMessageVisibilityKeys,
+  getMessagesAfterBaseline,
+  getVisibleOptimisticMessagesForServerMessages,
+  hasServerReplacementForOptimisticHuman,
+  mergeMessages,
+  messageIdentity,
+  normalizeHumanMessageText,
+} from "./merge";
+import {
+  fetchRunMessages,
+  findLatestUnloadedRunIndex,
+  mergeLoadedRunMessages,
+  sortRunsChronologically,
+  useThreadRuns,
+  withMessageTimestamp,
+  type LoadedRunMessage,
+} from "./query";
 import { findRunToRejoin } from "./rejoin";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
-  RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
 
@@ -56,15 +66,6 @@ export type ThreadStreamOptions = {
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   multitaskStrategy?: "reject" | "interrupt" | "rollback" | "enqueue";
-};
-
-const THREAD_RUNS_PAGE_SIZE = 100;
-const RUN_MESSAGES_PAGE_SIZE = 200;
-
-type RunMessagesResponse = {
-  data?: RunMessage[];
-  has_more?: boolean;
-  hasMore?: boolean;
 };
 
 function waitForNextPaint(): Promise<void> {
@@ -95,770 +96,6 @@ function uploadedFileSizeToNumber(size: UploadedFileInfo["size"]): number {
   return Number.isFinite(normalized) ? normalized : 0;
 }
 
-function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    return `message:${message.id}`;
-  }
-  return undefined;
-}
-
-function dedupeMessagesByIdentity(messages: Message[]): Message[] {
-  const lastIndexByIdentity = new Map<string, number>();
-
-  messages.forEach((message, index) => {
-    const identity = messageIdentity(message);
-    if (identity) {
-      lastIndexByIdentity.set(identity, index);
-    }
-    // For human messages that have no stable `id` (e.g. optimistic UI +
-    // subsequent server echo), also build a secondary key from text and/or
-    // attached files.  The server echo typically has a different id but
-    // semantically represents the same user message.  Without this, sending
-    // a picture (especially one with no accompanying text) renders twice
-    // until next page reload.
-    if (message.type === "human") {
-      const visKey = humanMessageVisibilityKey(message);
-      if (visKey && !visKey.startsWith("message:")) {
-        // secondary keys never override a concrete identity already stored
-        if (!lastIndexByIdentity.has(visKey)) {
-          lastIndexByIdentity.set(visKey, index);
-        }
-      }
-    }
-  });
-
-  // Keep the earliest position of each message (so history ordering survives
-  // a failed history/thread alignment) but render the freshest copy — later
-  // duplicates usually come from live thread state whose content supersedes
-  // run-event history.
-  const emittedIdentities = new Set<string>();
-  const result: Message[] = [];
-  for (const message of messages) {
-    const primaryIdentity = messageIdentity(message);
-    const secondaryIdentity =
-      message.type === "human"
-        ? (() => {
-            const k = humanMessageVisibilityKey(message);
-            return k && !k.startsWith("message:") ? k : undefined;
-          })()
-        : undefined;
-
-    if (!primaryIdentity && !secondaryIdentity) {
-      result.push(message);
-      continue;
-    }
-    // If either identity has been emitted, skip (we already de-duplicated this semantic message).
-    if (
-      (primaryIdentity && emittedIdentities.has(primaryIdentity)) ||
-      (secondaryIdentity && emittedIdentities.has(secondaryIdentity))
-    ) {
-      continue;
-    }
-    // Prefer the concrete id over the visibility key for indexing — if the
-    // server echo has a real id, always use its latest copy.
-    const resolvedIdentity =
-      (primaryIdentity && lastIndexByIdentity.has(primaryIdentity)
-        ? primaryIdentity
-        : secondaryIdentity!) ?? primaryIdentity ?? secondaryIdentity!;
-    if (!lastIndexByIdentity.has(resolvedIdentity)) {
-      result.push(message);
-      if (primaryIdentity) emittedIdentities.add(primaryIdentity);
-      if (secondaryIdentity) emittedIdentities.add(secondaryIdentity);
-      continue;
-    }
-    emittedIdentities.add(resolvedIdentity);
-    if (primaryIdentity) emittedIdentities.add(primaryIdentity);
-    if (secondaryIdentity) emittedIdentities.add(secondaryIdentity);
-    result.push(messages[lastIndexByIdentity.get(resolvedIdentity)!]!);
-  }
-  return result;
-}
-
-function withMessageTimestamp(
-  message: Message,
-  timestamp?: string | null,
-): Message {
-  if (!timestamp || getMessageTimestamp(message)) {
-    return message;
-  }
-
-  return {
-    ...message,
-    additional_kwargs: {
-      ...(message.additional_kwargs ?? {}),
-      timestamp,
-    },
-  } as Message;
-}
-
-function mergeMissingTimestamps(
-  sourceMessages: Message[],
-  targetMessages: Message[],
-): Message[] {
-  const timestampByIdentity = new Map<string, string>();
-
-  for (const message of sourceMessages) {
-    const identity = messageIdentity(message);
-    const timestamp = getMessageTimestamp(message);
-    if (identity && timestamp) {
-      timestampByIdentity.set(identity, timestamp);
-    }
-  }
-
-  if (timestampByIdentity.size === 0) {
-    return targetMessages;
-  }
-
-  return targetMessages.map((message) => {
-    const identity = messageIdentity(message);
-    return withMessageTimestamp(
-      message,
-      identity ? timestampByIdentity.get(identity) : null,
-    );
-  });
-}
-
-function findLatestUnloadedRunIndex(
-  runs: Run[],
-  loadedRunIds: ReadonlySet<string>,
-): number {
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const run = runs[i];
-    if (run && !loadedRunIds.has(run.run_id)) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function getRunCreatedAtMs(run: Run): number {
-  const createdAt = (run as { created_at?: string | null }).created_at;
-  if (!createdAt) {
-    return 0;
-  }
-  const timestamp = Date.parse(createdAt);
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function sortRunsChronologically(runs: Run[]): Run[] {
-  return [...runs].sort((a, b) => getRunCreatedAtMs(a) - getRunCreatedAtMs(b));
-}
-
-export type LoadedRunMessage = {
-  seq: number;
-  message: Message;
-};
-
-export function mergeLoadedRunMessages(
-  runs: Run[],
-  messagesByRunId: ReadonlyMap<string, LoadedRunMessage[]>,
-  appendedMessages: Message[] = [],
-): Message[] {
-  const sequenced = runs.flatMap(
-    (run) => messagesByRunId.get(run.run_id) ?? [],
-  );
-
-  const orderedMessages =
-    sequenced.length > 0 &&
-    sequenced.every((entry) => Number.isFinite(entry.seq))
-      ? [...sequenced]
-          .sort((a, b) => a.seq - b.seq)
-          .map((entry) => entry.message)
-      : sortRunsChronologically(runs).flatMap((run) =>
-          (messagesByRunId.get(run.run_id) ?? []).map((entry) => entry.message),
-        );
-
-  return dedupeMessagesByIdentity([...orderedMessages, ...appendedMessages]);
-}
-
-function messageIsAssistantSide(message: Message): boolean {
-  return message.type === "ai" || message.type === "tool";
-}
-
-// During streaming, the backend can temporarily expose the current turn as
-// [AI/tool..., human]. Only repair that narrow tail shape. Historical slices
-// may contain multiple user turns; moving the first human there scrambles the
-// conversation.
-function moveSingleTrailingHumanInputToFront(messages: Message[]): Message[] {
-  const humanIndexes = messages.flatMap((message, index) =>
-    message.type === "human" ? [index] : [],
-  );
-  if (humanIndexes.length !== 1) {
-    return messages;
-  }
-  const firstHumanIndex = humanIndexes[0]!;
-  if (
-    firstHumanIndex <= 0 ||
-    !messages.slice(0, firstHumanIndex).every(messageIsAssistantSide)
-  ) {
-    return messages;
-  }
-
-  const human = messages[firstHumanIndex]!;
-  return [
-    human,
-    ...messages.slice(0, firstHumanIndex),
-    ...messages.slice(firstHumanIndex + 1),
-  ];
-}
-
-function findLastMessageIndex(
-  messages: Message[],
-  predicate: (message: Message) => boolean,
-  beforeIndex = messages.length,
-): number {
-  for (
-    let index = Math.min(beforeIndex, messages.length) - 1;
-    index >= 0;
-    index--
-  ) {
-    const message = messages[index];
-    if (message && predicate(message)) {
-      return index;
-    }
-  }
-  return -1;
-}
-
-// When history has not caught up, thread.messages may already contain completed
-// prior turns plus the current in-flight tail. If a second assistant message
-// appears after an earlier completed reply, treat only the trailing block as the
-// new turn so optimistic input stays after prior turns.
-function splitThreadForOptimisticHuman(messages: Message[]): {
-  established: Message[];
-  currentTail: Message[];
-} {
-  const lastAiIndex = findLastMessageIndex(messages, messageIsAssistantSide);
-  if (lastAiIndex === -1) {
-    return { established: messages, currentTail: [] };
-  }
-
-  const priorAiIndex = findLastMessageIndex(
-    messages,
-    (message) => message.type === "ai",
-    lastAiIndex,
-  );
-
-  if (priorAiIndex === -1) {
-    if (messages.length === 1) {
-      return {
-        established: [],
-        currentTail: moveSingleTrailingHumanInputToFront(messages),
-      };
-    }
-    return { established: messages, currentTail: [] };
-  }
-
-  const trailingStart = priorAiIndex + 1;
-  return {
-    established: messages.slice(0, trailingStart),
-    currentTail: moveSingleTrailingHumanInputToFront(
-      messages.slice(trailingStart),
-    ),
-  };
-}
-
-function messagesEquivalent(
-  historyMessage: Message,
-  threadMessage: Message,
-): boolean {
-  const historyId = messageIdentity(historyMessage);
-  const threadId = messageIdentity(threadMessage);
-  if (historyId && threadId && historyId === threadId) {
-    return true;
-  }
-  if (historyMessage.type !== threadMessage.type) {
-    return false;
-  }
-  if (historyMessage.type === "human") {
-    const historyText = normalizeHumanMessageText(historyMessage);
-    const threadText = normalizeHumanMessageText(threadMessage);
-    return historyText.length > 0 && historyText === threadText;
-  }
-  if (historyMessage.type === "ai") {
-    const historyText = extractTextFromMessage(historyMessage).trim();
-    const threadText = extractTextFromMessage(threadMessage).trim();
-    return historyText.length > 0 && historyText === threadText;
-  }
-  return false;
-}
-
-// Messages that middlewares inject into checkpoint state (summarization
-// summaries, loop warnings, todo reminders, dynamic-context placeholders)
-// never appear in run-event history, so they must not participate in
-// history/thread overlap alignment — otherwise a single summary message at
-// the head of the live state breaks the strict positional match and the
-// whole thread gets re-appended after history.
-function isAlignmentNoiseMessage(message: Message): boolean {
-  return isHiddenFromUIMessage(message);
-}
-
-function lastEquivalentIndex(messages: Message[], target: Message): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messagesEquivalent(messages[index]!, target)) {
-      return index;
-    }
-  }
-  return -1;
-}
-
-function isMessageInHistory(
-  message: Message,
-  historyMessages: Message[],
-): boolean {
-  return historyMessages.some((historyMessage) =>
-    messagesEquivalent(historyMessage, message),
-  );
-}
-
-// When a historical thread is opened, run-event history is loaded newest-run
-// first. That suffix is not a prefix of checkpoint state, so the streaming
-// overlap finder fails and would otherwise prepend the latest turn. Rebuild
-// from the checkpoint prefix that precedes the matched span, then the
-// chronological history suffix.
-function mergeHistoryAsThreadSuffix(
-  historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] | null {
-  if (historyMessages.length === 0 || threadMessages.length === 0) {
-    return null;
-  }
-
-  const lastHistoryHumanIndex = findLastMessageIndex(
-    historyMessages,
-    (message) => message.type === "human" && !isAlignmentNoiseMessage(message),
-  );
-  if (lastHistoryHumanIndex === -1) {
-    return null;
-  }
-
-  const lastHistoryHuman = historyMessages[lastHistoryHumanIndex]!;
-  if (lastEquivalentIndex(threadMessages, lastHistoryHuman) < 0) {
-    return null;
-  }
-
-  const matchIndexes = historyMessages
-    .map((message) => lastEquivalentIndex(threadMessages, message))
-    .filter((index) => index >= 0);
-  if (matchIndexes.length === 0) {
-    return null;
-  }
-
-  const firstMatch = Math.min(...matchIndexes);
-  if (firstMatch <= 0) {
-    return null;
-  }
-
-  const prefix = threadMessages.slice(0, firstMatch);
-  const after = threadMessages
-    .slice(firstMatch)
-    .filter((message) => !isMessageInHistory(message, historyMessages));
-
-  return mergeThreadAndOptimisticMessages(
-    prefix,
-    [...historyMessages, ...after],
-    optimisticMessages,
-  );
-}
-
-function findHistoryThreadOverlap(
-  historyMessages: Message[],
-  threadMessages: Message[],
-): { cutoff: number; threadOverlapLen: number } {
-  const alignableHistoryIndexes: number[] = [];
-  historyMessages.forEach((message, index) => {
-    if (!isAlignmentNoiseMessage(message)) {
-      alignableHistoryIndexes.push(index);
-    }
-  });
-  const alignableThreadIndexes: number[] = [];
-  threadMessages.forEach((message, index) => {
-    if (!isAlignmentNoiseMessage(message)) {
-      alignableThreadIndexes.push(index);
-    }
-  });
-
-  const maxOverlap = Math.min(
-    alignableHistoryIndexes.length,
-    alignableThreadIndexes.length,
-  );
-  for (let overlapLen = maxOverlap; overlapLen >= 1; overlapLen -= 1) {
-    const historyStart = alignableHistoryIndexes.length - overlapLen;
-    const matches = alignableThreadIndexes
-      .slice(0, overlapLen)
-      .every((threadIndex, offset) =>
-        messagesEquivalent(
-          historyMessages[alignableHistoryIndexes[historyStart + offset]!]!,
-          threadMessages[threadIndex]!,
-        ),
-      );
-    if (matches) {
-      return {
-        cutoff: alignableHistoryIndexes[historyStart]!,
-        threadOverlapLen: alignableThreadIndexes[overlapLen - 1]! + 1,
-      };
-    }
-  }
-  return { cutoff: historyMessages.length, threadOverlapLen: 0 };
-}
-
-function repairTrailingTurnOrder(messages: Message[]): Message[] {
-  const { established, currentTail } = splitThreadForOptimisticHuman(messages);
-  if (currentTail.length === 0) {
-    return messages;
-  }
-  return [...established, ...currentTail];
-}
-
-function getMessageSeq(message: Message): number {
-  const seq = (message as unknown as { seq?: unknown }).seq;
-  if (typeof seq === "number" && Number.isFinite(seq)) return seq;
-  const metadataSeq = (message as unknown as { response_metadata?: { seq?: unknown } })
-    .response_metadata?.seq;
-  if (typeof metadataSeq === "number" && Number.isFinite(metadataSeq))
-    return metadataSeq;
-  const additionalSeq = (message as unknown as { additional_kwargs?: { seq?: unknown } })
-    .additional_kwargs?.seq;
-  if (typeof additionalSeq === "number" && Number.isFinite(additionalSeq))
-    return additionalSeq;
-  return -Infinity;
-}
-
-/**
- * Stable, last-resort ordering for merged messages.
- *
- * The merge logic generally preserves source ordering, but when multiple
- * sources (checkpoint thread state, run-event history, optimistic UI, SSE
- * live updates) disagree on ordering we can end up with messages whose
- * rendered timestamps are visibly out-of-sequence (e.g. an older human
- * message appears below a newer run's AI reply).
- *
- * This sort keys by:
- *   1. `seq` (backend-assigned per-message ordering) if available
- *   2. parsed timestamp for messages that carry one
- *   3. original array index as a tiebreaker so the sort remains stable
- */
-function isOptimisticMessage(message: Message): boolean {
-  const id = message.id || "";
-  return id.startsWith("opt-") || (message.additional_kwargs?.timestamp !== undefined && !message.response_metadata);
-}
-
-function sortMessagesByTime(messages: Message[]): Message[] {
-  if (messages.length <= 1) return messages;
-
-  const optimisticMsgs: Message[] = [];
-  const serverMsgs: Message[] = [];
-  const optimisticIndices: number[] = [];
-
-  messages.forEach((m, index) => {
-    if (isOptimisticMessage(m)) {
-      optimisticMsgs.push(m);
-      optimisticIndices.push(index);
-    } else {
-      serverMsgs.push(m);
-    }
-  });
-
-  const sortedServerMsgs = serverMsgs.map((m, index) => ({ m, index }));
-  sortedServerMsgs.sort((a, b) => {
-    const seqA = getMessageSeq(a.m);
-    const seqB = getMessageSeq(b.m);
-    if (Number.isFinite(seqA) && Number.isFinite(seqB) && seqA !== seqB) {
-      return seqA - seqB;
-    }
-    const tsA = getMessageTimestamp(a.m);
-    const tsB = getMessageTimestamp(b.m);
-    if (tsA && tsB && tsA !== tsB) {
-      return tsA < tsB ? -1 : 1;
-    }
-    return a.index - b.index;
-  });
-
-  if (optimisticMsgs.length === 0) {
-    return sortedServerMsgs.map(({ m }) => m);
-  }
-
-  const result: Message[] = [];
-  let optIdx = 0;
-
-  for (const serverMsg of sortedServerMsgs) {
-    const origIdx = messages.indexOf(serverMsg.m);
-    while (optIdx < optimisticMsgs.length) {
-      const optOrigIdx = optimisticIndices[optIdx]!;
-      if (optOrigIdx < origIdx) {
-        result.push(optimisticMsgs[optIdx]!);
-        optIdx++;
-      } else {
-        break;
-      }
-    }
-    result.push(serverMsg.m);
-  }
-
-  while (optIdx < optimisticMsgs.length) {
-    result.push(optimisticMsgs[optIdx]!);
-    optIdx++;
-  }
-
-  return result;
-}
-
-function finalizeMergedMessages(messages: Message[]): Message[] {
-  return sortMessagesByTime(
-    repairDynamicContextUserMessageOrder(
-      repairTrailingTurnOrder(dedupeMessagesByIdentity(messages)),
-    ),
-  );
-}
-
-function mergeThreadAndOptimisticMessages(
-  establishedThreadPrefix: Message[],
-  threadNewSegment: Message[],
-  optimisticMessages: Message[],
-): Message[] {
-  const humanOptimistic = optimisticMessages.filter(
-    (message) => message.type === "human",
-  );
-  const otherOptimistic = optimisticMessages.filter(
-    (message) => message.type !== "human",
-  );
-
-  if (humanOptimistic.length === 0) {
-    const currentTurnTail =
-      moveSingleTrailingHumanInputToFront(threadNewSegment);
-    return [...establishedThreadPrefix, ...currentTurnTail, ...otherOptimistic];
-  }
-
-  const { established: peeledEstablished, currentTail } =
-    splitThreadForOptimisticHuman(threadNewSegment);
-  const established = [...establishedThreadPrefix, ...peeledEstablished];
-  const base = [...established, ...currentTail];
-
-  const firstStreamingIndex = currentTail.findIndex(messageIsAssistantSide);
-  if (firstStreamingIndex === -1) {
-    return [...base, ...humanOptimistic, ...otherOptimistic];
-  }
-
-  const insertAt = established.length + firstStreamingIndex;
-  return [
-    ...base.slice(0, insertAt),
-    ...humanOptimistic,
-    ...otherOptimistic,
-    ...base.slice(insertAt),
-  ];
-}
-
-/**
- * Build a stable signature for the files attached to a human message.
- *
- * The optimistic UI stores files on `message.additional_kwargs.files[]` (or
- * `message.files[]` for backwards compat).  The server echoes them back via
- * a `<uploaded_files>…</uploaded_files>` marker inside `message.content`
- * **and** also populates `additional_kwargs.files[]` on the echoed message
- * when re-serialized from checkpoint/history.
- *
- * To handle both sources we union the two views and then deterministically
- * serialize `filename|size|path` tuples that survive the round-trip.  The
- * result is used as part of the human-message visibility key so pure-file
- * sends (no text) still collapse to a single entry after server echo.
- */
-function humanMessageFilesSignature(message: Message): string | null {
-  if (message.type !== "human") return null;
-  const rawFiles: FileInMessage[] = [];
-  const fromAdditional = (
-    message as unknown as { additional_kwargs?: { files?: FileInMessage[] } }
-  ).additional_kwargs?.files;
-  if (Array.isArray(fromAdditional)) rawFiles.push(...fromAdditional);
-  const fromDirect = (message as unknown as { files?: FileInMessage[] }).files;
-  if (Array.isArray(fromDirect)) rawFiles.push(...fromDirect);
-  const textContent = extractTextFromMessage(message);
-  if (typeof textContent === "string" && textContent.includes("<uploaded_files>")) {
-    rawFiles.push(...parseUploadedFiles(textContent));
-  }
-  if (rawFiles.length === 0) return null;
-  const signature = rawFiles
-    .map((f) => {
-      const name = f.filename ?? "";
-      const size = typeof f.size === "number" ? String(f.size) : "";
-      const path = f.path ?? "";
-      return `${name}|${size}|${path}`;
-    })
-    .sort()
-    .join(";");
-  return `human-files:${signature}`;
-}
-
-function humanMessageVisibilityKey(message: Message): string | null {
-  if (message.type !== "human") {
-    return null;
-  }
-  const identity = messageIdentity(message);
-  if (identity) {
-    return identity;
-  }
-  const text = normalizeHumanMessageText(message);
-  if (text) return `human-content:${text}`;
-  // Pure-file sends (no text) fall back to a file-based signature so
-  // server echo can still be matched against the optimistic message.
-  return humanMessageFilesSignature(message);
-}
-
-function getHumanMessageVisibilityKeys(messages: Message[]): Set<string> {
-  const keys = new Set<string>();
-  for (const message of messages) {
-    const key = humanMessageVisibilityKey(message);
-    if (key) {
-      keys.add(key);
-    }
-  }
-  return keys;
-}
-
-function normalizeHumanMessageText(message: Message): string {
-  if (message.type !== "human") {
-    return "";
-  }
-  return stripUploadedFilesTag(extractTextFromMessage(message)).trim();
-}
-
-function hasServerReplacementForOptimisticHuman(
-  optimisticMessages: Message[],
-  baselineHumanMessageKeys: ReadonlySet<string>,
-  serverMessages: Message[],
-): boolean {
-  const optimisticHumanMessages = optimisticMessages.filter(
-    (message) => message.type === "human",
-  );
-  if (optimisticHumanMessages.length === 0) return false;
-
-  const optimisticHumanTexts = new Set(
-    optimisticHumanMessages
-      .map(normalizeHumanMessageText)
-      .filter((text) => text.length > 0),
-  );
-  const optimisticFileSigs = new Set(
-    optimisticHumanMessages
-      .map(humanMessageFilesSignature)
-      .filter((sig): sig is string => Boolean(sig)),
-  );
-
-  if (optimisticHumanTexts.size === 0 && optimisticFileSigs.size === 0) {
-    return false;
-  }
-
-  return serverMessages.some((message) => {
-    if (message.type !== "human") {
-      return false;
-    }
-    const key = humanMessageVisibilityKey(message);
-    if (key && baselineHumanMessageKeys.has(key)) {
-      return false;
-    }
-    const text = normalizeHumanMessageText(message);
-    if (text && optimisticHumanTexts.has(text)) return true;
-    const fileSig = humanMessageFilesSignature(message);
-    if (fileSig && optimisticFileSigs.has(fileSig)) return true;
-    return false;
-  });
-}
-
-export function getVisibleOptimisticMessagesForServerMessages(
-  optimisticMessages: Message[],
-  baselineHumanMessageKeys: ReadonlySet<string>,
-  serverMessages: Message[],
-): Message[] {
-  const hasHumanOptimistic = optimisticMessages.some((message) => message.type === "human");
-
-  if (hasHumanOptimistic) {
-    const hasReplacement = hasServerReplacementForOptimisticHuman(
-      optimisticMessages,
-      baselineHumanMessageKeys,
-      serverMessages,
-    );
-    if (hasReplacement) {
-      return [];
-    }
-  }
-  return optimisticMessages;
-}
-
-export function mergeMessages(
-  historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
-  const timestampedThreadMessages = mergeMissingTimestamps(
-    historyMessages,
-    threadMessages,
-  );
-
-  // History is a suffix-aligned prefix of thread. Match by id when available and
-  // by human text when run-event ids differ from live thread state. Middleware
-  // injected messages (summaries, reminders) are skipped during alignment.
-  const { cutoff, threadOverlapLen } = findHistoryThreadOverlap(
-    historyMessages,
-    timestampedThreadMessages,
-  );
-
-  if (threadOverlapLen === 0) {
-    const suffixMerged = mergeHistoryAsThreadSuffix(
-      historyMessages,
-      timestampedThreadMessages,
-      optimisticMessages,
-    );
-    if (suffixMerged) {
-      return finalizeMergedMessages(suffixMerged);
-    }
-  }
-
-  const establishedThreadPrefix = timestampedThreadMessages.slice(
-    0,
-    threadOverlapLen,
-  );
-  const threadNewSegment = timestampedThreadMessages.slice(threadOverlapLen);
-
-  return finalizeMergedMessages([
-    ...historyMessages.slice(0, cutoff),
-    ...mergeThreadAndOptimisticMessages(
-      establishedThreadPrefix,
-      threadNewSegment,
-      optimisticMessages,
-    ),
-  ]);
-}
-
-function getMessagesAfterBaseline(
-  messages: Message[],
-  baselineMessageIds: ReadonlySet<string>,
-): Message[] {
-  return messages.filter((message) => {
-    const id = messageIdentity(message);
-    return !id || !baselineMessageIds.has(id);
-  });
-}
-
-export function getVisibleOptimisticMessages(
-  optimisticMessages: Message[],
-  previousHumanMessageCount: number,
-  currentHumanMessageCount: number,
-): Message[] {
-  if (
-    optimisticMessages.some((message) => message.type === "human") &&
-    currentHumanMessageCount > previousHumanMessageCount
-  ) {
-    return [];
-  }
-  return optimisticMessages;
-}
-
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -880,57 +117,6 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
-}
-
-async function fetchRunMessages(
-  threadId: string,
-  runId: string,
-  signal?: AbortSignal,
-): Promise<RunMessage[]> {
-  const pages: RunMessage[][] = [];
-  let beforeSeq: number | null = null;
-
-  for (let page = 0; page < 1000; page += 1) {
-    const params = new URLSearchParams({
-      limit: String(RUN_MESSAGES_PAGE_SIZE),
-    });
-    if (beforeSeq !== null) {
-      params.set("before_seq", String(beforeSeq));
-    }
-
-    const response = await fetch(
-      `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages?${params.toString()}`,
-      {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        signal,
-      },
-    );
-
-    if (!response.ok) {
-      throw new Error("Failed to load run messages.");
-    }
-
-    const result = (await response.json()) as RunMessagesResponse;
-    const data = Array.isArray(result.data) ? result.data : [];
-    if (data.length === 0) {
-      break;
-    }
-
-    pages.unshift(data);
-
-    const hasMore = result.has_more ?? result.hasMore ?? false;
-    const firstSeq = data[0]?.seq;
-    if (!hasMore || typeof firstSeq !== "number" || firstSeq === beforeSeq) {
-      break;
-    }
-    beforeSeq = firstSeq;
-  }
-
-  return pages.flat();
 }
 
 export function useThreadStream({
@@ -1285,6 +471,16 @@ export function useThreadStream({
   const messagesRef = useRef<Message[]>([]);
   const summarizedRef = useRef<Set<string>>(null);
   const optimisticBaselineHumanKeysRef = useRef<Set<string>>(new Set());
+  // Persists optimistic human timestamps after the optimistic bubbles are
+  // cleared, so the timestamp can still be copied onto the server-backed
+  // human message that replaces it (server messages often lack a timestamp
+  // during streaming — only the history/backfill path adds one on refresh).
+  const optimisticTimestampsRef = useRef<Map<string, string>>(new Map());
+  // Tracks the previous threadId so we can distinguish "new conversation
+  // created" (threadId: "new" → real ID) from "switch to another chat"
+  // (real ID A → real ID B). The former must NOT clear optimistic
+  // timestamps — sendMessage just stored one that's still needed.
+  const prevThreadIdRef = useRef<string>("");
 
   summarizedRef.current ??= new Set<string>();
 
@@ -1306,6 +502,16 @@ export function useThreadStream({
     }
     sendInFlightRef.current = false;
     optimisticBaselineHumanKeysRef.current = new Set();
+    // Only clear optimistic timestamps when switching between real threads.
+    // When creating a new conversation, threadId transitions from "new" to a
+    // real ID — sendMessage just stored a timestamp that's still needed to
+    // backfill the server-backed human message that replaces the optimistic
+    // bubble. Clearing here would lose it.
+    const prevThreadId = prevThreadIdRef.current;
+    prevThreadIdRef.current = threadId;
+    if (prevThreadId && prevThreadId !== "new" && prevThreadId !== threadId) {
+      optimisticTimestampsRef.current = new Map();
+    }
     pendingUsageBaselineMessageIdsRef.current = new Set(
       messagesRef.current
         .map(messageIdentity)
@@ -1400,11 +606,21 @@ export function useThreadStream({
 
       const newOptimistic: Message[] = [];
       if (!hideFromUI) {
+        const optimisticTs = new Date().toISOString();
+        // Persist the timestamp so it can be copied onto the server-backed
+        // human message that replaces this optimistic bubble (server messages
+        // often lack a timestamp during streaming).
+        if (text) {
+          optimisticTimestampsRef.current.set(text, optimisticTs);
+        }
         newOptimistic.push({
           type: "human",
           id: `opt-human-${Date.now()}`,
           content: text ? [{ type: "text", text }] : "",
-          additional_kwargs: optimisticAdditionalKwargs,
+          additional_kwargs: {
+            ...optimisticAdditionalKwargs,
+            timestamp: optimisticTs,
+          },
         });
       }
 
@@ -1530,6 +746,7 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
+            streamMode: ["values", "messages"],
             streamSubgraphs: true,
             streamResumable: true,
             onDisconnect: "continue",
@@ -1591,11 +808,35 @@ export function useThreadStream({
       serverMessagesWithoutOptimistic,
     );
 
-  const mergedMessages = mergeMessages(
+  let mergedMessages = mergeMessages(
     history,
     thread.messages,
     visibleOptimisticMessages,
   );
+
+  // Copy timestamps from optimistic human messages to server human messages
+  // that lack a timestamp.  The optimistic bubbles are cleared once the
+  // server's human message arrives, but the server copy often lacks a
+  // timestamp during streaming (only the history/backfill path adds one on
+  // refresh).  We persist the optimistic timestamp in a ref so it survives
+  // the clear and can be copied onto the server message across re-renders.
+  if (optimisticTimestampsRef.current.size > 0) {
+    mergedMessages = mergedMessages.map((m) => {
+      if (m.type !== "human") return m;
+      if (getMessageTimestamp(m)) return m; // already has timestamp
+      const text = normalizeHumanMessageText(m);
+      if (!text) return m;
+      const ts = optimisticTimestampsRef.current.get(text);
+      if (!ts) return m;
+      return {
+        ...m,
+        additional_kwargs: {
+          ...m.additional_kwargs,
+          timestamp: ts,
+        },
+      };
+    });
+  }
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
         thread.messages,
@@ -1700,12 +941,42 @@ export function useThreadHistory(threadId: string) {
           run.run_id,
           controller.signal,
         );
-        const _messages = runMessages
-          .filter((m) => !m.metadata?.caller?.startsWith("middleware:"))
-          .map((m) => ({
-            seq: m.seq,
-            message: withMessageTimestamp(m.content, m.created_at),
-          }));
+        // run messages 接口只返回 run 执行期间的事件消息（middleware
+        // summary、AI 回复等），不包含用户原始输入。用户输入只存在于
+        // run.kwargs.input.messages 中。如果不补充，history 会缺少 Q，
+        // 导致 merge 时 Q 被 dedupeByIdentity 放到 A 之后（因为 A 在
+        // history 中有副本，被提前到 history 位置，而 Q 只在 thread 中）。
+        // 这里将 kwargs.input.messages 作为 run 的第一条消息加入 history。
+        const runCreatedAt = (run as { created_at?: string | null })
+          .created_at;
+        const kwargs = (run as { kwargs?: { input?: { messages?: unknown[] } } })
+          .kwargs;
+        const inputMessages = (kwargs?.input?.messages ?? []) as Message[];
+        const inputEntries: { seq: number; message: Message }[] =
+          inputMessages
+            .filter((m): m is Message => m != null && typeof m === "object")
+            .map((m, i) => ({
+              seq: -1 - i, // 排在所有 event 消息之前
+              message: withMessageTimestamp(
+                m,
+                runCreatedAt ?? getMessageTimestamp(m) ?? undefined,
+              ),
+            }));
+        const _messages = [
+          ...inputEntries,
+          ...runMessages
+            .filter((m) => !m.metadata?.caller?.startsWith("middleware:"))
+            .map((m) => ({
+              seq: m.seq,
+              message: withMessageTimestamp(
+                m.content,
+                m.created_at ??
+                  getMessageTimestamp(m.content) ??
+                  runCreatedAt ??
+                  undefined,
+              ),
+            })),
+        ];
         if (
           threadIdRef.current !== requestThreadId ||
           generationRef.current !== requestGeneration
@@ -1719,7 +990,10 @@ export function useThreadHistory(threadId: string) {
           runsRef.current,
           loadedRunIdsRef.current,
         );
-      } while (pendingLoadRef.current);
+        // Load only one run per call to preserve the "load more" button.
+        // Timestamps are handled by the runCreatedAt fallback in
+        // withMessageTimestamp and the thread state's own timestamps.
+      } while (false);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         return;
@@ -1873,56 +1147,9 @@ export function useThreads(
   });
 }
 
-export function useThreadRuns(threadId?: string) {
-  return useQuery<Run[]>({
-    queryKey: ["thread", threadId],
-    queryFn: async () => {
-      if (!threadId) {
-        return [];
-      }
-      const runs: Run[] = [];
-      let offset = 0;
 
-      while (true) {
-        const params = new URLSearchParams({
-          limit: String(THREAD_RUNS_PAGE_SIZE),
-          offset: String(offset),
-        });
-        const response = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs?${params.toString()}`,
-          {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
-          },
-        );
-
-        if (!response.ok) {
-          // Test / mixed deployments may not expose runs for all threads; avoid
-          // noisy retries + console errors for missing resources.
-          if (response.status === 403 || response.status === 404) {
-            return [];
-          }
-          throw new Error("Failed to load thread runs.");
-        }
-
-        const page = (await response.json()) as Run[];
-        runs.push(...page);
-
-        if (page.length < THREAD_RUNS_PAGE_SIZE) {
-          break;
-        }
-        offset += page.length;
-      }
-
-      return runs;
-    },
-    refetchOnWindowFocus: false,
-    retry: false,
-  });
-}
+// Re-export useThreadRuns from query module
+export { useThreadRuns } from "./query";
 
 export function useThreadTokenUsage(
   threadId?: string | null,

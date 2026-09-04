@@ -6,7 +6,7 @@ import { getGatewayConfig } from "./gateway-config";
 import { STATIC_WEBSITE_USER } from "./static-user";
 import { type AuthResult, userSchema } from "./types";
 
-const SSR_AUTH_TIMEOUT_MS = 2_000;
+const SSR_AUTH_TIMEOUT_MS = 5_000;
 
 /**
  * Fetch the authenticated user from the gateway using the request's cookies.

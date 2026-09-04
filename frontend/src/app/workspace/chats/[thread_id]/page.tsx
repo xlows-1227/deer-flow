@@ -125,9 +125,11 @@ export default function ChatPage() {
         ...(referencedFiles && referencedFiles.length > 0
           ? { additionalKwargs: { referenced_files: referencedFiles } }
           : {}),
-        ...(thread.isLoading
-          ? { multitaskStrategy: "interrupt" as const }
-          : {}),
+        // Always send interrupt strategy: if there's an inflight run,
+        // the backend cancels it before starting the new one.  If there
+        // is no inflight run, interrupt is a no-op.  This avoids relying
+        // on `thread.isLoading` which may lag behind the actual run state.
+        multitaskStrategy: "interrupt" as const,
       });
       if (message.files.length > 0) {
         return sendPromise;

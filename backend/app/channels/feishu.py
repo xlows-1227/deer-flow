@@ -1318,6 +1318,221 @@ class _LarkWebSocketSession:
         return self._exited.wait(timeout_seconds)
 
 
+# 已处理卡片的 message_id 集合，防止重复点击
+_processed_card_messages: set[str] = set()
+# 集合最大容量，避免内存泄漏
+_MAX_PROCESSED_CARDS = 500
+
+
+def _handle_card_action(data, app_id=None, app_secret=None) -> None:
+    """处理飞书卡片按钮回调。
+
+    审批人点击卡片上的 ✅同意/❌拒绝 按钮后：
+    1. 立刻 patch 卡片，把按钮换成已处理状态（防止重复点击）
+    2. approve → 触发智能体（含禅道同步）
+    3. reject → 触发智能体（跳过禅道同步）
+    """
+    import json
+    import logging
+    import os
+
+    import httpx
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        event = getattr(data, "event", None)
+        if event is None:
+            return
+
+        action = getattr(event, "action", None)
+        if action is None:
+            return
+
+        value = getattr(action, "value", None)
+        if value is None:
+            return
+
+        # value 可能是 dict 或 JSON 字符串
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                return
+
+        if not isinstance(value, dict):
+            return
+
+        action_type = value.get("action", "")
+        callback = value.get("callback") or {}
+
+        if not callback:
+            return  # 非 approval skill 卡片，忽略
+
+        agent_id = callback.get("agent_id", "")
+        conversation_id = callback.get("conversation_id", "")
+        message = callback.get("message", "开始分析")
+        # 从 callback 中读取后端 API 配置（auth_token 不走环境变量，直接从卡片回调配置取）
+        base_url = callback.get("base_url", "") or os.environ.get("DEER_FLOW_API_URL", "http://localhost:8000")
+        auth_token = callback.get("auth_token", "") or os.environ.get("DEER_FLOW_AUTH_TOKEN", "")
+
+        if not agent_id or not conversation_id:
+            return
+
+        record_id = value.get("record_id", "")
+
+        # 提取表单数据（拒绝原因）
+        form_value = getattr(action, "form_value", None) or {}
+        if isinstance(form_value, str):
+            try:
+                form_value = json.loads(form_value)
+            except (json.JSONDecodeError, ValueError):
+                form_value = {}
+        reject_reason = ""
+        if isinstance(form_value, dict):
+            reject_reason = form_value.get("reject_reason", "")
+
+        # 获取操作人
+        operator = getattr(event, "operator", None)
+        operator_open_id = ""
+        if operator is not None:
+            operator_open_id = getattr(operator, "open_id", "") or ""
+
+        # 获取消息 ID（用于 patch 卡片 + 去重）
+        message_id = ""
+        context = getattr(event, "context", None)
+        if context is not None:
+            message_id = getattr(context, "open_message_id", "") or ""
+        if not message_id and operator is not None:
+            message_id = getattr(operator, "open_message_id", "") or ""
+
+        # 去重：同一卡片只处理一次（防止重复点击）
+        if message_id:
+            if message_id in _processed_card_messages:
+                logger.warning("Card already processed, skipping: msg_id=%s, action=%s", message_id, action_type)
+                return
+            _processed_card_messages.add(message_id)
+            # 控制集合大小，避免内存泄漏
+            if len(_processed_card_messages) > _MAX_PROCESSED_CARDS:
+                _processed_card_messages.clear()
+
+        logger.info(
+            "Card action: action=%s, agent=%s, record=%s, operator=%s, msg_id=%s",
+            action_type, agent_id, record_id, operator_open_id, message_id,
+        )
+
+        # 1. Patch 卡片：移除按钮，显示已处理状态（防止重复点击）
+        if app_id and app_secret and message_id:
+            _patch_card_after_action(
+                app_id, app_secret, message_id,
+                action_type, reject_reason,
+            )
+
+        # 2. 触发智能体（带上 action_type 和 record_id，智能体自行处理后续逻辑）
+        if action_type == "approve":
+            full_message = f"{message}（审批回调：action=approve, record_id={record_id}）"
+        elif action_type == "reject":
+            reason_part = f", reject_reason={reject_reason}" if reject_reason else ""
+            full_message = f"{message}（审批回调：action=reject, record_id={record_id}{reason_part}）"
+        else:
+            full_message = f"{message}（审批回调：action={action_type}, record_id={record_id}）"
+
+        url = f"{base_url}/api/v1/agents/{agent_id}/conversations/{conversation_id}/runs"
+        headers = {
+            "Authorization": f"Bearer {auth_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"message": full_message}
+
+        try:
+            resp = httpx.post(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            logger.info("Agent triggered: action=%s, status=%s", action_type, resp.status_code)
+        except Exception as e:
+            logger.error("Failed to trigger agent: %s", e)
+
+    except Exception as e:
+        logger.error("Error handling card action: %s", e, exc_info=True)
+
+
+def _patch_card_after_action(app_id, app_secret, message_id, action_type, reject_reason=""):
+    """Patch 飞书卡片消息，移除按钮，显示已处理状态。"""
+    import json
+    import logging
+    from datetime import datetime, timezone, timedelta
+
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+    logger = logging.getLogger(__name__)
+    CST = timezone(timedelta(hours=8))
+    now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+
+    if action_type == "approve":
+        title = "审批已通过"
+        tag_text = "已同意"
+        tag_color = "green"
+        template = "green"
+        body_content = f"✅ 审批人已同意\n\n已提交禅道同步。\n\n操作时间：{now_str}"
+    elif action_type == "reject":
+        title = "审批已拒绝"
+        tag_text = "已拒绝"
+        tag_color = "red"
+        template = "red"
+        reason_text = f"\n\n拒绝原因：{reject_reason}" if reject_reason else ""
+        body_content = f"❌ 审批人已拒绝{reason_text}\n\n不同步禅道。\n\n操作时间：{now_str}"
+    else:
+        title = "审批已处理"
+        tag_text = "已处理"
+        tag_color = "grey"
+        template = "grey"
+        body_content = f"审批已处理\n\n操作时间：{now_str}"
+
+    new_card = {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "text_tag_list": [
+                {"tag": "text_tag", "text": {"tag": "plain_text", "content": tag_text}, "color": tag_color}
+            ],
+            "template": template,
+            "padding": "12px 8px 12px 8px",
+        },
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": body_content},
+            ],
+        },
+    }
+
+    try:
+        client = (
+            lark.Client.builder()
+            .app_id(app_id)
+            .app_secret(app_secret)
+            .build()
+        )
+        req = (
+            PatchMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                PatchMessageRequestBody.builder()
+                .content_type("interactive")
+                .content(json.dumps(new_card))
+                .build()
+            )
+            .build()
+        )
+        resp = client.im.v1.message.patch(req)
+        if resp.success():
+            logger.info("Card patched: message_id=%s, action=%s", message_id, action_type)
+        else:
+            logger.warning("Card patch failed: code=%s, msg=%s", resp.code, resp.msg)
+    except Exception as e:
+        logger.error("Error patching card: %s", e)
+
+
 def _default_websocket_session_factory(
     *,
     app_id: str,
@@ -1328,8 +1543,16 @@ def _default_websocket_session_factory(
     verification_token: str,
 ) -> FeishuWebSocketSession:
     import lark_oapi as lark
+    from functools import partial
 
-    event_handler = lark.EventDispatcherHandler.builder(encrypt_key, verification_token).register_p2_im_message_receive_v1(message_handler).build()
+    card_action_handler = partial(_handle_card_action, app_id=app_id, app_secret=app_secret)
+
+    event_handler = (
+        lark.EventDispatcherHandler.builder(encrypt_key, verification_token)
+        .register_p2_im_message_receive_v1(message_handler)
+        .register_p2_card_action_trigger(card_action_handler)
+        .build()
+    )
     return _LarkWebSocketSession(
         app_id=app_id,
         app_secret=app_secret,

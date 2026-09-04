@@ -4,9 +4,9 @@ import { expect, test } from "vitest";
 import {
   getVisibleOptimisticMessagesForServerMessages,
   getVisibleOptimisticMessages,
-  mergeLoadedRunMessages,
   mergeMessages,
-} from "@/core/threads/hooks";
+} from "@/core/threads/merge";
+import { mergeLoadedRunMessages } from "@/core/threads/query";
 
 test("mergeMessages removes duplicate messages already present in history", () => {
   const human = {

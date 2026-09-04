@@ -335,17 +335,21 @@ export const MessageResponse = memo(
     <Streamdown
       className={cn(
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-        // For extremely long glued tokens (LLM output concatenated English
-        // with no spaces), prefer soft breaks at punctuation/whitespace but
-        // fall back to breaking between any letter (word-break: break-all)
-        // so the bubble never grows past its container width.  Code blocks
-        // use overflow-x:auto instead so formatting isn't destroyed.
-        "[&_p]:break-words [&_p]:overflow-x-hidden [&_p]:break-all",
-        "[&_p>span]:break-all",
-        "[&_li]:break-all [&_li]:overflow-x-hidden",
-        "[&_div]:break-words [&_div]:break-all",
-        "[&_blockquote]:break-all",
+        // Override whitespace-pre-wrap inherited from AIElementMessageContent.
+        // Streamdown outputs raw \n between block elements (e.g. \n</p>\n<p>\n);
+        // whitespace-pre-wrap renders those as visible blank lines.
+        // whitespace-normal collapses them, and we restore pre-wrap on <p>
+        // and <pre> so text line breaks and code are preserved.
+        //
+        // `break-words` on <p>/<li> handles long glued English text (no
+        // spaces) by wrapping inside the bubble.  Table separators are NOT
+        // affected because properly-formed tables render as <table> elements
+        // (with overflow-x-auto + break-normal), not as text inside <p>.
+        "whitespace-normal",
+        "[&_p]:whitespace-pre-wrap [&_p]:break-words",
+        "[&_li]:break-words [&_li]:overflow-x-auto",
         "[&_pre]:overflow-x-auto [&_pre]:break-normal [&_pre]:whitespace-pre",
+        "[&_table]:overflow-x-auto [&_table]:break-normal",
         className,
       )}
       {...props}
