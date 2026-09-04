@@ -64,8 +64,6 @@ import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
 
-import { ToolCallOmissionBanner } from "./tool-call-omission-banner";
-
 import { MarkdownContent } from "./markdown-content";
 
 function FeedbackButtons({
@@ -323,11 +321,40 @@ function MessageContent_({
     if (isHuman) {
       return rawContent ? stripUploadedFilesTag(rawContent) : "";
     }
-    if (friendlyErrorResult) {
-      return friendlyErrorResult.message;
-    }
-    return rawContent ?? "";
-  }, [rawContent, isHuman, friendlyErrorResult]);
+    // Always preserve the real content — the error banner is rendered
+    // separately below.  Previously, a detected error would replace the
+    // entire content with a one-line friendly sentence, silently dropping
+    // any legitimate text the model managed to produce before failing.
+    //
+    // Strip the <!--DF_RAW_ERROR:xxx--> HTML comment that the backend
+    // appends when an LLM call fails mid-stream.  Leaving it in would
+    // break Streamdown's markdown parser and produce a wall of raw text.
+    return (rawContent ?? "").replace(/\n<!--DF_RAW_ERROR:[\s\S]*?-->\s*$/, "");
+  }, [rawContent, isHuman]);
+
+  /**
+   * Whether the AI message body is substantially more than just the
+   * error sentence itself.  When `false`, rendering both the banner and
+   * the markdown would show the same text twice — so we skip markdown.
+   * When `true` (partial content survived before the failure), we show
+   * only the content without the misleading error banner.
+   */
+  const hasSubstantiveContent = useMemo(() => {
+    if (!friendlyErrorResult) return !!contentToDisplay;
+    const stripped = contentToDisplay
+      .replace(/<!--DF_RAW_ERROR:[\s\S]*?-->\s*$/, "")
+      .replace(friendlyErrorResult.message, "")
+      .trim();
+    // Anything left beyond a trivial amount is "substantive"
+    return stripped.length >= 20;
+  }, [contentToDisplay, friendlyErrorResult]);
+
+  /**
+   * Only show the error banner when the AI message has NO substantive
+   * content.  When the model produced a real answer (even if the stream
+   * ended with a non-critical error), the banner is misleading.
+   */
+  const showErrorBanner = friendlyErrorResult && !hasSubstantiveContent;
 
   const toolOmissionResult = useMemo(() => {
     if (isHuman || (!contentToDisplay && !(isAiMessage(message) && getToolCalls(message).length > 0))) {
@@ -423,17 +450,14 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {toolOmissionResult.count > 0 && (
-        <ToolCallOmissionBanner count={toolOmissionResult.count} toolNames={toolOmissionResult.toolNames} />
-      )}
-      {friendlyErrorResult ? (
+      {showErrorBanner ? (
         <FriendlyAiErrorBanner
-          tier={friendlyErrorResult.tier as "known" | "fallback"}
-          message={friendlyErrorResult.message}
-          original={friendlyErrorResult.original}
+          tier={friendlyErrorResult!.tier as "known" | "fallback"}
+          message={friendlyErrorResult!.message}
+          original={friendlyErrorResult!.original}
         />
       ) : null}
-      {!friendlyErrorResult && contentToDisplay && (
+      {hasSubstantiveContent ? (
         <MarkdownContent
           content={toolOmissionResult.content}
           isLoading={isLoading}
@@ -441,7 +465,15 @@ function MessageContent_({
           className="assistant-prose my-3"
           components={components}
         />
-      )}
+      ) : !showErrorBanner && contentToDisplay ? (
+        <MarkdownContent
+          content={toolOmissionResult.content}
+          isLoading={isLoading}
+          rehypePlugins={[rehypeRaw, ...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+          className="assistant-prose my-3"
+          components={components}
+        />
+      ) : null}
     </AIElementMessageContent>
   );
 }

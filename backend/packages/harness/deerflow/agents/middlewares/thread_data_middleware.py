@@ -119,21 +119,28 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def after_model(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        """Add timestamp to the last AIMessage after model generation."""
+        """Add timestamp to every AIMessage that lacks one after model generation."""
         messages = list(state.get("messages", []))
-        if not messages:
-            return None
+        now_iso = datetime.now(UTC).isoformat()
+        changed = False
 
-        last_message = messages[-1]
-        if isinstance(last_message, AIMessage) and "timestamp" not in last_message.additional_kwargs:
-            messages[-1] = last_message.model_copy(
-                update={
-                    "additional_kwargs": {
-                        **last_message.additional_kwargs,
-                        "timestamp": datetime.now(UTC).isoformat(),
+        ai_count = sum(1 for m in messages if isinstance(m, AIMessage))
+        logger.info("[after_model] %d AI messages in state, checking for missing timestamps", ai_count)
+
+        for i, msg in enumerate(messages):
+            if isinstance(msg, AIMessage) and "timestamp" not in msg.additional_kwargs:
+                messages[i] = msg.model_copy(
+                    update={
+                        "additional_kwargs": {
+                            **msg.additional_kwargs,
+                            "timestamp": now_iso,
+                        }
                     }
-                }
-            )
-            return {"messages": messages}
+                )
+                changed = True
+                logger.info("[after_model] Added timestamp %s to AI message idx=%d id=%s", now_iso, i, msg.id)
 
-        return None
+        if not changed:
+            logger.debug("[after_model] No AI messages needed timestamp injection")
+
+        return {"messages": messages} if changed else None

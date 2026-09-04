@@ -53,7 +53,6 @@ import { MarkdownContent } from "./markdown-content";
 import { MessageChoiceOptions } from "./message-choice-options";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
-import { ToolCallOmissionBanner } from "./tool-call-omission-banner";
 import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
@@ -279,8 +278,11 @@ export function MessageList({
     new Map(),
   );
 
-  // Populate frontend-render timestamps for groups that do not have a backend
-  // timestamp.  This is done in an effect to avoid mutating refs during render.
+  // NOTE: We intentionally do NOT fallback to new Date() when a message
+  // lacks a backend timestamp.  The previous code did `new Date().toISOString()`
+  // which caused timestamps to change on EVERY page refresh (because useState
+  // resets to empty Map, then useEffect re-fills with "now").  Showing a blank
+  // is vastly preferable to showing a constantly-changing fake time.
   useEffect(() => {
     setTimestampMap((prev) => {
       let changed = false;
@@ -291,8 +293,10 @@ export function MessageList({
         const backendTimestamp = formatMessageTime(
           getMessageTimestamp(aiMessage ?? group.messages[0]!),
         );
-        if (!backendTimestamp && group.id && !next.has(group.id)) {
-          next.set(group.id, formatMessageTime(new Date().toISOString()));
+        // Only fill when we somehow DO have a valid timestamp to persist
+        // across re-renders — do NOT synthesize with new Date().
+        if (backendTimestamp && group.id && !next.has(group.id)) {
+          next.set(group.id, backendTimestamp);
           changed = true;
         }
       }
@@ -506,7 +510,6 @@ export function MessageList({
               const { count, toolNames, cleaned } = detectToolOmissions(rawContent, [message]);
               return (
                 <div key={groupKey} className="w-full">
-                  {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                   <MarkdownContent
                     content={cleaned}
                     isLoading={thread.isLoading}
@@ -542,7 +545,6 @@ export function MessageList({
                   const { count, toolNames, cleaned } = detectToolOmissions(rawContent, group.messages[0] ? [group.messages[0]] : []);
                   return (
                     <>
-                      {count > 0 && <ToolCallOmissionBanner count={count} toolNames={toolNames} />}
                       <MarkdownContent
                         content={cleaned}
                         isLoading={thread.isLoading}
@@ -671,9 +673,6 @@ export function MessageList({
           })();
           return (
             <div key={`group-${groupKey}`} className="w-full max-w-[52rem]">
-              {processingContent.count > 0 && (
-                <ToolCallOmissionBanner count={processingContent.count} toolNames={processingContent.toolNames} />
-              )}
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}

@@ -32,7 +32,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 from typing import TYPE_CHECKING, Any, override
 
@@ -340,6 +340,12 @@ class DynamicContextMiddleware(AgentMiddleware):
             k: v for k, v in original_kwargs.items()
             if k not in ("hide_from_ui", "view_image_context", _DYNAMIC_CONTEXT_REMINDER_KEY)
         }
+        # Ensure user_msg carries a timestamp so the frontend merge/dedup
+        # logic can order it correctly. If the original message already has
+        # one (e.g. injected by ThreadDataMiddleware.before_agent), inherit it;
+        # otherwise stamp the current time.
+        if "timestamp" not in user_kwargs:
+            user_kwargs["timestamp"] = datetime.now(timezone.utc).isoformat()
         user_msg = HumanMessage(
             content=original.content,
             id=f"{stable_id}__user",

@@ -381,6 +381,7 @@ You: "Deploying to staging..." [proceed]
 - Clear and Concise: Avoid over-formatting unless requested
 - Natural Tone: Use paragraphs and prose, not bullet points by default
 - Action-Oriented: Focus on delivering results, not explaining processes
+- Markdown Tables: When presenting tabular data, ALWAYS use standard Markdown table syntax with pipe characters (| column | column |) and a separator row (|---|---|). NEVER use ASCII box-drawing characters (┌─┐│└┘├┤┬┴┼) to create tables — they render as plain code blocks and are not interactive.
 </response_style>
 
 <citations>

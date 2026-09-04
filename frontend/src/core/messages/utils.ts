@@ -525,12 +525,19 @@ export function extractPresentFilesFromMessage(message: Message) {
 /**
  * Extract timestamp from a message.
  * - Human messages: from additional_kwargs.timestamp (set by backend middleware)
+ *   Falls back to response_metadata.created_at if available.
  * - AI messages: from response_metadata.created_at (if provided by LLM)
+ *   Falls back to additional_kwargs.timestamp.
  */
 export function getMessageTimestamp(message: Message): string | null {
   if (message.type === "human") {
     const ts = message.additional_kwargs?.timestamp;
     if (typeof ts === "string") return ts;
+    // Fallback: some API paths set created_at in response_metadata
+    const metaTs = message.response_metadata?.created_at;
+    if (typeof metaTs === "string") return metaTs;
+    const metaTs2 = message.response_metadata?.timestamp;
+    if (typeof metaTs2 === "string") return metaTs2;
   }
   if (message.type === "ai") {
     const createdAt = message.response_metadata?.created_at;
