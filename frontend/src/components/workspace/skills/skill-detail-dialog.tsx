@@ -98,19 +98,48 @@ export function SkillDetailDialog({
     [contentSkill?.content],
   );
 
-  function handleDownload(event: React.MouseEvent) {
+  async function handleDownload(event: React.MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
     const url = displaySkill?.download_url;
     if (!url) return;
     try {
+      const resp = await fetch(url, { credentials: "include" });
+      if (!resp.ok) {
+        let msg = `下载失败 (${resp.status})`;
+        try {
+          const errData = await resp.json();
+          if (errData?.detail) msg = String(errData.detail);
+        } catch {
+          /* ignore */
+        }
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      const disposition = resp.headers.get("Content-Disposition");
+      let filename = `${displaySkill?.name ?? "skill"}.zip`;
+      if (disposition) {
+        const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+        if (utf8Match?.[1]) {
+          try { filename = decodeURIComponent(utf8Match[1]); } catch { /* keep default */ }
+        } else {
+          const quotedMatch = /filename="([^"]+)"/i.exec(disposition);
+          if (quotedMatch?.[1]) filename = quotedMatch[1];
+          else {
+            const simpleMatch = /filename=([^;]+)/i.exec(disposition);
+            if (simpleMatch?.[1]) filename = simpleMatch[1].trim();
+          }
+        }
+      }
+      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
-      a.download = `${displaySkill?.name ?? "skill"}.zip`;
-      a.rel = "noopener noreferrer";
+      a.href = objectUrl;
+      a.download = filename;
+      a.style.display = "none";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
       toast.success("开始下载 Skill 压缩包");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "下载失败");

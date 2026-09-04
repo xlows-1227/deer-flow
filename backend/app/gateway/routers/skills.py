@@ -927,7 +927,6 @@ def _build_skill_zip_internal(skill_dir: Path) -> bytes:
 
 
 @router.get("/skills/custom/{skill_name}/download", summary="Download Custom Skill")
-@require_permission("skills", "read")
 async def download_custom_skill(
     skill_name: str,
     request: Request,
