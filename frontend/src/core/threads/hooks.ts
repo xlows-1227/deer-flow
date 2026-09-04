@@ -990,14 +990,10 @@ export function useThreadHistory(threadId: string) {
           runsRef.current,
           loadedRunIdsRef.current,
         );
-        // Continue loading remaining runs so that ALL history messages are
-        // available for timestamp propagation. The previous condition
-        // `while (pendingLoadRef.current)` always evaluated to false here
-        // (pendingLoadRef was reset at the top of the loop), so only the
-        // single latest run was fetched — leaving earlier user messages
-        // without a timestamp source and causing them to render without
-        // a timestamp until the user manually clicked "load more".
-      } while (indexRef.current >= 0);
+        // Load only one run per call to preserve the "load more" button.
+        // Timestamps are handled by the runCreatedAt fallback in
+        // withMessageTimestamp and the thread state's own timestamps.
+      } while (false);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         return;
