@@ -968,9 +968,10 @@ class FeishuEventVerifier:
     credentials, but lark-oapi deliberately dispatches WebSocket frames through
     ``do_without_validation``. Dynamic bindings therefore compare the event
     header token here and additionally require a stable ID and fresh timestamp
-    before durable deduplication. HTTP callback signatures are not present on
-    this transport; ``encrypt_key`` remains part of the encrypted credential
-    bundle and dispatcher construction for provider configuration parity.
+    before durable deduplication.     HTTP callback signatures are not present on
+    this transport, including ``card.action.trigger``; ``encrypt_key`` remains
+    part of the encrypted credential bundle and dispatcher construction for
+    provider configuration parity.
     """
 
     def __init__(
@@ -1040,6 +1041,7 @@ class WebSocketSessionFactory(Protocol):
         message_handler: Callable[[Any], None],
         encrypt_key: str,
         verification_token: str,
+        card_action_handler: Callable[[Any], Any] | None = None,
     ) -> FeishuWebSocketSession: ...
 
 
@@ -1326,15 +1328,18 @@ def _default_websocket_session_factory(
     message_handler: Callable[[Any], None],
     encrypt_key: str,
     verification_token: str,
+    card_action_handler: Callable[[Any], Any] | None = None,
 ) -> FeishuWebSocketSession:
     import lark_oapi as lark
 
-    event_handler = lark.EventDispatcherHandler.builder(encrypt_key, verification_token).register_p2_im_message_receive_v1(message_handler).build()
+    builder = lark.EventDispatcherHandler.builder(encrypt_key, verification_token).register_p2_im_message_receive_v1(message_handler)
+    if card_action_handler is not None:
+        builder = builder.register_p2_card_action_trigger(card_action_handler)
     return _LarkWebSocketSession(
         app_id=app_id,
         app_secret=app_secret,
         domain=domain,
-        event_handler=event_handler,
+        event_handler=builder.build(),
     )
 
 
@@ -1355,9 +1360,9 @@ class FeishuChannel(Channel):
     The channel uses WebSocket long-connection mode so no public IP is required.
 
     Message flow:
-        1. User sends a message → bot adds "OK" emoji reaction
+        1. User sends a message or clicks a Skill-sent card → bot adds "OK" emoji reaction
         2. Bot replies in thread: "Working on it......"
-        3. Agent processes the message and returns a result
+        3. Agent processes the inbound payload and returns a result
         4. Bot replies in thread with the result
         5. Bot adds "DONE" emoji reaction to the original message
     """
@@ -1598,6 +1603,7 @@ class FeishuChannel(Channel):
                 message_handler=self._on_message,
                 encrypt_key=str(self.config.get("encrypt_key", "")),
                 verification_token=str(self.config.get("verification_token", "")),
+                card_action_handler=self._on_card_action,
             )
             self._ws_session = session
             session.run(on_ready=self._on_ws_ready, on_error=self._on_ws_error)
@@ -3334,3 +3340,116 @@ class FeishuChannel(Channel):
                 logger.warning("[Feishu] main loop not running, cannot publish inbound message")
         except Exception:
             logger.exception("[Feishu] error processing message")
+
+    @staticmethod
+    def _card_action_response(*, ok: bool, content: str) -> Any:
+        from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+
+        return P2CardActionTriggerResponse(
+            {
+                "toast": {
+                    "type": "info" if ok else "error",
+                    "content": content,
+                }
+            }
+        )
+
+    @staticmethod
+    def _format_card_action_text(action: Any) -> str:
+        value = getattr(action, "value", None)
+        if not isinstance(value, dict):
+            value = {} if value is None else {"raw": value}
+        payload: dict[str, Any] = {
+            "type": "feishu_card_action",
+            "tag": getattr(action, "tag", None),
+            "name": getattr(action, "name", None),
+            "value": value,
+        }
+        form_value = getattr(action, "form_value", None)
+        if form_value:
+            payload["form"] = form_value
+        option = getattr(action, "option", None)
+        if option:
+            payload["option"] = option
+        input_value = getattr(action, "input_value", None)
+        if input_value:
+            payload["input"] = input_value
+        checked = getattr(action, "checked", None)
+        if checked is not None:
+            payload["checked"] = checked
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _card_action_conversation(action: Any) -> tuple[str, str | None]:
+        value = getattr(action, "value", None)
+        if not isinstance(value, dict):
+            return "p2p", None
+        chat_type = value.get("chat_type")
+        if chat_type not in ("p2p", "group"):
+            chat_type = "p2p"
+        topic = value.get("topic_id") or value.get("root_id")
+        if isinstance(topic, str):
+            topic = topic.strip() or None
+        else:
+            topic = None
+        return str(chat_type), topic
+
+    def _on_card_action(self, event: Any) -> Any:
+        """Validate a card callback, ack Feishu, and enqueue it as inbound chat."""
+        if self.binding_id and self._stop_requested:
+            logger.info("[Feishu] ignored card action while binding is stopping")
+            return self._card_action_response(ok=False, content="Binding is stopping")
+        try:
+            logger.info("[Feishu] card action received: type=%s", type(event).__name__)
+            if self.binding_id and (self._event_verifier is None or not self._event_verifier(event)):
+                logger.warning(
+                    "[Feishu] rejected unauthenticated or stale card action",
+                    extra={"binding_id": self.binding_id},
+                )
+                return self._card_action_response(ok=False, content="Invalid card action")
+
+            event_header = getattr(event, "header", None)
+            event_id = getattr(event_header, "event_id", None)
+            event_created_at = FeishuEventVerifier._timestamp(event)
+            payload = getattr(event, "event", None)
+            operator = getattr(payload, "operator", None)
+            action = getattr(payload, "action", None)
+            context = getattr(payload, "context", None)
+            chat_id = getattr(context, "open_chat_id", None)
+            message_id = getattr(context, "open_message_id", None)
+            user_id = getattr(operator, "open_id", None)
+            if not isinstance(chat_id, str) or not chat_id.strip() or not isinstance(user_id, str) or not user_id.strip() or action is None:
+                return self._card_action_response(ok=False, content="Incomplete card action")
+
+            chat_type, topic_id = self._card_action_conversation(action)
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=self._format_card_action_text(action),
+                msg_type=InboundMessageType.CHAT,
+                thread_ts=message_id if isinstance(message_id, str) else None,
+                metadata={
+                    "message_id": message_id,
+                    "chat_type": chat_type,
+                    **({"event_id": event_id} if isinstance(event_id, str) else {}),
+                    **({"binding_id": self.binding_id, "agent_id": self.agent_id} if self.binding_id else {}),
+                    "card_action": True,
+                },
+                created_at=event_created_at,
+            )
+            inbound.topic_id = topic_id
+            source_message_id = message_id if isinstance(message_id, str) and message_id.strip() else chat_id
+
+            if self._main_loop and self._main_loop.is_running():
+                logger.info("[Feishu] publishing card action to bus (msg_id=%s)", source_message_id)
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._prepare_inbound(source_message_id, inbound, event_id if isinstance(event_id, str) else None),
+                    self._main_loop,
+                )
+                fut.add_done_callback(lambda f, mid=source_message_id: self._log_future_error(f, "prepare_inbound", mid))
+            else:
+                logger.warning("[Feishu] main loop not running, cannot publish card action")
+            return self._card_action_response(ok=True, content="Submitted to the agent")
+        except Exception:
+            logger.exception("[Feishu] error processing card action")
+            return self._card_action_response(ok=False, content="Failed to handle card action")

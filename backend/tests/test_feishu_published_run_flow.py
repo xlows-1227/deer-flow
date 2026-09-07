@@ -317,6 +317,120 @@ async def test_binding_message_uses_db_mapping_published_agent_quota_and_one_usa
     await engine.dispose()
 
 
+def _card_action_event(
+    *,
+    event_id: str = "card-event-1",
+    chat_id: str = "chat-1",
+    message_id: str = "om-card-1",
+    open_id: str = "user-1",
+    value: dict | None = None,
+):
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            event_id=event_id,
+            create_time=str(int(time.time() * 1000)),
+            token="verification-token",
+        ),
+        event=SimpleNamespace(
+            operator=SimpleNamespace(open_id=open_id),
+            action=SimpleNamespace(
+                value=value or {"action": "confirm"},
+                tag="button",
+                name="confirm",
+                form_value=None,
+                option=None,
+                input_value=None,
+                checked=None,
+            ),
+            context=SimpleNamespace(
+                open_chat_id=chat_id,
+                open_message_id=message_id,
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_card_action_reuses_published_thread_from_same_chat(tmp_path) -> None:
+    database_path = tmp_path / "published-feishu-card.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(
+            PublishedAgentRow(
+                id="agent-1",
+                owner_user_id="owner-a",
+                slug="agent-one",
+                display_name="Agent One",
+                status="published",
+            )
+        )
+        session.add(
+            AgentChannelRow(
+                id="binding-1",
+                agent_id="agent-1",
+                channel_type="feishu",
+                app_id="app-one",
+                secret_ref="secret://feishu/11111111111111111111111111111111",
+                status="active",
+            )
+        )
+        await session.commit()
+
+    order: list[str] = []
+    resolver = _Resolver(order)
+    ledger = _Ledger(order)
+    executor = _Executor(order)
+    mappings = DbMappingStore(session_factory)
+    runtime = PublishedChannelRuntime(
+        mapping_store=mappings,
+        resolver=resolver,
+        quota_ledger=ledger,
+        executor=executor,
+    )
+    bus = MessageBus()
+    manager = ChannelManager(bus, ChannelStore(tmp_path / "legacy-store.json"), published_runtime=runtime)
+    outbound_texts: list[str] = []
+
+    async def capture(message) -> None:
+        if message.is_final:
+            outbound_texts.append(message.text)
+
+    bus.subscribe_outbound(capture)
+    await manager.start()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-one",
+        app_secret="secret",
+        verification_token="verification-token",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        event_deduplicator=ChannelEventRepository(session_factory),
+    )
+    channel._main_loop = asyncio.get_running_loop()
+
+    channel._on_message(_event(text="please confirm"))
+    await asyncio.sleep(0.1)
+    channel._on_card_action(_card_action_event(value={"action": "confirm"}))
+    for _ in range(50):
+        if len(executor.calls) >= 2:
+            break
+        await asyncio.sleep(0.05)
+    await manager.stop()
+
+    assert len(executor.calls) == 2
+    assert executor.calls[0]["message"] == "please confirm"
+    payload = json.loads(str(executor.calls[1]["message"]))
+    assert payload["type"] == "feishu_card_action"
+    assert payload["value"] == {"action": "confirm"}
+    assert executor.calls[0]["thread_id"] == executor.calls[1]["thread_id"]
+    rows = await mappings.list_mappings(binding_id="binding-1", owner_user_id="owner-a")
+    assert len(rows) == 1
+    await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_quota_rejection_returns_safe_busy_message_without_run_or_usage(tmp_path) -> None:
     order: list[str] = []

@@ -381,3 +381,25 @@ def test_stalled_endpoint_is_binding_local_and_does_not_block_ready_session(monk
         first.stop(timeout_seconds=1.0)
         first_thread.join(1.0)
         second_thread.join(1.0)
+
+
+def test_default_websocket_factory_registers_card_action_callback() -> None:
+    from app.channels.feishu import _default_websocket_session_factory
+
+    def message_handler(_event) -> None:
+        return None
+
+    def card_handler(_event):
+        return None
+
+    session = _default_websocket_session_factory(
+        app_id="app-id",
+        app_secret="app-secret",
+        domain="https://open.feishu.cn",
+        message_handler=message_handler,
+        encrypt_key="",
+        verification_token="verification-token",
+        card_action_handler=card_handler,
+    )
+    processors = getattr(session._event_handler, "_callback_processor_map", {})
+    assert "p2.card.action.trigger" in processors
