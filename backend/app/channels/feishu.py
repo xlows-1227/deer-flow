@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from email.message import Message
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -200,6 +200,32 @@ class _MaterializedInboundFile:
     virtual_path: str
     actual_path: Path
     size: int
+
+
+# 卡片点击到 Run 终态之间等待 prepare_inbound 完成（含持久化去重 claim）的上限。
+_CARD_PREPARE_TIMEOUT_SECONDS = 10.0
+# 终态 finalize 等待点击侧线程（取原卡片+打"处理中"补丁）收尾的上限。
+_CARD_CLICK_PATCH_TIMEOUT_SECONDS = 30.0
+# 悬挂的 pending 卡片登记（Run 永不终结）超过该时长后被清理，允许重新点击。
+_CARD_RUN_STALE_SECONDS = 2 * 60 * 60.0
+
+
+@dataclass
+class _PendingCardRun:
+    """一次卡片审批点击的进行中状态（点击→Run 终态之间）。
+
+    两阶段卡片补丁：点击时卡片先打"处理中"（移除按钮防重复点击），Run 的
+    终态 outbound 到达后再改成已通过/已拒绝；失败则恢复原卡片按钮并清除
+    去重登记，允许重新点击。
+    """
+
+    action_type: str
+    reject_reason: str
+    registered_at: float = field(default_factory=time.monotonic)
+    # 点击时抓取的原始卡片 JSON（失败恢复用；抓取失败为 None）
+    original_content: str | None = None
+    # 点击侧线程完成（含抓取与"处理中"补丁，无论成败）后置位
+    click_work_done: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass(frozen=True)
@@ -1498,6 +1524,8 @@ class FeishuChannel(Channel):
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
         self._processed_card_message_ids: set[str] = set()
+        self._pending_card_runs: dict[str, _PendingCardRun] = {}
+        self._GetMessageRequest = None
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
@@ -1579,6 +1607,7 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetMessageRequest,
                 GetMessageResourceRequest,
                 PatchMessageRequest,
                 PatchMessageRequestBody,
@@ -1604,6 +1633,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = CreateImageRequest
         self._CreateImageRequestBody = CreateImageRequestBody
         self._GetMessageResourceRequest = GetMessageResourceRequest
+        self._GetMessageRequest = GetMessageRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -1747,6 +1777,30 @@ class FeishuChannel(Channel):
         self._thread = None
         self._ws_session = None
         logger.info("Feishu channel stopped")
+
+    async def _on_outbound(self, msg: OutboundMessage) -> None:
+        """Outbound 回调：发送回复后，终结该 thread 对应的 pending 卡片 Run。
+
+        卡片触发的 Run 其 outbound（进度/终态/错误）都带 thread_ts=卡片消息 id；
+        进度（is_final=False）保持"处理中"，终态到达时按 metadata.error 区分
+        成功（打卡片终态）与失败（还原按钮并清除去重，允许重新点击）。
+        """
+        await super()._on_outbound(msg)
+        if msg.channel_name != self.name:
+            return
+        card_message_id = msg.thread_ts or ""
+        if not card_message_id or not msg.is_final:
+            return
+        entry = self._claim_pending_card_run(card_message_id)
+        if entry is None:
+            return
+        success = not bool(msg.metadata.get("error"))
+        if success:
+            logger.info("[Feishu] card run succeeded, patching final state: message_id=%s", card_message_id)
+        else:
+            logger.warning("[Feishu] card run failed, restoring card buttons: message_id=%s", card_message_id)
+        task = asyncio.create_task(asyncio.to_thread(self._finalize_card_run, entry, card_message_id, success=success))
+        self._track_background_task(task, name="card_run_finalize", msg_id=card_message_id)
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         if not self._api_client:
@@ -3249,15 +3303,21 @@ class FeishuChannel(Channel):
         msg_id: str,
         inbound: InboundMessage,
         event_id: str | None = None,
-    ) -> None:
-        """Claim a trusted event before reactions or MessageBus dispatch."""
+    ) -> bool:
+        """Claim a trusted event before reactions or MessageBus dispatch.
+
+        Returns True when the inbound message was dispatched to the bus, and
+        False when the event was dropped (missing durable deduplicator or a
+        duplicate claim) — card actions rely on this to skip the
+        "processing" card patch for dropped events.
+        """
         if self.binding_id:
             if not event_id or self._event_deduplicator is None:
                 logger.error(
                     "[Feishu] rejecting binding event without durable deduplication",
                     extra={"binding_id": self.binding_id},
                 )
-                return
+                return False
             if not await self._event_deduplicator.claim(
                 self.binding_id,
                 event_id,
@@ -3267,11 +3327,12 @@ class FeishuChannel(Channel):
                     "[Feishu] duplicate event dropped",
                     extra={"binding_id": self.binding_id, "event_id": event_id},
                 )
-                return
+                return False
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
         await self.bus.publish_inbound(inbound)
+        return True
 
     def _on_message(self, event: Any) -> None:
         """Validate and enqueue one SDK message callback on the main loop."""
@@ -3550,6 +3611,13 @@ class FeishuChannel(Channel):
             # 避免投递失败时卡片被永久标记为已处理。
             card_message_id = message_id.strip() if isinstance(message_id, str) else ""
             if card_message_id and card_message_id in self._processed_card_message_ids:
+                if card_message_id in self._pending_card_runs:
+                    # 两阶段补丁进行中：Run 尚未终结，提示稍候而不是"已处理"
+                    logger.info("[Feishu] card action still processing, skipping: msg_id=%s", card_message_id)
+                    return self._card_action_response(
+                        ok=False,
+                        content="该操作正在处理中，请稍候",
+                    )
                 logger.warning("[Feishu] card already processed, skipping: msg_id=%s", card_message_id)
                 return self._card_action_response(
                     ok=False,
@@ -3592,20 +3660,17 @@ class FeishuChannel(Channel):
                 logger.warning("[Feishu] main loop not running, cannot publish card action")
                 return self._card_action_response(ok=False, content="系统繁忙，请稍后重试")
 
-            # 登记去重
+            # 登记去重与 pending 状态（两阶段卡片补丁：点击→处理中→终态）
             if card_message_id:
+                self._prune_stale_card_runs()
                 self._processed_card_message_ids.add(card_message_id)
+                self._pending_card_runs[card_message_id] = _PendingCardRun(
+                    action_type=action_type,
+                    reject_reason=str(reject_reason or ""),
+                )
                 # 控制集合大小，避免内存泄漏
                 if len(self._processed_card_message_ids) > 500:
                     self._processed_card_message_ids.clear()
-
-            # 后台线程 patch 卡片：移除按钮，显示已处理状态（防止重复点击），避免阻塞事件分发
-            if card_message_id:
-                threading.Thread(
-                    target=self._patch_card_after_action,
-                    args=(card_message_id, action_type, reject_reason),
-                    daemon=True,
-                ).start()
 
             logger.info("[Feishu] publishing card action to bus (msg_id=%s, action=%s)", source_message_id, action_type)
             try:
@@ -3616,21 +3681,208 @@ class FeishuChannel(Channel):
             except RuntimeError:
                 if card_message_id:
                     self._processed_card_message_ids.discard(card_message_id)
+                    self._pending_card_runs.pop(card_message_id, None)
                 logger.exception("[Feishu] failed to schedule card action (msg_id=%s)", source_message_id)
                 return self._card_action_response(ok=False, content="系统繁忙，请稍后重试")
-            fut.add_done_callback(lambda f, mid=source_message_id: self._log_future_error(f, "prepare_inbound", mid))
+
+            # 后台线程执行点击侧两阶段补丁第一阶段：等待 prepare_inbound 确认
+            # 事件确实投递（持久化去重命中时事件会被静默丢弃，此时不能打"处理中"），
+            # 抓取原始卡片内容并 patch 为"处理中"（移除按钮防重复点击）。
+            if card_message_id:
+                threading.Thread(
+                    target=self._run_card_click_patch,
+                    args=(card_message_id, fut),
+                    daemon=True,
+                ).start()
+            else:
+                fut.add_done_callback(lambda f, mid=source_message_id: self._log_future_error(f, "prepare_inbound", mid))
 
             # 根据 action 类型返回不同的 toast 文案
             if action_type == "approve":
-                toast_content = "✅ 审批通过，已提交处理"
+                toast_content = "✅ 已提交，正在处理…"
             elif action_type == "reject":
-                toast_content = "❌ 已拒绝该申请"
+                toast_content = "❌ 已提交拒绝，正在处理…"
             else:
-                toast_content = "已提交处理"
+                toast_content = "已提交，正在处理…"
             return self._card_action_response(ok=True, content=toast_content)
         except Exception:
             logger.exception("[Feishu] error processing card action")
             return self._card_action_response(ok=False, content="处理失败，请稍后重试")
+
+    def _claim_pending_card_run(self, card_message_id: str) -> _PendingCardRun | None:
+        """原子取走 pending 登记：首个调用者负责终态补丁，其余返回 None。"""
+        return self._pending_card_runs.pop(card_message_id, None)
+
+    def _rollback_card_action_registration(self, card_message_id: str) -> None:
+        """事件未投递（去重命中/调度失败）时撤销登记，卡片保持原样可重新点击。"""
+        self._claim_pending_card_run(card_message_id)
+        self._processed_card_message_ids.discard(card_message_id)
+
+    def _prune_stale_card_runs(self) -> None:
+        """清理悬挂的 pending 登记（Run 永未终结），避免内存与去重集合泄漏。"""
+        now = time.monotonic()
+        stale = [
+            message_id
+            for message_id, entry in self._pending_card_runs.items()
+            if now - entry.registered_at > _CARD_RUN_STALE_SECONDS
+        ]
+        for message_id in stale:
+            logger.warning("[Feishu] pruning stale card run registration: msg_id=%s", message_id)
+            self._rollback_card_action_registration(message_id)
+
+    def _run_card_click_patch(self, card_message_id: str, fut: concurrent.futures.Future) -> None:
+        """点击侧线程：确认事件已投递后，抓取原卡片并 patch 为"处理中"。"""
+        entry = self._pending_card_runs.get(card_message_id)
+        try:
+            if entry is None:
+                # Run 终态先于本线程到达并已取走登记，无需第一阶段补丁
+                self._log_future_error(fut, "prepare_inbound", card_message_id)
+                return
+            try:
+                dispatched = fut.result(timeout=_CARD_PREPARE_TIMEOUT_SECONDS)
+            except Exception:
+                logger.exception("[Feishu] card action prepare failed (msg_id=%s)", card_message_id)
+                self._rollback_card_action_registration(card_message_id)
+                return
+            if dispatched is False:
+                # 持久化去重命中（如进程重启后的事件重放）：事件被丢弃，卡片不打"处理中"
+                logger.info("[Feishu] duplicate card action dropped, card left untouched: msg_id=%s", card_message_id)
+                self._rollback_card_action_registration(card_message_id)
+                return
+            entry.original_content = self._fetch_card_original_content(card_message_id)
+            self._patch_card_processing(card_message_id)
+        finally:
+            if entry is not None:
+                entry.click_work_done.set()
+
+    def _fetch_card_original_content(self, message_id: str) -> str | None:
+        """抓取卡片当前内容 JSON（失败恢复时用于还原按钮）。"""
+        try:
+            if not self._api_client or not self._GetMessageRequest:
+                logger.warning("[Feishu] cannot fetch card content: api_client not initialized")
+                return None
+            req = self._GetMessageRequest.builder().message_id(message_id).build()
+            resp = self._api_client.im.v1.message.get(req)
+            if not resp.success():
+                logger.warning("[Feishu] card content fetch failed: code=%s, msg=%s", resp.code, resp.msg)
+                return None
+            items = getattr(getattr(resp, "data", None), "items", None) or []
+            for item in items:
+                content = getattr(getattr(item, "body", None), "content", None)
+                if isinstance(content, str) and content.strip():
+                    return content
+            return None
+        except Exception:
+            logger.exception("[Feishu] error fetching card content: message_id=%s", message_id)
+            return None
+
+    def _patch_card_processing(self, message_id: str) -> None:
+        """Patch 卡片为"处理中"：移除按钮防重复点击，等待 Run 终态后再改终态。"""
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            if not self._api_client:
+                logger.warning("[Feishu] cannot patch card: api_client not initialized")
+                return
+
+            CST = timezone(timedelta(hours=8))
+            now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+
+            new_card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "审批处理中"},
+                    "text_tag_list": [{"tag": "text_tag", "text": {"tag": "plain_text", "content": "处理中"}, "color": "blue"}],
+                    "template": "blue",
+                    "padding": "12px 8px 12px 8px",
+                },
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": (
+                                f"⏳ 审批已提交，智能体正在处理…\n\n"
+                                f"处理完成后此处将自动更新结果。\n\n"
+                                f"操作时间：{now_str}\n\n"
+                                f"如长时间停留在该状态，请联系管理员。"
+                            ),
+                        },
+                    ],
+                },
+            }
+
+            req = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(json.dumps(new_card)).build()).build()
+            resp = self._api_client.im.v1.message.patch(req)
+            if resp.success():
+                logger.info("[Feishu] card patched to processing: message_id=%s", message_id)
+            else:
+                logger.warning("[Feishu] processing card patch failed: code=%s, msg=%s", resp.code, resp.msg)
+        except Exception:
+            logger.exception("[Feishu] error patching processing card: message_id=%s", message_id)
+
+    def _finalize_card_run(self, entry: _PendingCardRun, card_message_id: str, *, success: bool) -> None:
+        """Run 终结后打卡片终态：成功→已通过/已拒绝；失败→还原按钮允许重试。"""
+        from datetime import datetime, timedelta, timezone
+
+        # 等点击侧线程收尾（含"处理中"补丁），保证补丁顺序不乱
+        if not entry.click_work_done.wait(_CARD_CLICK_PATCH_TIMEOUT_SECONDS):
+            logger.warning("[Feishu] card click patch did not finish in time: msg_id=%s", card_message_id)
+
+        if success:
+            self._patch_card_after_action(card_message_id, entry.action_type, entry.reject_reason)
+            return
+
+        # 失败：清除去重登记让用户可重新点击
+        self._processed_card_message_ids.discard(card_message_id)
+        if not self._api_client:
+            logger.warning("[Feishu] cannot restore card: api_client not initialized")
+            return
+        if entry.original_content:
+            try:
+                req = self._PatchMessageRequest.builder().message_id(card_message_id).request_body(self._PatchMessageRequestBody.builder().content(entry.original_content).build()).build()
+                resp = self._api_client.im.v1.message.patch(req)
+                if resp.success():
+                    logger.info("[Feishu] card restored after failed run: message_id=%s", card_message_id)
+                    return
+                logger.warning("[Feishu] card restore failed: code=%s, msg=%s", resp.code, resp.msg)
+            except Exception:
+                logger.exception("[Feishu] error restoring card: message_id=%s", card_message_id)
+
+        # 无法还原原卡片（抓取失败/补丁失败）时退化为灰色失败卡片
+        try:
+            CST = timezone(timedelta(hours=8))
+            now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+            new_card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "审批未完成"},
+                    "text_tag_list": [{"tag": "text_tag", "text": {"tag": "plain_text", "content": "处理失败"}, "color": "grey"}],
+                    "template": "grey",
+                    "padding": "12px 8px 12px 8px",
+                },
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": (
+                                f"⚠️ 审批处理失败，卡片按钮无法自动恢复。\n\n"
+                                f"具体原因见会话中的错误提示；如需重试，请联系管理员重新发起审批。\n\n"
+                                f"操作时间：{now_str}"
+                            ),
+                        },
+                    ],
+                },
+            }
+            req = self._PatchMessageRequest.builder().message_id(card_message_id).request_body(self._PatchMessageRequestBody.builder().content(json.dumps(new_card)).build()).build()
+            resp = self._api_client.im.v1.message.patch(req)
+            if resp.success():
+                logger.info("[Feishu] card patched to failed state: message_id=%s", card_message_id)
+            else:
+                logger.warning("[Feishu] failed card patch failed: code=%s, msg=%s", resp.code, resp.msg)
+        except Exception:
+            logger.exception("[Feishu] error patching failed card: message_id=%s", card_message_id)
 
     def _patch_card_after_action(self, message_id: str, action_type: str, reject_reason: str = "") -> None:
         """Patch 飞书卡片消息，移除按钮，显示已处理状态（防止重复点击）。"""

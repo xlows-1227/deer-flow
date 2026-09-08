@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -429,7 +429,7 @@ async def test_card_action_reject_with_reason_publishes_with_card_topic(
 
     assert response is not None
     assert response.toast.type == "info"
-    assert response.toast.content == "❌ 已拒绝该申请"
+    assert response.toast.content == "❌ 已提交拒绝，正在处理…"
     await asyncio.sleep(0.1)
     assert bus.inbound_queue.qsize() == 1
     inbound = await bus.get_inbound()
@@ -509,3 +509,175 @@ def test_patch_card_after_action_builds_sdk_compatible_request() -> None:
     assert card["schema"] == "2.0"
     assert card["header"]["title"]["content"] == "审批已拒绝"
     assert "预算不足" in card["body"]["elements"][0]["content"]
+
+
+def _make_card_patch_channel() -> tuple[FeishuChannel, list[dict[str, Any]], list[str]]:
+    """带 Fake SDK 的通道：记录每次卡片 patch 内容与 get 抓取的原始内容。"""
+    from lark_oapi.api.im.v1 import GetMessageRequest, PatchMessageRequest, PatchMessageRequestBody
+
+    bus = MessageBus()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-id",
+        app_secret="app-secret",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        verification_token="verification-token",
+    )
+
+    original_card = json.dumps(
+        {
+            "schema": "2.0",
+            "header": {"title": {"tag": "plain_text", "content": "审批请求"}, "template": "blue"},
+            "body": {"elements": [{"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "同意"}}]}]},
+        },
+        ensure_ascii=False,
+    )
+    patches: list[dict[str, Any]] = []
+    gets: list[str] = []
+
+    class FakeMessageApi:
+        def patch(self, req: Any) -> Any:
+            patches.append({"message_id": req.message_id, "content": req.request_body.content})
+            return SimpleNamespace(success=lambda: True, code=0, msg="")
+
+        def get(self, req: Any) -> Any:
+            gets.append(req.message_id)
+            return SimpleNamespace(
+                success=lambda: True,
+                code=0,
+                msg="",
+                data=SimpleNamespace(items=[SimpleNamespace(body=SimpleNamespace(content=original_card))]),
+            )
+
+    class FakeImV1:
+        message = FakeMessageApi()
+
+    class FakeIm:
+        v1 = FakeImV1()
+
+    class FakeApiClient:
+        im = FakeIm()
+
+    channel._api_client = FakeApiClient()
+    channel._PatchMessageRequest = PatchMessageRequest
+    channel._PatchMessageRequestBody = PatchMessageRequestBody
+    channel._GetMessageRequest = GetMessageRequest
+    channel.send = AsyncMock()  # type: ignore[method-assign]
+    return channel, patches, gets
+
+
+async def _wait_for(condition: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("condition not met in time")
+
+
+@pytest.mark.asyncio
+async def test_card_click_patches_processing_then_final_on_success(event_repository: ChannelEventRepository) -> None:
+    """两阶段：点击打"处理中"（非终态），Run 成功终态 outbound 到达后才打"已通过"。"""
+    channel, patches, gets = _make_card_patch_channel()
+    channel._event_deduplicator = event_repository
+    channel._main_loop = asyncio.get_running_loop()
+
+    response = channel._on_card_action(_card_action_event(value={"action": "approve", "record_id": "rec-1"}))
+    assert response.toast.type == "info"
+
+    await _wait_for(lambda: len(patches) >= 1)
+    first_card = json.loads(patches[0]["content"])
+    assert first_card["header"]["title"]["content"] == "审批处理中"
+    assert gets == ["card-message-1"]
+    # 终态未到：不重复点击提示为"处理中"
+    repeat = channel._on_card_action(_card_action_event(value={"action": "approve", "record_id": "rec-1"}))
+    assert repeat.toast.content == "该操作正在处理中，请稍候"
+
+    from app.channels.message_bus import OutboundMessage
+
+    await channel._on_outbound(
+        OutboundMessage(
+            channel_name=channel.name,
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text="审批完成",
+            thread_ts="card-message-1",
+            is_final=True,
+            metadata={},
+        )
+    )
+    await _wait_for(lambda: len(patches) >= 2)
+
+    final_card = json.loads(patches[-1]["content"])
+    assert final_card["header"]["title"]["content"] == "审批已通过"
+    # 成功后登记保留（卡片已是终态，禁止再次点击）
+    assert "card-message-1" in channel._processed_card_message_ids
+    assert "card-message-1" not in channel._pending_card_runs
+    channel.send.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_card_run_failure_restores_original_and_clears_dedup(event_repository: ChannelEventRepository) -> None:
+    """Run 失败（busy/内部错误等 error 标记终态）：还原原卡片按钮并清除去重，允许重试。"""
+    channel, patches, _ = _make_card_patch_channel()
+    channel._event_deduplicator = event_repository
+    channel._main_loop = asyncio.get_running_loop()
+
+    channel._on_card_action(_card_action_event(value={"action": "approve", "record_id": "rec-1"}))
+    await _wait_for(lambda: len(patches) >= 1)
+
+    from app.channels.message_bus import OutboundMessage
+
+    # 进度消息不打终态
+    await channel._on_outbound(
+        OutboundMessage(
+            channel_name=channel.name,
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text="处理中进度",
+            thread_ts="card-message-1",
+            is_final=False,
+            metadata={},
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert len(patches) == 1
+    assert "card-message-1" in channel._pending_card_runs
+
+    await channel._on_outbound(
+        OutboundMessage(
+            channel_name=channel.name,
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text="This agent is busy. Please try again later.",
+            thread_ts="card-message-1",
+            is_final=True,
+            metadata={"error": True},
+        )
+    )
+    await _wait_for(lambda: len(patches) >= 2)
+
+    # 还原为原始卡片 JSON（按钮回来了）
+    assert json.loads(patches[-1]["content"])["header"]["title"]["content"] == "审批请求"
+    assert "card-message-1" not in channel._processed_card_message_ids
+    assert "card-message-1" not in channel._pending_card_runs
+
+
+@pytest.mark.asyncio
+async def test_duplicate_card_action_event_leaves_card_untouched(event_repository: ChannelEventRepository) -> None:
+    """持久化去重命中（进程重启后事件重放）：事件被丢弃，卡片不打"处理中"且登记回滚。"""
+    channel, patches, _ = _make_card_patch_channel()
+    channel._event_deduplicator = event_repository
+    channel._main_loop = asyncio.get_running_loop()
+
+    # 预先占用持久化事件（模拟重启前已处理过同一事件）
+    assert await event_repository.claim("binding-1", "card-event-1", system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE)
+
+    channel._on_card_action(_card_action_event(value={"action": "approve", "record_id": "rec-1"}))
+
+    await _wait_for(lambda: "card-message-1" not in channel._pending_card_runs)
+    await asyncio.sleep(0.2)
+    assert patches == []  # 卡片完全未被改动
+    assert "card-message-1" not in channel._processed_card_message_ids
+    assert channel.bus.inbound_queue.empty()
