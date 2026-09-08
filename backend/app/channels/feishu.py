@@ -3346,8 +3346,25 @@ class FeishuChannel(Channel):
                 json.dumps(_sdk_event_to_dict(event), ensure_ascii=False, default=str),
             )
             if self.binding_id and (self._event_verifier is None or not self._event_verifier(event)):
+                # 生产排障用：与 card action 路径同款的诊断信息，区分 token
+                # 不匹配（指纹不在 accepted_fp 中）与事件过旧/时钟偏差（skew
+                # 超过 max_age_seconds=300）
+                event_header = getattr(event, "header", None)
+                event_ts = FeishuEventVerifier._timestamp(event)
+                header_token = getattr(event_header, "token", None)
+                fingerprints = (
+                    self._event_verifier.accepted_token_fingerprints()
+                    if isinstance(self._event_verifier, FeishuEventVerifier)
+                    else ()
+                )
                 logger.warning(
-                    "[Feishu] rejected unauthenticated or stale event",
+                    "[Feishu] rejected unauthenticated or stale event: event_id=%s event_type=%s skew=%.1fs header_token=%s accepted_fp=%s verifier=%s",
+                    getattr(event_header, "event_id", None),
+                    getattr(event_header, "event_type", None),
+                    (time.time() - event_ts) if event_ts is not None else float("nan"),
+                    _token_fingerprint(header_token),
+                    fingerprints,
+                    self._event_verifier is not None,
                     extra={"binding_id": self.binding_id},
                 )
                 return
