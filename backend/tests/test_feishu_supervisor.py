@@ -2486,6 +2486,70 @@ async def test_lost_runtime_token_still_stops_local_transport(
 
 
 @pytest.mark.asyncio
+async def test_late_lease_renewal_recovers_without_stopping_transport(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, secrets, first, _second = supervisor_env
+    factory = _Factory(set())
+    monkeypatch.setattr("app.channels.supervisor.RUNTIME_LEASE_HEARTBEAT_SECONDS", 0.01)
+    supervisor = FeishuSupervisor(repository, secrets, MessageBus(), channel_factory=factory)
+    await supervisor.start_binding(first["id"])
+    lease_task = supervisor._running[first["id"]].lease_task
+    assert lease_task is not None
+
+    async def late_heartbeat(*_args: Any, allow_expired: bool = False, **_kwargs: Any) -> bool:
+        return allow_expired
+
+    monkeypatch.setattr(repository, "renew_runtime", late_heartbeat)
+
+    for _ in range(100):
+        if any("recovered the same lease" in record.getMessage() for record in caplog.records):
+            break
+        await asyncio.sleep(0.01)
+
+    assert any("recovered the same lease" in record.getMessage() for record in caplog.records)
+    assert factory.instances[0].stop_count == 0
+    assert factory.instances[0].is_running is True
+    assert supervisor.running_binding_ids == (first["id"],)
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_lease_loss_logs_reason_and_stops_transport(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, secrets, first, _second = supervisor_env
+    factory = _Factory(set())
+    monkeypatch.setattr("app.channels.supervisor.RUNTIME_LEASE_HEARTBEAT_SECONDS", 0.01)
+    supervisor = FeishuSupervisor(repository, secrets, MessageBus(), channel_factory=factory)
+    await supervisor.start_binding(first["id"])
+    lease_task = supervisor._running[first["id"]].lease_task
+    assert lease_task is not None
+
+    async def lost_forever(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(repository, "renew_runtime", lost_forever)
+    monkeypatch.setattr(repository, "renew_quiescing_runtime", lost_forever)
+
+    for _ in range(100):
+        if factory.instances[0].stop_count and supervisor.running_binding_ids == ():
+            break
+        await asyncio.sleep(0.01)
+
+    assert factory.instances[0].stop_count == 1
+    assert supervisor.running_binding_ids == ()
+    reasons = [record.getMessage() for record in caplog.records if "stopping transport fail closed" in record.getMessage()]
+    assert len(reasons) == 1
+    assert "lease" in reasons[0]
+    await asyncio.gather(lease_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_runtime_renewal_error_stops_local_transport_fail_closed(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,

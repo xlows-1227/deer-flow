@@ -1269,6 +1269,56 @@ class FeishuSupervisor:
                     continue
             return
 
+    async def _recover_late_lease_renewal(
+        self,
+        binding_id: str,
+        *,
+        current: _RunningChannel,
+        lease_token: str,
+    ) -> bool:
+        """Re-extend a still-owned lease whose heartbeat landed after expiry.
+
+        A blocked event loop or one slow database pass can make the renewal
+        miss ``runtime_lease_expires_at`` while no other runtime touched the
+        row. Stopping a healthy transport for that loses published-agent
+        availability permanently, so forgiveness keeps every other fencing
+        condition: the binding stays active with no durable stop request and
+        an unchanged lease token.
+        """
+        try:
+            return await self._repository.renew_runtime(
+                current.agent_id,
+                binding_id,
+                owner_user_id=current.owner_user_id,
+                lease_token=lease_token,
+                lease_seconds=RUNTIME_LEASE_TTL_SECONDS,
+                allow_expired=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to recover a late Feishu runtime lease renewal",
+                extra={"binding_id": binding_id},
+            )
+            return False
+
+    async def _lease_loss_reason(self, binding_id: str, *, lease_token: str) -> str:
+        """Classify why a runtime lease stopped being renewable."""
+        try:
+            row = await self._binding(binding_id)
+        except Exception:
+            return "binding row unavailable"
+        if row.get("status") == "deleting":
+            return "binding is being deleted"
+        if row.get("runtime_stop_requested"):
+            return "runtime stop was requested"
+        if row.get("runtime_lease_token") != lease_token:
+            return "lease was claimed by another runtime"
+        if row.get("status") != "active":
+            return f"binding status is {row.get('status')!r}"
+        return "lease expired and was not recoverable"
+
     async def _monitor_runtime_lease(
         self,
         binding_id: str,
@@ -1300,6 +1350,17 @@ class FeishuSupervisor:
                 renewed = False
             if renewed:
                 continue
+            if await self._recover_late_lease_renewal(binding_id, current=current, lease_token=lease_token):
+                logger.warning(
+                    "Feishu runtime lease renewal landed after expiry; recovered the same lease without stopping the transport",
+                    extra={"binding_id": binding_id},
+                )
+                continue
+            logger.warning(
+                "Feishu runtime lease lost (%s); stopping transport fail closed",
+                await self._lease_loss_reason(binding_id, lease_token=lease_token),
+                extra={"binding_id": binding_id},
+            )
             async with self._binding_lifecycle(binding_id):
                 latest = self._running.get(binding_id)
                 if latest is not None and latest.generation is generation and latest.lease_token == lease_token:

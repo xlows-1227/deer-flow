@@ -1128,7 +1128,11 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
-                    metadata=_slim_metadata(msg.metadata),
+                    # 流式执行出错时标记 error，让飞书卡片审批 Run 走失败恢复
+                    metadata={
+                        **_slim_metadata(msg.metadata),
+                        **({"error": True} if stream_error else {}),
+                    },
                 )
             )
 
@@ -1219,12 +1223,13 @@ class ChannelManager:
     # -- error helper ------------------------------------------------------
 
     async def _send_error(self, msg: InboundMessage, error_text: str) -> None:
+        # metadata["error"] 让飞书通道把卡片审批 Run 识别为失败并还原卡片按钮
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
             thread_id=await self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
-            metadata=_slim_metadata(msg.metadata),
+            metadata={**_slim_metadata(msg.metadata), "error": True},
         )
         await self.bus.publish_outbound(outbound)

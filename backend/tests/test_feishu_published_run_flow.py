@@ -30,7 +30,7 @@ from deerflow.persistence.published_agent import PublishedAgentRow
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.quota import EffectiveQuota, QuotaExceededError, Reservation
 from deerflow.publishing.resolver import AgentNotAvailableError
-from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunRecord, RunStatus
+from deerflow.runtime import ConflictError, DisconnectMode, MemoryStreamBridge, RunRecord, RunStatus
 
 
 def _quota() -> EffectiveQuota:
@@ -167,14 +167,23 @@ class _QuotaExceededLedger(_Ledger):
         raise QuotaExceededError("INBOUND_RPS_EXCEEDED", retry_after=1)
 
 
-def _inbound(*, text: str = "hello") -> InboundMessage:
+class _ConflictExecutor(_Executor):
+    """Mimic RunManager rejecting a second concurrent run on one thread."""
+
+    async def execute(self, **kwargs) -> PublishedChannelExecution:
+        self.order.append("run")
+        self.calls.append(kwargs)
+        raise ConflictError(f"{kwargs['thread_id']} already has an active run")
+
+
+def _inbound(*, text: str = "hello", binding_id: str = "binding-1") -> InboundMessage:
     return InboundMessage(
-        channel_name="feishu:binding-1",
+        channel_name=f"feishu:{binding_id}",
         chat_id="chat-1",
         user_id="user-1",
         text=text,
         metadata={
-            "binding_id": "binding-1",
+            "binding_id": binding_id,
             "agent_id": "agent-1",
             "event_id": "event-1",
             "chat_type": "p2p",
@@ -182,7 +191,7 @@ def _inbound(*, text: str = "hello") -> InboundMessage:
     )
 
 
-async def _dispatch_once(runtime: PublishedChannelRuntime, store_path) -> str:
+async def _dispatch_once(runtime: PublishedChannelRuntime, store_path, *, binding_id: str = "binding-1") -> str:
     bus = MessageBus()
     manager = ChannelManager(bus, ChannelStore(store_path), published_runtime=runtime)
     outbound = asyncio.get_running_loop().create_future()
@@ -193,7 +202,7 @@ async def _dispatch_once(runtime: PublishedChannelRuntime, store_path) -> str:
 
     bus.subscribe_outbound(capture)
     await manager.start()
-    await bus.publish_inbound(_inbound())
+    await bus.publish_inbound(_inbound(binding_id=binding_id))
     text = await asyncio.wait_for(outbound, timeout=2.0)
     await manager.stop()
     return str(text)
@@ -318,6 +327,30 @@ async def test_binding_message_uses_db_mapping_published_agent_quota_and_one_usa
 
 
 @pytest.mark.asyncio
+async def test_ach_prefixed_binding_credential_id_fits_quota_reservation_varchar_32(tmp_path) -> None:
+    order: list[str] = []
+    resolver = _Resolver(order)
+    ledger = _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=resolver,
+        quota_ledger=ledger,
+        executor=_Executor(order),
+    )
+
+    binding_id = "ach_cc2578a7820d4634a84b5eceb4a2d96a"
+    text = await _dispatch_once(runtime, tmp_path / "ach-binding-legacy.json", binding_id=binding_id)
+
+    assert text == "published answer"
+    assert order == ["resolve", "reserve", "run", "settle"]
+    credential_id = resolver.calls[0]["credential_id"]
+    assert credential_id == "cc2578a7820d4634a84b5eceb4a2d96a"
+    assert len(credential_id) <= 32
+    assert ledger.settled_usage[0]["credential_id"] == credential_id
+    assert ledger.settled_usage[0]["conversation_id"] == "thread-1"
+
+
+@pytest.mark.asyncio
 async def test_quota_rejection_returns_safe_busy_message_without_run_or_usage(tmp_path) -> None:
     order: list[str] = []
     ledger = _QuotaExceededLedger(order)
@@ -334,6 +367,29 @@ async def test_quota_rejection_returns_safe_busy_message_without_run_or_usage(tm
     assert text == "This agent is busy. Please try again later."
     assert order == ["resolve", "reserve"]
     assert executor.calls == []
+    assert ledger.settled_usage == []
+
+
+@pytest.mark.asyncio
+async def test_thread_conflict_returns_safe_busy_message_and_releases_reservation(tmp_path) -> None:
+    """同线程第二个并发 Run 被 RunManager 拒绝时：释放未启动的配额并回复 busy 文案，
+    而不是落入内部错误的兜底回复。"""
+    order: list[str] = []
+    ledger = _Ledger(order)
+    executor = _ConflictExecutor(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_Resolver(order),
+        quota_ledger=ledger,
+        executor=executor,
+    )
+
+    text = await _dispatch_once(runtime, tmp_path / "conflict-legacy.json")
+
+    assert text == "This agent is busy. Please try again later."
+    assert order == ["resolve", "reserve", "run"]
+    assert len(executor.calls) == 1
+    assert ledger.released == ["reservation-1"]
     assert ledger.settled_usage == []
 
 
