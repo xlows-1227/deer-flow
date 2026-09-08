@@ -504,15 +504,14 @@ class AgentChannelRepository:
                 return None
             # Pre-check: system-wide app_id uniqueness (Feishu WebSocket allows only one connection per app_id)
             existing_app_conflict = (
-                (await session.execute(
+                await session.execute(
                     select(AgentChannelRow).where(
                         AgentChannelRow.status == "active",
                         AgentChannelRow.app_id == row.app_id,
                         AgentChannelRow.id != binding_id,
                     )
-                ))
-                .scalar_one_or_none()
-            )
+                )
+            ).scalar_one_or_none()
             if existing_app_conflict is not None:
                 raise ActiveAgentChannelConflictError(
                     f"This Feishu app (app_id={row.app_id}) is already bound to Agent {existing_app_conflict.agent_id}. "
@@ -533,9 +532,7 @@ class AgentChannelRepository:
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
-                raise ActiveAgentChannelConflictError(
-                    "Agent already has an active channel binding, or another Agent is already using this Feishu app"
-                ) from exc
+                raise ActiveAgentChannelConflictError("Agent already has an active channel binding, or another Agent is already using this Feishu app") from exc
             return _to_dict(row)
 
     async def deactivate(self, agent_id: str, binding_id: str, *, owner_user_id: str) -> dict[str, Any] | None:
@@ -650,12 +647,22 @@ class AgentChannelRepository:
         owner_user_id: str,
         lease_token: str,
         lease_seconds: float = 15.0,
+        allow_expired: bool = False,
     ) -> bool:
-        """Heartbeat one active runtime claim and observe durable revocation."""
+        """Heartbeat one active runtime claim and observe durable revocation.
+
+        ``allow_expired`` re-extends a lease whose heartbeat landed after
+        ``runtime_lease_expires_at``. Every other fencing condition (active
+        binding, no durable stop request, unchanged token) still applies, so a
+        revoked or foreign lease is never recoverable this way.
+        """
         async with self._sf() as session:
             row = (await session.execute(self._owned_query(agent_id, binding_id, owner_user_id).with_for_update())).scalar_one_or_none()
+            if row is None:
+                return False
             now = _now()
-            if row is None or row.status != "active" or row.runtime_stop_requested or row.runtime_lease_token != lease_token or row.runtime_lease_expires_at is None or _utc(row.runtime_lease_expires_at) <= now:
+            expired = row.runtime_lease_expires_at is None or _utc(row.runtime_lease_expires_at) <= now
+            if row.status != "active" or row.runtime_stop_requested or row.runtime_lease_token != lease_token or (expired and not allow_expired):
                 return False
             row.runtime_lease_expires_at = now + timedelta(seconds=max(0.1, lease_seconds))
             row.updated_at = now
