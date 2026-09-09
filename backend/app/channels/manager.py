@@ -1127,11 +1127,12 @@ class ChannelManager:
                     response_text = latest_text or "(No response from agent)"
 
             logger.info(
-                "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s",
+                "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s, head=%r",
                 thread_id,
                 len(response_text),
                 len(artifacts),
                 stream_error,
+                response_text[:160],
             )
             await self.bus.publish_outbound(
                 OutboundMessage(

@@ -329,16 +329,20 @@ async def test_publish_uses_one_captured_skill_snapshot(env):
 
 
 @pytest.mark.asyncio
-async def test_publish_fails_closed_when_selected_skill_cannot_be_snapshotted(env):
-    service, draft_service, _, _ = env
+async def test_publish_auto_filters_unavailable_skill(env):
+    """When a skill becomes unavailable (deleted/disabled/sharing revoked)
+    between draft save and publish, the validator auto-removes it instead of
+    blocking the publish. The release is created with the remaining skills.
+    """
+    service, draft_service, _, release_repo = env
     agent = await _seed_agent(draft_service)
     service._skills._caps.clear()  # noqa: SLF001 - simulate delete/disable before capture
 
-    with pytest.raises(PublishError) as exc_info:
-        await service.publish(agent["id"], owner_user_id="user-a")
-
-    assert "SKILL_NOT_FOUND" in {violation.code for violation in exc_info.value.violations}
-    assert await service.list_releases(agent["id"], owner_user_id="user-a") == []
+    # Publish succeeds — the unavailable skill is auto-filtered
+    result = await service.publish(agent["id"], owner_user_id="user-a")
+    release = await release_repo.get(result["release_id"], owner_user_id="user-a")
+    # No skills in the release (reporting was auto-removed)
+    assert len(release["skills"]) == 0
 
 
 @pytest.mark.asyncio

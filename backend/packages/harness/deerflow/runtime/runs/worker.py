@@ -3406,6 +3406,25 @@ def _cache_and_patch_values_messages(run_id: str, messages: list[Any]) -> None:
                     pass
 
 
+def _log_values_last_ai(stage: str, messages: Any) -> None:
+    """取证日志：values 快照中最后一条 AI 消息的头部（%r 显示换行）。"""
+    if not isinstance(messages, list):
+        return
+    for m in reversed(messages):
+        if isinstance(m, dict):
+            if m.get("type") not in ("ai", "AIMessage", "AIMessageChunk"):
+                continue
+            content = m.get("content", "")
+        else:
+            if getattr(m, "type", "") not in ("ai", "AIMessage", "AIMessageChunk"):
+                continue
+            content = getattr(m, "content", "")
+        if not isinstance(content, str):
+            content = repr(content)
+        logger.info("[Worker] values last AI (%s): len=%d head=%r", stage, len(content), content[:120])
+        return
+
+
 def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> None:
     """After serialization, patch content from [工具调用已省略] → [工具调用: name1, name2].
 
@@ -4839,6 +4858,7 @@ async def run_agent(
                         if isinstance(msgs, list):
                             _cache_and_patch_values_messages(run_id, msgs)
                             cleaned_chunk["messages"] = msgs
+                            _log_values_last_ai("post-patch", msgs)
                 safe_chunk = redactor.redact_stream_payload(mode, cleaned_chunk, run_id=run_id)
                 serialized_chunk = serialize(safe_chunk, mode=mode)
                 if mode == "messages":
@@ -4848,6 +4868,7 @@ async def run_agent(
                         msgs = serialized_chunk.get("messages")
                         if isinstance(msgs, list):
                             _cache_ai_tool_names_from_values(run_id, msgs)
+                            _log_values_last_ai("post-serialize", msgs)
                 await bridge.publish(run_id, sse_event, serialized_chunk)
 
         # 7b. Final-content patch for glued-English output.

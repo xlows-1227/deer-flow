@@ -138,9 +138,17 @@ def test_rule3_model_available_ok(collaborators):
 # ---------------------------------------------------------------------------
 
 
-def test_rule4_skill_not_found(collaborators):
-    violations = validate_draft_for_publish(_draft(skills=[{"skill_name": "ghost", "source": "public"}]), **collaborators)
-    assert "SKILL_NOT_FOUND" in codes(violations)
+def test_rule4_skill_not_found_auto_filters(collaborators):
+    """Unselectable skills are auto-filtered from the draft, not reported as violations.
+
+    The skill is already gone from the platform; blocking publish would trap
+    the user in an unrecoverable state. The validator silently removes it.
+    """
+    draft = _draft(skills=[{"skill_name": "ghost", "source": "public"}])
+    violations = validate_draft_for_publish(draft, **collaborators)
+    assert "SKILL_NOT_FOUND" not in codes(violations)
+    # Skill was removed from the draft in-place
+    assert draft["skills"] == []
 
 
 def test_rule4_skill_found_ok(collaborators):

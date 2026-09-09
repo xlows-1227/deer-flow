@@ -144,6 +144,41 @@ class RunJournal(BaseCallbackHandler):
             text = self._message_text(message).strip()
             if text:
                 self._last_ai_msg = text[:2000]
+                # 取证日志：记录原始 content 的结构（str / list / 其他）、
+                # 换行与空格计数，用于区分「端点剥离空白」与「多块 join 丢换行」。
+                content = getattr(message, "content", None)
+                if isinstance(content, str):
+                    logger.info(
+                        "[Journal] last_ai_msg set: len=%d shape=str nl=%d sp=%d head=%r",
+                        len(text),
+                        content.count("\n"),
+                        content.count(" "),
+                        text[:120],
+                    )
+                elif isinstance(content, list):
+                    text_blocks = [
+                        block if isinstance(block, str) else block.get("text")
+                        for block in content
+                        if isinstance(block, str)
+                        or (isinstance(block, Mapping) and isinstance(block.get("text"), str))
+                    ]
+                    logger.info(
+                        "[Journal] last_ai_msg set: len=%d shape=list blocks=%d types=%s heads=%r",
+                        len(text),
+                        len(text_blocks),
+                        [
+                            block.get("type") if isinstance(block, Mapping) else "str"
+                            for block in content[:8]
+                        ],
+                        [str(block)[:30] for block in text_blocks[:4]],
+                    )
+                else:
+                    logger.info(
+                        "[Journal] last_ai_msg set: len=%d shape=%s head=%r",
+                        len(text),
+                        type(content).__name__,
+                        text[:120],
+                    )
 
     def on_chain_start(
         self,

@@ -22,7 +22,10 @@ pointer, so historical releases stay byte-identical and auditable.
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from deerflow.persistence.agent_release import AgentReleaseRepository
 from deerflow.persistence.published_agent import (
@@ -238,8 +241,11 @@ class PublishService:
             name = entry["skill_name"]
             snapshot = skill_snapshots.get(name)
             if snapshot is None:
-                # The validator above always emits SKILL_NOT_FOUND first.
-                raise AssertionError(f"validated Skill snapshot missing: {name}")
+                # The validator auto-removes unselectable skills, but if a
+                # snapshot is still missing (e.g. race condition between
+                # validation and publish), skip it rather than crashing.
+                logger.warning("publish: skipping skill %s — snapshot missing", name)
+                continue
             files = snapshot.file_map()
             checksum = _skill_checksum(name, files)
             prepared_skills.append(

@@ -165,8 +165,18 @@ class DraftService:
         skills: Sequence[Mapping[str, str]],
         *,
         owner_user_id: str,
-    ) -> list[Mapping[str, str]]:
+    ) -> tuple[list[Mapping[str, str]], list[str]]:
+        """Resolve skill entries, auto-filtering unselectable ones.
+
+        Returns ``(resolved, removed)`` where ``removed`` is a list of skill
+        names that were in the input but are no longer selectable by the owner
+        (deleted, disabled, or sharing revoked). Instead of blocking the save,
+        they are silently dropped so the user can proceed — the alternative
+        (hard-fail) traps the user in an unrecoverable state where they can
+        neither save nor publish.
+        """
         resolved: list[Mapping[str, str]] = []
+        removed: list[str] = []
         seen: set[str] = set()
         for entry in skills:
             try:
@@ -180,9 +190,10 @@ class DraftService:
                 raise SkillNotSelectableError(f"duplicate skill selection: {name}")
             seen.add(name)
             if not self._skills.is_selectable_by(name, owner_user_id):
-                raise SkillNotSelectableError(f"skill not selectable: {name}")
+                removed.append(name)
+                continue
             resolved.append({"skill_name": name, "source": _resolve_skill_source(self._skills, name, owner_user_id)})
-        return resolved
+        return resolved, removed
 
     # ------------------------------------------------------------------
     # agent identity + draft reads
@@ -342,8 +353,9 @@ class DraftService:
         # The skill ``source`` is derived authoritatively from the index, never
         # from the client-supplied value (code-review Important-1).
         resolved_skills: list[Mapping[str, str]] | None = None
+        removed_skills: list[str] = []
         if skills is not None:
-            resolved_skills = self._resolve_skill_entries(skills, owner_user_id=owner_user_id)
+            resolved_skills, removed_skills = self._resolve_skill_entries(skills, owner_user_id=owner_user_id)
         resolved_grants = None
         if connector_grants is not None:
             resolved_grants = await self._resolve_connector_grants(connector_grants, owner_user_id=owner_user_id)
@@ -362,6 +374,8 @@ class DraftService:
         )
         if updated is None:
             raise DraftConflictError("draft revision conflict or not found")
+        if removed_skills:
+            updated["removed_skills"] = removed_skills
         return updated
 
     async def set_skills(
@@ -371,7 +385,7 @@ class DraftService:
         owner_user_id: str,
         skills: Sequence[Mapping[str, str]],
     ) -> dict[str, Any]:
-        resolved = self._resolve_skill_entries(skills, owner_user_id=owner_user_id)
+        resolved, _removed = self._resolve_skill_entries(skills, owner_user_id=owner_user_id)
         result = await self._drafts.replace_skills(agent_id, owner_user_id=owner_user_id, skills=resolved)
         if result is None:
             raise DraftConflictError("draft not found")
