@@ -687,6 +687,114 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         thinking_enabled,
     )
 
+    # 取证包装：在最底层（_agenerate / _astream）记录模型原始返回的结构、
+    # 换行与空格计数。若此处已无换行，问题在 SDK/网络层；若此处有换行，
+    # 问题在上层（LangChain 聚合、中间件或图节点）。
+    def _raw_content_stats(content: Any) -> str:
+        if isinstance(content, str):
+            return f"str len={len(content)} nl={content.count(chr(10))} sp={content.count(' ')} head={content[:60]!r}"
+        if isinstance(content, list):
+            texts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    texts.append(block)
+                elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                    texts.append(block["text"])
+            joined = "".join(texts)
+            types = [
+                block.get("type") if isinstance(block, dict) else "str"
+                for block in content[:6]
+            ]
+            return (
+                f"list blocks={len(content)} types={types} "
+                f"joined_len={len(joined)} joined_nl={joined.count(chr(10))} joined_sp={joined.count(' ')} head={joined[:60]!r}"
+            )
+        return type(content).__name__
+
+    def _log_raw_request(mode: str, messages: Any, kwargs: dict) -> None:
+        try:
+            msgs = messages if isinstance(messages, list) else [messages]
+            last_human = ""
+            for m in reversed(msgs):
+                if getattr(m, "type", "") == "human":
+                    last_human = str(getattr(m, "content", ""))[:60]
+                    break
+            logger.info(
+                "[RAW_MODEL_OUTPUT] model=%s mode=%s request: msgs=%d last_human=%r instance_params=(temperature=%s extra_body=%s reasoning_effort=%s stream_usage=%s max_tokens=%s) call_kwargs_keys=%s",
+                name,
+                mode,
+                len(msgs),
+                last_human,
+                getattr(model_instance, "temperature", None),
+                getattr(model_instance, "extra_body", None),
+                getattr(model_instance, "reasoning_effort", None),
+                getattr(model_instance, "stream_usage", None),
+                getattr(model_instance, "max_tokens", None),
+                sorted(k for k in kwargs.keys() if k not in {"run_manager", "stop"}),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    _orig_forensic_agenerate = model_instance._agenerate
+
+    async def _forensic_agenerate(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        _log_raw_request("agenerate", messages, kwargs)
+        result = await _orig_forensic_agenerate(messages, *args, **kwargs)
+        try:
+            for gen_list in getattr(result, "generations", []) or []:
+                for gen in gen_list:
+                    gen_message = getattr(gen, "message", None)
+                    if gen_message is not None:
+                        logger.info(
+                            "[RAW_MODEL_OUTPUT] model=%s mode=agenerate msg=%s content=%s",
+                            name,
+                            type(gen_message).__name__,
+                            _raw_content_stats(getattr(gen_message, "content", None)),
+                        )
+        except Exception:  # noqa: BLE001
+            pass
+        return result
+
+    object.__setattr__(model_instance, "_agenerate", _forensic_agenerate)
+
+    _orig_forensic_astream = getattr(model_instance, "_astream", None)
+    if callable(_orig_forensic_astream):
+
+        async def _forensic_astream(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+            _log_raw_request("astream", messages, kwargs)
+            parts: list[str] = []
+            blocks = 0
+            async for chunk in _orig_forensic_astream(messages, *args, **kwargs):
+                # Chunks may be AIMessageChunk (content 直接可读) 或
+                # ChatGenerationChunk（content 在 .message 上），统一取值。
+                chunk_source = getattr(chunk, "message", chunk)
+                chunk_content = getattr(chunk_source, "content", None)
+                if isinstance(chunk_content, str):
+                    parts.append(chunk_content)
+                elif isinstance(chunk_content, list):
+                    blocks += len(chunk_content)
+                    for block in chunk_content:
+                        if isinstance(block, str):
+                            parts.append(block)
+                        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                            parts.append(block["text"])
+                yield chunk
+            joined = "".join(parts)
+            try:
+                logger.info(
+                    "[RAW_MODEL_OUTPUT] model=%s mode=astream merged_len=%d nl=%d sp=%d list_blocks=%d head=%r",
+                    name,
+                    len(joined),
+                    joined.count("\n"),
+                    joined.count(" "),
+                    blocks,
+                    joined[:60],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        object.__setattr__(model_instance, "_astream", _forensic_astream)
+
     if attach_tracing:
         callbacks = build_tracing_callbacks()
         if callbacks:

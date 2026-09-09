@@ -58,7 +58,10 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import {
+  rehypeStripBlockWhitespace,
+  useRehypeSplitWordsIntoSpans,
+} from "@/core/rehype";
 import { humanMessagePlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
@@ -461,7 +464,12 @@ function MessageContent_({
         <MarkdownContent
           content={toolOmissionResult.content}
           isLoading={isLoading}
-          rehypePlugins={[rehypeRaw, ...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+          rehypePlugins={[
+            rehypeRaw,
+            ...rehypePlugins,
+            [rehypeKatex, { output: "html" }],
+            rehypeStripBlockWhitespace,
+          ]}
           className="assistant-prose my-3"
           components={components}
         />
@@ -469,7 +477,12 @@ function MessageContent_({
         <MarkdownContent
           content={toolOmissionResult.content}
           isLoading={isLoading}
-          rehypePlugins={[rehypeRaw, ...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+          rehypePlugins={[
+            rehypeRaw,
+            ...rehypePlugins,
+            [rehypeKatex, { output: "html" }],
+            rehypeStripBlockWhitespace,
+          ]}
           className="assistant-prose my-3"
           components={components}
         />

@@ -748,7 +748,7 @@ def _apply_prompt_template_impl(
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
     # identical across users and sessions for maximum prefix-cache reuse.
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    final_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "Friday",
         soul=instruction_section,
         self_update_section=_build_self_update_section(agent_name),
@@ -759,6 +759,19 @@ def _apply_prompt_template_impl(
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
     )
+    # 取证日志：记录最终系统提示词与自定义指令的规模和首尾内容，
+    # 用于排查“单行/无空格输出”类格式约束是否被写进了提示词。
+    logger.info(
+        "[SYSTEM_PROMPT] agent=%s published=%s total_len=%d total_nl=%d instructions_len=%d instructions_head=%r instructions_tail=%r",
+        agent_name or "default",
+        published,
+        len(final_prompt),
+        final_prompt.count("\n"),
+        len(instruction_section or ""),
+        (instruction_section or "")[:200],
+        (instruction_section or "")[-200:],
+    )
+    return final_prompt
 
 
 @lru_cache(maxsize=32)
