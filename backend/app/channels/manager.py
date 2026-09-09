@@ -999,9 +999,24 @@ class ChannelManager:
                 on_progress=publish_progress,
             )
         except PublishedChannelBusyError:
+            # 附件下载/准入、配额等失败都被归并为 busy；这里必须带异常链
+            # 记录根因（token 失败、403 权限、超限、沙箱同步失败等），
+            # 否则线上只剩一句 busy，无法排障。
+            logger.warning(
+                "[Manager] published channel rejected inbound: channel=%s, chat_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                exc_info=True,
+            )
             await self._send_error(msg, "This agent is busy. Please try again later.")
             return
         except PublishedChannelUnavailableError:
+            logger.warning(
+                "[Manager] published agent unavailable: channel=%s, chat_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                exc_info=True,
+            )
             await self._send_error(msg, "This agent is currently unavailable.")
             return
         artifacts = list(execution.artifacts)
