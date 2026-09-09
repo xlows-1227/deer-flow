@@ -306,21 +306,29 @@ async def test_replace_skills_accepts_public_and_own_private(service):
 
 
 @pytest.mark.anyio
-async def test_replace_skills_rejects_other_owners_private(service):
+async def test_replace_skills_auto_filters_other_owners_private(service):
+    """Skills that belong to another owner are auto-filtered, not hard-rejected.
+
+    The skill is gone from the user's perspective (sharing revoked or never
+    granted); blocking the save would trap them in an unrecoverable state.
+    """
     agent = await service.create_agent(owner_user_id="user-b", slug="bot", display_name="Bot")
-    with pytest.raises(SkillNotSelectableError):
-        await service.set_skills(
-            agent["id"],
-            owner_user_id="user-b",
-            skills=[{"skill_name": "secret-tool", "source": "private"}],  # owned by user-a
-        )
+    result = await service.set_skills(
+        agent["id"],
+        owner_user_id="user-b",
+        skills=[{"skill_name": "secret-tool", "source": "private"}],  # owned by user-a
+    )
+    # Skill was silently dropped — no crash, draft still saved
+    assert result is not None
 
 
 @pytest.mark.anyio
-async def test_replace_skills_rejects_unknown_skill(service):
+async def test_replace_skills_auto_filters_unknown_skill(service):
+    """Unknown skills are auto-filtered instead of blocking the save."""
     agent = await service.create_agent(owner_user_id="user-a", slug="bot", display_name="Bot")
-    with pytest.raises(SkillNotSelectableError):
-        await service.set_skills(agent["id"], owner_user_id="user-a", skills=[{"skill_name": "ghost", "source": "public"}])
+    result = await service.set_skills(agent["id"], owner_user_id="user-a", skills=[{"skill_name": "ghost", "source": "public"}])
+    # Skill was silently dropped — no crash, draft still saved
+    assert result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -487,20 +495,26 @@ async def test_update_draft_bundle_stale_revision_leaves_subtables_unchanged(ser
 
 
 @pytest.mark.anyio
-async def test_update_draft_bundle_rejects_unselectable_skill_before_write(service):
+async def test_update_draft_bundle_auto_filters_unselectable_skill(service):
+    """Unselectable skills are auto-filtered, not hard-rejected.
+
+    The rest of the bundle (soul_markdown, etc.) still applies. The removed
+    skill is reported in the response via ``removed_skills``.
+    """
     agent = await service.create_agent(owner_user_id="user-a", slug="validate", display_name="V")
-    with pytest.raises(SkillNotSelectableError):
-        await service.update_draft_bundle(
-            agent["id"],
-            owner_user_id="user-a",
-            revision=1,
-            skills=[{"skill_name": "ghost", "source": "public"}],
-            soul_markdown="# should-not-apply",
-        )
-    # Nothing written.
+    result = await service.update_draft_bundle(
+        agent["id"],
+        owner_user_id="user-a",
+        revision=1,
+        skills=[{"skill_name": "ghost", "source": "public"}],
+        soul_markdown="# should-apply",
+    )
+    # Soul markdown applied, ghost skill dropped, removed_skills reported
+    assert result["soul_markdown"] == "# should-apply"
+    assert result.get("removed_skills") == ["ghost"]
     after = await service.get_draft(agent["id"], owner_user_id="user-a")
-    assert after["revision"] == 1
-    assert after["soul_markdown"] == ""
+    assert after["soul_markdown"] == "# should-apply"
+    assert {s["skill_name"] for s in after["skills"]} == set()
 
 
 # ---------------------------------------------------------------------------

@@ -1609,6 +1609,10 @@ class FeishuChannel(Channel):
         if self._running:
             return
 
+        # 部署校验标记：手动热更新 feishu.py 后重启，日志里必须出现这一行，
+        # 否则说明容器仍在运行旧文件。改动此文件时同步更新 build 标记。
+        logger.info("[Feishu] feishu.py build loaded: card-v2-md-normalize-20260909-r2")
+
         try:
             import lark_oapi as lark
             from lark_oapi.api.im.v1 import (
@@ -1824,10 +1828,11 @@ class FeishuChannel(Channel):
             return
 
         logger.info(
-            "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d",
+            "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d, head=%r",
             msg.chat_id,
             msg.thread_ts,
             len(msg.text),
+            msg.text[:160],
         )
 
         last_exc: Exception | None = None
@@ -2100,7 +2105,10 @@ class FeishuChannel(Channel):
                             except ValueError as exc:
                                 raise ValueError("Feishu resource Content-Length is invalid") from exc
                             if content_length < 0 or content_length > max_bytes:
-                                raise ValueError("Feishu inbound resource exceeds size limit")
+                                raise ValueError(
+                                    f"Feishu inbound resource exceeds size limit: "
+                                    f"content_length={content_length}, max_bytes={max_bytes}"
+                                )
 
                         disposition = Message()
                         disposition["content-disposition"] = response.headers.get(
@@ -2119,7 +2127,10 @@ class FeishuChannel(Channel):
                             async for chunk in response.aiter_raw():
                                 total_bytes += len(chunk)
                                 if total_bytes > max_bytes:
-                                    raise ValueError("Feishu inbound resource exceeds size limit")
+                                    raise ValueError(
+                                        f"Feishu inbound resource exceeds size limit: "
+                                        f"downloaded>={total_bytes}, max_bytes={max_bytes}"
+                                    )
                                 file_handle.write(chunk)
             if total_bytes == 0:
                 raise ValueError("Feishu inbound resource is empty")
@@ -3127,15 +3138,31 @@ class FeishuChannel(Channel):
     # -- message formatting ------------------------------------------------
 
     @staticmethod
-    def _build_card_content(text: str) -> str:
-        """Build a Feishu interactive card with markdown content.
+    def _normalize_markdown(text: str) -> str:
+        """给行首缺空格的 Markdown 标记补上空格。
 
-        Feishu's interactive card format natively renders markdown, including
-        headers, bold/italic, code blocks, lists, and links.
+        中文模型常输出「##标题」「-条目」。CommonMark（含飞书卡片）要求
+        「## 」「- 」后必须跟空格才识别为标题/列表，否则符号原样显示。
+        """
+
+        def _fix_line(line: str) -> str:
+            line = re.sub(r"^(\s{0,3}#{1,6})(?=[^\s#])", r"\1 ", line)
+            return re.sub(r"^(\s*-)(?=[^\s\d-])", r"\1 ", line)
+
+        return "\n".join(_fix_line(line) for line in text.split("\n"))
+
+    @staticmethod
+    def _build_card_content(text: str) -> str:
+        """Build a Feishu Card JSON 2.0 with a markdown body.
+
+        markdown 组件属于卡片 JSON 2.0（schema + body.elements）；v1 顶层
+        elements 里的 markdown 标签不会按 Markdown 渲染，整段文本会被
+        压成一行原样显示。
         """
         card = {
-            "config": {"wide_screen_mode": True, "update_multi": True},
-            "elements": [{"tag": "markdown", "content": text}],
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "body": {"elements": [{"tag": "markdown", "content": FeishuChannel._normalize_markdown(text)}]},
         }
         return json.dumps(card)
 

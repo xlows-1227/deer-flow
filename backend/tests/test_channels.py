@@ -2049,11 +2049,33 @@ class TestFeishuChannel:
             final_patch_request = channel._api_client.im.v1.message.patch.call_args_list[1].args[0]
             assert first_patch_request.message_id == "om-running-card"
             assert final_patch_request.message_id == "om-running-card"
-            assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "Hello"
-            assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "Hello world"
+            assert json.loads(first_patch_request.body.content)["body"]["elements"][0]["content"] == "Hello"
+            assert json.loads(final_patch_request.body.content)["body"]["elements"][0]["content"] == "Hello world"
+            assert json.loads(final_patch_request.body.content)["schema"] == "2.0"
             assert json.loads(final_patch_request.body.content)["config"]["update_multi"] is True
 
         _run(go())
+
+
+class TestFeishuMarkdownCard:
+    """Verify Feishu reply cards use Card JSON 2.0 and readable markdown."""
+
+    def test_card_uses_v2_schema(self):
+        from app.channels.feishu import FeishuChannel
+
+        card = json.loads(FeishuChannel._build_card_content("**Hello** world"))
+        assert card["schema"] == "2.0"
+        assert card["config"]["update_multi"] is True
+        assert card["body"]["elements"][0] == {"tag": "markdown", "content": "**Hello** world"}
+
+    def test_normalizes_spaceless_markers(self):
+        from app.channels.feishu import FeishuChannel
+
+        raw = "##📊数据查询\n-人员查询：找人\n## 已有空格\n- 列表项\n-5°C 低温\n---\n正常段落"
+        normalized = FeishuChannel._normalize_markdown(raw)
+        assert normalized == (
+            "## 📊数据查询\n- 人员查询：找人\n## 已有空格\n- 列表项\n-5°C 低温\n---\n正常段落"
+        )
 
 
 class TestWeComChannel:

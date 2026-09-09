@@ -415,11 +415,11 @@ async def test_binding_topic_group_maps_each_topic_to_its_own_thread(tmp_path) -
     channel._main_loop = asyncio.get_running_loop()
     resolver_calls: list[tuple[str, str]] = []
 
-    async def _topic_group_resolver(chat_id: str, msg_id: str) -> str:
+    async def _topic_group_resolver(chat_id: str, msg_id: str) -> tuple[str | None, str | None]:
         resolver_calls.append((chat_id, msg_id))
-        return msg_id
+        return "group", msg_id
 
-    channel._resolve_group_topic_id = _topic_group_resolver
+    channel._resolve_chat_topic = _topic_group_resolver
 
     channel._on_message(_group_event("event-a", message_id="topic-a-root", text="msg-a"))
     channel._on_message(_group_event("event-b", message_id="topic-b-root", text="msg-b"))
@@ -429,8 +429,14 @@ async def test_binding_topic_group_maps_each_topic_to_its_own_thread(tmp_path) -
     await asyncio.sleep(0.05)
     await manager.stop()
 
-    # 两条顶层消息各自解析 per-topic 会话键；话题内回复（root_id 已定）不再解析
-    assert resolver_calls == [("chat-1", "topic-a-root"), ("chat-1", "topic-b-root")]
+    # 每条消息都查询群模式（话题内回复也查，用于校正 chat_type）；仅顶层
+    # 消息会采用 per-topic 会话键（回复沿用 root_id）。manager 并发
+    # create_task，顺序不保证，按集合比较。
+    assert sorted(resolver_calls) == [
+        ("chat-1", "reply-in-a"),
+        ("chat-1", "topic-a-root"),
+        ("chat-1", "topic-b-root"),
+    ]
     # manager 对每条消息独立 create_task 并发处理，执行顺序不保证，
     # 因此按消息文本索引而不是依赖 calls 顺序。
     assert len(executor.calls) == 3

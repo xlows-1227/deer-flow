@@ -671,6 +671,22 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     final_kwargs = {**model_settings_from_config, **kwargs}
     model_instance = model_class(**final_kwargs)
 
+    # 取证日志：暴露该模型实际使用的实现类与端点（不含密钥），用于定位
+    # 不同模型输出格式差异的来源。
+    _endpoint = (
+        model_settings_from_config.get("base_url")
+        or model_settings_from_config.get("api_base")
+        or getattr(model_instance, "openai_api_base", None)
+    )
+    logger.info(
+        "[MODEL_FACTORY] created model=%s use=%s model_id=%s endpoint=%s thinking=%s",
+        name,
+        model_config.use,
+        model_settings_from_config.get("model"),
+        _endpoint,
+        thinking_enabled,
+    )
+
     if attach_tracing:
         callbacks = build_tracing_callbacks()
         if callbacks:
