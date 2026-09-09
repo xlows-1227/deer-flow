@@ -326,6 +326,126 @@ async def test_binding_message_uses_db_mapping_published_agent_quota_and_one_usa
     await engine.dispose()
 
 
+def _group_event(
+    event_id: str,
+    *,
+    message_id: str,
+    root_id: str | None = None,
+    text: str = "topic group message",
+):
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            event_id=event_id,
+            create_time=str(int(time.time() * 1000)),
+            token="verification-token",
+        ),
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                chat_id="chat-1",
+                message_id=message_id,
+                root_id=root_id,
+                thread_id=None,
+                chat_type="group",
+                content=json.dumps({"text": text}),
+            ),
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="user-1")),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_binding_topic_group_maps_each_topic_to_its_own_thread(tmp_path) -> None:
+    """话题群：每个话题一个 DeerFlow 会话；话题内回复复用根消息的会话。"""
+    database_path = tmp_path / "published-feishu-topic-group.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(
+            PublishedAgentRow(
+                id="agent-1",
+                owner_user_id="owner-a",
+                slug="agent-one",
+                display_name="Agent One",
+                status="published",
+            )
+        )
+        session.add(
+            AgentChannelRow(
+                id="binding-1",
+                agent_id="agent-1",
+                channel_type="feishu",
+                app_id="app-one",
+                secret_ref="secret://feishu/11111111111111111111111111111111",
+                status="active",
+            )
+        )
+        await session.commit()
+
+    order: list[str] = []
+    resolver = _Resolver(order)
+    ledger = _Ledger(order)
+    executor = _Executor(order)
+    mappings = DbMappingStore(session_factory)
+    runtime = PublishedChannelRuntime(
+        mapping_store=mappings,
+        resolver=resolver,
+        quota_ledger=ledger,
+        executor=executor,
+    )
+    bus = MessageBus()
+    manager = ChannelManager(bus, ChannelStore(tmp_path / "legacy-store.json"), published_runtime=runtime)
+    outbound: asyncio.Queue[str] = asyncio.Queue()
+
+    async def capture(message) -> None:
+        await outbound.put(message.text)
+
+    bus.subscribe_outbound(capture)
+    await manager.start()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-one",
+        app_secret="secret",
+        verification_token="verification-token",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        event_deduplicator=ChannelEventRepository(session_factory),
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    resolver_calls: list[tuple[str, str]] = []
+
+    async def _topic_group_resolver(chat_id: str, msg_id: str) -> str:
+        resolver_calls.append((chat_id, msg_id))
+        return msg_id
+
+    channel._resolve_group_topic_id = _topic_group_resolver
+
+    channel._on_message(_group_event("event-a", message_id="topic-a-root", text="msg-a"))
+    channel._on_message(_group_event("event-b", message_id="topic-b-root", text="msg-b"))
+    channel._on_message(_group_event("event-c", message_id="reply-in-a", root_id="topic-a-root", text="msg-c"))
+    for _ in range(3):
+        await asyncio.wait_for(outbound.get(), timeout=2.0)
+    await asyncio.sleep(0.05)
+    await manager.stop()
+
+    # 两条顶层消息各自解析 per-topic 会话键；话题内回复（root_id 已定）不再解析
+    assert resolver_calls == [("chat-1", "topic-a-root"), ("chat-1", "topic-b-root")]
+    # manager 对每条消息独立 create_task 并发处理，执行顺序不保证，
+    # 因此按消息文本索引而不是依赖 calls 顺序。
+    assert len(executor.calls) == 3
+    threads_by_message = {call["message"]: call["thread_id"] for call in executor.calls}
+    assert len(threads_by_message) == 3
+    assert threads_by_message["msg-a"] != threads_by_message["msg-b"]
+    assert threads_by_message["msg-c"] == threads_by_message["msg-a"]
+    rows = await mappings.list_mappings(binding_id="binding-1", owner_user_id="owner-a")
+    topics = {row.topic_id: row.thread_id for row in rows}
+    assert set(topics) == {"topic-a-root", "topic-b-root"}
+    assert topics["topic-a-root"] == threads_by_message["msg-a"]
+    assert topics["topic-b-root"] == threads_by_message["msg-b"]
+    await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_ach_prefixed_binding_credential_id_fits_quota_reservation_varchar_32(tmp_path) -> None:
     order: list[str] = []

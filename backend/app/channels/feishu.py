@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 FEISHU_INBOUND_FILE_MAX_BYTES = 50 * 1024 * 1024
 FEISHU_PUBLISHED_INBOUND_MAX_FILES = 10
 FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 15.0
+# 话题群 chat_mode 查询缓存时长：群模式极少变化，缓存可避免每条顶层消息
+# 都调用一次群信息接口。
+FEISHU_CHAT_MODE_CACHE_TTL_SECONDS = 600.0
 FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS = 5.0
 FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS = 10.0
 FEISHU_PUBLISHED_DOWNLOAD_TIMEOUT_SECONDS = 60.0
@@ -1533,11 +1536,15 @@ class FeishuChannel(Channel):
         self._processed_card_message_ids: set[str] = set()
         self._pending_card_runs: dict[str, _PendingCardRun] = {}
         self._GetMessageRequest = None
+        self._GetChatRequest = None
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
+        # chat_id -> (monotonic 纪元, chat_mode)。话题群判定按群缓存。
+        self._chat_mode_cache: dict[str, tuple[float, str | None]] = {}
+        self._chat_mode_lock = threading.Lock()
         self._thread_lock = threading.Lock()
         self._cleanup_tasks: set[asyncio.Task] = set()
         self._attachment_cleanup_state_lock = threading.Lock()
@@ -1614,6 +1621,7 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetChatRequest,
                 GetMessageRequest,
                 GetMessageResourceRequest,
                 PatchMessageRequest,
@@ -1641,6 +1649,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequestBody = CreateImageRequestBody
         self._GetMessageResourceRequest = GetMessageResourceRequest
         self._GetMessageRequest = GetMessageRequest
+        self._GetChatRequest = GetChatRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -3305,6 +3314,42 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
+    async def _resolve_group_topic_id(self, chat_id: str, msg_id: str) -> str | None:
+        """Return the per-topic session key for a topic-group root message.
+
+        话题群把每条顶层消息都变成一个话题；话题根消息的事件不带
+        root_id/thread_id，若不区分群模式会塌缩成整群一个会话，而话题内
+        回复（root_id 有值）又会映射到另一个 per-topic 会话。这里通过群
+        信息接口的 chat_mode 判定话题群，用根消息自身 msg_id 作为会话键，
+        使根消息与话题内回复（root_id 即根消息 id）落到同一个会话。
+        """
+        if not self._api_client or not self._GetChatRequest:
+            return None
+        now = time.monotonic()
+        with self._chat_mode_lock:
+            cached = self._chat_mode_cache.get(chat_id)
+        if cached is not None and now - cached[0] < FEISHU_CHAT_MODE_CACHE_TTL_SECONDS:
+            chat_mode = cached[1]
+        else:
+            request = self._GetChatRequest.builder().chat_id(chat_id).build()
+            try:
+                response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
+                chat_mode = getattr(getattr(response, "data", None), "chat_mode", None)
+                if not isinstance(chat_mode, str) or not chat_mode:
+                    chat_mode = None
+            except Exception:
+                logger.warning(
+                    "[Feishu] chat mode lookup failed for chat_id=%s; keeping chat-wide session",
+                    chat_id,
+                    exc_info=True,
+                )
+                chat_mode = None
+            with self._chat_mode_lock:
+                self._chat_mode_cache[chat_id] = (time.monotonic(), chat_mode)
+        if chat_mode == "topic_group":
+            return msg_id
+        return None
+
     async def _prepare_inbound(
         self,
         msg_id: str,
@@ -3338,6 +3383,17 @@ class FeishuChannel(Channel):
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
+        if (
+            self.binding_id
+            and inbound.topic_id is None
+            and inbound.metadata.get("chat_type") == "group"
+        ):
+            # 话题群中每条顶层消息都是独立话题，但事件里 root_id/thread_id
+            # 均为空；普通群保持整群一个会话。这里按群模式解析出
+            # per-topic 会话键，使飞书话题与 DeerFlow 会话一一对应。
+            topic_key = await self._resolve_group_topic_id(inbound.chat_id, msg_id)
+            if topic_key:
+                inbound.topic_id = topic_key
         await self.bus.publish_inbound(inbound)
         return True
 
@@ -3471,6 +3527,8 @@ class FeishuChannel(Channel):
 
             # DB-driven bindings keep direct chats stable per user and groups
             # stable per chat/topic. Legacy channels preserve per-message topics.
+            # 话题群的根消息（root_id/thread_id 均空）在 _prepare_inbound 中
+            # 按群模式解析为 per-topic 会话键。
             topic_id = (root_id or thread_id or None) if self.binding_id else (root_id or msg_id)
 
             inbound = self._make_inbound(
