@@ -272,7 +272,8 @@ def test_card_action_with_tampered_body_token_is_rejected() -> None:
     assert bus.inbound_queue.empty()
 
 
-def test_card_action_without_any_token_is_rejected() -> None:
+def test_card_action_without_any_token_is_accepted_over_long_connection() -> None:
+    """新应用的长连接事件可能不携带任何 token：信任已认证连接，直接放行。"""
     bus = MessageBus()
     channel = FeishuChannel(
         bus,
@@ -285,6 +286,49 @@ def test_card_action_without_any_token_is_rejected() -> None:
     channel._make_inbound = MagicMock()
 
     channel._on_card_action(_card_action_event(body_token=None, header_token=None))
+
+    channel._make_inbound.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_message_event_without_token_is_accepted_over_long_connection(
+    event_repository: ChannelEventRepository,
+) -> None:
+    """新应用长连接订阅的 im.message.receive_v1 事件头无 token（生产实测），需放行。"""
+    bus = MessageBus()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-id",
+        app_secret="app-secret",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        event_deduplicator=event_repository,
+        verification_token="verification-token",
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    channel._make_inbound = MagicMock(wraps=channel._make_inbound)
+
+    channel._on_message(_event(event_id="event-msg-1", token=None))
+
+    channel._make_inbound.assert_called_once()
+    await asyncio.sleep(0.1)
+    assert bus.inbound_queue.qsize() == 1
+
+
+def test_message_event_with_wrong_token_is_still_rejected() -> None:
+    """token 出现但与绑定凭据都不匹配（跨应用/配错）时仍须拒绝。"""
+    bus = MessageBus()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-id",
+        app_secret="app-secret",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        verification_token="verification-token",
+    )
+    channel._make_inbound = MagicMock()
+
+    channel._on_message(_event(event_id="event-msg-2", token="wrong-token"))
 
     channel._make_inbound.assert_not_called()
     assert bus.inbound_queue.empty()
@@ -511,7 +555,7 @@ def test_patch_card_after_action_builds_sdk_compatible_request() -> None:
     assert "预算不足" in card["body"]["elements"][0]["content"]
 
 
-def _make_card_patch_channel() -> tuple[FeishuChannel, list[dict[str, Any]], list[str]]:
+def _make_card_patch_channel(*, get_ok: bool = True) -> tuple[FeishuChannel, list[dict[str, Any]], list[str]]:
     """带 Fake SDK 的通道：记录每次卡片 patch 内容与 get 抓取的原始内容。"""
     from lark_oapi.api.im.v1 import GetMessageRequest, PatchMessageRequest, PatchMessageRequestBody
 
@@ -543,6 +587,8 @@ def _make_card_patch_channel() -> tuple[FeishuChannel, list[dict[str, Any]], lis
 
         def get(self, req: Any) -> Any:
             gets.append(req.message_id)
+            if not get_ok:
+                return SimpleNamespace(success=lambda: False, code=230002, msg="no scope", data=None)
             return SimpleNamespace(
                 success=lambda: True,
                 code=0,
@@ -662,6 +708,81 @@ async def test_card_run_failure_restores_original_and_clears_dedup(event_reposit
     assert json.loads(patches[-1]["content"])["header"]["title"]["content"] == "审批请求"
     assert "card-message-1" not in channel._processed_card_message_ids
     assert "card-message-1" not in channel._pending_card_runs
+
+
+@pytest.mark.asyncio
+async def test_second_card_click_while_first_pending_is_rejected(event_repository: ChannelEventRepository) -> None:
+    """并发预检：第一张卡在途时点第二张卡直接拒绝，卡片不动、不登记，可稍后再点。"""
+    channel, patches, _ = _make_card_patch_channel()
+    channel._event_deduplicator = event_repository
+    channel._main_loop = asyncio.get_running_loop()
+
+    channel._on_card_action(_card_action_event(value={"action": "approve", "record_id": "rec-1"}))
+    await _wait_for(lambda: len(patches) >= 1)  # 第一张卡进入"处理中"
+    await channel.bus.get_inbound()  # 排空第一条（第一张卡的）inbound
+
+    second = channel._on_card_action(
+        _card_action_event(
+            event_id="card-event-2",
+            message_id="card-message-2",
+            value={"action": "approve", "record_id": "rec-2"},
+        )
+    )
+    assert second.toast.type == "error"
+    assert second.toast.content == "已有审批正在处理，请稍后再试"
+    assert channel.bus.inbound_queue.empty()
+    assert "card-message-2" not in channel._processed_card_message_ids
+    assert "card-message-2" not in channel._pending_card_runs
+    await asyncio.sleep(0.1)
+    assert all(patch["message_id"] == "card-message-1" for patch in patches)
+
+    # 第一张卡终态后，第二张卡恢复可点击
+    from app.channels.message_bus import OutboundMessage
+
+    await channel._on_outbound(
+        OutboundMessage(
+            channel_name=channel.name,
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text="done",
+            thread_ts="card-message-1",
+            is_final=True,
+            metadata={},
+        )
+    )
+    await _wait_for(lambda: "card-message-1" not in channel._pending_card_runs)
+    assert channel._pending_card_runs == {}
+
+
+@pytest.mark.asyncio
+async def test_card_without_original_fetch_leaves_card_untouched_on_failure(event_repository: ChannelEventRepository) -> None:
+    """抓不到原始卡片（如缺读消息权限）时不打"处理中"：失败后卡片天然保持原样。"""
+    channel, patches, gets = _make_card_patch_channel(get_ok=False)
+    channel._event_deduplicator = event_repository
+    channel._main_loop = asyncio.get_running_loop()
+
+    channel._on_card_action(_card_action_event(value={"action": "approve", "record_id": "rec-1"}))
+    await _wait_for(lambda: len(gets) == 1)
+    await asyncio.sleep(0.2)
+    assert patches == []  # 未打"处理中"，卡片保持原样
+
+    from app.channels.message_bus import OutboundMessage
+
+    await channel._on_outbound(
+        OutboundMessage(
+            channel_name=channel.name,
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text="This agent is busy. Please try again later.",
+            thread_ts="card-message-1",
+            is_final=True,
+            metadata={"error": True},
+        )
+    )
+    await _wait_for(lambda: "card-message-1" not in channel._pending_card_runs)
+    await asyncio.sleep(0.1)
+    assert patches == []  # 失败也无需还原
+    assert "card-message-1" not in channel._processed_card_message_ids  # 可重新点击
 
 
 @pytest.mark.asyncio

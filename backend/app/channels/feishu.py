@@ -1006,7 +1006,10 @@ class FeishuEventVerifier:
     ``im.message.receive_v1``. Callers therefore pass the body token explicitly
     via the ``token`` keyword and the verifier accepts any candidate token
     (explicit body token or header token) matching any accepted secret
-    (verification token or encrypt key).
+    (verification token or encrypt key). Events that carry no token at all are
+    accepted: long-connection subscriptions for newer apps deliver frames
+    without one, and the authenticated WebSocket connection plus the freshness
+    window and durable event deduplication remain in force.
     """
 
     def __init__(
@@ -1060,7 +1063,11 @@ class FeishuEventVerifier:
             raw_header_token = getattr(header, "token", None)
             if isinstance(raw_header_token, str) and raw_header_token:
                 candidates.append(raw_header_token)
-            if not any(hmac.compare_digest(candidate, expected) for candidate in candidates for expected in self._accepted_tokens):
+            # 长连接模式下，平台对新应用/新订阅的事件头可能不再携带 token
+            # （连接本身已用 app 凭据认证，实测 header_token 为空）。此时依赖
+            # 已认证连接 + 时间窗 + 持久化去重兜底，直接放行；token 一旦出现
+            # 仍严格比对，拦截路由错乱或凭据配错（跨应用事件）。
+            if candidates and not any(hmac.compare_digest(candidate, expected) for candidate in candidates for expected in self._accepted_tokens):
                 return False
         return True
 
@@ -3650,6 +3657,21 @@ class FeishuChannel(Channel):
                     content="请先填写拒绝原因，再点击拒绝按钮",
                 )
 
+            # 并发预检：本绑定已有审批 Run 在途（卡片从点击到终态期间登记在
+            # _pending_card_runs）时，新卡片点击直接拒绝且完全不动卡片——按钮
+            # 保留、不登记去重，等在途审批结束后可再次点击。避免进入 Run 后
+            # 被并发配额拒绝、卡片被误打失败态。
+            if card_message_id and self._pending_card_runs:
+                logger.info(
+                    "[Feishu] card action rejected while another approval is running: msg_id=%s, pending=%s",
+                    card_message_id,
+                    sorted(self._pending_card_runs),
+                )
+                return self._card_action_response(
+                    ok=False,
+                    content="已有审批正在处理，请稍后再试",
+                )
+
             chat_type, topic_id = self._card_action_conversation(action)
             inbound = self._make_inbound(
                 chat_id=chat_id,
@@ -3767,7 +3789,16 @@ class FeishuChannel(Channel):
                 self._rollback_card_action_registration(card_message_id)
                 return
             entry.original_content = self._fetch_card_original_content(card_message_id)
-            self._patch_card_processing(card_message_id)
+            if entry.original_content is not None:
+                self._patch_card_processing(card_message_id)
+            else:
+                # 抓不到原始卡片内容（如缺读消息权限）时不动卡片：按钮保留，
+                # 失败后无需还原即可重新点击；成功终态照常补丁。防重复点击
+                # 由去重登记 + "正在处理中" toast 兜底。
+                logger.warning(
+                    "[Feishu] original card content unavailable, leaving card untouched: msg_id=%s",
+                    card_message_id,
+                )
         finally:
             if entry is not None:
                 entry.click_work_done.set()
@@ -3855,18 +3886,26 @@ class FeishuChannel(Channel):
         if not self._api_client:
             logger.warning("[Feishu] cannot restore card: api_client not initialized")
             return
-        if entry.original_content:
+        if entry.original_content is None:
+            # 点击时未抓到原始卡片（卡片从未被打成"处理中"），无需还原
+            logger.info("[Feishu] card untouched after failed run: message_id=%s", card_message_id)
+            return
+        restored = False
+        for attempt in range(2):
             try:
                 req = self._PatchMessageRequest.builder().message_id(card_message_id).request_body(self._PatchMessageRequestBody.builder().content(entry.original_content).build()).build()
                 resp = self._api_client.im.v1.message.patch(req)
                 if resp.success():
                     logger.info("[Feishu] card restored after failed run: message_id=%s", card_message_id)
-                    return
-                logger.warning("[Feishu] card restore failed: code=%s, msg=%s", resp.code, resp.msg)
+                    restored = True
+                    break
+                logger.warning("[Feishu] card restore failed (attempt %d): code=%s, msg=%s", attempt + 1, resp.code, resp.msg)
             except Exception:
-                logger.exception("[Feishu] error restoring card: message_id=%s", card_message_id)
+                logger.exception("[Feishu] error restoring card (attempt %d): message_id=%s", attempt + 1, card_message_id)
+        if restored:
+            return
 
-        # 无法还原原卡片（抓取失败/补丁失败）时退化为灰色失败卡片
+        # 还原补丁连续失败（卡片停留在"处理中"）时才退化为灰色失败卡片
         try:
             CST = timezone(timedelta(hours=8))
             now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
