@@ -47,6 +47,46 @@ export function rehypeSplitWordsIntoSpans() {
   };
 }
 
+const WHITESPACE_ONLY_RE = /^[ \t\r\n]*$/;
+
+/**
+ * rehype-raw re-parses the tree with parse5, which "foster-parents" the
+ * whitespace-only text nodes that remark-rehype inserts between table
+ * elements (<table>/<thead>/<tr>/...) out to BEFORE the table. The resulting
+ * run of "\n" nodes renders as a block of blank lines between the preceding
+ * heading/paragraph and the table whenever an ancestor uses
+ * white-space:pre-wrap, and pollutes copy/paste even when collapsed. Drop
+ * whitespace-only text nodes that sit directly under the root or adjacent to
+ * a table; they never carry content.
+ */
+export function rehypeStripBlockWhitespace() {
+  const clean = (parent: Root | Element): void => {
+    const children = parent.children;
+    const kept = children.filter((child, index) => {
+      if (child.type !== "text" || !WHITESPACE_ONLY_RE.test(child.value)) {
+        return true;
+      }
+      const prev = children[index - 1];
+      const next = children[index + 1];
+      const touchesTable =
+        (next?.type === "element" && next.tagName === "table") ||
+        (prev?.type === "element" && prev.tagName === "table");
+      return !(parent.type === "root" || touchesTable);
+    });
+    if (kept.length !== children.length) {
+      parent.children = kept;
+    }
+    for (const child of parent.children) {
+      if (child.type === "element") {
+        clean(child);
+      }
+    }
+  };
+  return (tree: Root) => {
+    clean(tree);
+  };
+}
+
 export function useRehypeSplitWordsIntoSpans(enabled = true) {
   const rehypePlugins = useMemo(
     () => (enabled ? [rehypeSplitWordsIntoSpans] : []),

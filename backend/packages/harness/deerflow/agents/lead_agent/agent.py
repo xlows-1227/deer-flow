@@ -876,6 +876,19 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             app_config=resolved_app_config,
         )
     filtered_tools = filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy)
+    # 取证日志：工具描述可能包含输出格式约束（如要求单行输出），
+    # 记录每个工具的名称与描述头部用于排查。
+    try:
+        for _tool in filtered_tools:
+            _desc = getattr(_tool, "description", "") or ""
+            logger.info(
+                "[TOOL_DESC] name=%s desc_len=%d desc_head=%r",
+                getattr(_tool, "name", "?"),
+                len(_desc),
+                _desc[:120],
+            )
+    except Exception:
+        pass
     cache_key = (
         *base_cache_key,
         _tool_cache_signature(filtered_tools),
