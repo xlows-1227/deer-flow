@@ -1542,8 +1542,8 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
-        # chat_id -> (monotonic 纪元, chat_mode)。话题群判定按群缓存。
-        self._chat_mode_cache: dict[str, tuple[float, str | None]] = {}
+        # chat_id -> (monotonic 纪元, chat_mode, group_message_type)。话题群判定按群缓存。
+        self._chat_mode_cache: dict[str, tuple[float, str | None, str | None]] = {}
         self._chat_mode_lock = threading.Lock()
         self._thread_lock = threading.Lock()
         self._cleanup_tasks: set[asyncio.Task] = set()
@@ -3314,29 +3314,38 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
-    async def _resolve_group_topic_id(self, chat_id: str, msg_id: str) -> str | None:
-        """Return the per-topic session key for a topic-group root message.
+    async def _resolve_chat_topic(self, chat_id: str, msg_id: str) -> tuple[str | None, str | None]:
+        """Return the authoritative (chat_type, topic_id) for one chat.
 
         话题群把每条顶层消息都变成一个话题；话题根消息的事件不带
-        root_id/thread_id，若不区分群模式会塌缩成整群一个会话，而话题内
-        回复（root_id 有值）又会映射到另一个 per-topic 会话。这里通过群
-        信息接口的 chat_mode 判定话题群，用根消息自身 msg_id 作为会话键，
-        使根消息与话题内回复（root_id 即根消息 id）落到同一个会话。
+        root_id/thread_id，且实测 chat_type 可能缺失或误标（如话题群消息
+        被解析成 p2p），不能作为会话划分依据。这里以群信息接口为准：
+        话题群（chat_mode=="topic"，普通群开启话题模式时 chat_mode==
+        "group" 且 group_message_type=="thread"）用根消息自身 msg_id 作为
+        会话键，使根消息与话题内回复（root_id 即根消息 id）落到同一个
+        会话；普通群返回整群一个会话；单聊返回 p2p。接口失败或字段缺失
+        时返回 (None, None)，保留事件自带的 chat_type。
         """
         if not self._api_client or not self._GetChatRequest:
-            return None
+            return None, None
         now = time.monotonic()
         with self._chat_mode_lock:
             cached = self._chat_mode_cache.get(chat_id)
         if cached is not None and now - cached[0] < FEISHU_CHAT_MODE_CACHE_TTL_SECONDS:
-            chat_mode = cached[1]
+            chat_mode, group_message_type = cached[1], cached[2]
         else:
             request = self._GetChatRequest.builder().chat_id(chat_id).build()
             try:
                 response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
-                chat_mode = getattr(getattr(response, "data", None), "chat_mode", None)
+                if not response.success():
+                    raise RuntimeError(f"Feishu chat info failed: code={response.code}, msg={response.msg}")
+                response_data = getattr(response, "data", None)
+                chat_mode = getattr(response_data, "chat_mode", None)
+                group_message_type = getattr(response_data, "group_message_type", None)
                 if not isinstance(chat_mode, str) or not chat_mode:
                     chat_mode = None
+                if not isinstance(group_message_type, str) or not group_message_type:
+                    group_message_type = None
             except Exception:
                 logger.warning(
                     "[Feishu] chat mode lookup failed for chat_id=%s; keeping chat-wide session",
@@ -3344,11 +3353,23 @@ class FeishuChannel(Channel):
                     exc_info=True,
                 )
                 chat_mode = None
+                group_message_type = None
             with self._chat_mode_lock:
-                self._chat_mode_cache[chat_id] = (time.monotonic(), chat_mode)
-        if chat_mode == "topic_group":
-            return msg_id
-        return None
+                self._chat_mode_cache[chat_id] = (time.monotonic(), chat_mode, group_message_type)
+            # 生产排障用：直接可见该群的会话映射模式判定结果
+            logger.info(
+                "[Feishu] chat mode resolved: chat_id=%s chat_mode=%s group_message_type=%s",
+                chat_id,
+                chat_mode,
+                group_message_type,
+            )
+        if chat_mode == "p2p":
+            return "p2p", None
+        if chat_mode == "topic" or (chat_mode == "group" and group_message_type == "thread"):
+            return "group", msg_id
+        if chat_mode == "group":
+            return "group", None
+        return None, None
 
     async def _prepare_inbound(
         self,
@@ -3383,16 +3404,15 @@ class FeishuChannel(Channel):
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
-        if (
-            self.binding_id
-            and inbound.topic_id is None
-            and inbound.metadata.get("chat_type") == "group"
-        ):
-            # 话题群中每条顶层消息都是独立话题，但事件里 root_id/thread_id
-            # 均为空；普通群保持整群一个会话。这里按群模式解析出
-            # per-topic 会话键，使飞书话题与 DeerFlow 会话一一对应。
-            topic_key = await self._resolve_group_topic_id(inbound.chat_id, msg_id)
-            if topic_key:
+        if self.binding_id:
+            # 事件里的 chat_type 实测可能缺失或误标（话题群根消息出现
+            # p2p），会话划分与 actor scope 一律以群信息接口的缓存结果为
+            # 准；仅根消息（topic_id 为空）需要补 per-topic 会话键，话题内
+            # 回复沿用 root_id，避免覆盖。
+            chat_type, topic_key = await self._resolve_chat_topic(inbound.chat_id, msg_id)
+            if chat_type:
+                inbound.metadata["chat_type"] = chat_type
+            if topic_key and inbound.topic_id is None:
                 inbound.topic_id = topic_key
         await self.bus.publish_inbound(inbound)
         return True
@@ -3506,10 +3526,11 @@ class FeishuChannel(Channel):
             text = text.strip()
 
             logger.info(
-                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
+                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, chat_type=%s, sender=%s, text=%r",
                 chat_id,
                 msg_id,
                 root_id,
+                chat_type,
                 sender_id,
                 text[:100] if text else "",
             )
