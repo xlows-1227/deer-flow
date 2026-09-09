@@ -1542,8 +1542,8 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
-        # chat_id -> (monotonic 纪元, chat_mode)。话题群判定按群缓存。
-        self._chat_mode_cache: dict[str, tuple[float, str | None]] = {}
+        # chat_id -> (monotonic 纪元, chat_mode, group_message_type)。话题群判定按群缓存。
+        self._chat_mode_cache: dict[str, tuple[float, str | None, str | None]] = {}
         self._chat_mode_lock = threading.Lock()
         self._thread_lock = threading.Lock()
         self._cleanup_tasks: set[asyncio.Task] = set()
@@ -3320,8 +3320,10 @@ class FeishuChannel(Channel):
         话题群把每条顶层消息都变成一个话题；话题根消息的事件不带
         root_id/thread_id，若不区分群模式会塌缩成整群一个会话，而话题内
         回复（root_id 有值）又会映射到另一个 per-topic 会话。这里通过群
-        信息接口的 chat_mode 判定话题群，用根消息自身 msg_id 作为会话键，
-        使根消息与话题内回复（root_id 即根消息 id）落到同一个会话。
+        信息接口判定话题模式（chat_mode=="topic"，普通群开启话题模式时为
+        chat_mode=="group" 且 group_message_type=="thread"），用根消息自身
+        msg_id 作为会话键，使根消息与话题内回复（root_id 即根消息 id）落
+        到同一个会话。
         """
         if not self._api_client or not self._GetChatRequest:
             return None
@@ -3329,14 +3331,20 @@ class FeishuChannel(Channel):
         with self._chat_mode_lock:
             cached = self._chat_mode_cache.get(chat_id)
         if cached is not None and now - cached[0] < FEISHU_CHAT_MODE_CACHE_TTL_SECONDS:
-            chat_mode = cached[1]
+            chat_mode, group_message_type = cached[1], cached[2]
         else:
             request = self._GetChatRequest.builder().chat_id(chat_id).build()
             try:
                 response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
-                chat_mode = getattr(getattr(response, "data", None), "chat_mode", None)
+                if not response.success():
+                    raise RuntimeError(f"Feishu chat info failed: code={response.code}, msg={response.msg}")
+                response_data = getattr(response, "data", None)
+                chat_mode = getattr(response_data, "chat_mode", None)
+                group_message_type = getattr(response_data, "group_message_type", None)
                 if not isinstance(chat_mode, str) or not chat_mode:
                     chat_mode = None
+                if not isinstance(group_message_type, str) or not group_message_type:
+                    group_message_type = None
             except Exception:
                 logger.warning(
                     "[Feishu] chat mode lookup failed for chat_id=%s; keeping chat-wide session",
@@ -3344,9 +3352,17 @@ class FeishuChannel(Channel):
                     exc_info=True,
                 )
                 chat_mode = None
+                group_message_type = None
             with self._chat_mode_lock:
-                self._chat_mode_cache[chat_id] = (time.monotonic(), chat_mode)
-        if chat_mode == "topic_group":
+                self._chat_mode_cache[chat_id] = (time.monotonic(), chat_mode, group_message_type)
+            # 生产排障用：直接可见该群的会话映射模式判定结果
+            logger.info(
+                "[Feishu] chat mode resolved: chat_id=%s chat_mode=%s group_message_type=%s",
+                chat_id,
+                chat_mode,
+                group_message_type,
+            )
+        if chat_mode == "topic" or (chat_mode == "group" and group_message_type == "thread"):
             return msg_id
         return None
 

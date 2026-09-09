@@ -2463,14 +2463,22 @@ def _binding_event(*, root_id=None, thread_id=None, chat_type="group", text="hi"
     )
 
 
-def _fake_chat_mode_api(mode: str | None, error: Exception | None = None):
+def _fake_chat_mode_api(
+    mode: str | None,
+    error: Exception | None = None,
+    *,
+    group_message_type: str | None = None,
+):
     state = {"calls": 0}
 
     def get(_request):
         state["calls"] += 1
         if error is not None:
             raise error
-        return SimpleNamespace(data=SimpleNamespace(chat_mode=mode))
+        return SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(chat_mode=mode, group_message_type=group_message_type),
+        )
 
     class _RequestBuilder:
         def chat_id(self, _chat_id):
@@ -2567,7 +2575,7 @@ async def test_binding_p2p_message_skips_chat_mode_lookup():
 @pytest.mark.asyncio
 async def test_resolve_group_topic_id_distinguishes_topic_groups_and_caches():
     channel = _binding_channel()
-    api, request_cls, state = _fake_chat_mode_api("topic_group")
+    api, request_cls, state = _fake_chat_mode_api("topic")
     channel._api_client = api
     channel._GetChatRequest = request_cls
 
@@ -2577,16 +2585,27 @@ async def test_resolve_group_topic_id_distinguishes_topic_groups_and_caches():
 
 
 @pytest.mark.asyncio
+async def test_resolve_group_topic_id_accepts_thread_mode_normal_group():
+    """普通群开启话题模式（group_message_type=thread）同样按话题独立会话。"""
+    channel = _binding_channel()
+    api, request_cls, _state = _fake_chat_mode_api("group", group_message_type="thread")
+    channel._api_client = api
+    channel._GetChatRequest = request_cls
+
+    assert await channel._resolve_group_topic_id("chat_1", "msg_1") == "msg_1"
+
+
+@pytest.mark.asyncio
 async def test_resolve_group_topic_id_normal_group_and_failure_fall_back():
     channel = _binding_channel()
-    api, request_cls, _state = _fake_chat_mode_api("group")
+    api, request_cls, _state = _fake_chat_mode_api("group", group_message_type="chat")
     channel._api_client = api
     channel._GetChatRequest = request_cls
     assert await channel._resolve_group_topic_id("chat_1", "msg_1") is None
 
     failing_channel = _binding_channel()
     failing_api, failing_request_cls, _failing_state = _fake_chat_mode_api(
-        "topic_group", error=RuntimeError("chat info unavailable")
+        "topic", error=RuntimeError("chat info unavailable")
     )
     failing_channel._api_client = failing_api
     failing_channel._GetChatRequest = failing_request_cls
