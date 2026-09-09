@@ -254,6 +254,42 @@ async def test_card_action_with_body_token_is_accepted_over_long_connection(
     assert '"record_id": "rec-1"' in inbound.text
 
 
+@pytest.mark.asyncio
+async def test_card_action_in_group_keeps_card_topic_over_topic_group_resolution(
+    event_repository: ChannelEventRepository,
+) -> None:
+    """话题群会话解析不得改变卡片回调的"一卡一会话"语义。
+
+    卡片点击在进入 _prepare_inbound 前已把 topic_id 定为卡片消息 id；
+    话题群解析只在 topic_id 为空时介入，这里钉死群聊卡片同样如此。
+    """
+    bus = MessageBus()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-id",
+        app_secret="app-secret",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        event_deduplicator=event_repository,
+        verification_token="verification-token",
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    channel._resolve_group_topic_id = AsyncMock(return_value="must-not-apply")
+
+    response = channel._on_card_action(
+        _card_action_event(
+            value={"action": "approve", "record_id": "rec-1", "chat_type": "group"},
+        )
+    )
+
+    assert response is not None
+    await asyncio.sleep(0.1)
+    assert bus.inbound_queue.qsize() == 1
+    inbound = await bus.get_inbound()
+    assert inbound.topic_id == "card-message-1"
+    channel._resolve_group_topic_id.assert_not_awaited()
+
+
 def test_card_action_with_tampered_body_token_is_rejected() -> None:
     bus = MessageBus()
     channel = FeishuChannel(
