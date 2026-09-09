@@ -363,11 +363,21 @@ class TokenUsageMiddleware(AgentMiddleware):
                 # small per-tool envelope allowance.
                 schema_text = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 count += int(request.model.get_num_tokens(schema_text)) + (8 * len(tools))
+        except NotImplementedError:
+            # Custom OpenAI-compatible models (e.g. deepseek-v4-flash) often
+            # don't implement get_num_tokens_from_messages. This is expected,
+            # not an error — fall back to heuristic without logging a Traceback
+            # that could propagate to the SSE stream and trigger frontend error
+            # popups ("模型服务暂时不可用").
+            logger.debug(
+                "published token preflight: %s does not implement get_num_tokens_from_messages, using heuristic",
+                type(request.model).__name__,
+            )
+            count = cls._heuristic_input_tokens(messages, tools)
         except Exception:
-            # Custom OpenAI-compatible gateway models often use names tiktoken
-            # does not recognize. Prefer a conservative heuristic over fail-closed
-            # preflight so Published Runs remain callable; after_model still
-            # enforces the real cumulative budget from provider usage_metadata.
+            # Other errors (tiktoken model name not recognized, etc.) — log
+            # with exc_info for debugging but still fall back to heuristic so
+            # Published Runs remain callable.
             logger.warning(
                 "published token preflight fallback for %s; using heuristic input estimate",
                 type(request.model).__name__,
