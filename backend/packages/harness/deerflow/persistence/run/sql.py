@@ -265,7 +265,7 @@ class RunRepository(RunStore):
             "updated_at": datetime.now(UTC),
         }
         if last_ai_message is not None:
-            values["last_ai_message"] = last_ai_message[:2000]
+            values["last_ai_message"] = last_ai_message
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
@@ -306,7 +306,7 @@ class RunRepository(RunStore):
             if value is not None:
                 values[key] = value
         if last_ai_message is not None:
-            values["last_ai_message"] = last_ai_message[:2000]
+            values["last_ai_message"] = last_ai_message
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:

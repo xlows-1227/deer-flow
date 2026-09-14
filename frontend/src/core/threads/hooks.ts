@@ -480,7 +480,7 @@ export function useThreadStream({
   // created" (threadId: "new" → real ID) from "switch to another chat"
   // (real ID A → real ID B). The former must NOT clear optimistic
   // timestamps — sendMessage just stored one that's still needed.
-  const prevThreadIdRef = useRef<string>("");
+  const prevThreadIdRef = useRef<string | null | undefined>("");
 
   summarizedRef.current ??= new Set<string>();
 

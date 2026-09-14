@@ -143,12 +143,14 @@ class RunJournal(BaseCallbackHandler):
         if is_ai_message and (caller is None or caller == "lead_agent"):
             text = self._message_text(message).strip()
             if text:
-                self._last_ai_msg = text[:2000]
+                # 完整保留：飞书等出站通道会读取 last_ai_message 作为最终答复，
+                # 截断会导致卡片只显示前 2000 字。
+                self._last_ai_msg = text
                 # 取证日志：记录原始 content 的结构（str / list / 其他）、
                 # 换行与空格计数，用于区分「端点剥离空白」与「多块 join 丢换行」。
                 content = getattr(message, "content", None)
                 if isinstance(content, str):
-                    logger.info(
+                    logger.debug(
                         "[Journal] last_ai_msg set: len=%d shape=str nl=%d sp=%d head=%r",
                         len(text),
                         content.count("\n"),
@@ -162,7 +164,7 @@ class RunJournal(BaseCallbackHandler):
                         if isinstance(block, str)
                         or (isinstance(block, Mapping) and isinstance(block.get("text"), str))
                     ]
-                    logger.info(
+                    logger.debug(
                         "[Journal] last_ai_msg set: len=%d shape=list blocks=%d types=%s heads=%r",
                         len(text),
                         len(text_blocks),
@@ -173,7 +175,7 @@ class RunJournal(BaseCallbackHandler):
                         [str(block)[:30] for block in text_blocks[:4]],
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "[Journal] last_ai_msg set: len=%d shape=%s head=%r",
                         len(text),
                         type(content).__name__,

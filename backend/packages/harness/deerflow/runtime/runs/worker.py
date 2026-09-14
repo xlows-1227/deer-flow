@@ -2944,7 +2944,7 @@ def _inject_english_whitespace_rule_if_needed(graph_input: dict) -> None:
     msgs.insert(last_human_idx, rule_message)
 
 
-def _clean_model_text(text: str, skip_space_restoration: bool = False) -> str:
+def _clean_model_text(text: str, skip_space_restoration: bool = False, *, preserve_whitespace: bool = False) -> str:
     if not text:
         return text
     text = _SYSTEM_REMINDER_RE.sub("", text)
@@ -2959,10 +2959,14 @@ def _clean_model_text(text: str, skip_space_restoration: bool = False) -> str:
         original_text = text
         text = _restore_english_spaces(text)
         if text != original_text:
-            logger.info("English spaces restored: len %d -> %d (sample: %r -> %r)",
+            logger.debug("English spaces restored: len %d -> %d (sample: %r -> %r)",
                         len(original_text), len(text),
                         original_text[:80], text[:80])
-    text = text.strip()
+    # Streaming chunks are 1-3 chars each; stripping edge whitespace here
+    # would erase newline-only chunks and glue the whole message into one
+    # line once aggregated (kimi-for-coding streams CJK char-by-char).
+    if not preserve_whitespace:
+        text = text.strip()
     return text
 
 
@@ -3024,15 +3028,15 @@ def _clean_aimessage_content(obj: Any, is_streaming_chunk: bool = False, skip_sp
     if obj is None:
         return None
     if isinstance(obj, str):
-        return _clean_model_text(obj, skip_space_restoration=skip_space_restoration)
+        return _clean_model_text(obj, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk)
     if isinstance(obj, dict):
         cleaned = {}
         for k, v in obj.items():
             if k == "content" and isinstance(v, str):
-                cleaned[k] = _clean_model_text(v, skip_space_restoration=skip_space_restoration)
+                cleaned[k] = _clean_model_text(v, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk)
             elif k == "content" and isinstance(v, list):
                 cleaned[k] = [
-                    _clean_model_text(item, skip_space_restoration=skip_space_restoration) if isinstance(item, str) else item
+                    _clean_model_text(item, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk) if isinstance(item, str) else item
                     for item in v
                 ]
             else:
@@ -3052,10 +3056,10 @@ def _clean_aimessage_content(obj: Any, is_streaming_chunk: bool = False, skip_sp
             extracted_names = _extract_tool_names_from_text(raw_text)
 
             if isinstance(content, str):
-                obj.content = _clean_model_text(content, skip_space_restoration=skip_space_restoration)
+                obj.content = _clean_model_text(content, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk)
             elif isinstance(content, list):
                 obj.content = [
-                    _clean_model_text(item, skip_space_restoration=skip_space_restoration) if isinstance(item, str) else item
+                    _clean_model_text(item, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk) if isinstance(item, str) else item
                     for item in content
                 ]
             if isinstance(obj.content, str):
@@ -3421,7 +3425,7 @@ def _log_values_last_ai(stage: str, messages: Any) -> None:
             content = getattr(m, "content", "")
         if not isinstance(content, str):
             content = repr(content)
-        logger.info("[Worker] values last AI (%s): len=%d head=%r", stage, len(content), content[:120])
+        logger.debug("[Worker] values last AI (%s): len=%d head=%r", stage, len(content), content[:120])
         return
 
 
@@ -4021,7 +4025,7 @@ async def _run_flash_direct_model(
                 else ""
             )
             _preview.append(f"[{i}] {mtype}: {snippet}")
-    logger.info(
+    logger.debug(
         "[LLM_INPUT_PREVIEW] run=%s total=%s messages:\n%s",
         record.run_id,
         len(conversation_messages),
@@ -4811,7 +4815,7 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 # Skip space restoration in streaming (chunks too small for correct restoration)
-                cleaned_chunk = _clean_aimessage_content(chunk, skip_space_restoration=(single_mode == "messages")) if single_mode == "messages" else chunk
+                cleaned_chunk = _clean_aimessage_content(chunk, is_streaming_chunk=True, skip_space_restoration=True) if single_mode == "messages" else chunk
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 if single_mode == "values" and isinstance(cleaned_chunk, dict):
                     # Pre-process values: ensure every AI message in state has
