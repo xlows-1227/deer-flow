@@ -441,6 +441,93 @@ class TestConvenienceFields:
         assert data["total_tokens"] == 100
         assert data["message_count"] == 5
 
+    @pytest.mark.anyio
+    async def test_marker_only_ai_text_does_not_set_last_ai_message(self, journal_setup):
+        """Models imitate the [工具调用: ...] markers from patched history; that is not an answer."""
+        j, _ = journal_setup
+        j.on_llm_end(
+            _make_llm_response("[工具调用: ask_clarification]", tool_calls=[{"id": "c1", "name": "ask_clarification", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        assert j.get_completion_data()["last_ai_message"] is None
+
+    @pytest.mark.anyio
+    async def test_marker_only_ai_text_does_not_clear_previous_answer(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("Useful answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response("[工具调用: query_database]", tool_calls=[{"id": "c2", "name": "query_database", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        assert j.get_completion_data()["last_ai_message"] == "Useful answer"
+
+
+class TestClarificationReply:
+    """The ask_clarification ToolMessage is the run's user-facing reply."""
+
+    @pytest.mark.anyio
+    async def test_tool_end_clarification_tool_message_sets_last_ai(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, _ = journal_setup
+        j.on_tool_end(
+            ToolMessage(
+                content="❓ 你的基础数据？",
+                tool_call_id="call_1",
+                name="ask_clarification",
+                id="clarification:call_1",
+            ),
+            run_id=uuid4(),
+        )
+        assert j.get_completion_data()["last_ai_message"] == "❓ 你的基础数据？"
+
+    @pytest.mark.anyio
+    async def test_chain_end_command_with_clarification_sets_last_ai(self, journal_setup):
+        """The intercepted tool never executes, so the ToolMessage arrives inside a node Command."""
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, _ = journal_setup
+        j.on_llm_end(
+            _make_llm_response("[工具调用: ask_clarification]", tool_calls=[{"id": "call_1", "name": "ask_clarification", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_chain_end(
+            [Command(update={"messages": [ToolMessage(content="❓ 问题", tool_call_id="call_1", name="ask_clarification", id="clarification:call_1")]}, goto="__end__")],
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        assert j.get_completion_data()["last_ai_message"] == "❓ 问题"
+
+    @pytest.mark.anyio
+    async def test_chain_end_subagent_command_ignored(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("Lead answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_chain_end(
+            [Command(update={"messages": [ToolMessage(content="❓ 子代理", tool_call_id="c", name="ask_clarification", id="clarification:c")]}, goto="__end__")],
+            run_id=uuid4(),
+            tags=["subagent:general-purpose"],
+        )
+        assert j.get_completion_data()["last_ai_message"] == "Lead answer"
+
+    @pytest.mark.anyio
+    async def test_chain_end_non_command_outputs_ignored(self, journal_setup):
+        j, _ = journal_setup
+        j.on_chain_end({"messages": []}, run_id=uuid4(), parent_run_id=None)
+        j.on_chain_end(None, run_id=uuid4(), parent_run_id=None)
+        j.on_chain_end([{"not": "a command"}], run_id=uuid4(), parent_run_id=None)
+        assert j.get_completion_data()["last_ai_message"] is None
+
 
 class TestMiddlewareEvents:
     @pytest.mark.anyio

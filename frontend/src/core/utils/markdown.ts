@@ -206,10 +206,16 @@ function mergeRowsToCellCount(
       currentCells = cells;
     } else {
       // Strip trailing `|` (with surrounding whitespace) from current,
-      // strip leading `|` (with surrounding whitespace) from `row`,
-      // then glue with " | " as the new cell boundary.
+      // strip ALL leading boundary pipes (with surrounding whitespace)
+      // from `row`, then glue with " | " as the new cell boundary.
+      // A split row's continuation line starts with `||` or `| |`
+      // (empty first cell); leaving the extra pipe would insert a
+      // phantom empty cell into the merged row.
+      //
+      //   | GUID | + | varchar | NO | 主键 | → | GUID | varchar | NO | 主键 |
+      //   | GUID | + || varchar | NO | 主键 | → | GUID | varchar | NO | 主键 |
       const head = current.replace(/\s*\|\s*$/, "");
-      const tail = row.replace(/^\s*\|\s*/, "");
+      const tail = row.replace(/^(?:\s*\|)+\s*/, "");
       current = `${head} | ${tail}`;
       currentCells += cells;
     }
@@ -250,8 +256,12 @@ export function preprocessMarkdown(raw: string): string {
 
     // 0c. Table separator row: |---|---|  → ensure newline before it
     //     SKIP if we're inside ** block (would split bold marker).
+    //     The prefix must be a non-separator character: firing on `-`,
+    //     `:` or whitespace splits an already well-formed separator row
+    //     (|------|--------|------|) at an intra-row pipe.  A pipe prefix
+    //     (`...cell||------|`) IS allowed — it marks a glued jam boundary.
     text = text.replace(
-      /([^\n])(\|[\s\-:]{3,}(?:\|[\s\-:]{3,})+\|)/g,
+      /([^\s\n\-:])(\|[\s\-:]{3,}(?:\|[\s\-:]{3,})+\|)/g,
       (_match, prefix: string, row: string) => {
         if (insideBold(prefix)) return prefix + row; // don't break bold!
         return prefix + "\n" + row;
@@ -260,8 +270,13 @@ export function preprocessMarkdown(raw: string): string {
 
     // 0d. Table content rows: |col|col|  → ensure newline before it
     //     ALSO skip inside ** block.
+    //     The prefix must be non-whitespace: firing on the space before
+    //     a mid-row pipe shatters a well-formed spaced row
+    //     (`| a | b | c |` → `| a` + `| b | c |`), which the cell-count
+    //     repair in Step 0g then re-glues — and that re-gluing destroys
+    //     legitimate empty-first-cell continuation rows (`| | x | y |`).
     text = text.replace(
-      /([^\n|])(\|(?:[^\n|]+\|){2,})/g,
+      /([^\s\n|])(\|(?:[^\n|]+\|){2,})/g,
       (_match, prefix: string, row: string) => {
         // Skip if inside bold block
         if (insideBold(prefix)) return prefix + row;
@@ -284,29 +299,31 @@ export function preprocessMarkdown(raw: string): string {
     //     has only 1 cell before `||`, so it's an empty cell, not a
     //     row boundary).  Splitting an empty cell would break the
     //     table by turning one row into two misaligned rows.
+    //     We additionally skip when the matched segment is entirely
+    //     separator cells AND the next char is a separator char too
+    //     (i.e. we're INSIDE a separator row, e.g. one written without
+    //     a trailing pipe).  Splitting there would shatter a well-formed
+    //     separator row and corrupt the column count Step 0g relies on.
+    //     When separator cells are followed by real content
+    //     (`|---|---||cell...`), the split is a glued row boundary and
+    //     still happens.
     text = text.replace(
       /(\|(?:[^\n|]+\|){2,})\|(?=[^\s\n|])/g,
-      "$1\n|",
+      (match, seg: string, offset: number, full: string) => {
+        const cells = seg.split("|").filter((c) => c.length > 0);
+        const allSeparator = cells.every((c) => /^[\s\-:]+$/.test(c));
+        const nextChar = full[offset + match.length] ?? "";
+        if (allSeparator && /[-:]/.test(nextChar)) return match;
+        return `${seg}\n|`;
+      },
     );
 
-    // 0f. Join broken table rows: the LLM sometimes splits a single
-    //     table row across two lines, where the second line starts
-    //     with an empty cell (|| or | |).  This causes the markdown
-    //     renderer to create two misaligned rows instead of one.
-    //
-    //     | GUID |\n|| varchar | NO | 主键 |  →  | GUID | varchar | NO | 主键 |
-    //
-    //     We detect: a line ending with `|` followed by a newline
-    //     and a line starting with `||` or `| |` (empty first cell).
-    //     The join removes the boundary `|` + `\n` + `||`, replacing
-    //     with a single `|` as the cell separator.
-    //     This does NOT match normal two-row tables because a normal
-    //     second row starts with `| cell` (pipe-space-content), not
-    //     `||` (pipe-pipe).
-    text = text.replace(
-      /(\|)\s*\n\s*\|\s*\|/g,
-      "$1",
-    );
+    // NOTE: there is intentionally NO "join rows that start with an empty
+    // first cell (|| or | |)" step here.  A complete row followed by a
+    // row with an empty first cell is a legitimate table pattern (visual
+    // row-grouping), and joining them unconditionally swallows the
+    // continuation rows.  Genuinely split rows (previous row has fewer
+    // cells than the separator row) are repaired by Step 0g below.
 
     // 0g. Join broken table rows by cell count: the LLM also splits a
     //     single row across two lines where the second line starts

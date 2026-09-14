@@ -628,7 +628,12 @@ class GatewayPublishedRunExecutor:
         progress_queue: asyncio.Queue[str] | None = None
         bridge = getattr(self._app.state, "stream_bridge", None)
         if bridge is not None:
-            from app.channels.manager import _accumulate_stream_text, _extract_response_text
+            from app.channels.manager import (
+                _accumulate_stream_text,
+                _extract_clarification_text,
+                _extract_response_text,
+                _is_tool_marker_only,
+            )
 
             if on_progress is not None:
                 progress_queue = asyncio.Queue(maxsize=1)
@@ -675,7 +680,12 @@ class GatewayPublishedRunExecutor:
                     elif event.event == "__end__":
                         return
 
-                    if on_progress is None or not latest_text or latest_text == last_published_text:
+                    if (
+                        on_progress is None
+                        or not latest_text
+                        or latest_text == last_published_text
+                        or _is_tool_marker_only(latest_text)
+                    ):
                         continue
                     now = time.monotonic()
                     if last_published_text and now - last_publish_at < 0.35:
@@ -774,6 +784,12 @@ class GatewayPublishedRunExecutor:
         elif record.status == RunStatus.success:
             status = "success"
             text = record.last_ai_message or "(No response from agent)"
+            if last_values is not None:
+                clarification_text = _extract_clarification_text(last_values)
+                if clarification_text:
+                    # Runs ended by ask_clarification must reply with the
+                    # question/options, never a tool-call marker text.
+                    text = clarification_text
         elif record.status == RunStatus.interrupted:
             status = "cancelled"
             text = "The request was cancelled. Please try again."
