@@ -32,6 +32,11 @@ DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
+# Matches texts that are nothing but a generated tool-call placeholder marker,
+# e.g. ``[工具调用: query_database]`` or ``[工具调用已省略]``. Such markers are
+# display placeholders, never an agent reply.
+_TOOL_MARKER_ONLY_RE = re.compile(r"^\[工具调用(?:已省略|[:：][^\]]*)\]$")
+
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
@@ -183,6 +188,13 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     return normalized
 
 
+def _is_tool_marker_only(text: str) -> bool:
+    """True when text is nothing but a generated tool-call placeholder marker."""
+    if not isinstance(text, str):
+        return False
+    return bool(_TOOL_MARKER_ONLY_RE.fullmatch(text.strip()))
+
+
 def _extract_response_text(result: dict | list) -> str:
     """Extract the last AI message text from a LangGraph runs.wait result.
 
@@ -192,6 +204,7 @@ def _extract_response_text(result: dict | list) -> str:
     Handles special cases:
     - Regular AI text responses
     - Clarification interrupts (``ask_clarification`` tool messages)
+    - AI messages that only carry a ``[工具调用: ...]`` display marker
     """
     if isinstance(result, list):
         messages = result
@@ -221,7 +234,7 @@ def _extract_response_text(result: dict | list) -> str:
         # Regular AI message with text content
         if msg_type == "ai":
             content = msg.get("content", "")
-            if isinstance(content, str) and content:
+            if isinstance(content, str) and content and not _is_tool_marker_only(content):
                 return content
             # content can be a list of content blocks
             if isinstance(content, list):
@@ -232,8 +245,42 @@ def _extract_response_text(result: dict | list) -> str:
                     elif isinstance(block, str):
                         parts.append(block)
                 text = "".join(parts)
-                if text:
+                if text and not _is_tool_marker_only(text):
                     return text
+    return ""
+
+
+def _extract_clarification_text(result: dict | list) -> str:
+    """Return this turn's ask_clarification reply from a values snapshot.
+
+    ``ClarificationMiddleware`` ends runs with a ToolMessage whose content is
+    the user-facing question/options (id ``clarification:<tool_call_id>``).
+    The backward walk stops at the last human message so clarification
+    replies from earlier turns never match.
+    """
+    if isinstance(result, list):
+        messages = result
+    elif isinstance(result, dict):
+        messages = result.get("messages", [])
+    else:
+        return ""
+    if not isinstance(messages, list):
+        return ""
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        msg_type = msg.get("type")
+        if msg_type == "human":
+            break
+        if msg_type != "tool":
+            continue
+        msg_id = msg.get("id")
+        if msg.get("name") == "ask_clarification" or (
+            isinstance(msg_id, str) and msg_id.startswith("clarification:")
+        ):
+            content = msg.get("content", "")
+            if isinstance(content, str) and content:
+                return content
     return ""
 
 
