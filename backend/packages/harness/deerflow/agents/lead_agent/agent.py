@@ -467,7 +467,7 @@ def _build_middlewares(
                         )
                     else:
                         preview = str(last_content)[:160]
-                    _log.info(
+                    _log.debug(
                         "[LLM_INPUT_PREVIEW] GRAPH path last_human idx=%s changed=%s preview=%s",
                         last_human_idx,
                         changed,
@@ -524,7 +524,7 @@ def _build_middlewares(
                         )
                     else:
                         preview = str(lc)[:160]
-                    _log.info(
+                    _log.debug(
                         "[LLM_INPUT_PREVIEW] GRAPH path last_human idx=%s unchanged preview=%s",
                         last_human_idx,
                         preview,
@@ -881,7 +881,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     try:
         for _tool in filtered_tools:
             _desc = getattr(_tool, "description", "") or ""
-            logger.info(
+            logger.debug(
                 "[TOOL_DESC] name=%s desc_len=%d desc_head=%r",
                 getattr(_tool, "name", "?"),
                 len(_desc),

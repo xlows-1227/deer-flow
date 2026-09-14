@@ -162,6 +162,24 @@ def _nmcp_normalize_messages(messages: Any) -> tuple[Any, bool]:
     return messages, False
 
 
+_RETRY_EXHAUSTED_ATTR = "_deerflow_llm_retried"
+
+
+def _mark_retry_exhausted(exc: BaseException) -> None:
+    """Tag an exception whose retries are already exhausted by an inner wrapper.
+
+    The retry wrappers nest (Runnable ``astream`` calls ``_astream``), and
+    without this tag each layer multiplies the retry count — a persistent
+    provider error then burns up to 25 attempts and keeps the user on a
+    'processing' spinner for minutes before the failure surfaces.  Layers
+    above the one that already retried must fail fast.
+    """
+    try:
+        setattr(exc, _RETRY_EXHAUSTED_ATTR, True)
+    except Exception:
+        pass
+
+
 def _is_retryable_llm_error(exc: BaseException) -> bool:
     """Check if an LLM error is transiently retryable (e.g. Kimi 403 concurrency).
 
@@ -169,6 +187,8 @@ def _is_retryable_llm_error(exc: BaseException) -> bool:
     heavy introspection.  We look for the key patterns that identify
     retriable provider-side failures.
     """
+    if getattr(exc, _RETRY_EXHAUSTED_ATTR, False):
+        return False
     name = exc.__class__.__name__.lower()
     detail = str(exc).lower()
 
@@ -222,6 +242,7 @@ def _model_call_retry_wrapper_sync(
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable_llm_error(exc) or attempt >= max_retries:
+                    _mark_retry_exhausted(exc)
                     raise
                 wait_ms = base_delay_ms * (2 ** attempt)
                 logger.warning(
@@ -232,6 +253,8 @@ def _model_call_retry_wrapper_sync(
                     str(exc)[:200],
                 )
                 time.sleep(wait_ms / 1000)
+        if last_exc is not None:
+            _mark_retry_exhausted(last_exc)
         raise last_exc  # type: ignore[misc]
 
     return wrapper
@@ -272,7 +295,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                     parts.append(f"[{i - len(msgs) + len(msgs[-8:]):+d}] {mtype}({ps})")
                 else:
                     parts.append(f"[{i - len(msgs) + len(msgs[-8:]):+d}] {mtype}={str(content)[:40]!r}")
-            logger.info(
+            logger.debug(
                 "[LLM_INPUT_PREVIEW] model=%s wrapper=%s tail=%s",
                 resolved_name,
                 name,
@@ -282,7 +305,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
             pass
 
     async def wrapped_agenerate(messages, *args, **kwargs):
-        logger.info("[MODEL_WRAPPER] wrapped_agenerate CALLED (messages=%s)", len(messages) if isinstance(messages, list) else "?")
+        logger.debug("[MODEL_WRAPPER] wrapped_agenerate CALLED (messages=%s)", len(messages) if isinstance(messages, list) else "?")
         nm, changed = _nmcp_normalize_messages(messages)
         _preview("agenerate" + ("(norm)" if changed else ""), nm)
         last_exc = None
@@ -292,6 +315,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable_llm_error(exc) or attempt >= 4:
+                    _mark_retry_exhausted(exc)
                     raise
                 wait_ms = 1000 * (2 ** attempt)
                 logger.warning(
@@ -299,6 +323,8 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                     attempt + 1, wait_ms, str(exc)[:200],
                 )
                 await asyncio.sleep(wait_ms / 1000)
+        if last_exc is not None:
+            _mark_retry_exhausted(last_exc)
         raise last_exc  # type: ignore[misc]
 
     def wrapped_generate(messages, *args, **kwargs):
@@ -312,7 +338,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
     if callable(orig_astream):
 
         async def wrapped_astream(messages, *args, **kwargs):
-            logger.info("[MODEL_WRAPPER] wrapped_astream CALLED (messages=%s)", len(messages) if isinstance(messages, list) else "?")
+            logger.debug("[MODEL_WRAPPER] wrapped_astream CALLED (messages=%s)", len(messages) if isinstance(messages, list) else "?")
             nm, changed = _nmcp_normalize_messages(messages)
             _preview("astream" + ("(norm)" if changed else ""), nm)
             last_exc = None
@@ -324,6 +350,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                 except Exception as exc:
                     last_exc = exc
                     if not _is_retryable_llm_error(exc) or attempt >= 4:
+                        _mark_retry_exhausted(exc)
                         raise
                     wait_ms = 1000 * (2 ** attempt)
                     logger.warning(
@@ -331,6 +358,8 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                         attempt + 1, wait_ms, str(exc)[:200],
                     )
                     await asyncio.sleep(wait_ms / 1000)
+            if last_exc is not None:
+                _mark_retry_exhausted(last_exc)
             raise last_exc  # type: ignore[misc]
 
         object.__setattr__(instance, "_astream", wrapped_astream)
@@ -390,7 +419,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
         orig_stream_runnable = instance.stream
 
         async def _wrapped_runnable_ainvoke(input, config=None, **kwargs):  # noqa: A002
-            logger.info("[MODEL_WRAPPER] _wrapped_runnable_ainvoke CALLED")
+            logger.debug("[MODEL_WRAPPER] _wrapped_runnable_ainvoke CALLED")
             if isinstance(input, (list, BaseMessage)):
                 nm, _changed = _nmcp_normalize_messages(input)
                 _preview("ainvoke-runnable", nm)
@@ -401,6 +430,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                     except Exception as exc:
                         last_exc = exc
                         if not _is_retryable_llm_error(exc) or attempt >= 4:
+                            _mark_retry_exhausted(exc)
                             raise
                         wait_ms = 1000 * (2 ** attempt)
                         logger.warning(
@@ -408,6 +438,8 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                             attempt + 1, wait_ms, str(exc)[:200],
                         )
                         await asyncio.sleep(wait_ms / 1000)
+                if last_exc is not None:
+                    _mark_retry_exhausted(last_exc)
                 raise last_exc  # type: ignore[misc]
             return await orig_ainvoke_runnable(input, config=config, **kwargs)
 
@@ -419,7 +451,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
             return orig_invoke_runnable(input, config=config, **kwargs)
 
         async def _wrapped_runnable_astream(input, config=None, **kwargs):  # noqa: A002
-            logger.info("[MODEL_WRAPPER] _wrapped_runnable_astream CALLED")
+            logger.debug("[MODEL_WRAPPER] _wrapped_runnable_astream CALLED")
             if isinstance(input, (list, BaseMessage)):
                 nm, _changed = _nmcp_normalize_messages(input)
                 _preview("astream-runnable", nm)
@@ -432,6 +464,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                     except Exception as exc:
                         last_exc = exc
                         if not _is_retryable_llm_error(exc) or attempt >= 4:
+                            _mark_retry_exhausted(exc)
                             raise
                         wait_ms = 1000 * (2 ** attempt)
                         logger.warning(
@@ -439,6 +472,8 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
                             attempt + 1, wait_ms, str(exc)[:200],
                         )
                         await asyncio.sleep(wait_ms / 1000)
+                if last_exc is not None:
+                    _mark_retry_exhausted(last_exc)
                 raise last_exc  # type: ignore[misc]
             else:
                 async for chunk in orig_astream_runnable(input, config=config, **kwargs):
@@ -719,7 +754,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 if getattr(m, "type", "") == "human":
                     last_human = str(getattr(m, "content", ""))[:60]
                     break
-            logger.info(
+            logger.debug(
                 "[RAW_MODEL_OUTPUT] model=%s mode=%s request: msgs=%d last_human=%r instance_params=(temperature=%s extra_body=%s reasoning_effort=%s stream_usage=%s max_tokens=%s) call_kwargs_keys=%s",
                 name,
                 mode,
@@ -735,6 +770,40 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         except Exception:  # noqa: BLE001
             pass
 
+    # 将最终发送给端点的 payload（消息、tools、参数）落盘，供离线精确重放
+    # 与两条路径（图/flash）逐字节 diff。密钥字段不落盘。
+    _forensic_payload_seq = 0
+
+    def _forensic_dump_payload(payload: Any) -> None:
+        nonlocal _forensic_payload_seq
+        try:
+            import json as _json
+            import time as _time
+            from pathlib import Path as _Path
+
+            out_dir = _Path(".deer-flow/forensic")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            _forensic_payload_seq += 1
+            fname = out_dir / f"payload_{name}_{int(_time.time() * 1000)}_{_forensic_payload_seq}.json"
+            safe = {k: v for k, v in (payload or {}).items() if "key" not in k.lower()}
+            fname.write_text(
+                _json.dumps(safe, ensure_ascii=False, indent=1, default=str),
+                encoding="utf-8",
+            )
+            logger.debug("[RAW_MODEL_OUTPUT] payload dumped: model=%s file=%s", name, fname)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _orig_get_request_payload = getattr(model_instance, "_get_request_payload", None)
+    if callable(_orig_get_request_payload):
+
+        def _forensic_get_request_payload(input_, *args, **kwargs):  # type: ignore[no-untyped-def]
+            payload = _orig_get_request_payload(input_, *args, **kwargs)
+            _forensic_dump_payload(payload)
+            return payload
+
+        object.__setattr__(model_instance, "_get_request_payload", _forensic_get_request_payload)
+
     _orig_forensic_agenerate = model_instance._agenerate
 
     async def _forensic_agenerate(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -745,7 +814,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 for gen in gen_list:
                     gen_message = getattr(gen, "message", None)
                     if gen_message is not None:
-                        logger.info(
+                        logger.debug(
                             "[RAW_MODEL_OUTPUT] model=%s mode=agenerate msg=%s content=%s",
                             name,
                             type(gen_message).__name__,
@@ -764,13 +833,19 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             _log_raw_request("astream", messages, kwargs)
             parts: list[str] = []
             blocks = 0
+            chunk_count = 0
+            chunks_with_nl = 0
+            samples: list[str] = []
             async for chunk in _orig_forensic_astream(messages, *args, **kwargs):
                 # Chunks may be AIMessageChunk (content 直接可读) 或
                 # ChatGenerationChunk（content 在 .message 上），统一取值。
                 chunk_source = getattr(chunk, "message", chunk)
                 chunk_content = getattr(chunk_source, "content", None)
+                chunk_count += 1
                 if isinstance(chunk_content, str):
                     parts.append(chunk_content)
+                    if "\n" in chunk_content:
+                        chunks_with_nl += 1
                 elif isinstance(chunk_content, list):
                     blocks += len(chunk_content)
                     for block in chunk_content:
@@ -778,16 +853,29 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                             parts.append(block)
                         elif isinstance(block, dict) and isinstance(block.get("text"), str):
                             parts.append(block["text"])
+                if len(samples) < 3:
+                    samples.append(
+                        f"#{chunk_count} cls={type(chunk_source).__name__} "
+                        f"content={str(chunk_content)[:140]!r}"
+                    )
                 yield chunk
             joined = "".join(parts)
             try:
-                logger.info(
-                    "[RAW_MODEL_OUTPUT] model=%s mode=astream merged_len=%d nl=%d sp=%d list_blocks=%d head=%r",
+                for sample in samples:
+                    logger.debug(
+                        "[RAW_MODEL_OUTPUT] model=%s mode=astream chunk_sample %s",
+                        name,
+                        sample,
+                    )
+                logger.debug(
+                    "[RAW_MODEL_OUTPUT] model=%s mode=astream merged_len=%d nl=%d sp=%d list_blocks=%d chunks=%d chunks_with_nl=%d head=%r",
                     name,
                     len(joined),
                     joined.count("\n"),
                     joined.count(" "),
                     blocks,
+                    chunk_count,
+                    chunks_with_nl,
                     joined[:60],
                 )
             except Exception:  # noqa: BLE001

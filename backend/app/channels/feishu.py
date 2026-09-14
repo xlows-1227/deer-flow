@@ -34,6 +34,10 @@ from deerflow.sandbox.sandbox_provider import SandboxAcquisition, get_sandbox_pr
 
 logger = logging.getLogger(__name__)
 
+# 热更新验证标识：服务器日志里出现该行说明本文件（含 _normalize_markdown 修复）
+# 已被加载；重新热更新后若看不到此日志，说明加载的不是这份代码。
+logger.info("[Feishu] feishu.py module loaded: md_normalize=20260911c")
+
 FEISHU_INBOUND_FILE_MAX_BYTES = 50 * 1024 * 1024
 FEISHU_PUBLISHED_INBOUND_MAX_FILES = 10
 FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 15.0
@@ -1518,6 +1522,10 @@ class FeishuChannel(Channel):
         self._runtime_health_callback = runtime_health_callback
         self._published_http_client_factory = published_http_client_factory or self._new_published_http_client
         self._ws_session: FeishuWebSocketSession | None = None
+        # 同一卡片的消息补丁必须串行且间隔发送：并发的 patch 可能在飞书
+        # 侧乱序落库（旧内容覆盖新内容），过密则会触发接口频控。
+        self._card_patch_lock = asyncio.Lock()
+        self._last_card_patch_at = 0.0
         self._startup_event = threading.Event()
         self._startup_error: RuntimeError | None = None
         self._startup_acknowledged = False
@@ -1842,6 +1850,10 @@ class FeishuChannel(Channel):
                 return  # success
             except Exception as exc:
                 last_exc = exc
+                if "230099" in str(exc):
+                    # Deterministic card-content rejection (e.g. too many
+                    # tables); the content will not change between attempts.
+                    break
                 if attempt < _max_retries - 1:
                     delay = 2**attempt  # 1s, 2s
                     logger.warning(
@@ -1854,9 +1866,25 @@ class FeishuChannel(Channel):
                     await asyncio.sleep(delay)
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
+        await self._notify_send_failure(msg, last_exc)
         if last_exc is None:
             raise RuntimeError("Feishu send failed without an exception from any attempt")
         raise last_exc
+
+    async def _notify_send_failure(self, msg: OutboundMessage, exc: BaseException | None) -> None:
+        """Patch the running card with a failure notice instead of leaving it stuck on 'Working on it...'."""
+        if not self._api_client or not self._PatchMessageRequest:
+            return
+        card_id = self._running_card_ids.get(msg.thread_ts) if msg.thread_ts else None
+        if not card_id:
+            return
+        detail = str(exc)[:200] if exc else "unknown error"
+        notice = f"⚠️ 回复发送失败，请稍后重试或换个问法。\n（错误详情：{detail}）"
+        try:
+            await self._update_card(card_id, notice)
+            logger.info("[Feishu] failure notice patched onto card %s", card_id)
+        except Exception:
+            logger.exception("[Feishu] failed to patch failure notice onto card %s", card_id)
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -3139,17 +3167,256 @@ class FeishuChannel(Channel):
 
     @staticmethod
     def _normalize_markdown(text: str) -> str:
-        """给行首缺空格的 Markdown 标记补上空格。
+        """Normalize markdown for Feishu card rendering.
 
-        中文模型常输出「##标题」「-条目」。CommonMark（含飞书卡片）要求
-        「## 」「- 」后必须跟空格才识别为标题/列表，否则符号原样显示。
+        Some models (e.g. kimi-for-coding) stream Markdown without newlines
+        (``nl=0``), producing ``##标题---|表头|值||---|---|`` all on one
+        line. Feishu's card markdown element requires proper line breaks to
+        render headings, tables, lists, and ``---`` separators.
+
+        This function:
+        1. Splits ``---`` horizontal rules (distinguishing from table separators).
+        2. Splits before ``##``/``###`` headings.
+        3. Splits table rows on ``||`` boundaries (explicit row separators).
+        4. Inserts newlines when a table starts in the middle of a text line
+           (e.g. after a heading).
+        5. Adds missing spaces after ``#`` and ``-`` markers.
+        6. Splits merged table rows (single ``|`` between rows instead of ``||``)
+           by detecting column count from the header/separator row.
+        7. Unwraps fenced code blocks: Feishu card markdown (JSON 2.0) does not
+           support CodeBlock, so ``` markers would render as literal text.
+        8. Splits long heading lines: jammed streams glue a paragraph onto a
+           heading (``##重要提醒目前无法...``), which renders the whole line as
+           one giant heading. Cuts at the first sentence punctuation or
+           sentence-start marker when the heading body exceeds 12 chars.
         """
 
+        # Step 0: Unwrap fenced code blocks (``` ... ```). Keeps the inner
+        # content as plain lines so tree diagrams / code at least break onto
+        # their own lines instead of showing literal fence markers.
+        text = re.sub(r"```[^\n]*?\n([\s\S]*?)```", lambda m: "\n" + m.group(1).strip("\n") + "\n", text)
+        text = re.sub(r"```([^`\n]*)```", lambda m: m.group(1), text)  # single-line fences
+        text = re.sub(r"```[^\n]*$", "", text, flags=re.MULTILINE)  # dangling opening fence
+
+        # Step 1: Split "---" horizontal rules.
+        # Must NOT match table separator rows (|---|---|) where --- is flanked
+        # by pipes. Rule: --- preceded by non-dash, NOT followed by | or dash.
+        # This catches both "text---" and "table_row|---heading".
+        text = re.sub(r"(?<!\n)(?<![\-])(\s*)(---)(?![\|\-])", r"\1\n\2\n", text)
+
+        # Step 2: Insert newlines before headings (##, ###, etc.)
+        text = re.sub(r"(?<!\n)(?<![#\s])(#{1,6})(?=[^\s#])", r"\n\1", text)
+
+        # Step 3: Split table rows on "||" boundaries (explicit row separators)
+        text = re.sub(r"\|\|(?=[^|\n]*\|[^|\n]*\|)", r"|\n|", text)
+
+        # Step 4: Insert newline when a table starts in the middle of a text
+        # line (e.g. "## heading|col1|col2|" → "## heading\n|col1|col2|").
+        text = FeishuChannel._split_inline_table_start(text)
+
+        # Step 5: Fix missing spaces after # and - markers
         def _fix_line(line: str) -> str:
             line = re.sub(r"^(\s{0,3}#{1,6})(?=[^\s#])", r"\1 ", line)
             return re.sub(r"^(\s*-)(?=[^\s\d-])", r"\1 ", line)
 
-        return "\n".join(_fix_line(line) for line in text.split("\n"))
+        lines = text.split("\n")
+        fixed_lines = [_fix_line(line) for line in lines]
+        text = "\n".join(fixed_lines)
+
+        # Step 6: Split merged table rows (too many pipes for the column count)
+        text = FeishuChannel._split_inline_table_rows(text)
+
+        # Step 7: Split long heading lines (paragraph glued onto a heading).
+        text = FeishuChannel._split_long_heading_lines(text)
+
+        # Clean up: collapse 3+ consecutive newlines to 2
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _split_long_heading_lines(text: str) -> str:
+        """Cut paragraphs that were glued onto a heading line.
+
+        Real headings are short. When a heading body exceeds 12 chars, cut it
+        at the earliest sentence punctuation (，。；！？) or sentence-start
+        marker (目前/因为/由于/以下/综上/总之/需要/请) and continue the
+        remainder as a normal line, so ``##重要提醒目前无法...`` becomes
+        ``## 重要提醒`` + ``目前无法...``.
+        """
+        punct = "，。；！？"
+        markers = ("目前", "因为", "由于", "以下", "综上", "总之", "需要", "请")
+        out: list[str] = []
+        for line in text.split("\n"):
+            match = re.match(r"^(\s{0,3}#{1,6})\s*(\S.*)$", line)
+            if not match:
+                out.append(line)
+                continue
+            body = match.group(2).strip()
+            if len(body) <= 12:
+                out.append(line)
+                continue
+            cut = len(body)
+            for ch in punct:
+                idx = body.find(ch)
+                if 2 <= idx < cut:
+                    cut = idx
+            for marker in markers:
+                idx = body.find(marker)
+                if 2 <= idx < cut:
+                    cut = idx
+            if cut >= len(body):
+                out.append(line)
+                continue
+            head = body[:cut].rstrip(" ，。；：、")
+            rest = body[cut:].lstrip(" ，。；：")
+            if len(head) < 2 or not rest:
+                out.append(line)
+                continue
+            out.append(f"{match.group(1)} {head}")
+            out.append(rest)
+        return "\n".join(out)
+
+    @staticmethod
+    def _split_inline_table_start(text: str) -> str:
+        """Insert newline when a table starts in the middle of a text line.
+
+        After ``||`` splitting, table rows are on separate lines, but the
+        first row may still be inline with preceding text:
+        ``...some text|cell1|cell2|`` → ``...some text\\n|cell1|cell2|``
+        """
+        lines = text.split("\n")
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("|"):
+                new_lines.append(line)
+                continue
+            match = re.search(r"\|[^|\n]*(?:\|[^|\n]*)+\|", stripped)
+            if match and match.start() > 0:
+                prefix = stripped[:match.start()].rstrip()
+                table_part = stripped[match.start():]
+                rest = stripped[match.end():]
+                if prefix:
+                    new_lines.append(prefix)
+                new_lines.append(table_part)
+                if rest:
+                    remaining = FeishuChannel._split_inline_table_start(rest)
+                    new_lines.extend(remaining.split("\n"))
+            else:
+                new_lines.append(line)
+        return "\n".join(new_lines)
+
+    @staticmethod
+    def _split_inline_table_rows(text: str) -> str:
+        """Split table rows that have too many pipes (merged rows without ``||``).
+
+        After ``||`` splitting, some rows may still have too many pipes because
+        the model used single ``|`` between rows. This function detects the
+        expected column count from the header/separator row and splits data
+        rows accordingly.
+        """
+        lines = text.split("\n")
+        result: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.lstrip()
+            if not stripped.startswith("|"):
+                result.append(line)
+                i += 1
+                continue
+
+            pipe_count = stripped.count("|")
+            if pipe_count < 3:
+                result.append(line)
+                i += 1
+                continue
+
+            next_stripped = lines[i + 1].lstrip() if i + 1 < len(lines) else ""
+            if next_stripped.startswith("|") and re.match(r"^\|[\s-]+\|", next_stripped):
+                cols = next_stripped.count("|") - 1
+                if cols < 1:
+                    cols = pipe_count - 1
+                expected_pipes = cols + 1
+
+                result.append(line)
+                i += 1
+                result.append(lines[i])
+                i += 1
+
+                while i < len(lines):
+                    data_line = lines[i]
+                    data_stripped = data_line.lstrip()
+                    if not data_stripped.startswith("|"):
+                        break
+                    data_pipes = data_stripped.count("|")
+                    if data_pipes == expected_pipes:
+                        result.append(data_line)
+                        i += 1
+                    elif data_pipes > expected_pipes:
+                        # If the row contains "||" (unsplit row separator),
+                        # split on it first, then process each sub-row.
+                        if "||" in data_stripped:
+                            sub_text = data_stripped.replace("||", "|\n|")
+                            for sub_line in sub_text.split("\n"):
+                                sub_stripped = sub_line.lstrip()
+                                if not sub_stripped:
+                                    continue
+                                sub_pipes = sub_stripped.count("|")
+                                if sub_pipes == expected_pipes:
+                                    result.append(sub_line)
+                                elif sub_pipes > expected_pipes:
+                                    parts2 = sub_stripped.split("|")
+                                    cells2 = parts2[1:]
+                                    if sub_stripped.rstrip().endswith("|"):
+                                        cells2 = cells2[:-1]
+                                    if len(cells2) % cols == 0:
+                                        for j in range(0, len(cells2), cols):
+                                            row_cells = cells2[j:j + cols]
+                                            result.append("|" + "|".join(row_cells) + "|")
+                                    else:
+                                        result.append(sub_line)
+                                else:
+                                    result.append(sub_line)
+                            i += 1
+                            continue
+                        parts = data_stripped.split("|")
+                        cells = parts[1:]
+                        if data_stripped.rstrip().endswith("|"):
+                            cells = cells[:-1]
+                        if len(cells) % cols != 0:
+                            result.append(data_line)
+                            i += 1
+                            break
+                        for j in range(0, len(cells), cols):
+                            row_cells = cells[j:j + cols]
+                            if len(row_cells) == cols:
+                                result.append("|" + "|".join(row_cells) + "|")
+                            elif len(row_cells) > 0:
+                                result.append("|" + "|".join(row_cells) + "|")
+                        i += 1
+                    else:
+                        break
+                continue
+            else:
+                if pipe_count > 3 and pipe_count % 3 == 0:
+                    cols = 2
+                    parts = stripped.split("|")
+                    cells = parts[1:]
+                    if stripped.rstrip().endswith("|"):
+                        cells = cells[:-1]
+                    if len(cells) > cols and len(cells) % cols == 0:
+                        for j in range(0, len(cells), cols):
+                            row_cells = cells[j:j + cols]
+                            result.append("|" + "|".join(row_cells) + "|")
+                        i += 1
+                        continue
+
+                result.append(line)
+                i += 1
+                continue
+
+        return "\n".join(result)
 
     @staticmethod
     def _build_card_content(text: str) -> str:
@@ -3159,10 +3426,18 @@ class FeishuChannel(Channel):
         elements 里的 markdown 标签不会按 Markdown 渲染，整段文本会被
         压成一行原样显示。
         """
+        normalized = FeishuChannel._normalize_markdown(text)
+        logger.info(
+            "[Feishu] card content built (md_normalize=20260911c): raw_len=%d normalized_len=%d nl=%d head=%r",
+            len(text),
+            len(normalized),
+            normalized.count("\n"),
+            normalized[:120],
+        )
         card = {
             "schema": "2.0",
             "config": {"update_multi": True},
-            "body": {"elements": [{"tag": "markdown", "content": FeishuChannel._normalize_markdown(text)}]},
+            "body": {"elements": [{"tag": "markdown", "content": normalized}]},
         }
         return json.dumps(card)
 
@@ -3179,6 +3454,27 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
 
+    @staticmethod
+    def _check_api_response(response: Any, action: str) -> None:
+        """Raise when the Feishu SDK reports a business-level failure.
+
+        The SDK does not raise on API errors (rate limits, invalid content,
+        deleted messages) — it only sets success()/code/msg on the response,
+        so every send path must check the result explicitly.
+        """
+        success = getattr(response, "success", None)
+        if callable(success):
+            ok = bool(success())
+        else:
+            ok = True
+        if not ok:
+            code = getattr(response, "code", None)
+            msg = getattr(response, "msg", None)
+            error = getattr(response, "error", None)
+            raise RuntimeError(
+                f"Feishu {action} failed: code={code} msg={msg!r} error={error!r}"
+            )
+
     async def _reply_card(self, message_id: str, text: str) -> str | None:
         """Reply with an interactive card and return the created card message ID."""
         if not self._api_client:
@@ -3187,6 +3483,7 @@ class FeishuChannel(Channel):
         content = self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        self._check_api_response(response, "card reply")
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
 
@@ -3197,16 +3494,29 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        self._check_api_response(response, "card create")
 
     async def _update_card(self, message_id: str, text: str) -> None:
-        """Patch an existing card message in place."""
+        """Patch an existing card message in place.
+
+        Patches for the same card are serialized and spaced out: concurrent
+        patches could land out of order at Feishu (stale content winning),
+        and back-to-back patches trip the per-message update rate limit.
+        """
         if not self._api_client or not self._PatchMessageRequest:
             return
 
         content = self._build_card_content(text)
-        request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        async with self._card_patch_lock:
+            # Feishu rejects rapid-fire patches on one message; stay >=1.1s apart.
+            elapsed = time.monotonic() - self._last_card_patch_at
+            if self._last_card_patch_at > 0 and elapsed < 1.1:
+                await asyncio.sleep(1.1 - elapsed)
+            request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+            self._last_card_patch_at = time.monotonic()
+        self._check_api_response(response, f"card patch (message={message_id}, content_len={len(content)})")
 
     def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
         """Keep a strong reference to fire-and-forget tasks and surface errors."""
