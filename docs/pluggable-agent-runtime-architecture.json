@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DeerFlow 可插拔 Agent Runtime 目标架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1390, 740],
+    "views": [
+      {
+        "id": "run_path",
+        "label": "一次业务调用",
+        "focus": ["business_clients", "public_gateway", "publish_control", "execution_router", "runtime_deerflow", "runtime_events"],
+        "note": "公开 API 保持稳定，Execution Router 将运行请求交给已绑定的部署代次。"
+      },
+      {
+        "id": "deploy_path",
+        "label": "发布与部署",
+        "focus": ["publish_control", "bundle_registry", "deployment_manager", "environment_provider", "runtime_pi", "runtime_codex"],
+        "note": "Release 先固化为 Agent Bundle，再由 Deployment 选择运行框架和环境。"
+      },
+      {
+        "id": "platform_boundary",
+        "label": "权限与平台能力",
+        "focus": ["publish_control", "execution_router", "runtime_deerflow", "runtime_pi", "runtime_codex", "platform_services"],
+        "note": "Runtime 只持有短期运行令牌，通过平台网关访问模型、工具和凭据。"
+      }
+    ],
+    "legend": {
+      "mode": "hidden",
+      "entries": {
+        "external": { "label": "业务调用方" },
+        "backend": { "label": "应用服务" },
+        "database": { "label": "持久化资产" },
+        "cloud": { "label": "部署与平台能力" },
+        "security": { "label": "可信边界与路由" },
+        "messagebus": { "label": "标准事件通道" }
+      }
+    }
+  },
+  "components": [
+    { "id": "business_clients", "type": "external", "label": "业务调用方", "sublabel": "OpenAPI / 渠道系统", "pos": [40, 335], "size": [150, 68] },
+    { "id": "public_gateway", "type": "backend", "label": "Public Agent API", "sublabel": "鉴权 · 限流 · 幂等 · SSE", "pos": [245, 335], "size": [165, 68], "tag": "现有接口" },
+    { "id": "publish_control", "type": "security", "label": "发布控制面", "sublabel": "Agent / Release / 会话策略", "pos": [470, 210], "size": [170, 72], "tag": "控制面" },
+    { "id": "bundle_registry", "type": "database", "label": "Bundle Registry", "sublabel": "不可变配置包 · 摘要 · 签名", "pos": [470, 470], "size": [170, 72], "tag": "无密钥" },
+    { "id": "execution_router", "type": "security", "label": "Execution Router", "sublabel": "部署绑定 · 代次固定 · 能力校验", "pos": [700, 335], "size": [185, 74], "tag": "新增核心" },
+    { "id": "deployment_manager", "type": "cloud", "label": "Deployment Manager", "sublabel": "期望状态 · 就绪 · 蓝绿切换", "pos": [700, 90], "size": [185, 74], "tag": "调和器" },
+    { "id": "environment_provider", "type": "cloud", "label": "Environment Provider", "sublabel": "Local / Docker / Kubernetes", "pos": [955, 90], "size": [190, 74], "tag": "运行位置" },
+    { "id": "runtime_deerflow", "type": "backend", "label": "DeerFlow Runtime", "sublabel": "Harness + LangGraph Adapter", "pos": [955, 245], "size": [190, 72], "tag": "独立部署" },
+    { "id": "runtime_pi", "type": "backend", "label": "Pi Runtime", "sublabel": "RPC Adapter · Session Process", "pos": [955, 365], "size": [190, 72], "tag": "独立部署" },
+    { "id": "runtime_codex", "type": "backend", "label": "Codex Runtime", "sublabel": "ACP Adapter · Session Process", "pos": [955, 485], "size": [190, 72], "tag": "独立部署" },
+    { "id": "platform_services", "type": "cloud", "label": "平台能力网关", "sublabel": "Model · MCP · Artifact · Secret", "pos": [1190, 335], "size": [180, 76], "tag": "短期凭证" },
+    { "id": "runtime_events", "type": "messagebus", "label": "Runtime Event Stream", "sublabel": "持久序号 · 重放 · 去重", "pos": [1190, 625], "size": [180, 74], "tag": "统一协议" }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "DeerFlow 控制面", "wraps": ["public_gateway", "publish_control", "bundle_registry", "execution_router", "deployment_manager"], "pad": 20 },
+    { "kind": "region", "label": "Agent 执行面", "wraps": ["environment_provider", "runtime_deerflow", "runtime_pi", "runtime_codex"], "pad": 20 },
+    { "kind": "security-group", "label": "隔离的 Agent Runtime 工作负载", "wraps": ["runtime_deerflow", "runtime_pi", "runtime_codex"], "pad": 14 }
+  ],
+  "connections": [
+    { "id": "call_api", "from": "business_clients", "to": "public_gateway", "label": "HTTPS / SSE", "variant": "emphasis", "labelAt": [218, 421] },
+    { "id": "resolve_policy", "from": "public_gateway", "to": "publish_control", "label": "解析 Release + 授权", "variant": "security", "route": "orthogonal-h" },
+    { "id": "submit_run", "from": "publish_control", "to": "execution_router", "label": "RuntimeRunRequest", "variant": "emphasis", "route": "orthogonal-h" },
+    { "id": "read_bundle", "from": "publish_control", "to": "bundle_registry", "label": "生成 / 读取 Bundle", "route": "orthogonal-v", "labelAt": [650, 450] },
+    { "id": "activate_deploy", "from": "publish_control", "to": "deployment_manager", "label": "发布后部署", "variant": "dashed", "route": "orthogonal-v" },
+    { "id": "reconcile_env", "from": "deployment_manager", "to": "environment_provider", "label": "apply / observe", "variant": "emphasis", "labelAt": [920, 181] },
+    { "id": "materialize_runtime", "from": "environment_provider", "to": "runtime_deerflow", "label": "创建 Runtime 部署", "variant": "dashed", "route": "straight", "labelAt": [1160, 205] },
+    { "id": "route_deerflow", "from": "execution_router", "to": "runtime_deerflow", "label": "选中部署代次", "variant": "emphasis", "route": "orthogonal-h", "labelAt": [905, 218] },
+    { "id": "route_pi", "from": "execution_router", "to": "runtime_pi", "variant": "emphasis", "route": "orthogonal-h" },
+    { "id": "route_codex", "from": "execution_router", "to": "runtime_codex", "variant": "emphasis", "route": "orthogonal-h" },
+    { "id": "deerflow_capabilities", "from": "runtime_deerflow", "to": "platform_services", "label": "受控能力调用", "variant": "security", "route": "orthogonal-h", "labelAt": [1168, 225] },
+    { "id": "pi_capabilities", "from": "runtime_pi", "to": "platform_services", "variant": "security", "route": "orthogonal-h" },
+    { "id": "codex_capabilities", "from": "runtime_codex", "to": "platform_services", "variant": "security", "route": "orthogonal-h" },
+    { "id": "runtime_event_protocol", "from": "runtime_codex", "to": "runtime_events", "label": "统一 RuntimeEvent", "variant": "dashed", "fromSide": "bottom", "toSide": "left", "via": [[1050, 662]], "labelAt": [1115, 650] },
+    { "id": "project_events", "from": "runtime_events", "to": "public_gateway", "label": "持久化 + 兼容投影", "variant": "emphasis", "fromSide": "bottom", "toSide": "bottom", "via": [[1280, 715], [327.5, 715], [327.5, 430]], "labelAt": [620, 703] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "稳定边界",
+      "items": ["业务 API 不感知 DeerFlow、Pi 或 Codex", "Release 表达 Agent 能力，Deployment 决定运行框架", "同一次 Run 固定 Release、部署代次和 Runtime"]
+    },
+    {
+      "dot": "violet",
+      "title": "框架切换",
+      "items": ["切换是蓝绿部署，不是请求参数", "新会话进入新代次，旧会话默认留在旧代次", "原生 Session 不跨框架透明迁移"]
+    },
+    {
+      "dot": "emerald",
+      "title": "安全与可恢复",
+      "items": ["Bundle 不携带长期密钥", "事件带单调序号并支持断线重放", "Runtime 通过短期令牌访问平台能力"]
+    }
+  ]
+}
