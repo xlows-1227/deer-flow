@@ -20,8 +20,11 @@ The eight rules mirror the design doc one-to-one:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Per-file instruction size cap (default 200KB; overridable via config in a
 # later milestone). The check is per-file, not combined, because AGENT.md and
@@ -146,17 +149,26 @@ def validate_draft_for_publish(
             granted_caps.add((connector_id, grant["capability"]))
 
     # Rules 4 & 5 — skills
+    # Auto-filter skills that are no longer selectable (deleted, disabled, or
+    # sharing revoked) instead of hard-failing. The skill is already gone from
+    # the platform; blocking publish would trap the user in an unrecoverable
+    # state where they can neither save (draft validation) nor publish.
+    active_skills = [
+        entry for entry in draft.get("skills") or []
+        if skills_index.is_selectable_by(entry["skill_name"], owner_user_id)
+    ]
+    if len(active_skills) < len(draft.get("skills") or []):
+        removed = [
+            entry["skill_name"] for entry in (draft.get("skills") or [])
+            if not skills_index.is_selectable_by(entry["skill_name"], owner_user_id)
+        ]
+        logger.info(
+            "publish validation: auto-removed %d unavailable skill(s): %s",
+            len(removed), removed,
+        )
+        draft["skills"] = active_skills
     for entry in draft.get("skills") or []:
         name = entry["skill_name"]
-        if not skills_index.is_selectable_by(name, owner_user_id):
-            violations.append(
-                PublishViolation(
-                    code="SKILL_NOT_FOUND",
-                    message=f"Skill '{name}' is not available to this owner.",
-                    field="skills",
-                )
-            )
-            continue
         info = skills_index.get(name)
         # Each declared connector capability must be covered by a grant.
         for cap in (info or {}).get("caps", []) if isinstance(info, dict) else []:

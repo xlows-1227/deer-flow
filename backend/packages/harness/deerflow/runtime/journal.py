@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -34,6 +35,13 @@ if TYPE_CHECKING:
     from deerflow.skills.privacy import SkillContentRedactor
 
 logger = logging.getLogger(__name__)
+
+# Texts that are nothing but a generated tool-call placeholder marker, e.g.
+# ``[工具调用: query_database]`` or ``[工具调用已省略]``.  Models imitate these
+# markers from the patched thread history and echo them back as message text;
+# they are display markers, never an agent answer, so they must not become
+# ``last_ai_message`` (outbound channels use it as the final reply).
+_TOOL_MARKER_ONLY_RE = re.compile(r"^\[工具调用(?:已省略|[:：][^\]]*)\]$")
 
 
 class RunJournal(BaseCallbackHandler):
@@ -132,9 +140,35 @@ class RunJournal(BaseCallbackHandler):
             return text
         return ""
 
+    def _record_clarification_reply(self, message: BaseMessage) -> None:
+        """Record an ask_clarification ToolMessage as the run's user-facing reply.
+
+        ``ClarificationMiddleware`` ends the run with a formatted ToolMessage
+        (id ``clarification:<tool_call_id>``) holding the question/options.
+        Outbound channels must reply with that text instead of the model's
+        tool-call marker text.
+        """
+        if not isinstance(message, ToolMessage) and getattr(message, "type", None) != "tool":
+            return
+        name = getattr(message, "name", None)
+        msg_id = getattr(message, "id", None)
+        if name != "ask_clarification" and not (
+            isinstance(msg_id, str) and msg_id.startswith("clarification:")
+        ):
+            return
+        text = self._message_text(message).strip()
+        if text:
+            self._last_ai_msg = text
+            logger.debug(
+                "[Journal] last_ai_msg set from clarification reply: len=%d head=%r",
+                len(text),
+                text[:120],
+            )
+
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
         self._msg_count += 1
+        self._record_clarification_reply(message)
 
         # ``last_ai_message`` should represent the lead agent's user-facing
         # answer. Middleware/subagent model calls and empty tool-call-only
@@ -142,8 +176,48 @@ class RunJournal(BaseCallbackHandler):
         is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
         if is_ai_message and (caller is None or caller == "lead_agent"):
             text = self._message_text(message).strip()
+            if text and _TOOL_MARKER_ONLY_RE.fullmatch(text):
+                logger.debug("[Journal] ignoring marker-only AI text: %r", text[:80])
+                text = ""
             if text:
-                self._last_ai_msg = text[:2000]
+                # 完整保留：飞书等出站通道会读取 last_ai_message 作为最终答复，
+                # 截断会导致卡片只显示前 2000 字。
+                self._last_ai_msg = text
+                # 取证日志：记录原始 content 的结构（str / list / 其他）、
+                # 换行与空格计数，用于区分「端点剥离空白」与「多块 join 丢换行」。
+                content = getattr(message, "content", None)
+                if isinstance(content, str):
+                    logger.debug(
+                        "[Journal] last_ai_msg set: len=%d shape=str nl=%d sp=%d head=%r",
+                        len(text),
+                        content.count("\n"),
+                        content.count(" "),
+                        text[:120],
+                    )
+                elif isinstance(content, list):
+                    text_blocks = [
+                        block if isinstance(block, str) else block.get("text")
+                        for block in content
+                        if isinstance(block, str)
+                        or (isinstance(block, Mapping) and isinstance(block.get("text"), str))
+                    ]
+                    logger.debug(
+                        "[Journal] last_ai_msg set: len=%d shape=list blocks=%d types=%s heads=%r",
+                        len(text),
+                        len(text_blocks),
+                        [
+                            block.get("type") if isinstance(block, Mapping) else "str"
+                            for block in content[:8]
+                        ],
+                        [str(block)[:30] for block in text_blocks[:4]],
+                    )
+                else:
+                    logger.debug(
+                        "[Journal] last_ai_msg set: len=%d shape=%s head=%r",
+                        len(text),
+                        type(content).__name__,
+                        text[:120],
+                    )
 
     def on_chain_start(
         self,
@@ -167,9 +241,42 @@ class RunJournal(BaseCallbackHandler):
                 metadata={"caller": caller, **(metadata or {})},
             )
 
-    def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_end(
+        self,
+        outputs: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
         self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
+        caller = self._identify_caller(tags)
+        if caller is None or caller == "lead_agent":
+            self._capture_clarification_commands(outputs)
+
+    def _capture_clarification_commands(self, outputs: Any) -> None:
+        """Record ask_clarification ToolMessages carried in node Command outputs.
+
+        The clarification middleware intercepts the tool call before execution,
+        so ``on_tool_end`` never fires for it; the formatted ToolMessage only
+        reaches LangChain callbacks inside the ``Command`` the tools node
+        returns (``Command(update={"messages": [...]}, goto=END)``).
+        """
+        candidates = outputs if isinstance(outputs, list) else [outputs]
+        for item in candidates:
+            if not isinstance(item, Command):
+                continue
+            update = getattr(item, "update", None)
+            if not isinstance(update, dict):
+                continue
+            messages = update.get("messages")
+            if not isinstance(messages, (list, tuple)):
+                continue
+            for message in messages:
+                if isinstance(message, BaseMessage):
+                    self._record_clarification_reply(message)
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._put(

@@ -57,7 +57,10 @@ class ChannelMappingRepository:
         topic_id: str | None,
     ) -> tuple[str, str]:
         if chat_type == "p2p":
-            return f"user:{_require(feishu_user_id, 'feishu_user_id')}", ""
+            # p2p 保留 topic：审批卡片等入口以卡片消息 id 作为 topic 隔离成
+            # 独立会话线程（同一用户的两张并发审批卡不再共用线程）。无 topic
+            # 的普通消息仍归一为 ""，与存量 (binding, chat, user, "") 映射兼容。
+            return f"user:{_require(feishu_user_id, 'feishu_user_id')}", (topic_id or "").strip()
         if chat_type == "group":
             return _GROUP_ACTOR_SCOPE, (topic_id or "").strip()
         raise ValueError("chat_type must be 'p2p' or 'group'")

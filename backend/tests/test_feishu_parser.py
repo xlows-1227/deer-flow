@@ -2409,3 +2409,248 @@ def test_feishu_treats_unknown_slash_text_as_chat(text):
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["msg_type"].value == "chat", f"{text!r} should be classified as CHAT"
+
+
+# ---------------------------------------------------------------------------
+# Binding (published agent) topic mapping: Feishu topic groups vs normal groups
+# ---------------------------------------------------------------------------
+
+
+class _ClaimAllDeduplicator:
+    async def claim(self, binding_id, event_id, *, system_scope):
+        return True
+
+
+def _binding_channel(bus: MessageBus | None = None) -> FeishuChannel:
+    return FeishuChannel(
+        bus or MessageBus(),
+        {"app_id": "test", "app_secret": "test", "verification_token": "verification-token"},
+        binding_id="binding-1",
+        event_deduplicator=_ClaimAllDeduplicator(),
+    )
+
+
+def _binding_group_inbound(*, chat_type: str = "group", topic_id: str | None = None) -> InboundMessage:
+    return InboundMessage(
+        channel_name="feishu:binding-1",
+        chat_id="chat_1",
+        user_id="user_1",
+        text="hello",
+        thread_ts="msg_1",
+        topic_id=topic_id,
+        metadata={"binding_id": "binding-1", "chat_type": chat_type},
+    )
+
+
+def _binding_event(*, root_id=None, thread_id=None, chat_type="group", text="hi"):
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            event_id="event-1",
+            create_time=str(int(time.time() * 1000)),
+            token="verification-token",
+        ),
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                chat_id="chat_1",
+                message_id="msg_1",
+                root_id=root_id,
+                thread_id=thread_id,
+                chat_type=chat_type,
+                content=json.dumps({"text": text}),
+            ),
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="user_1")),
+        ),
+    )
+
+
+def _fake_chat_mode_api(
+    mode: str | None,
+    error: Exception | None = None,
+    *,
+    group_message_type: str | None = None,
+):
+    state = {"calls": 0}
+
+    def get(_request):
+        state["calls"] += 1
+        if error is not None:
+            raise error
+        return SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(chat_mode=mode, group_message_type=group_message_type),
+        )
+
+    class _RequestBuilder:
+        def chat_id(self, _chat_id):
+            return self
+
+        def build(self):
+            return object()
+
+    class _Request:
+        @staticmethod
+        def builder():
+            return _RequestBuilder()
+
+    api = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(chat=SimpleNamespace(get=get))))
+    return api, _Request, state
+
+
+def test_binding_in_topic_reply_maps_topic_to_root_message():
+    bus = MessageBus()
+    channel = _binding_channel(bus)
+    event = _binding_event(root_id="om_root")
+
+    with pytest.MonkeyPatch.context() as m:
+        captured: dict[str, InboundMessage] = {}
+
+        def fake_make_inbound(**kwargs):
+            inbound = InboundMessage(
+                channel_name="feishu:binding-1",
+                chat_id=kwargs["chat_id"],
+                user_id=kwargs["user_id"],
+                text=kwargs["text"],
+                msg_type=kwargs["msg_type"],
+                thread_ts=kwargs["thread_ts"],
+                files=kwargs["files"],
+                metadata=kwargs["metadata"],
+            )
+            captured["inbound"] = inbound
+            return inbound
+
+        m.setattr(channel, "_make_inbound", fake_make_inbound)
+        channel._on_message(event)
+
+    assert captured["inbound"].topic_id == "om_root"
+
+
+@pytest.mark.asyncio
+async def test_binding_topic_group_root_message_gets_per_topic_session():
+    bus = MessageBus()
+    channel = _binding_channel(bus)
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._resolve_chat_topic = AsyncMock(return_value=("group", "msg_1"))
+
+    inbound = _binding_group_inbound()
+    assert await channel._prepare_inbound("msg_1", inbound, "event-1") is True
+
+    channel._resolve_chat_topic.assert_awaited_once_with("chat_1", "msg_1")
+    dispatched = bus.inbound_queue.get_nowait()
+    assert dispatched.topic_id == "msg_1"
+    assert dispatched.metadata["chat_type"] == "group"
+
+
+@pytest.mark.asyncio
+async def test_binding_normal_group_root_message_keeps_chat_wide_session():
+    bus = MessageBus()
+    channel = _binding_channel(bus)
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._resolve_chat_topic = AsyncMock(return_value=("group", None))
+
+    inbound = _binding_group_inbound()
+    assert await channel._prepare_inbound("msg_1", inbound, "event-1") is True
+
+    channel._resolve_chat_topic.assert_awaited_once()
+    dispatched = bus.inbound_queue.get_nowait()
+    assert dispatched.topic_id is None
+    assert dispatched.metadata["chat_type"] == "group"
+
+
+@pytest.mark.asyncio
+async def test_binding_mislabeled_p2p_event_gets_authoritative_chat_type():
+    """话题群事件被误标为 p2p 时，以群信息接口结果为准划分会话。"""
+    bus = MessageBus()
+    channel = _binding_channel(bus)
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._resolve_chat_topic = AsyncMock(return_value=("group", "msg_1"))
+
+    inbound = _binding_group_inbound(chat_type="p2p")
+    assert await channel._prepare_inbound("msg_1", inbound, "event-1") is True
+
+    channel._resolve_chat_topic.assert_awaited_once_with("chat_1", "msg_1")
+    dispatched = bus.inbound_queue.get_nowait()
+    assert dispatched.topic_id == "msg_1"
+    assert dispatched.metadata["chat_type"] == "group"
+
+
+@pytest.mark.asyncio
+async def test_binding_direct_chat_keeps_user_scoped_session():
+    bus = MessageBus()
+    channel = _binding_channel(bus)
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._resolve_chat_topic = AsyncMock(return_value=("p2p", None))
+
+    inbound = _binding_group_inbound(chat_type="p2p")
+    assert await channel._prepare_inbound("msg_1", inbound, "event-1") is True
+
+    channel._resolve_chat_topic.assert_awaited_once()
+    dispatched = bus.inbound_queue.get_nowait()
+    assert dispatched.topic_id is None
+    assert dispatched.metadata["chat_type"] == "p2p"
+
+
+@pytest.mark.asyncio
+async def test_binding_chat_info_failure_keeps_event_chat_type():
+    bus = MessageBus()
+    channel = _binding_channel(bus)
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._resolve_chat_topic = AsyncMock(return_value=(None, None))
+
+    inbound = _binding_group_inbound(chat_type="group")
+    assert await channel._prepare_inbound("msg_1", inbound, "event-1") is True
+
+    channel._resolve_chat_topic.assert_awaited_once()
+    dispatched = bus.inbound_queue.get_nowait()
+    assert dispatched.topic_id is None
+    assert dispatched.metadata["chat_type"] == "group"
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_topic_distinguishes_topic_groups_and_caches():
+    channel = _binding_channel()
+    api, request_cls, state = _fake_chat_mode_api("topic")
+    channel._api_client = api
+    channel._GetChatRequest = request_cls
+
+    assert await channel._resolve_chat_topic("chat_1", "msg_1") == ("group", "msg_1")
+    assert await channel._resolve_chat_topic("chat_1", "msg_2") == ("group", "msg_2")
+    assert state["calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_topic_accepts_thread_mode_normal_group():
+    """普通群开启话题模式（group_message_type=thread）同样按话题独立会话。"""
+    channel = _binding_channel()
+    api, request_cls, _state = _fake_chat_mode_api("group", group_message_type="thread")
+    channel._api_client = api
+    channel._GetChatRequest = request_cls
+
+    assert await channel._resolve_chat_topic("chat_1", "msg_1") == ("group", "msg_1")
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_topic_normal_group_p2p_and_failure_fall_back():
+    channel = _binding_channel()
+    api, request_cls, _state = _fake_chat_mode_api("group", group_message_type="chat")
+    channel._api_client = api
+    channel._GetChatRequest = request_cls
+    assert await channel._resolve_chat_topic("chat_1", "msg_1") == ("group", None)
+
+    p2p_channel = _binding_channel()
+    p2p_api, p2p_request_cls, _p2p_state = _fake_chat_mode_api("p2p")
+    p2p_channel._api_client = p2p_api
+    p2p_channel._GetChatRequest = p2p_request_cls
+    assert await p2p_channel._resolve_chat_topic("chat_1", "msg_1") == ("p2p", None)
+
+    failing_channel = _binding_channel()
+    failing_api, failing_request_cls, _failing_state = _fake_chat_mode_api(
+        "topic", error=RuntimeError("chat info unavailable")
+    )
+    failing_channel._api_client = failing_api
+    failing_channel._GetChatRequest = failing_request_cls
+    assert await failing_channel._resolve_chat_topic("chat_1", "msg_1") == (None, None)

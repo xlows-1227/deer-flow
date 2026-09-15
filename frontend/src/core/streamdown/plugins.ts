@@ -4,7 +4,10 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { StreamdownProps } from "streamdown";
 
-import { rehypeSplitWordsIntoSpans } from "../rehype";
+import {
+  rehypeSplitWordsIntoSpans,
+  rehypeStripBlockWhitespace,
+} from "../rehype";
 
 export const streamdownPlugins = {
   remarkPlugins: [
@@ -14,6 +17,9 @@ export const streamdownPlugins = {
   rehypePlugins: [
     rehypeRaw,
     [rehypeKatex, { output: "html" }],
+    // Must run after rehypeRaw: parse5 foster-parents the "\n" nodes inside
+    // tables out before the table, creating the blank-gap-before-table bug.
+    rehypeStripBlockWhitespace,
   ] as StreamdownProps["rehypePlugins"],
 };
 
@@ -25,6 +31,7 @@ export const streamdownPluginsWithWordAnimation = {
   rehypePlugins: [
     [rehypeKatex, { output: "html" }],
     rehypeSplitWordsIntoSpans,
+    rehypeStripBlockWhitespace,
   ] as StreamdownProps["rehypePlugins"],
 };
 

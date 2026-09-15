@@ -33,7 +33,7 @@ def test_file_shares_migration_on_sqlite(tmp_path):
     url = asyncio.run(_prepare_database(tmp_path / "file-shares-migration.db"))
     columns, version = asyncio.run(_migrate_and_inspect(url))
 
-    assert version == "2026_07_13_file_shares"
+    assert version == "2026_08_21_skill_shares"
     assert columns == {
         "id",
         "owner_user_id",

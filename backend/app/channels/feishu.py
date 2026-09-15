@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from email.message import Message
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -34,9 +34,16 @@ from deerflow.sandbox.sandbox_provider import SandboxAcquisition, get_sandbox_pr
 
 logger = logging.getLogger(__name__)
 
+# 热更新验证标识：服务器日志里出现该行说明本文件（含 _normalize_markdown 修复）
+# 已被加载；重新热更新后若看不到此日志，说明加载的不是这份代码。
+logger.info("[Feishu] feishu.py module loaded: md_normalize=20260911c")
+
 FEISHU_INBOUND_FILE_MAX_BYTES = 50 * 1024 * 1024
 FEISHU_PUBLISHED_INBOUND_MAX_FILES = 10
 FEISHU_WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 15.0
+# 话题群 chat_mode 查询缓存时长：群模式极少变化，缓存可避免每条顶层消息
+# 都调用一次群信息接口。
+FEISHU_CHAT_MODE_CACHE_TTL_SECONDS = 600.0
 FEISHU_ENDPOINT_CONNECT_TIMEOUT_SECONDS = 5.0
 FEISHU_ENDPOINT_READ_TIMEOUT_SECONDS = 10.0
 FEISHU_PUBLISHED_DOWNLOAD_TIMEOUT_SECONDS = 60.0
@@ -200,6 +207,32 @@ class _MaterializedInboundFile:
     virtual_path: str
     actual_path: Path
     size: int
+
+
+# 卡片点击到 Run 终态之间等待 prepare_inbound 完成（含持久化去重 claim）的上限。
+_CARD_PREPARE_TIMEOUT_SECONDS = 10.0
+# 终态 finalize 等待点击侧线程（取原卡片+打"处理中"补丁）收尾的上限。
+_CARD_CLICK_PATCH_TIMEOUT_SECONDS = 30.0
+# 悬挂的 pending 卡片登记（Run 永不终结）超过该时长后被清理，允许重新点击。
+_CARD_RUN_STALE_SECONDS = 2 * 60 * 60.0
+
+
+@dataclass
+class _PendingCardRun:
+    """一次卡片审批点击的进行中状态（点击→Run 终态之间）。
+
+    两阶段卡片补丁：点击时卡片先打"处理中"（移除按钮防重复点击），Run 的
+    终态 outbound 到达后再改成已通过/已拒绝；失败则恢复原卡片按钮并清除
+    去重登记，允许重新点击。
+    """
+
+    action_type: str
+    reject_reason: str
+    registered_at: float = field(default_factory=time.monotonic)
+    # 点击时抓取的原始卡片 JSON（失败恢复用；抓取失败为 None）
+    original_content: str | None = None
+    # 点击侧线程完成（含抓取与"处理中"补丁，无论成败）后置位
+    click_work_done: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass(frozen=True)
@@ -969,22 +1002,41 @@ class FeishuEventVerifier:
     ``do_without_validation``. Dynamic bindings therefore compare the event
     header token here and additionally require a stable ID and fresh timestamp
     before durable deduplication. HTTP callback signatures are not present on
-    this transport; ``encrypt_key`` remains part of the encrypted credential
-    bundle and dispatcher construction for provider configuration parity.
+    this transport, including ``card.action.trigger``; ``encrypt_key`` remains
+    part of the encrypted credential bundle and dispatcher construction for
+    provider configuration parity.
+
+    ``card.action.trigger`` carries its callback token in the event body
+    (``event.token``), which Feishu derives from the app's encrypt key rather
+    than the subscription verification token, while the header token keeps the
+    verification-token convention of subscription events like
+    ``im.message.receive_v1``. Callers therefore pass the body token explicitly
+    via the ``token`` keyword and the verifier accepts any candidate token
+    (explicit body token or header token) matching any accepted secret
+    (verification token or encrypt key). Events that carry no token at all are
+    accepted: long-connection subscriptions for newer apps deliver frames
+    without one, and the authenticated WebSocket connection plus the freshness
+    window and durable event deduplication remain in force.
     """
 
     def __init__(
         self,
         *,
         verification_token: str = "",
+        additional_tokens: tuple[str, ...] = (),
         max_age_seconds: int = 300,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if max_age_seconds <= 0:
             raise ValueError("max_age_seconds must be positive")
         self._verification_token = verification_token
+        self._accepted_tokens = tuple(candidate for candidate in (verification_token, *additional_tokens) if isinstance(candidate, str) and candidate)
         self._max_age_seconds = max_age_seconds
         self._clock = clock
+
+    def accepted_token_fingerprints(self) -> tuple[str, ...]:
+        """Short sha256 prefixes of accepted secrets for rejection diagnostics."""
+        return tuple(hashlib.sha256(token.encode("utf-8")).hexdigest()[:8] for token in self._accepted_tokens)
 
     @staticmethod
     def _timestamp(event: Any) -> float | None:
@@ -994,11 +1046,14 @@ class FeishuEventVerifier:
             timestamp = float(raw_timestamp)
         except (TypeError, ValueError):
             return None
-        if timestamp >= 1_000_000_000_000:
+        # Subscription events carry milliseconds while ``card.action.trigger``
+        # frames arrive in microseconds; normalise by 1000 until the value is
+        # a plausible epoch-seconds figure.
+        while timestamp >= 1_000_000_000_000:
             timestamp /= 1000
         return timestamp
 
-    def __call__(self, event: Any) -> bool:
+    def __call__(self, event: Any, *, token: str | None = None) -> bool:
         header = getattr(event, "header", None)
         event_id = getattr(header, "event_id", None)
         if not isinstance(event_id, str) or not event_id.strip():
@@ -1008,11 +1063,46 @@ class FeishuEventVerifier:
         if timestamp is None or abs(self._clock() - timestamp) > self._max_age_seconds:
             return False
 
-        if self._verification_token:
-            token = getattr(header, "token", None)
-            if not isinstance(token, str) or not hmac.compare_digest(token, self._verification_token):
+        if self._accepted_tokens:
+            candidates: list[str] = []
+            if isinstance(token, str) and token:
+                candidates.append(token)
+            raw_header_token = getattr(header, "token", None)
+            if isinstance(raw_header_token, str) and raw_header_token:
+                candidates.append(raw_header_token)
+            # 长连接模式下，平台对新应用/新订阅的事件头可能不再携带 token
+            # （连接本身已用 app 凭据认证，实测 header_token 为空）。此时依赖
+            # 已认证连接 + 时间窗 + 持久化去重兜底，直接放行；token 一旦出现
+            # 仍严格比对，拦截路由错乱或凭据配错（跨应用事件）。
+            if candidates and not any(hmac.compare_digest(candidate, expected) for candidate in candidates for expected in self._accepted_tokens):
                 return False
         return True
+
+
+def _token_fingerprint(token: Any) -> str:
+    """Short sha256 prefix of a token for rejection logs, or '-' when absent."""
+    if not isinstance(token, str) or not token:
+        return "-"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+def _sdk_event_to_dict(obj: Any) -> Any:
+    """Best-effort JSON-safe conversion of an lark-oapi event object.
+
+    Walks plain attributes (skipping SDK internals like ``_types``) so raw
+    inbound frames can be logged verbatim for production diagnosis.
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(key): _sdk_event_to_dict(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_sdk_event_to_dict(item) for item in obj]
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    if hasattr(obj, "__dict__"):
+        return {key: _sdk_event_to_dict(value) for key, value in vars(obj).items() if not key.startswith("_")}
+    return str(obj)
 
 
 class FeishuWebSocketSession(Protocol):
@@ -1040,6 +1130,7 @@ class WebSocketSessionFactory(Protocol):
         message_handler: Callable[[Any], None],
         encrypt_key: str,
         verification_token: str,
+        card_action_handler: Callable[[Any], Any] | None = None,
     ) -> FeishuWebSocketSession: ...
 
 
@@ -1318,219 +1409,13 @@ class _LarkWebSocketSession:
         return self._exited.wait(timeout_seconds)
 
 
-# 已处理卡片的 message_id 集合，防止重复点击
-_processed_card_messages: set[str] = set()
-# 集合最大容量，避免内存泄漏
-_MAX_PROCESSED_CARDS = 500
-
-
-def _handle_card_action(data, app_id=None, app_secret=None) -> None:
-    """处理飞书卡片按钮回调。
-
-    审批人点击卡片上的 ✅同意/❌拒绝 按钮后：
-    1. 立刻 patch 卡片，把按钮换成已处理状态（防止重复点击）
-    2. approve → 触发智能体（含禅道同步）
-    3. reject → 触发智能体（跳过禅道同步）
-    """
-    import json
-    import logging
-    import os
-
-    import httpx
-
-    logger = logging.getLogger(__name__)
-
-    try:
-        event = getattr(data, "event", None)
-        if event is None:
-            return
-
-        action = getattr(event, "action", None)
-        if action is None:
-            return
-
-        value = getattr(action, "value", None)
-        if value is None:
-            return
-
-        # value 可能是 dict 或 JSON 字符串
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (json.JSONDecodeError, ValueError):
-                return
-
-        if not isinstance(value, dict):
-            return
-
-        action_type = value.get("action", "")
-        callback = value.get("callback") or {}
-
-        if not callback:
-            return  # 非 approval skill 卡片，忽略
-
-        agent_id = callback.get("agent_id", "")
-        conversation_id = callback.get("conversation_id", "")
-        message = callback.get("message", "开始分析")
-        # 从 callback 中读取后端 API 配置（auth_token 不走环境变量，直接从卡片回调配置取）
-        base_url = callback.get("base_url", "") or os.environ.get("DEER_FLOW_API_URL", "http://localhost:8000")
-        auth_token = callback.get("auth_token", "") or os.environ.get("DEER_FLOW_AUTH_TOKEN", "")
-
-        if not agent_id or not conversation_id:
-            return
-
-        record_id = value.get("record_id", "")
-
-        # 提取表单数据（拒绝原因）
-        form_value = getattr(action, "form_value", None) or {}
-        if isinstance(form_value, str):
-            try:
-                form_value = json.loads(form_value)
-            except (json.JSONDecodeError, ValueError):
-                form_value = {}
-        reject_reason = ""
-        if isinstance(form_value, dict):
-            reject_reason = form_value.get("reject_reason", "")
-
-        # 获取操作人
-        operator = getattr(event, "operator", None)
-        operator_open_id = ""
-        if operator is not None:
-            operator_open_id = getattr(operator, "open_id", "") or ""
-
-        # 获取消息 ID（用于 patch 卡片 + 去重）
-        message_id = ""
-        context = getattr(event, "context", None)
-        if context is not None:
-            message_id = getattr(context, "open_message_id", "") or ""
-        if not message_id and operator is not None:
-            message_id = getattr(operator, "open_message_id", "") or ""
-
-        # 去重：同一卡片只处理一次（防止重复点击）
-        if message_id:
-            if message_id in _processed_card_messages:
-                logger.warning("Card already processed, skipping: msg_id=%s, action=%s", message_id, action_type)
-                return
-            _processed_card_messages.add(message_id)
-            # 控制集合大小，避免内存泄漏
-            if len(_processed_card_messages) > _MAX_PROCESSED_CARDS:
-                _processed_card_messages.clear()
-
-        logger.info(
-            "Card action: action=%s, agent=%s, record=%s, operator=%s, msg_id=%s",
-            action_type, agent_id, record_id, operator_open_id, message_id,
-        )
-
-        # 1. Patch 卡片：移除按钮，显示已处理状态（防止重复点击）
-        if app_id and app_secret and message_id:
-            _patch_card_after_action(
-                app_id, app_secret, message_id,
-                action_type, reject_reason,
-            )
-
-        # 2. 触发智能体（带上 action_type 和 record_id，智能体自行处理后续逻辑）
-        if action_type == "approve":
-            full_message = f"{message}（审批回调：action=approve, record_id={record_id}）"
-        elif action_type == "reject":
-            reason_part = f", reject_reason={reject_reason}" if reject_reason else ""
-            full_message = f"{message}（审批回调：action=reject, record_id={record_id}{reason_part}）"
-        else:
-            full_message = f"{message}（审批回调：action={action_type}, record_id={record_id}）"
-
-        url = f"{base_url}/api/v1/agents/{agent_id}/conversations/{conversation_id}/runs"
-        headers = {
-            "Authorization": f"Bearer {auth_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {"message": full_message}
-
-        try:
-            resp = httpx.post(url, headers=headers, json=payload, timeout=30)
-            resp.raise_for_status()
-            logger.info("Agent triggered: action=%s, status=%s", action_type, resp.status_code)
-        except Exception as e:
-            logger.error("Failed to trigger agent: %s", e)
-
-    except Exception as e:
-        logger.error("Error handling card action: %s", e, exc_info=True)
-
-
-def _patch_card_after_action(app_id, app_secret, message_id, action_type, reject_reason=""):
-    """Patch 飞书卡片消息，移除按钮，显示已处理状态。"""
-    import json
-    import logging
-    from datetime import datetime, timezone, timedelta
-
-    import lark_oapi as lark
-    from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
-
-    logger = logging.getLogger(__name__)
-    CST = timezone(timedelta(hours=8))
-    now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
-
-    if action_type == "approve":
-        title = "审批已通过"
-        tag_text = "已同意"
-        tag_color = "green"
-        template = "green"
-        body_content = f"✅ 审批人已同意\n\n已提交禅道同步。\n\n操作时间：{now_str}"
-    elif action_type == "reject":
-        title = "审批已拒绝"
-        tag_text = "已拒绝"
-        tag_color = "red"
-        template = "red"
-        reason_text = f"\n\n拒绝原因：{reject_reason}" if reject_reason else ""
-        body_content = f"❌ 审批人已拒绝{reason_text}\n\n不同步禅道。\n\n操作时间：{now_str}"
-    else:
-        title = "审批已处理"
-        tag_text = "已处理"
-        tag_color = "grey"
-        template = "grey"
-        body_content = f"审批已处理\n\n操作时间：{now_str}"
-
-    new_card = {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "text_tag_list": [
-                {"tag": "text_tag", "text": {"tag": "plain_text", "content": tag_text}, "color": tag_color}
-            ],
-            "template": template,
-            "padding": "12px 8px 12px 8px",
-        },
-        "body": {
-            "elements": [
-                {"tag": "markdown", "content": body_content},
-            ],
-        },
-    }
-
-    try:
-        client = (
-            lark.Client.builder()
-            .app_id(app_id)
-            .app_secret(app_secret)
-            .build()
-        )
-        req = (
-            PatchMessageRequest.builder()
-            .message_id(message_id)
-            .request_body(
-                PatchMessageRequestBody.builder()
-                .content_type("interactive")
-                .content(json.dumps(new_card))
-                .build()
-            )
-            .build()
-        )
-        resp = client.im.v1.message.patch(req)
-        if resp.success():
-            logger.info("Card patched: message_id=%s, action=%s", message_id, action_type)
-        else:
-            logger.warning("Card patch failed: code=%s, msg=%s", resp.code, resp.msg)
-    except Exception as e:
-        logger.error("Error patching card: %s", e)
+def _ack_noop_event(event: Any) -> None:
+    """Ack otherwise-unhandled subscription frames (e.g. message read receipts)."""
+    logger.debug(
+        "[Feishu] acked event with no-op handler: %s raw=%s",
+        type(event).__name__,
+        json.dumps(_sdk_event_to_dict(event), ensure_ascii=False, default=str),
+    )
 
 
 def _default_websocket_session_factory(
@@ -1541,23 +1426,26 @@ def _default_websocket_session_factory(
     message_handler: Callable[[Any], None],
     encrypt_key: str,
     verification_token: str,
+    card_action_handler: Callable[[Any], Any] | None = None,
 ) -> FeishuWebSocketSession:
     import lark_oapi as lark
-    from functools import partial
 
-    card_action_handler = partial(_handle_card_action, app_id=app_id, app_secret=app_secret)
-
-    event_handler = (
+    builder = (
         lark.EventDispatcherHandler.builder(encrypt_key, verification_token)
         .register_p2_im_message_receive_v1(message_handler)
-        .register_p2_card_action_trigger(card_action_handler)
-        .build()
+        # Read receipts and our own OK/DONE reactions are pushed unrequested
+        # once the app has IM scope; ack them as no-ops instead of raising
+        # "processor not found" per frame.
+        .register_p2_im_message_message_read_v1(_ack_noop_event)
+        .register_p2_im_message_reaction_created_v1(_ack_noop_event)
     )
+    if card_action_handler is not None:
+        builder = builder.register_p2_card_action_trigger(card_action_handler)
     return _LarkWebSocketSession(
         app_id=app_id,
         app_secret=app_secret,
         domain=domain,
-        event_handler=event_handler,
+        event_handler=builder.build(),
     )
 
 
@@ -1578,9 +1466,9 @@ class FeishuChannel(Channel):
     The channel uses WebSocket long-connection mode so no public IP is required.
 
     Message flow:
-        1. User sends a message → bot adds "OK" emoji reaction
+        1. User sends a message or clicks a Skill-sent card → bot adds "OK" emoji reaction
         2. Bot replies in thread: "Working on it......"
-        3. Agent processes the message and returns a result
+        3. Agent processes the inbound payload and returns a result
         4. Bot replies in thread with the result
         5. Bot adds "DONE" emoji reaction to the original message
     """
@@ -1618,7 +1506,14 @@ class FeishuChannel(Channel):
         self.binding_id = binding_id
         self.agent_id = agent_id
         self._event_deduplicator = event_deduplicator
-        self._event_verifier = event_verifier or (FeishuEventVerifier(verification_token=str(resolved_config.get("verification_token", ""))) if binding_id else None)
+        self._event_verifier = event_verifier or (
+            FeishuEventVerifier(
+                verification_token=str(resolved_config.get("verification_token", "")),
+                additional_tokens=(str(resolved_config.get("encrypt_key", "")),),
+            )
+            if binding_id
+            else None
+        )
         if startup_timeout_seconds <= 0:
             raise ValueError("startup_timeout_seconds must be positive")
         self._websocket_session_factory = websocket_session_factory or _default_websocket_session_factory
@@ -1627,6 +1522,10 @@ class FeishuChannel(Channel):
         self._runtime_health_callback = runtime_health_callback
         self._published_http_client_factory = published_http_client_factory or self._new_published_http_client
         self._ws_session: FeishuWebSocketSession | None = None
+        # 同一卡片的消息补丁必须串行且间隔发送：并发的 patch 可能在飞书
+        # 侧乱序落库（旧内容覆盖新内容），过密则会触发接口频控。
+        self._card_patch_lock = asyncio.Lock()
+        self._last_card_patch_at = 0.0
         self._startup_event = threading.Event()
         self._startup_error: RuntimeError | None = None
         self._startup_acknowledged = False
@@ -1642,11 +1541,18 @@ class FeishuChannel(Channel):
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
+        self._processed_card_message_ids: set[str] = set()
+        self._pending_card_runs: dict[str, _PendingCardRun] = {}
+        self._GetMessageRequest = None
+        self._GetChatRequest = None
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
+        # chat_id -> (monotonic 纪元, chat_mode, group_message_type)。话题群判定按群缓存。
+        self._chat_mode_cache: dict[str, tuple[float, str | None, str | None]] = {}
+        self._chat_mode_lock = threading.Lock()
         self._thread_lock = threading.Lock()
         self._cleanup_tasks: set[asyncio.Task] = set()
         self._attachment_cleanup_state_lock = threading.Lock()
@@ -1711,6 +1617,10 @@ class FeishuChannel(Channel):
         if self._running:
             return
 
+        # 部署校验标记：手动热更新 feishu.py 后重启，日志里必须出现这一行，
+        # 否则说明容器仍在运行旧文件。改动此文件时同步更新 build 标记。
+        logger.info("[Feishu] feishu.py build loaded: card-v2-md-normalize-20260909-r2")
+
         try:
             import lark_oapi as lark
             from lark_oapi.api.im.v1 import (
@@ -1723,6 +1633,8 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetChatRequest,
+                GetMessageRequest,
                 GetMessageResourceRequest,
                 PatchMessageRequest,
                 PatchMessageRequestBody,
@@ -1748,6 +1660,8 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = CreateImageRequest
         self._CreateImageRequestBody = CreateImageRequestBody
         self._GetMessageResourceRequest = GetMessageResourceRequest
+        self._GetMessageRequest = GetMessageRequest
+        self._GetChatRequest = GetChatRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -1821,6 +1735,7 @@ class FeishuChannel(Channel):
                 message_handler=self._on_message,
                 encrypt_key=str(self.config.get("encrypt_key", "")),
                 verification_token=str(self.config.get("verification_token", "")),
+                card_action_handler=self._on_card_action,
             )
             self._ws_session = session
             session.run(on_ready=self._on_ws_ready, on_error=self._on_ws_error)
@@ -1891,16 +1806,41 @@ class FeishuChannel(Channel):
         self._ws_session = None
         logger.info("Feishu channel stopped")
 
+    async def _on_outbound(self, msg: OutboundMessage) -> None:
+        """Outbound 回调：发送回复后，终结该 thread 对应的 pending 卡片 Run。
+
+        卡片触发的 Run 其 outbound（进度/终态/错误）都带 thread_ts=卡片消息 id；
+        进度（is_final=False）保持"处理中"，终态到达时按 metadata.error 区分
+        成功（打卡片终态）与失败（还原按钮并清除去重，允许重新点击）。
+        """
+        await super()._on_outbound(msg)
+        if msg.channel_name != self.name:
+            return
+        card_message_id = msg.thread_ts or ""
+        if not card_message_id or not msg.is_final:
+            return
+        entry = self._claim_pending_card_run(card_message_id)
+        if entry is None:
+            return
+        success = not bool(msg.metadata.get("error"))
+        if success:
+            logger.info("[Feishu] card run succeeded, patching final state: message_id=%s", card_message_id)
+        else:
+            logger.warning("[Feishu] card run failed, restoring card buttons: message_id=%s", card_message_id)
+        task = asyncio.create_task(asyncio.to_thread(self._finalize_card_run, entry, card_message_id, success=success))
+        self._track_background_task(task, name="card_run_finalize", msg_id=card_message_id)
+
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         if not self._api_client:
             logger.warning("[Feishu] send called but no api_client available")
             return
 
         logger.info(
-            "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d",
+            "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d, head=%r",
             msg.chat_id,
             msg.thread_ts,
             len(msg.text),
+            msg.text[:160],
         )
 
         last_exc: Exception | None = None
@@ -1910,6 +1850,10 @@ class FeishuChannel(Channel):
                 return  # success
             except Exception as exc:
                 last_exc = exc
+                if "230099" in str(exc):
+                    # Deterministic card-content rejection (e.g. too many
+                    # tables); the content will not change between attempts.
+                    break
                 if attempt < _max_retries - 1:
                     delay = 2**attempt  # 1s, 2s
                     logger.warning(
@@ -1922,9 +1866,25 @@ class FeishuChannel(Channel):
                     await asyncio.sleep(delay)
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
+        await self._notify_send_failure(msg, last_exc)
         if last_exc is None:
             raise RuntimeError("Feishu send failed without an exception from any attempt")
         raise last_exc
+
+    async def _notify_send_failure(self, msg: OutboundMessage, exc: BaseException | None) -> None:
+        """Patch the running card with a failure notice instead of leaving it stuck on 'Working on it...'."""
+        if not self._api_client or not self._PatchMessageRequest:
+            return
+        card_id = self._running_card_ids.get(msg.thread_ts) if msg.thread_ts else None
+        if not card_id:
+            return
+        detail = str(exc)[:200] if exc else "unknown error"
+        notice = f"⚠️ 回复发送失败，请稍后重试或换个问法。\n（错误详情：{detail}）"
+        try:
+            await self._update_card(card_id, notice)
+            logger.info("[Feishu] failure notice patched onto card %s", card_id)
+        except Exception:
+            logger.exception("[Feishu] failed to patch failure notice onto card %s", card_id)
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -2173,7 +2133,10 @@ class FeishuChannel(Channel):
                             except ValueError as exc:
                                 raise ValueError("Feishu resource Content-Length is invalid") from exc
                             if content_length < 0 or content_length > max_bytes:
-                                raise ValueError("Feishu inbound resource exceeds size limit")
+                                raise ValueError(
+                                    f"Feishu inbound resource exceeds size limit: "
+                                    f"content_length={content_length}, max_bytes={max_bytes}"
+                                )
 
                         disposition = Message()
                         disposition["content-disposition"] = response.headers.get(
@@ -2192,7 +2155,10 @@ class FeishuChannel(Channel):
                             async for chunk in response.aiter_raw():
                                 total_bytes += len(chunk)
                                 if total_bytes > max_bytes:
-                                    raise ValueError("Feishu inbound resource exceeds size limit")
+                                    raise ValueError(
+                                        f"Feishu inbound resource exceeds size limit: "
+                                        f"downloaded>={total_bytes}, max_bytes={max_bytes}"
+                                    )
                                 file_handle.write(chunk)
             if total_bytes == 0:
                 raise ValueError("Feishu inbound resource is empty")
@@ -3200,15 +3166,278 @@ class FeishuChannel(Channel):
     # -- message formatting ------------------------------------------------
 
     @staticmethod
-    def _build_card_content(text: str) -> str:
-        """Build a Feishu interactive card with markdown content.
+    def _normalize_markdown(text: str) -> str:
+        """Normalize markdown for Feishu card rendering.
 
-        Feishu's interactive card format natively renders markdown, including
-        headers, bold/italic, code blocks, lists, and links.
+        Some models (e.g. kimi-for-coding) stream Markdown without newlines
+        (``nl=0``), producing ``##标题---|表头|值||---|---|`` all on one
+        line. Feishu's card markdown element requires proper line breaks to
+        render headings, tables, lists, and ``---`` separators.
+
+        This function:
+        1. Splits ``---`` horizontal rules (distinguishing from table separators).
+        2. Splits before ``##``/``###`` headings.
+        3. Splits table rows on ``||`` boundaries (explicit row separators).
+        4. Inserts newlines when a table starts in the middle of a text line
+           (e.g. after a heading).
+        5. Adds missing spaces after ``#`` and ``-`` markers.
+        6. Splits merged table rows (single ``|`` between rows instead of ``||``)
+           by detecting column count from the header/separator row.
+        7. Unwraps fenced code blocks: Feishu card markdown (JSON 2.0) does not
+           support CodeBlock, so ``` markers would render as literal text.
+        8. Splits long heading lines: jammed streams glue a paragraph onto a
+           heading (``##重要提醒目前无法...``), which renders the whole line as
+           one giant heading. Cuts at the first sentence punctuation or
+           sentence-start marker when the heading body exceeds 12 chars.
         """
+
+        # Step 0: Unwrap fenced code blocks (``` ... ```). Keeps the inner
+        # content as plain lines so tree diagrams / code at least break onto
+        # their own lines instead of showing literal fence markers.
+        text = re.sub(r"```[^\n]*?\n([\s\S]*?)```", lambda m: "\n" + m.group(1).strip("\n") + "\n", text)
+        text = re.sub(r"```([^`\n]*)```", lambda m: m.group(1), text)  # single-line fences
+        text = re.sub(r"```[^\n]*$", "", text, flags=re.MULTILINE)  # dangling opening fence
+
+        # Step 1: Split "---" horizontal rules.
+        # Must NOT match table separator rows (|---|---|) where --- is flanked
+        # by pipes. Rule: --- preceded by non-dash, NOT followed by | or dash.
+        # This catches both "text---" and "table_row|---heading".
+        text = re.sub(r"(?<!\n)(?<![\-])(\s*)(---)(?![\|\-])", r"\1\n\2\n", text)
+
+        # Step 2: Insert newlines before headings (##, ###, etc.)
+        text = re.sub(r"(?<!\n)(?<![#\s])(#{1,6})(?=[^\s#])", r"\n\1", text)
+
+        # Step 3: Split table rows on "||" boundaries (explicit row separators)
+        text = re.sub(r"\|\|(?=[^|\n]*\|[^|\n]*\|)", r"|\n|", text)
+
+        # Step 4: Insert newline when a table starts in the middle of a text
+        # line (e.g. "## heading|col1|col2|" → "## heading\n|col1|col2|").
+        text = FeishuChannel._split_inline_table_start(text)
+
+        # Step 5: Fix missing spaces after # and - markers
+        def _fix_line(line: str) -> str:
+            line = re.sub(r"^(\s{0,3}#{1,6})(?=[^\s#])", r"\1 ", line)
+            return re.sub(r"^(\s*-)(?=[^\s\d-])", r"\1 ", line)
+
+        lines = text.split("\n")
+        fixed_lines = [_fix_line(line) for line in lines]
+        text = "\n".join(fixed_lines)
+
+        # Step 6: Split merged table rows (too many pipes for the column count)
+        text = FeishuChannel._split_inline_table_rows(text)
+
+        # Step 7: Split long heading lines (paragraph glued onto a heading).
+        text = FeishuChannel._split_long_heading_lines(text)
+
+        # Clean up: collapse 3+ consecutive newlines to 2
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _split_long_heading_lines(text: str) -> str:
+        """Cut paragraphs that were glued onto a heading line.
+
+        Real headings are short. When a heading body exceeds 12 chars, cut it
+        at the earliest sentence punctuation (，。；！？) or sentence-start
+        marker (目前/因为/由于/以下/综上/总之/需要/请) and continue the
+        remainder as a normal line, so ``##重要提醒目前无法...`` becomes
+        ``## 重要提醒`` + ``目前无法...``.
+        """
+        punct = "，。；！？"
+        markers = ("目前", "因为", "由于", "以下", "综上", "总之", "需要", "请")
+        out: list[str] = []
+        for line in text.split("\n"):
+            match = re.match(r"^(\s{0,3}#{1,6})\s*(\S.*)$", line)
+            if not match:
+                out.append(line)
+                continue
+            body = match.group(2).strip()
+            if len(body) <= 12:
+                out.append(line)
+                continue
+            cut = len(body)
+            for ch in punct:
+                idx = body.find(ch)
+                if 2 <= idx < cut:
+                    cut = idx
+            for marker in markers:
+                idx = body.find(marker)
+                if 2 <= idx < cut:
+                    cut = idx
+            if cut >= len(body):
+                out.append(line)
+                continue
+            head = body[:cut].rstrip(" ，。；：、")
+            rest = body[cut:].lstrip(" ，。；：")
+            if len(head) < 2 or not rest:
+                out.append(line)
+                continue
+            out.append(f"{match.group(1)} {head}")
+            out.append(rest)
+        return "\n".join(out)
+
+    @staticmethod
+    def _split_inline_table_start(text: str) -> str:
+        """Insert newline when a table starts in the middle of a text line.
+
+        After ``||`` splitting, table rows are on separate lines, but the
+        first row may still be inline with preceding text:
+        ``...some text|cell1|cell2|`` → ``...some text\\n|cell1|cell2|``
+        """
+        lines = text.split("\n")
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("|"):
+                new_lines.append(line)
+                continue
+            match = re.search(r"\|[^|\n]*(?:\|[^|\n]*)+\|", stripped)
+            if match and match.start() > 0:
+                prefix = stripped[:match.start()].rstrip()
+                table_part = stripped[match.start():]
+                rest = stripped[match.end():]
+                if prefix:
+                    new_lines.append(prefix)
+                new_lines.append(table_part)
+                if rest:
+                    remaining = FeishuChannel._split_inline_table_start(rest)
+                    new_lines.extend(remaining.split("\n"))
+            else:
+                new_lines.append(line)
+        return "\n".join(new_lines)
+
+    @staticmethod
+    def _split_inline_table_rows(text: str) -> str:
+        """Split table rows that have too many pipes (merged rows without ``||``).
+
+        After ``||`` splitting, some rows may still have too many pipes because
+        the model used single ``|`` between rows. This function detects the
+        expected column count from the header/separator row and splits data
+        rows accordingly.
+        """
+        lines = text.split("\n")
+        result: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.lstrip()
+            if not stripped.startswith("|"):
+                result.append(line)
+                i += 1
+                continue
+
+            pipe_count = stripped.count("|")
+            if pipe_count < 3:
+                result.append(line)
+                i += 1
+                continue
+
+            next_stripped = lines[i + 1].lstrip() if i + 1 < len(lines) else ""
+            if next_stripped.startswith("|") and re.match(r"^\|[\s-]+\|", next_stripped):
+                cols = next_stripped.count("|") - 1
+                if cols < 1:
+                    cols = pipe_count - 1
+                expected_pipes = cols + 1
+
+                result.append(line)
+                i += 1
+                result.append(lines[i])
+                i += 1
+
+                while i < len(lines):
+                    data_line = lines[i]
+                    data_stripped = data_line.lstrip()
+                    if not data_stripped.startswith("|"):
+                        break
+                    data_pipes = data_stripped.count("|")
+                    if data_pipes == expected_pipes:
+                        result.append(data_line)
+                        i += 1
+                    elif data_pipes > expected_pipes:
+                        # If the row contains "||" (unsplit row separator),
+                        # split on it first, then process each sub-row.
+                        if "||" in data_stripped:
+                            sub_text = data_stripped.replace("||", "|\n|")
+                            for sub_line in sub_text.split("\n"):
+                                sub_stripped = sub_line.lstrip()
+                                if not sub_stripped:
+                                    continue
+                                sub_pipes = sub_stripped.count("|")
+                                if sub_pipes == expected_pipes:
+                                    result.append(sub_line)
+                                elif sub_pipes > expected_pipes:
+                                    parts2 = sub_stripped.split("|")
+                                    cells2 = parts2[1:]
+                                    if sub_stripped.rstrip().endswith("|"):
+                                        cells2 = cells2[:-1]
+                                    if len(cells2) % cols == 0:
+                                        for j in range(0, len(cells2), cols):
+                                            row_cells = cells2[j:j + cols]
+                                            result.append("|" + "|".join(row_cells) + "|")
+                                    else:
+                                        result.append(sub_line)
+                                else:
+                                    result.append(sub_line)
+                            i += 1
+                            continue
+                        parts = data_stripped.split("|")
+                        cells = parts[1:]
+                        if data_stripped.rstrip().endswith("|"):
+                            cells = cells[:-1]
+                        if len(cells) % cols != 0:
+                            result.append(data_line)
+                            i += 1
+                            break
+                        for j in range(0, len(cells), cols):
+                            row_cells = cells[j:j + cols]
+                            if len(row_cells) == cols:
+                                result.append("|" + "|".join(row_cells) + "|")
+                            elif len(row_cells) > 0:
+                                result.append("|" + "|".join(row_cells) + "|")
+                        i += 1
+                    else:
+                        break
+                continue
+            else:
+                if pipe_count > 3 and pipe_count % 3 == 0:
+                    cols = 2
+                    parts = stripped.split("|")
+                    cells = parts[1:]
+                    if stripped.rstrip().endswith("|"):
+                        cells = cells[:-1]
+                    if len(cells) > cols and len(cells) % cols == 0:
+                        for j in range(0, len(cells), cols):
+                            row_cells = cells[j:j + cols]
+                            result.append("|" + "|".join(row_cells) + "|")
+                        i += 1
+                        continue
+
+                result.append(line)
+                i += 1
+                continue
+
+        return "\n".join(result)
+
+    @staticmethod
+    def _build_card_content(text: str) -> str:
+        """Build a Feishu Card JSON 2.0 with a markdown body.
+
+        markdown 组件属于卡片 JSON 2.0（schema + body.elements）；v1 顶层
+        elements 里的 markdown 标签不会按 Markdown 渲染，整段文本会被
+        压成一行原样显示。
+        """
+        normalized = FeishuChannel._normalize_markdown(text)
+        logger.info(
+            "[Feishu] card content built (md_normalize=20260911c): raw_len=%d normalized_len=%d nl=%d head=%r",
+            len(text),
+            len(normalized),
+            normalized.count("\n"),
+            normalized[:120],
+        )
         card = {
-            "config": {"wide_screen_mode": True, "update_multi": True},
-            "elements": [{"tag": "markdown", "content": text}],
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "body": {"elements": [{"tag": "markdown", "content": normalized}]},
         }
         return json.dumps(card)
 
@@ -3225,6 +3454,27 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
 
+    @staticmethod
+    def _check_api_response(response: Any, action: str) -> None:
+        """Raise when the Feishu SDK reports a business-level failure.
+
+        The SDK does not raise on API errors (rate limits, invalid content,
+        deleted messages) — it only sets success()/code/msg on the response,
+        so every send path must check the result explicitly.
+        """
+        success = getattr(response, "success", None)
+        if callable(success):
+            ok = bool(success())
+        else:
+            ok = True
+        if not ok:
+            code = getattr(response, "code", None)
+            msg = getattr(response, "msg", None)
+            error = getattr(response, "error", None)
+            raise RuntimeError(
+                f"Feishu {action} failed: code={code} msg={msg!r} error={error!r}"
+            )
+
     async def _reply_card(self, message_id: str, text: str) -> str | None:
         """Reply with an interactive card and return the created card message ID."""
         if not self._api_client:
@@ -3233,6 +3483,7 @@ class FeishuChannel(Channel):
         content = self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        self._check_api_response(response, "card reply")
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
 
@@ -3243,16 +3494,29 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        self._check_api_response(response, "card create")
 
     async def _update_card(self, message_id: str, text: str) -> None:
-        """Patch an existing card message in place."""
+        """Patch an existing card message in place.
+
+        Patches for the same card are serialized and spaced out: concurrent
+        patches could land out of order at Feishu (stale content winning),
+        and back-to-back patches trip the per-message update rate limit.
+        """
         if not self._api_client or not self._PatchMessageRequest:
             return
 
         content = self._build_card_content(text)
-        request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        async with self._card_patch_lock:
+            # Feishu rejects rapid-fire patches on one message; stay >=1.1s apart.
+            elapsed = time.monotonic() - self._last_card_patch_at
+            if self._last_card_patch_at > 0 and elapsed < 1.1:
+                await asyncio.sleep(1.1 - elapsed)
+            request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+            self._last_card_patch_at = time.monotonic()
+        self._check_api_response(response, f"card patch (message={message_id}, content_len={len(content)})")
 
     def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
         """Keep a strong reference to fire-and-forget tasks and surface errors."""
@@ -3387,20 +3651,83 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
+    async def _resolve_chat_topic(self, chat_id: str, msg_id: str) -> tuple[str | None, str | None]:
+        """Return the authoritative (chat_type, topic_id) for one chat.
+
+        话题群把每条顶层消息都变成一个话题；话题根消息的事件不带
+        root_id/thread_id，且实测 chat_type 可能缺失或误标（如话题群消息
+        被解析成 p2p），不能作为会话划分依据。这里以群信息接口为准：
+        话题群（chat_mode=="topic"，普通群开启话题模式时 chat_mode==
+        "group" 且 group_message_type=="thread"）用根消息自身 msg_id 作为
+        会话键，使根消息与话题内回复（root_id 即根消息 id）落到同一个
+        会话；普通群返回整群一个会话；单聊返回 p2p。接口失败或字段缺失
+        时返回 (None, None)，保留事件自带的 chat_type。
+        """
+        if not self._api_client or not self._GetChatRequest:
+            return None, None
+        now = time.monotonic()
+        with self._chat_mode_lock:
+            cached = self._chat_mode_cache.get(chat_id)
+        if cached is not None and now - cached[0] < FEISHU_CHAT_MODE_CACHE_TTL_SECONDS:
+            chat_mode, group_message_type = cached[1], cached[2]
+        else:
+            request = self._GetChatRequest.builder().chat_id(chat_id).build()
+            try:
+                response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
+                if not response.success():
+                    raise RuntimeError(f"Feishu chat info failed: code={response.code}, msg={response.msg}")
+                response_data = getattr(response, "data", None)
+                chat_mode = getattr(response_data, "chat_mode", None)
+                group_message_type = getattr(response_data, "group_message_type", None)
+                if not isinstance(chat_mode, str) or not chat_mode:
+                    chat_mode = None
+                if not isinstance(group_message_type, str) or not group_message_type:
+                    group_message_type = None
+            except Exception:
+                logger.warning(
+                    "[Feishu] chat mode lookup failed for chat_id=%s; keeping chat-wide session",
+                    chat_id,
+                    exc_info=True,
+                )
+                chat_mode = None
+                group_message_type = None
+            with self._chat_mode_lock:
+                self._chat_mode_cache[chat_id] = (time.monotonic(), chat_mode, group_message_type)
+            # 生产排障用：直接可见该群的会话映射模式判定结果
+            logger.info(
+                "[Feishu] chat mode resolved: chat_id=%s chat_mode=%s group_message_type=%s",
+                chat_id,
+                chat_mode,
+                group_message_type,
+            )
+        if chat_mode == "p2p":
+            return "p2p", None
+        if chat_mode == "topic" or (chat_mode == "group" and group_message_type == "thread"):
+            return "group", msg_id
+        if chat_mode == "group":
+            return "group", None
+        return None, None
+
     async def _prepare_inbound(
         self,
         msg_id: str,
         inbound: InboundMessage,
         event_id: str | None = None,
-    ) -> None:
-        """Claim a trusted event before reactions or MessageBus dispatch."""
+    ) -> bool:
+        """Claim a trusted event before reactions or MessageBus dispatch.
+
+        Returns True when the inbound message was dispatched to the bus, and
+        False when the event was dropped (missing durable deduplicator or a
+        duplicate claim) — card actions rely on this to skip the
+        "processing" card patch for dropped events.
+        """
         if self.binding_id:
             if not event_id or self._event_deduplicator is None:
                 logger.error(
                     "[Feishu] rejecting binding event without durable deduplication",
                     extra={"binding_id": self.binding_id},
                 )
-                return
+                return False
             if not await self._event_deduplicator.claim(
                 self.binding_id,
                 event_id,
@@ -3410,11 +3737,22 @@ class FeishuChannel(Channel):
                     "[Feishu] duplicate event dropped",
                     extra={"binding_id": self.binding_id, "event_id": event_id},
                 )
-                return
+                return False
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
+        if self.binding_id:
+            # 事件里的 chat_type 实测可能缺失或误标（话题群根消息出现
+            # p2p），会话划分与 actor scope 一律以群信息接口的缓存结果为
+            # 准；仅根消息（topic_id 为空）需要补 per-topic 会话键，话题内
+            # 回复沿用 root_id，避免覆盖。
+            chat_type, topic_key = await self._resolve_chat_topic(inbound.chat_id, msg_id)
+            if chat_type:
+                inbound.metadata["chat_type"] = chat_type
+            if topic_key and inbound.topic_id is None:
+                inbound.topic_id = topic_key
         await self.bus.publish_inbound(inbound)
+        return True
 
     def _on_message(self, event: Any) -> None:
         """Validate and enqueue one SDK message callback on the main loop."""
@@ -3423,9 +3761,30 @@ class FeishuChannel(Channel):
             return
         try:
             logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
+            logger.debug(
+                "[Feishu] message raw event: %s",
+                json.dumps(_sdk_event_to_dict(event), ensure_ascii=False, default=str),
+            )
             if self.binding_id and (self._event_verifier is None or not self._event_verifier(event)):
+                # 生产排障用：与 card action 路径同款的诊断信息，区分 token
+                # 不匹配（指纹不在 accepted_fp 中）与事件过旧/时钟偏差（skew
+                # 超过 max_age_seconds=300）
+                event_header = getattr(event, "header", None)
+                event_ts = FeishuEventVerifier._timestamp(event)
+                header_token = getattr(event_header, "token", None)
+                fingerprints = (
+                    self._event_verifier.accepted_token_fingerprints()
+                    if isinstance(self._event_verifier, FeishuEventVerifier)
+                    else ()
+                )
                 logger.warning(
-                    "[Feishu] rejected unauthenticated or stale event",
+                    "[Feishu] rejected unauthenticated or stale event: event_id=%s event_type=%s skew=%.1fs header_token=%s accepted_fp=%s verifier=%s",
+                    getattr(event_header, "event_id", None),
+                    getattr(event_header, "event_type", None),
+                    (time.time() - event_ts) if event_ts is not None else float("nan"),
+                    _token_fingerprint(header_token),
+                    fingerprints,
+                    self._event_verifier is not None,
                     extra={"binding_id": self.binding_id},
                 )
                 return
@@ -3504,10 +3863,11 @@ class FeishuChannel(Channel):
             text = text.strip()
 
             logger.info(
-                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
+                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, chat_type=%s, sender=%s, text=%r",
                 chat_id,
                 msg_id,
                 root_id,
+                chat_type,
                 sender_id,
                 text[:100] if text else "",
             )
@@ -3525,6 +3885,8 @@ class FeishuChannel(Channel):
 
             # DB-driven bindings keep direct chats stable per user and groups
             # stable per chat/topic. Legacy channels preserve per-message topics.
+            # 话题群的根消息（root_id/thread_id 均空）在 _prepare_inbound 中
+            # 按群模式解析为 per-topic 会话键。
             topic_id = (root_id or thread_id or None) if self.binding_id else (root_id or msg_id)
 
             inbound = self._make_inbound(
@@ -3557,3 +3919,496 @@ class FeishuChannel(Channel):
                 logger.warning("[Feishu] main loop not running, cannot publish inbound message")
         except Exception:
             logger.exception("[Feishu] error processing message")
+
+    @staticmethod
+    def _card_action_response(*, ok: bool, content: str) -> Any:
+        from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+
+        return P2CardActionTriggerResponse(
+            {
+                "toast": {
+                    "type": "info" if ok else "error",
+                    "content": content,
+                }
+            }
+        )
+
+    @staticmethod
+    def _format_card_action_text(action: Any) -> str:
+        value = getattr(action, "value", None)
+        if not isinstance(value, dict):
+            value = {} if value is None else {"raw": value}
+        payload: dict[str, Any] = {
+            "type": "feishu_card_action",
+            "tag": getattr(action, "tag", None),
+            "name": getattr(action, "name", None),
+            "value": value,
+        }
+        form_value = getattr(action, "form_value", None)
+        if form_value:
+            payload["form"] = form_value
+        option = getattr(action, "option", None)
+        if option:
+            payload["option"] = option
+        input_value = getattr(action, "input_value", None)
+        if input_value:
+            payload["input"] = input_value
+        checked = getattr(action, "checked", None)
+        if checked is not None:
+            payload["checked"] = checked
+        return (
+            "[审批回调] 审批人点击了飞书审批卡片。请解析以下 JSON，"
+            "提取 value.action（approve/reject）和 value.record_id，"
+            "并调用 feishu-approval-postaction 技能完成后续处理"
+            "（更新表格状态；approve 时同步禅道，reject 时跳过）：" + json.dumps(payload, ensure_ascii=False)
+        )
+
+    @staticmethod
+    def _card_action_conversation(action: Any) -> tuple[str, str | None]:
+        value = getattr(action, "value", None)
+        if not isinstance(value, dict):
+            return "p2p", None
+        chat_type = value.get("chat_type")
+        if chat_type not in ("p2p", "group"):
+            chat_type = "p2p"
+        topic = value.get("topic_id") or value.get("root_id")
+        if isinstance(topic, str):
+            topic = topic.strip() or None
+        else:
+            topic = None
+        return str(chat_type), topic
+
+    def _on_card_action(self, event: Any) -> Any:
+        """Validate a card callback, ack Feishu, and enqueue it as inbound chat."""
+        if self.binding_id and self._stop_requested:
+            logger.info("[Feishu] ignored card action while binding is stopping")
+            return self._card_action_response(ok=False, content="Binding is stopping")
+        try:
+            logger.info("[Feishu] card action received: type=%s", type(event).__name__)
+            # 生产排障用：完整记录原始回调帧（含 header.create_time 原始精度、
+            # header/event token），验证失败时可直接从日志定位原因
+            logger.info(
+                "[Feishu] card action raw event: %s",
+                json.dumps(_sdk_event_to_dict(event), ensure_ascii=False, default=str),
+            )
+            event_header = getattr(event, "header", None)
+            payload = getattr(event, "event", None)
+            if self.binding_id:
+                # card.action.trigger 的校验 token 在事件体（event.token，源自
+                # Encrypt Key），header.token 则沿用订阅事件的 Verification Token
+                # 约定；两者任一命中绑定凭据即通过
+                payload_token = getattr(payload, "token", None)
+                payload_token = payload_token if isinstance(payload_token, str) and payload_token else None
+                if self._event_verifier is None or not self._event_verifier(event, token=payload_token):
+                    event_ts = FeishuEventVerifier._timestamp(event)
+                    header_token = getattr(event_header, "token", None)
+                    fingerprints = self._event_verifier.accepted_token_fingerprints() if isinstance(self._event_verifier, FeishuEventVerifier) else ()
+                    logger.warning(
+                        "[Feishu] rejected unauthenticated or stale card action: header_token=%s payload_token=%s skew=%.1fs payload_fp=%s header_fp=%s accepted_fp=%s",
+                        bool(header_token),
+                        bool(payload_token),
+                        (time.time() - event_ts) if event_ts is not None else float("nan"),
+                        _token_fingerprint(payload_token),
+                        _token_fingerprint(header_token),
+                        fingerprints,
+                        extra={"binding_id": self.binding_id},
+                    )
+                    return self._card_action_response(ok=False, content="Invalid card action")
+
+            event_id = getattr(event_header, "event_id", None)
+            event_created_at = FeishuEventVerifier._timestamp(event)
+            operator = getattr(payload, "operator", None)
+            action = getattr(payload, "action", None)
+            context = getattr(payload, "context", None)
+            chat_id = getattr(context, "open_chat_id", None)
+            message_id = getattr(context, "open_message_id", None)
+            user_id = getattr(operator, "open_id", None)
+            if not isinstance(chat_id, str) or not chat_id.strip() or not isinstance(user_id, str) or not user_id.strip() or action is None:
+                return self._card_action_response(ok=False, content="Incomplete card action")
+
+            # 提取 action_type 和 value（用于 toast 文案和卡片 patch）
+            value = getattr(action, "value", None)
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    value = {}
+            if not isinstance(value, dict):
+                value = {}
+            action_type = str(value.get("action", ""))
+
+            # 提取拒绝原因（表单数据）
+            form_value = getattr(action, "form_value", None) or {}
+            if isinstance(form_value, str):
+                try:
+                    form_value = json.loads(form_value)
+                except (json.JSONDecodeError, ValueError):
+                    form_value = {}
+            reject_reason = form_value.get("reject_reason", "") if isinstance(form_value, dict) else ""
+
+            # 去重检查：同一卡片只处理一次（防止重复点击）。
+            # 登记发生在投递成功之后（同一连接帧顺序分发，单线程内无竞态），
+            # 避免投递失败时卡片被永久标记为已处理。
+            card_message_id = message_id.strip() if isinstance(message_id, str) else ""
+            if card_message_id and card_message_id in self._processed_card_message_ids:
+                if card_message_id in self._pending_card_runs:
+                    # 两阶段补丁进行中：Run 尚未终结，提示稍候而不是"已处理"
+                    logger.info("[Feishu] card action still processing, skipping: msg_id=%s", card_message_id)
+                    return self._card_action_response(
+                        ok=False,
+                        content="该操作正在处理中，请稍候",
+                    )
+                logger.warning("[Feishu] card already processed, skipping: msg_id=%s", card_message_id)
+                return self._card_action_response(
+                    ok=False,
+                    content="该操作已处理，请勿重复点击",
+                )
+
+            # 拒绝时必填拒绝原因（飞书卡片输入框无原生 required，服务端校验兜底）。
+            # 校验放在去重登记之前，失败时卡片按钮保留，填写后可重新点击。
+            if action_type == "reject" and not str(reject_reason or "").strip():
+                logger.info("[Feishu] reject without reason, blocked: msg_id=%s", card_message_id)
+                return self._card_action_response(
+                    ok=False,
+                    content="请先填写拒绝原因，再点击拒绝按钮",
+                )
+
+            # 并发预检：本绑定已有审批 Run 在途（卡片从点击到终态期间登记在
+            # _pending_card_runs）时，新卡片点击直接拒绝且完全不动卡片——按钮
+            # 保留、不登记去重，等在途审批结束后可再次点击。避免进入 Run 后
+            # 被并发配额拒绝、卡片被误打失败态。
+            if card_message_id and self._pending_card_runs:
+                logger.info(
+                    "[Feishu] card action rejected while another approval is running: msg_id=%s, pending=%s",
+                    card_message_id,
+                    sorted(self._pending_card_runs),
+                )
+                return self._card_action_response(
+                    ok=False,
+                    content="已有审批正在处理，请稍后再试",
+                )
+
+            chat_type, topic_id = self._card_action_conversation(action)
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=self._format_card_action_text(action),
+                msg_type=InboundMessageType.CHAT,
+                thread_ts=message_id if isinstance(message_id, str) else None,
+                metadata={
+                    "message_id": message_id,
+                    "chat_type": chat_type,
+                    **({"event_id": event_id} if isinstance(event_id, str) else {}),
+                    **({"binding_id": self.binding_id, "agent_id": self.agent_id} if self.binding_id else {}),
+                    "card_action": True,
+                },
+                created_at=event_created_at,
+            )
+            # 每张审批卡片独立会话线程（topic=卡片消息 id）：同一用户的多张并发
+            # 审批卡不会挤进同一线程触发 multitask reject；同一张卡重复点击仍会
+            # 落到同一线程，由 busy 提示正确拦截。skill 按钮未携带 topic_id 时
+            # _card_action_conversation 对 p2p 会退回 None，导致全部卡片共用线程。
+            inbound.topic_id = card_message_id or topic_id
+            source_message_id = card_message_id or chat_id
+
+            if not (self._main_loop and self._main_loop.is_running()):
+                logger.warning("[Feishu] main loop not running, cannot publish card action")
+                return self._card_action_response(ok=False, content="系统繁忙，请稍后重试")
+
+            # 登记去重与 pending 状态（两阶段卡片补丁：点击→处理中→终态）
+            if card_message_id:
+                self._prune_stale_card_runs()
+                self._processed_card_message_ids.add(card_message_id)
+                self._pending_card_runs[card_message_id] = _PendingCardRun(
+                    action_type=action_type,
+                    reject_reason=str(reject_reason or ""),
+                )
+                # 控制集合大小，避免内存泄漏
+                if len(self._processed_card_message_ids) > 500:
+                    self._processed_card_message_ids.clear()
+
+            logger.info("[Feishu] publishing card action to bus (msg_id=%s, action=%s)", source_message_id, action_type)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._prepare_inbound(source_message_id, inbound, event_id if isinstance(event_id, str) else None),
+                    self._main_loop,
+                )
+            except RuntimeError:
+                if card_message_id:
+                    self._processed_card_message_ids.discard(card_message_id)
+                    self._pending_card_runs.pop(card_message_id, None)
+                logger.exception("[Feishu] failed to schedule card action (msg_id=%s)", source_message_id)
+                return self._card_action_response(ok=False, content="系统繁忙，请稍后重试")
+
+            # 后台线程执行点击侧两阶段补丁第一阶段：等待 prepare_inbound 确认
+            # 事件确实投递（持久化去重命中时事件会被静默丢弃，此时不能打"处理中"），
+            # 抓取原始卡片内容并 patch 为"处理中"（移除按钮防重复点击）。
+            if card_message_id:
+                threading.Thread(
+                    target=self._run_card_click_patch,
+                    args=(card_message_id, fut),
+                    daemon=True,
+                ).start()
+            else:
+                fut.add_done_callback(lambda f, mid=source_message_id: self._log_future_error(f, "prepare_inbound", mid))
+
+            # 根据 action 类型返回不同的 toast 文案
+            if action_type == "approve":
+                toast_content = "✅ 已提交，正在处理…"
+            elif action_type == "reject":
+                toast_content = "❌ 已提交拒绝，正在处理…"
+            else:
+                toast_content = "已提交，正在处理…"
+            return self._card_action_response(ok=True, content=toast_content)
+        except Exception:
+            logger.exception("[Feishu] error processing card action")
+            return self._card_action_response(ok=False, content="处理失败，请稍后重试")
+
+    def _claim_pending_card_run(self, card_message_id: str) -> _PendingCardRun | None:
+        """原子取走 pending 登记：首个调用者负责终态补丁，其余返回 None。"""
+        return self._pending_card_runs.pop(card_message_id, None)
+
+    def _rollback_card_action_registration(self, card_message_id: str) -> None:
+        """事件未投递（去重命中/调度失败）时撤销登记，卡片保持原样可重新点击。"""
+        self._claim_pending_card_run(card_message_id)
+        self._processed_card_message_ids.discard(card_message_id)
+
+    def _prune_stale_card_runs(self) -> None:
+        """清理悬挂的 pending 登记（Run 永未终结），避免内存与去重集合泄漏。"""
+        now = time.monotonic()
+        stale = [
+            message_id
+            for message_id, entry in self._pending_card_runs.items()
+            if now - entry.registered_at > _CARD_RUN_STALE_SECONDS
+        ]
+        for message_id in stale:
+            logger.warning("[Feishu] pruning stale card run registration: msg_id=%s", message_id)
+            self._rollback_card_action_registration(message_id)
+
+    def _run_card_click_patch(self, card_message_id: str, fut: concurrent.futures.Future) -> None:
+        """点击侧线程：确认事件已投递后，抓取原卡片并 patch 为"处理中"。"""
+        entry = self._pending_card_runs.get(card_message_id)
+        try:
+            if entry is None:
+                # Run 终态先于本线程到达并已取走登记，无需第一阶段补丁
+                self._log_future_error(fut, "prepare_inbound", card_message_id)
+                return
+            try:
+                dispatched = fut.result(timeout=_CARD_PREPARE_TIMEOUT_SECONDS)
+            except Exception:
+                logger.exception("[Feishu] card action prepare failed (msg_id=%s)", card_message_id)
+                self._rollback_card_action_registration(card_message_id)
+                return
+            if dispatched is False:
+                # 持久化去重命中（如进程重启后的事件重放）：事件被丢弃，卡片不打"处理中"
+                logger.info("[Feishu] duplicate card action dropped, card left untouched: msg_id=%s", card_message_id)
+                self._rollback_card_action_registration(card_message_id)
+                return
+            entry.original_content = self._fetch_card_original_content(card_message_id)
+            if entry.original_content is not None:
+                self._patch_card_processing(card_message_id)
+            else:
+                # 抓不到原始卡片内容（如缺读消息权限）时不动卡片：按钮保留，
+                # 失败后无需还原即可重新点击；成功终态照常补丁。防重复点击
+                # 由去重登记 + "正在处理中" toast 兜底。
+                logger.warning(
+                    "[Feishu] original card content unavailable, leaving card untouched: msg_id=%s",
+                    card_message_id,
+                )
+        finally:
+            if entry is not None:
+                entry.click_work_done.set()
+
+    def _fetch_card_original_content(self, message_id: str) -> str | None:
+        """抓取卡片当前内容 JSON（失败恢复时用于还原按钮）。"""
+        try:
+            if not self._api_client or not self._GetMessageRequest:
+                logger.warning("[Feishu] cannot fetch card content: api_client not initialized")
+                return None
+            req = self._GetMessageRequest.builder().message_id(message_id).build()
+            resp = self._api_client.im.v1.message.get(req)
+            if not resp.success():
+                logger.warning("[Feishu] card content fetch failed: code=%s, msg=%s", resp.code, resp.msg)
+                return None
+            items = getattr(getattr(resp, "data", None), "items", None) or []
+            for item in items:
+                content = getattr(getattr(item, "body", None), "content", None)
+                if isinstance(content, str) and content.strip():
+                    return content
+            return None
+        except Exception:
+            logger.exception("[Feishu] error fetching card content: message_id=%s", message_id)
+            return None
+
+    def _patch_card_processing(self, message_id: str) -> None:
+        """Patch 卡片为"处理中"：移除按钮防重复点击，等待 Run 终态后再改终态。"""
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            if not self._api_client:
+                logger.warning("[Feishu] cannot patch card: api_client not initialized")
+                return
+
+            CST = timezone(timedelta(hours=8))
+            now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+
+            new_card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "审批处理中"},
+                    "text_tag_list": [{"tag": "text_tag", "text": {"tag": "plain_text", "content": "处理中"}, "color": "blue"}],
+                    "template": "blue",
+                    "padding": "12px 8px 12px 8px",
+                },
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": (
+                                f"⏳ 审批已提交，智能体正在处理…\n\n"
+                                f"处理完成后此处将自动更新结果。\n\n"
+                                f"操作时间：{now_str}\n\n"
+                                f"如长时间停留在该状态，请联系管理员。"
+                            ),
+                        },
+                    ],
+                },
+            }
+
+            req = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(json.dumps(new_card)).build()).build()
+            resp = self._api_client.im.v1.message.patch(req)
+            if resp.success():
+                logger.info("[Feishu] card patched to processing: message_id=%s", message_id)
+            else:
+                logger.warning("[Feishu] processing card patch failed: code=%s, msg=%s", resp.code, resp.msg)
+        except Exception:
+            logger.exception("[Feishu] error patching processing card: message_id=%s", message_id)
+
+    def _finalize_card_run(self, entry: _PendingCardRun, card_message_id: str, *, success: bool) -> None:
+        """Run 终结后打卡片终态：成功→已通过/已拒绝；失败→还原按钮允许重试。"""
+        from datetime import datetime, timedelta, timezone
+
+        # 等点击侧线程收尾（含"处理中"补丁），保证补丁顺序不乱
+        if not entry.click_work_done.wait(_CARD_CLICK_PATCH_TIMEOUT_SECONDS):
+            logger.warning("[Feishu] card click patch did not finish in time: msg_id=%s", card_message_id)
+
+        if success:
+            self._patch_card_after_action(card_message_id, entry.action_type, entry.reject_reason)
+            return
+
+        # 失败：清除去重登记让用户可重新点击
+        self._processed_card_message_ids.discard(card_message_id)
+        if not self._api_client:
+            logger.warning("[Feishu] cannot restore card: api_client not initialized")
+            return
+        if entry.original_content is None:
+            # 点击时未抓到原始卡片（卡片从未被打成"处理中"），无需还原
+            logger.info("[Feishu] card untouched after failed run: message_id=%s", card_message_id)
+            return
+        restored = False
+        for attempt in range(2):
+            try:
+                req = self._PatchMessageRequest.builder().message_id(card_message_id).request_body(self._PatchMessageRequestBody.builder().content(entry.original_content).build()).build()
+                resp = self._api_client.im.v1.message.patch(req)
+                if resp.success():
+                    logger.info("[Feishu] card restored after failed run: message_id=%s", card_message_id)
+                    restored = True
+                    break
+                logger.warning("[Feishu] card restore failed (attempt %d): code=%s, msg=%s", attempt + 1, resp.code, resp.msg)
+            except Exception:
+                logger.exception("[Feishu] error restoring card (attempt %d): message_id=%s", attempt + 1, card_message_id)
+        if restored:
+            return
+
+        # 还原补丁连续失败（卡片停留在"处理中"）时才退化为灰色失败卡片
+        try:
+            CST = timezone(timedelta(hours=8))
+            now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+            new_card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "审批未完成"},
+                    "text_tag_list": [{"tag": "text_tag", "text": {"tag": "plain_text", "content": "处理失败"}, "color": "grey"}],
+                    "template": "grey",
+                    "padding": "12px 8px 12px 8px",
+                },
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": (
+                                f"⚠️ 审批处理失败，卡片按钮无法自动恢复。\n\n"
+                                f"具体原因见会话中的错误提示；如需重试，请联系管理员重新发起审批。\n\n"
+                                f"操作时间：{now_str}"
+                            ),
+                        },
+                    ],
+                },
+            }
+            req = self._PatchMessageRequest.builder().message_id(card_message_id).request_body(self._PatchMessageRequestBody.builder().content(json.dumps(new_card)).build()).build()
+            resp = self._api_client.im.v1.message.patch(req)
+            if resp.success():
+                logger.info("[Feishu] card patched to failed state: message_id=%s", card_message_id)
+            else:
+                logger.warning("[Feishu] failed card patch failed: code=%s, msg=%s", resp.code, resp.msg)
+        except Exception:
+            logger.exception("[Feishu] error patching failed card: message_id=%s", card_message_id)
+
+    def _patch_card_after_action(self, message_id: str, action_type: str, reject_reason: str = "") -> None:
+        """Patch 飞书卡片消息，移除按钮，显示已处理状态（防止重复点击）。"""
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            if not self._api_client:
+                logger.warning("[Feishu] cannot patch card: api_client not initialized")
+                return
+
+            CST = timezone(timedelta(hours=8))
+            now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+
+            if action_type == "approve":
+                title = "审批已通过"
+                tag_text = "已同意"
+                tag_color = "green"
+                template = "green"
+                body_content = f"✅ 审批人已同意\n\n已提交后续处理。\n\n操作时间：{now_str}"
+            elif action_type == "reject":
+                title = "审批已拒绝"
+                tag_text = "已拒绝"
+                tag_color = "red"
+                template = "red"
+                reason_text = f"\n\n拒绝原因：{reject_reason}" if reject_reason else ""
+                body_content = f"❌ 审批人已拒绝{reason_text}\n\n操作时间：{now_str}"
+            else:
+                title = "审批已处理"
+                tag_text = "已处理"
+                tag_color = "grey"
+                template = "grey"
+                body_content = f"审批已处理\n\n操作时间：{now_str}"
+
+            new_card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": title},
+                    "text_tag_list": [{"tag": "text_tag", "text": {"tag": "plain_text", "content": tag_text}, "color": tag_color}],
+                    "template": template,
+                    "padding": "12px 8px 12px 8px",
+                },
+                "body": {
+                    "elements": [
+                        {"tag": "markdown", "content": body_content},
+                    ],
+                },
+            }
+
+            req = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(json.dumps(new_card)).build()).build()
+            resp = self._api_client.im.v1.message.patch(req)
+            if resp.success():
+                logger.info("[Feishu] card patched: message_id=%s, action=%s", message_id, action_type)
+            else:
+                logger.warning("[Feishu] card patch failed: code=%s, msg=%s", resp.code, resp.msg)
+        except Exception:
+            logger.exception("[Feishu] error patching card: message_id=%s", message_id)

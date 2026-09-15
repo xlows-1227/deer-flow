@@ -26,6 +26,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
+
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage, HumanMessage
 
@@ -560,7 +561,6 @@ def _restore_english_spaces(text: str) -> str:
         INFLECT_CHAIN_TOKENS = {*STRICT, *AMBIG}
         rest = tail_partial
         chain_tokens = 0
-        c_ok = True
         while rest:
             found_tok = False
             for tok in sorted(INFLECT_CHAIN_TOKENS, key=len, reverse=True):
@@ -572,7 +572,6 @@ def _restore_english_spaces(text: str) -> str:
                     found_tok = True
                     break
             if not found_tok:
-                c_ok = False
                 break
         # case (c) REMOVED — too loose.  'deser' (=d+es+er, all STRICT) matches
         # any base like 'the' -> fake absorb 'thedeser'.  Real multi-morpheme
@@ -596,7 +595,6 @@ def _restore_english_spaces(text: str) -> str:
         # Short-circuit: entire run is a valid (possibly inflected) word
         _isw = _is_single_word(low)
         if _isw:
-            print(chr(91)+chr(68)+chr(66)+chr(71)+chr(93)+chr(32)+chr(95)+chr(105)+chr(115)+chr(95)+chr(115)+chr(105)+chr(110)+chr(103)+chr(108)+chr(101)+chr(32)+chr(114)+chr(101)+chr(116)+chr(117)+chr(114)+chr(110)+chr(101)+chr(100)+chr(32)+chr(84)+chr(114)+chr(117)+chr(101)+chr(32)+chr(102)+chr(111)+chr(114)+chr(32)+repr(run))
             return run
 
         words: list[str] = []
@@ -651,11 +649,14 @@ def _restore_english_spaces(text: str) -> str:
                             continue
                         word = s[i - L:i]
                         if L >= 3 and word in _EN_WORD_SET:
-                            dp[i] = True; break
+                            dp[i] = True
+                            break
                         elif L == 2 and word in _TWO_LETTER_FUNCTION_WORDS:
-                            dp[i] = True; break
+                            dp[i] = True
+                            break
                         elif L == 1 and word in _ONE_LETTER_ALLOWED:
-                            dp[i] = True; break
+                            dp[i] = True
+                            break
                 return dp[len(s)]
 
             def _nwl(tail_str: str, _no_func_bonus: bool = False) -> int:
@@ -693,7 +694,6 @@ def _restore_english_spaces(text: str) -> str:
                 """
                 if len(tail_str) == 0:
                     return 9999
-                m2 = min(_MAX_EN_WORD_LEN, len(tail_str))
                 # Determine first-word length of tail (for both scoring paths)
                 # ORPHAN-AWARE: skip up to 2 orphan leading chars to find
                 # the first real dict word.  Record orphan_count so we can
@@ -708,11 +708,15 @@ def _restore_english_spaces(text: str) -> str:
                     _found = False
                     for L2 in range(min(_MAX_EN_WORD_LEN, len(_t)), 2, -1):
                         if _t[:L2] in _EN_WORD_SET:
-                            first_len = L2; _found = True; break
+                            first_len = L2
+                            _found = True
+                            break
                     if not _found and len(_t) >= 2 and _t[:2] in _TWO_LETTER_FUNCTION_WORDS:
-                        first_len = 2; _found = True
+                        first_len = 2
+                        _found = True
                     if not _found and len(_t) >= 1 and _t[:1] in _ONE_LETTER_ALLOWED:
-                        first_len = 1; _found = True
+                        first_len = 1
+                        _found = True
                     if _found:
                         orphan_count = _skip
                         break
@@ -1168,7 +1172,6 @@ def _restore_english_spaces(text: str) -> str:
                             continue
                         # Valid contraction.
                         sfx_end = apos_pos + 1 + len(matched_sfx)
-                        contraction_tok = before + "'" + matched_sfx
                         # Emit the letters-before-apostrophe (if any pure
                         # letter prefix needs splitting — e.g. in
                         # "youdon'tknow" the "youdo" part before the 't is
@@ -2781,7 +2784,6 @@ def _validate_and_merge_fragments(original: str, fragments: list[str]) -> list[s
 
     # Check 2: Count very short fragments (<= 2 chars)
     very_short_count = sum(1 for f in fragments if len(f) <= 2)
-    total_len = sum(len(f) for f in fragments)
 
     # If too many very short fragments, this is likely a bad split
     if very_short_count >= len(fragments) // 2 and len(fragments) > 2:
@@ -2814,7 +2816,14 @@ def _has_vowel(text: str) -> bool:
 # `langdetect` so it only does something simple: measure ratio of
 # Latin-letter-based tokens vs CJK characters.  This is enough to decide
 # whether we want to add the "English whitespace preservation" system rule.
-_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df\U0002a700-\U0002b73f\U0002b740-\U0002b81f\U0002b820-\U0002ceaf\u3040-\u30ff\u31f0-\u31ff\ua960-\ua97f\U0001b000-\U0001b12f\u1100-\u11ff\uac00-\ud7af\ud7b0-\ud7ff\ud800-\udbff]")
+_CJK_RE = re.compile(
+    "["
+    "\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df\U0002a700-\U0002b73f"
+    "\U0002b740-\U0002b81f\U0002b820-\U0002ceaf\u3040-\u30ff\u31f0-\u31ff"
+    "\ua960-\ua97f\U0001b000-\U0001b12f\u1100-\u11ff\uac00-\ud7af"
+    "\ud7b0-\ud7ff\ud800-\udbff"
+    "]"
+)
 _WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
 
@@ -2935,7 +2944,7 @@ def _inject_english_whitespace_rule_if_needed(graph_input: dict) -> None:
     msgs.insert(last_human_idx, rule_message)
 
 
-def _clean_model_text(text: str, skip_space_restoration: bool = False) -> str:
+def _clean_model_text(text: str, skip_space_restoration: bool = False, *, preserve_whitespace: bool = False) -> str:
     if not text:
         return text
     text = _SYSTEM_REMINDER_RE.sub("", text)
@@ -2950,10 +2959,14 @@ def _clean_model_text(text: str, skip_space_restoration: bool = False) -> str:
         original_text = text
         text = _restore_english_spaces(text)
         if text != original_text:
-            logger.info("English spaces restored: len %d -> %d (sample: %r -> %r)",
+            logger.debug("English spaces restored: len %d -> %d (sample: %r -> %r)",
                         len(original_text), len(text),
                         original_text[:80], text[:80])
-    text = text.strip()
+    # Streaming chunks are 1-3 chars each; stripping edge whitespace here
+    # would erase newline-only chunks and glue the whole message into one
+    # line once aggregated (kimi-for-coding streams CJK char-by-char).
+    if not preserve_whitespace:
+        text = text.strip()
     return text
 
 
@@ -3015,15 +3028,15 @@ def _clean_aimessage_content(obj: Any, is_streaming_chunk: bool = False, skip_sp
     if obj is None:
         return None
     if isinstance(obj, str):
-        return _clean_model_text(obj, skip_space_restoration=skip_space_restoration)
+        return _clean_model_text(obj, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk)
     if isinstance(obj, dict):
         cleaned = {}
         for k, v in obj.items():
             if k == "content" and isinstance(v, str):
-                cleaned[k] = _clean_model_text(v, skip_space_restoration=skip_space_restoration)
+                cleaned[k] = _clean_model_text(v, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk)
             elif k == "content" and isinstance(v, list):
                 cleaned[k] = [
-                    _clean_model_text(item, skip_space_restoration=skip_space_restoration) if isinstance(item, str) else item
+                    _clean_model_text(item, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk) if isinstance(item, str) else item
                     for item in v
                 ]
             else:
@@ -3033,8 +3046,6 @@ def _clean_aimessage_content(obj: Any, is_streaming_chunk: bool = False, skip_sp
         return [_clean_aimessage_content(item, is_streaming_chunk=is_streaming_chunk, skip_space_restoration=skip_space_restoration) for item in obj]
     if hasattr(obj, "content"):
         try:
-            msg_type = getattr(obj, "type", "unknown")
-            msg_id = getattr(obj, "id", None) or getattr(obj, "lc_id", None) or f"id_{id(obj)}"
             content = obj.content
             # Extract tool names BEFORE cleaning (from raw text markers)
             raw_text = ""
@@ -3045,10 +3056,10 @@ def _clean_aimessage_content(obj: Any, is_streaming_chunk: bool = False, skip_sp
             extracted_names = _extract_tool_names_from_text(raw_text)
 
             if isinstance(content, str):
-                obj.content = _clean_model_text(content, skip_space_restoration=skip_space_restoration)
+                obj.content = _clean_model_text(content, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk)
             elif isinstance(content, list):
                 obj.content = [
-                    _clean_model_text(item, skip_space_restoration=skip_space_restoration) if isinstance(item, str) else item
+                    _clean_model_text(item, skip_space_restoration=skip_space_restoration, preserve_whitespace=is_streaming_chunk) if isinstance(item, str) else item
                     for item in content
                 ]
             if isinstance(obj.content, str):
@@ -3399,6 +3410,25 @@ def _cache_and_patch_values_messages(run_id: str, messages: list[Any]) -> None:
                     pass
 
 
+def _log_values_last_ai(stage: str, messages: Any) -> None:
+    """取证日志：values 快照中最后一条 AI 消息的头部（%r 显示换行）。"""
+    if not isinstance(messages, list):
+        return
+    for m in reversed(messages):
+        if isinstance(m, dict):
+            if m.get("type") not in ("ai", "AIMessage", "AIMessageChunk"):
+                continue
+            content = m.get("content", "")
+        else:
+            if getattr(m, "type", "") not in ("ai", "AIMessage", "AIMessageChunk"):
+                continue
+            content = getattr(m, "content", "")
+        if not isinstance(content, str):
+            content = repr(content)
+        logger.debug("[Worker] values last AI (%s): len=%d head=%r", stage, len(content), content[:120])
+        return
+
+
 def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> None:
     """After serialization, patch content from [工具调用已省略] → [工具调用: name1, name2].
 
@@ -3411,8 +3441,6 @@ def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> No
     if not isinstance(chunk_dict, dict):
         return
     content = chunk_dict.get("content", "")
-    chunk_id = chunk_dict.get("id", "?")
-    chunk_type = chunk_dict.get("type", "?")
     if not isinstance(content, str):
         return
 
@@ -3997,7 +4025,7 @@ async def _run_flash_direct_model(
                 else ""
             )
             _preview.append(f"[{i}] {mtype}: {snippet}")
-    logger.info(
+    logger.debug(
         "[LLM_INPUT_PREVIEW] run=%s total=%s messages:\n%s",
         record.run_id,
         len(conversation_messages),
@@ -4787,7 +4815,7 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 # Skip space restoration in streaming (chunks too small for correct restoration)
-                cleaned_chunk = _clean_aimessage_content(chunk, skip_space_restoration=(single_mode == "messages")) if single_mode == "messages" else chunk
+                cleaned_chunk = _clean_aimessage_content(chunk, is_streaming_chunk=True, skip_space_restoration=True) if single_mode == "messages" else chunk
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 if single_mode == "values" and isinstance(cleaned_chunk, dict):
                     # Pre-process values: ensure every AI message in state has
@@ -4834,6 +4862,7 @@ async def run_agent(
                         if isinstance(msgs, list):
                             _cache_and_patch_values_messages(run_id, msgs)
                             cleaned_chunk["messages"] = msgs
+                            _log_values_last_ai("post-patch", msgs)
                 safe_chunk = redactor.redact_stream_payload(mode, cleaned_chunk, run_id=run_id)
                 serialized_chunk = serialize(safe_chunk, mode=mode)
                 if mode == "messages":
@@ -4843,6 +4872,7 @@ async def run_agent(
                         msgs = serialized_chunk.get("messages")
                         if isinstance(msgs, list):
                             _cache_ai_tool_names_from_values(run_id, msgs)
+                            _log_values_last_ai("post-serialize", msgs)
                 await bridge.publish(run_id, sse_event, serialized_chunk)
 
         # 7b. Final-content patch for glued-English output.

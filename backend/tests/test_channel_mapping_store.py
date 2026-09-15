@@ -88,6 +88,53 @@ async def test_private_chat_isolated_by_feishu_user(mapping_store: DbMappingStor
 
 
 @pytest.mark.asyncio
+async def test_private_chat_topics_are_isolated(mapping_store: DbMappingStore) -> None:
+    """p2p 也按 topic 隔离：两张审批卡（topic=卡片消息 id）各占独立线程。"""
+    card_a = await mapping_store.get_or_create_thread(
+        binding_id="binding-1",
+        agent_id="agent-1",
+        chat_id="chat-1",
+        feishu_user_id="user-a",
+        chat_type="p2p",
+        topic_id="om-card-a",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
+    )
+    card_b = await mapping_store.get_or_create_thread(
+        binding_id="binding-1",
+        agent_id="agent-1",
+        chat_id="chat-1",
+        feishu_user_id="user-a",
+        chat_type="p2p",
+        topic_id="om-card-b",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
+    )
+    # 无 topic 的普通消息仍回落到既有的默认映射
+    default_thread = await mapping_store.get_or_create_thread(
+        binding_id="binding-1",
+        agent_id="agent-1",
+        chat_id="chat-1",
+        feishu_user_id="user-a",
+        chat_type="p2p",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
+    )
+    # 同一 topic 重复解析得到同一线程
+    card_a_again = await mapping_store.get_or_create_thread(
+        binding_id="binding-1",
+        agent_id="agent-1",
+        chat_id="chat-1",
+        feishu_user_id="user-a",
+        chat_type="p2p",
+        topic_id="om-card-a",
+        system_scope=SYSTEM_CHANNEL_MAPPING_SCOPE,
+    )
+
+    assert card_a != card_b
+    assert card_a != default_thread
+    assert card_b != default_thread
+    assert card_a == card_a_again
+
+
+@pytest.mark.asyncio
 async def test_group_members_share_thread(mapping_store: DbMappingStore) -> None:
     first = await mapping_store.get_or_create_thread(
         binding_id="binding-1",

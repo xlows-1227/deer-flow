@@ -381,6 +381,127 @@ class TestExtractResponseText:
         # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
         assert _extract_response_text(result) == ""
 
+    def test_marker_only_ai_content_skipped(self):
+        """AI messages that only carry a [工具调用: ...] marker are placeholders, not replies."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "帮我列一个减肥计划"},
+                {"type": "ai", "content": "[工具调用: ask_clarification]"},
+            ]
+        }
+        assert _extract_response_text(result) == ""
+
+    def test_marker_only_generic_marker_skipped(self):
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "查一下"},
+                {"type": "ai", "content": "[工具调用已省略]"},
+                {"type": "ai", "content": "实际回答"},
+            ]
+        }
+        assert _extract_response_text(result) == "实际回答"
+
+    def test_marker_with_preamble_kept(self):
+        """Real text plus a trailing marker is still a usable reply."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "查一下"},
+                {"type": "ai", "content": "我来查一下\n[工具调用: query_database]"},
+            ]
+        }
+        assert _extract_response_text(result) == "我来查一下\n[工具调用: query_database]"
+
+
+# ---------------------------------------------------------------------------
+# _extract_clarification_text tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractClarificationText:
+    def test_returns_clarification_tool_message(self):
+        from app.channels.manager import _extract_clarification_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "帮我列一个减肥计划"},
+                {"type": "ai", "content": "[工具调用: ask_clarification]"},
+                {
+                    "type": "tool",
+                    "name": "ask_clarification",
+                    "id": "clarification:call_4067",
+                    "content": "❓ 你的基础数据是什么？",
+                },
+            ]
+        }
+        assert _extract_clarification_text(result) == "❓ 你的基础数据是什么？"
+
+    def test_matches_by_id_prefix_without_name(self):
+        from app.channels.manager import _extract_clarification_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "hi"},
+                {"type": "tool", "id": "clarification:call_1", "content": "❓ 问题"},
+            ]
+        }
+        assert _extract_clarification_text(result) == "❓ 问题"
+
+    def test_stops_at_last_human_message(self):
+        """Clarification replies from earlier turns must not leak into later runs."""
+        from app.channels.manager import _extract_clarification_text
+
+        result = {
+            "messages": [
+                {"type": "tool", "name": "ask_clarification", "content": "❓ 旧问题"},
+                {"type": "human", "content": "新问题"},
+                {"type": "ai", "content": "新回答"},
+            ]
+        }
+        assert _extract_clarification_text(result) == ""
+
+    def test_ignores_other_tool_messages(self):
+        from app.channels.manager import _extract_clarification_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "查一下"},
+                {"type": "tool", "name": "query_database", "content": "rows"},
+            ]
+        }
+        assert _extract_clarification_text(result) == ""
+
+    def test_empty_and_invalid_inputs(self):
+        from app.channels.manager import _extract_clarification_text
+
+        assert _extract_clarification_text({}) == ""
+        assert _extract_clarification_text({"messages": []}) == ""
+        assert _extract_clarification_text("not-a-dict") == ""
+        assert _extract_clarification_text(None) == ""
+
+
+class TestIsToolMarkerOnly:
+    def test_markers(self):
+        from app.channels.manager import _is_tool_marker_only
+
+        assert _is_tool_marker_only("[工具调用: ask_clarification]")
+        assert _is_tool_marker_only("[工具调用: query_database, other_tool]")
+        assert _is_tool_marker_only("[工具调用已省略]")
+        assert _is_tool_marker_only("  [工具调用: x]  ")
+
+    def test_non_markers(self):
+        from app.channels.manager import _is_tool_marker_only
+
+        assert not _is_tool_marker_only("我来查一下\n[工具调用: query_database]")
+        assert not _is_tool_marker_only("")
+        assert not _is_tool_marker_only("普通回答")
+        assert not _is_tool_marker_only("[工具调用]")
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
@@ -2049,11 +2170,33 @@ class TestFeishuChannel:
             final_patch_request = channel._api_client.im.v1.message.patch.call_args_list[1].args[0]
             assert first_patch_request.message_id == "om-running-card"
             assert final_patch_request.message_id == "om-running-card"
-            assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "Hello"
-            assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "Hello world"
+            assert json.loads(first_patch_request.body.content)["body"]["elements"][0]["content"] == "Hello"
+            assert json.loads(final_patch_request.body.content)["body"]["elements"][0]["content"] == "Hello world"
+            assert json.loads(final_patch_request.body.content)["schema"] == "2.0"
             assert json.loads(final_patch_request.body.content)["config"]["update_multi"] is True
 
         _run(go())
+
+
+class TestFeishuMarkdownCard:
+    """Verify Feishu reply cards use Card JSON 2.0 and readable markdown."""
+
+    def test_card_uses_v2_schema(self):
+        from app.channels.feishu import FeishuChannel
+
+        card = json.loads(FeishuChannel._build_card_content("**Hello** world"))
+        assert card["schema"] == "2.0"
+        assert card["config"]["update_multi"] is True
+        assert card["body"]["elements"][0] == {"tag": "markdown", "content": "**Hello** world"}
+
+    def test_normalizes_spaceless_markers(self):
+        from app.channels.feishu import FeishuChannel
+
+        raw = "##📊数据查询\n-人员查询：找人\n## 已有空格\n- 列表项\n-5°C 低温\n---\n正常段落"
+        normalized = FeishuChannel._normalize_markdown(raw)
+        assert normalized == (
+            "## 📊数据查询\n- 人员查询：找人\n## 已有空格\n- 列表项\n-5°C 低温\n---\n正常段落"
+        )
 
 
 class TestWeComChannel:

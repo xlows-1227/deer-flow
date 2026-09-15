@@ -190,7 +190,6 @@ class AgentRunCreateRequest(_PublicModel):
 
     message: Union[str, list[ContentPart]] = Field(
         min_length=1,
-        max_length=_MAX_MESSAGE_PARTS,
         description="Plain text, or an ordered list of multimodal content parts.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)

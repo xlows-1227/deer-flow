@@ -30,7 +30,7 @@ from deerflow.persistence.published_agent import PublishedAgentRow
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.quota import EffectiveQuota, QuotaExceededError, Reservation
 from deerflow.publishing.resolver import AgentNotAvailableError
-from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunRecord, RunStatus
+from deerflow.runtime import ConflictError, DisconnectMode, MemoryStreamBridge, RunRecord, RunStatus
 
 
 def _quota() -> EffectiveQuota:
@@ -167,14 +167,23 @@ class _QuotaExceededLedger(_Ledger):
         raise QuotaExceededError("INBOUND_RPS_EXCEEDED", retry_after=1)
 
 
-def _inbound(*, text: str = "hello") -> InboundMessage:
+class _ConflictExecutor(_Executor):
+    """Mimic RunManager rejecting a second concurrent run on one thread."""
+
+    async def execute(self, **kwargs) -> PublishedChannelExecution:
+        self.order.append("run")
+        self.calls.append(kwargs)
+        raise ConflictError(f"{kwargs['thread_id']} already has an active run")
+
+
+def _inbound(*, text: str = "hello", binding_id: str = "binding-1") -> InboundMessage:
     return InboundMessage(
-        channel_name="feishu:binding-1",
+        channel_name=f"feishu:{binding_id}",
         chat_id="chat-1",
         user_id="user-1",
         text=text,
         metadata={
-            "binding_id": "binding-1",
+            "binding_id": binding_id,
             "agent_id": "agent-1",
             "event_id": "event-1",
             "chat_type": "p2p",
@@ -182,7 +191,7 @@ def _inbound(*, text: str = "hello") -> InboundMessage:
     )
 
 
-async def _dispatch_once(runtime: PublishedChannelRuntime, store_path) -> str:
+async def _dispatch_once(runtime: PublishedChannelRuntime, store_path, *, binding_id: str = "binding-1") -> str:
     bus = MessageBus()
     manager = ChannelManager(bus, ChannelStore(store_path), published_runtime=runtime)
     outbound = asyncio.get_running_loop().create_future()
@@ -193,7 +202,7 @@ async def _dispatch_once(runtime: PublishedChannelRuntime, store_path) -> str:
 
     bus.subscribe_outbound(capture)
     await manager.start()
-    await bus.publish_inbound(_inbound())
+    await bus.publish_inbound(_inbound(binding_id=binding_id))
     text = await asyncio.wait_for(outbound, timeout=2.0)
     await manager.stop()
     return str(text)
@@ -317,6 +326,156 @@ async def test_binding_message_uses_db_mapping_published_agent_quota_and_one_usa
     await engine.dispose()
 
 
+def _group_event(
+    event_id: str,
+    *,
+    message_id: str,
+    root_id: str | None = None,
+    text: str = "topic group message",
+):
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            event_id=event_id,
+            create_time=str(int(time.time() * 1000)),
+            token="verification-token",
+        ),
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                chat_id="chat-1",
+                message_id=message_id,
+                root_id=root_id,
+                thread_id=None,
+                chat_type="group",
+                content=json.dumps({"text": text}),
+            ),
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="user-1")),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_binding_topic_group_maps_each_topic_to_its_own_thread(tmp_path) -> None:
+    """话题群：每个话题一个 DeerFlow 会话；话题内回复复用根消息的会话。"""
+    database_path = tmp_path / "published-feishu-topic-group.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(
+            PublishedAgentRow(
+                id="agent-1",
+                owner_user_id="owner-a",
+                slug="agent-one",
+                display_name="Agent One",
+                status="published",
+            )
+        )
+        session.add(
+            AgentChannelRow(
+                id="binding-1",
+                agent_id="agent-1",
+                channel_type="feishu",
+                app_id="app-one",
+                secret_ref="secret://feishu/11111111111111111111111111111111",
+                status="active",
+            )
+        )
+        await session.commit()
+
+    order: list[str] = []
+    resolver = _Resolver(order)
+    ledger = _Ledger(order)
+    executor = _Executor(order)
+    mappings = DbMappingStore(session_factory)
+    runtime = PublishedChannelRuntime(
+        mapping_store=mappings,
+        resolver=resolver,
+        quota_ledger=ledger,
+        executor=executor,
+    )
+    bus = MessageBus()
+    manager = ChannelManager(bus, ChannelStore(tmp_path / "legacy-store.json"), published_runtime=runtime)
+    outbound: asyncio.Queue[str] = asyncio.Queue()
+
+    async def capture(message) -> None:
+        await outbound.put(message.text)
+
+    bus.subscribe_outbound(capture)
+    await manager.start()
+    channel = FeishuChannel(
+        bus,
+        app_id="app-one",
+        app_secret="secret",
+        verification_token="verification-token",
+        binding_id="binding-1",
+        agent_id="agent-1",
+        event_deduplicator=ChannelEventRepository(session_factory),
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    resolver_calls: list[tuple[str, str]] = []
+
+    async def _topic_group_resolver(chat_id: str, msg_id: str) -> tuple[str | None, str | None]:
+        resolver_calls.append((chat_id, msg_id))
+        return "group", msg_id
+
+    channel._resolve_chat_topic = _topic_group_resolver
+
+    channel._on_message(_group_event("event-a", message_id="topic-a-root", text="msg-a"))
+    channel._on_message(_group_event("event-b", message_id="topic-b-root", text="msg-b"))
+    channel._on_message(_group_event("event-c", message_id="reply-in-a", root_id="topic-a-root", text="msg-c"))
+    for _ in range(3):
+        await asyncio.wait_for(outbound.get(), timeout=2.0)
+    await asyncio.sleep(0.05)
+    await manager.stop()
+
+    # 每条消息都查询群模式（话题内回复也查，用于校正 chat_type）；仅顶层
+    # 消息会采用 per-topic 会话键（回复沿用 root_id）。manager 并发
+    # create_task，顺序不保证，按集合比较。
+    assert sorted(resolver_calls) == [
+        ("chat-1", "reply-in-a"),
+        ("chat-1", "topic-a-root"),
+        ("chat-1", "topic-b-root"),
+    ]
+    # manager 对每条消息独立 create_task 并发处理，执行顺序不保证，
+    # 因此按消息文本索引而不是依赖 calls 顺序。
+    assert len(executor.calls) == 3
+    threads_by_message = {call["message"]: call["thread_id"] for call in executor.calls}
+    assert len(threads_by_message) == 3
+    assert threads_by_message["msg-a"] != threads_by_message["msg-b"]
+    assert threads_by_message["msg-c"] == threads_by_message["msg-a"]
+    rows = await mappings.list_mappings(binding_id="binding-1", owner_user_id="owner-a")
+    topics = {row.topic_id: row.thread_id for row in rows}
+    assert set(topics) == {"topic-a-root", "topic-b-root"}
+    assert topics["topic-a-root"] == threads_by_message["msg-a"]
+    assert topics["topic-b-root"] == threads_by_message["msg-b"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ach_prefixed_binding_credential_id_fits_quota_reservation_varchar_32(tmp_path) -> None:
+    order: list[str] = []
+    resolver = _Resolver(order)
+    ledger = _Ledger(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=resolver,
+        quota_ledger=ledger,
+        executor=_Executor(order),
+    )
+
+    binding_id = "ach_cc2578a7820d4634a84b5eceb4a2d96a"
+    text = await _dispatch_once(runtime, tmp_path / "ach-binding-legacy.json", binding_id=binding_id)
+
+    assert text == "published answer"
+    assert order == ["resolve", "reserve", "run", "settle"]
+    credential_id = resolver.calls[0]["credential_id"]
+    assert credential_id == "cc2578a7820d4634a84b5eceb4a2d96a"
+    assert len(credential_id) <= 32
+    assert ledger.settled_usage[0]["credential_id"] == credential_id
+    assert ledger.settled_usage[0]["conversation_id"] == "thread-1"
+
+
 @pytest.mark.asyncio
 async def test_quota_rejection_returns_safe_busy_message_without_run_or_usage(tmp_path) -> None:
     order: list[str] = []
@@ -334,6 +493,29 @@ async def test_quota_rejection_returns_safe_busy_message_without_run_or_usage(tm
     assert text == "This agent is busy. Please try again later."
     assert order == ["resolve", "reserve"]
     assert executor.calls == []
+    assert ledger.settled_usage == []
+
+
+@pytest.mark.asyncio
+async def test_thread_conflict_returns_safe_busy_message_and_releases_reservation(tmp_path) -> None:
+    """同线程第二个并发 Run 被 RunManager 拒绝时：释放未启动的配额并回复 busy 文案，
+    而不是落入内部错误的兜底回复。"""
+    order: list[str] = []
+    ledger = _Ledger(order)
+    executor = _ConflictExecutor(order)
+    runtime = PublishedChannelRuntime(
+        mapping_store=_Mapping(),
+        resolver=_Resolver(order),
+        quota_ledger=ledger,
+        executor=executor,
+    )
+
+    text = await _dispatch_once(runtime, tmp_path / "conflict-legacy.json")
+
+    assert text == "This agent is busy. Please try again later."
+    assert order == ["resolve", "reserve", "run"]
+    assert len(executor.calls) == 1
+    assert ledger.released == ["reservation-1"]
     assert ledger.settled_usage == []
 
 

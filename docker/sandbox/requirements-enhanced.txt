@@ -25,5 +25,5 @@ pydot
 networkx
 diagrams
 plantuml
-lark-oapi
+lark-oapi>=1.7.3
 playwright

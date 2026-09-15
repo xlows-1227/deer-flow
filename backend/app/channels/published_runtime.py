@@ -20,7 +20,7 @@ from deerflow.persistence.channel_mapping import SYSTEM_CHANNEL_MAPPING_SCOPE
 from deerflow.publishing.context import PublishedAgentContext
 from deerflow.publishing.quota import QuotaExceededError, Reservation
 from deerflow.publishing.resolver import AgentNotAvailableError, AgentSuspendedError
-from deerflow.runtime import RunRecord
+from deerflow.runtime import ConflictError, RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,18 @@ _PROGRESS_DRAIN_TIMEOUT_SECONDS = 0.25
 _RUN_CLEANUP_TIMEOUT_SECONDS = 1.0
 PUBLISHED_INBOUND_MAX_FILES = 10
 PUBLISHED_INBOUND_MAX_FILE_BYTES = 50 * 1024 * 1024
+
+
+def _binding_credential_id(binding_id: str) -> str:
+    """Compact quota/usage credential key for one Feishu binding.
+
+    Binding ids are ``ach_<32hex>`` (36 chars), which overflows the
+    ``agent_quota_reservations.credential_id`` VARCHAR(32) on PostgreSQL
+    (``StringDataRightTruncationError``). The ``ach_`` prefix carries no
+    quota meaning, so drop it. Any longer future format fails visibly at
+    the same insert instead of silently colliding here.
+    """
+    return binding_id.removeprefix("ach_")
 
 
 class PublishedChannelUnavailableError(RuntimeError):
@@ -318,7 +330,7 @@ class PublishedChannelRuntime:
             context = await self._resolver.resolve(
                 agent_id,
                 source="feishu",
-                credential_id=binding_id,
+                credential_id=_binding_credential_id(binding_id),
                 external_actor=f"feishu:{message.user_id}",
                 conversation_scope=thread_id,
                 correlation_id=event_id,
@@ -389,6 +401,17 @@ class PublishedChannelRuntime:
             # The Run exists and may still consume tokens. Keep its reservation
             # pending so the durable settlement recovery can reconcile it.
             raise
+        except ConflictError as exc:
+            # The thread already has an active Run (multitask_strategy=reject,
+            # raised before the Run starter marks started). The run never
+            # started, so release the reserved quota and surface a friendly
+            # busy message instead of the generic internal-error reply.
+            await self._quota.release_unstarted(
+                reservation.id,
+                owner_user_id=context.owner_user_id,
+                run_id=run_id,
+            )
+            raise PublishedChannelBusyError("published conversation already has an active run") from exc
         except BaseException:
             await self._quota.release_unstarted(
                 reservation.id,
@@ -406,7 +429,7 @@ class PublishedChannelRuntime:
             "owner_user_id": context.owner_user_id,
             "agent_id": context.agent_id,
             "source": "feishu",
-            "credential_id": binding_id,
+            "credential_id": _binding_credential_id(binding_id),
             "external_actor_hash": hashlib.sha256(context.external_actor.encode()).hexdigest(),
             "conversation_id": thread_id,
             "run_id": execution.run_id,
@@ -605,7 +628,12 @@ class GatewayPublishedRunExecutor:
         progress_queue: asyncio.Queue[str] | None = None
         bridge = getattr(self._app.state, "stream_bridge", None)
         if bridge is not None:
-            from app.channels.manager import _accumulate_stream_text, _extract_response_text
+            from app.channels.manager import (
+                _accumulate_stream_text,
+                _extract_clarification_text,
+                _extract_response_text,
+                _is_tool_marker_only,
+            )
 
             if on_progress is not None:
                 progress_queue = asyncio.Queue(maxsize=1)
@@ -652,7 +680,12 @@ class GatewayPublishedRunExecutor:
                     elif event.event == "__end__":
                         return
 
-                    if on_progress is None or not latest_text or latest_text == last_published_text:
+                    if (
+                        on_progress is None
+                        or not latest_text
+                        or latest_text == last_published_text
+                        or _is_tool_marker_only(latest_text)
+                    ):
                         continue
                     now = time.monotonic()
                     if last_published_text and now - last_publish_at < 0.35:
@@ -751,6 +784,12 @@ class GatewayPublishedRunExecutor:
         elif record.status == RunStatus.success:
             status = "success"
             text = record.last_ai_message or "(No response from agent)"
+            if last_values is not None:
+                clarification_text = _extract_clarification_text(last_values)
+                if clarification_text:
+                    # Runs ended by ask_clarification must reply with the
+                    # question/options, never a tool-call marker text.
+                    text = clarification_text
         elif record.status == RunStatus.interrupted:
             status = "cancelled"
             text = "The request was cancelled. Please try again."
