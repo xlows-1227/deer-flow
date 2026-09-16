@@ -3165,6 +3165,19 @@ class FeishuChannel(Channel):
 
     # -- message formatting ------------------------------------------------
 
+    _URL_TOKEN_PREFIX_RE = re.compile(r"(?:https?://|www\.)\S*$", re.IGNORECASE)
+
+    @staticmethod
+    def _in_url_token(text: str, pos: int) -> bool:
+        """True when offset ``pos`` lies inside a URL token.
+
+        The whitespace-free run ending just before ``pos`` must start with
+        http(s):// or www. — i.e. ``pos`` is a fragment (``/#/route``) or
+        anchor (``index#section``) inside a URL, where heading/rule
+        recovery rules must not fire.
+        """
+        return bool(FeishuChannel._URL_TOKEN_PREFIX_RE.search(text[:pos]))
+
     @staticmethod
     def _normalize_markdown(text: str) -> str:
         """Normalize markdown for Feishu card rendering.
@@ -3189,6 +3202,10 @@ class FeishuChannel(Channel):
            heading (``##重要提醒目前无法...``), which renders the whole line as
            one giant heading. Cuts at the first sentence punctuation or
            sentence-start marker when the heading body exceeds 12 chars.
+
+        URL safety: steps 1/2/5/8 never fire inside URL tokens, so fragments
+        (``http://h/#/route``), anchors (``...index#section``) and slugs
+        (``my---page``) survive normalization unchanged.
         """
 
         # Step 0: Unwrap fenced code blocks (``` ... ```). Keeps the inner
@@ -3202,10 +3219,24 @@ class FeishuChannel(Channel):
         # Must NOT match table separator rows (|---|---|) where --- is flanked
         # by pipes. Rule: --- preceded by non-dash, NOT followed by | or dash.
         # This catches both "text---" and "table_row|---heading".
-        text = re.sub(r"(?<!\n)(?<![\-])(\s*)(---)(?![\|\-])", r"\1\n\2\n", text)
+        # Skips inside URLs (http://h/my---page): slugs stay intact.
+        def _split_rule(m: "re.Match[str]") -> str:
+            if FeishuChannel._in_url_token(text, m.start(2)):
+                return m.group(0)
+            return f"{m.group(1)}\n{m.group(2)}\n"
+
+        text = re.sub(r"(?<!\n)(?<![\-])(\s*)(---)(?![\|\-])", _split_rule, text)
 
         # Step 2: Insert newlines before headings (##, ###, etc.)
-        text = re.sub(r"(?<!\n)(?<![#\s])(#{1,6})(?=[^\s#])", r"\n\1", text)
+        # Skip inside URLs: `http://h/#/route` / `...index#section` are URL
+        # fragments, not glued headings — splitting them eats the `#` and
+        # renders the path as a giant heading.
+        def _split_heading(m: "re.Match[str]") -> str:
+            if FeishuChannel._in_url_token(text, m.start(1)):
+                return m.group(0)
+            return "\n" + m.group(1)
+
+        text = re.sub(r"(?<!\n)(?<![#\s])(#{1,6})(?=[^\s#])", _split_heading, text)
 
         # Step 3: Split table rows on "||" boundaries (explicit row separators)
         text = re.sub(r"\|\|(?=[^|\n]*\|[^|\n]*\|)", r"|\n|", text)
@@ -3214,9 +3245,11 @@ class FeishuChannel(Channel):
         # line (e.g. "## heading|col1|col2|" → "## heading\n|col1|col2|").
         text = FeishuChannel._split_inline_table_start(text)
 
-        # Step 5: Fix missing spaces after # and - markers
+        # Step 5: Fix missing spaces after # and - markers.  A `/` right after
+        # the hashes means a wrapped URL fragment line (`#/workForecast/index`
+        # alone on a line) — spacing it would turn it into a real heading.
         def _fix_line(line: str) -> str:
-            line = re.sub(r"^(\s{0,3}#{1,6})(?=[^\s#])", r"\1 ", line)
+            line = re.sub(r"^(\s{0,3}#{1,6})(?=[^\s#/])", r"\1 ", line)
             return re.sub(r"^(\s*-)(?=[^\s\d-])", r"\1 ", line)
 
         lines = text.split("\n")
@@ -3248,7 +3281,9 @@ class FeishuChannel(Channel):
         out: list[str] = []
         for line in text.split("\n"):
             match = re.match(r"^(\s{0,3}#{1,6})\s*(\S.*)$", line)
-            if not match:
+            # A body starting with `/` is a wrapped URL fragment line, not a
+            # heading — leave it alone.
+            if not match or match.group(2).startswith("/"):
                 out.append(line)
                 continue
             body = match.group(2).strip()
