@@ -462,7 +462,17 @@ async def _transfer_custom_skill_ownership(
     """
     skills_transferred = 0
     try:
-        storage = get_or_new_skill_storage()
+        # Use a fresh non-isolated storage instance: the process singleton is
+        # built with ``enforce_owner_isolation=True``, which makes
+        # ``_iter_skill_files`` skip custom skills whose owner is not the
+        # current request user. For an ownership transfer we need to see
+        # every custom skill regardless of owner, so we pass an explicit
+        # ``skills_path`` (which also forces a new instance instead of
+        # returning the singleton) and leave isolation at its default False.
+        root_storage = get_or_new_skill_storage()
+        storage = get_or_new_skill_storage(
+            skills_path=str(root_storage.get_skills_root_path())
+        )
         all_skills = storage.load_skills(enabled_only=False)
     except Exception:
         logger.warning(
