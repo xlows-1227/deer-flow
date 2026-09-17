@@ -433,10 +433,90 @@ async def _fetch_custom_skill_sharees_and_owner(
         if not g.shared_with_user_id:
             continue
         lookup_key = g.shared_with_user_id.lower()
-        email, role = user_email_index.get(lookup_key, (g.shared_with_user_id, "user"))
+        if lookup_key not in user_email_index:
+            # Sharee is not an active user (soft-deleted account) — hide
+            # instead of falling back to a raw UUID display.
+            continue
+        email, role = user_email_index[lookup_key]
         info = SkillShareUserInfo(id=g.shared_with_user_id, email=email, system_role=role)
         sharees_by_skill.setdefault(g.skill_name, []).append(info)
     return sharees_by_skill, owner_email_by_owner_id
+
+
+async def _transfer_custom_skill_ownership(
+    *,
+    from_user_id: str,
+    to_user_id: str,
+    share_repo: SkillShareRepository | None = None,
+) -> dict[str, int]:
+    """Reassign all custom skills owned by ``from_user_id`` to ``to_user_id``.
+
+    Used by the admin user-deletion flow so a soft-deleted account's skills
+    don't end up orphaned: the on-disk ``.owners/<skill>.json`` metadata is
+    rewritten and any ``skill_shares`` rows with the deleted owner are
+    updated to the new owner. Single-skill failures are logged and skipped
+    so the delete operation as a whole stays atomic from the admin's
+    perspective.
+
+    Returns ``{"skills_transferred": int, "shares_transferred": int}``.
+    """
+    skills_transferred = 0
+    try:
+        storage = get_or_new_skill_storage()
+        all_skills = storage.load_skills(enabled_only=False)
+    except Exception:
+        logger.warning(
+            "Failed to load skills storage for ownership transfer from %s",
+            from_user_id,
+            exc_info=True,
+        )
+        all_skills = []
+
+    for skill in all_skills:
+        if skill.category != SkillCategory.CUSTOM:
+            continue
+        try:
+            current_owner = storage._read_custom_skill_owner(skill.skill_dir)
+            if not current_owner or current_owner.lower() != from_user_id.lower():
+                continue
+            owner_file = storage._owner_file(skill.skill_dir)
+            owner_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                delete=False,
+                dir=str(owner_file.parent),
+            ) as tmp_file:
+                json.dump({"owner_id": to_user_id}, tmp_file, ensure_ascii=False)
+                tmp_file.write("\n")
+                tmp_path = Path(tmp_file.name)
+            tmp_path.replace(owner_file)
+            skills_transferred += 1
+        except Exception:
+            logger.warning(
+                "Failed to transfer ownership of skill %s from %s to %s",
+                skill.name,
+                from_user_id,
+                to_user_id,
+                exc_info=True,
+            )
+
+    shares_transferred = 0
+    if share_repo is not None:
+        try:
+            shares_transferred = await share_repo.transfer_ownership(
+                from_user_id=from_user_id,
+                to_user_id=to_user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to transfer skill_shares rows from %s to %s",
+                from_user_id,
+                to_user_id,
+                exc_info=True,
+            )
+
+    return {"skills_transferred": skills_transferred, "shares_transferred": shares_transferred}
 
 
 async def _load_skills_share_aware(
@@ -466,10 +546,18 @@ async def _load_skills_share_aware(
     # Next, augment base set with "shared with me" custom skills I don't own.
     if user_id:
         shared_grants = await share_repo.list_shares_for_shared_user(user_id)
+        # Grants whose owner is no longer an active user (soft-deleted
+        # account) are skipped entirely — deleted users must not surface
+        # anywhere in skill listings.
+        active_owner_index = await _build_user_email_index(
+            {g.owner_user_id for g in shared_grants if g.owner_user_id}
+        )
         owned_names = {s.name for s in base_skills if s.category == SkillCategory.CUSTOM}
         shared_to_add: list[Skill] = []
         public_name_set = {s.name for s in base_skills if s.category == SkillCategory.PUBLIC}
         for grant in shared_grants:
+            if grant.owner_user_id and grant.owner_user_id.lower() not in active_owner_index:
+                continue
             if grant.skill_name in owned_names or grant.skill_name in public_name_set:
                 continue
             skill_dir = storage.get_custom_skill_dir(grant.skill_name)

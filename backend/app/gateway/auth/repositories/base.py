@@ -103,10 +103,28 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def list_users(self) -> list[User]:
-        """Return all registered users ordered by email ascending.
+        """Return all active (non-deleted) users ordered by email ascending.
 
-        Used for sharee picker UIs and admin user listings.  Callers
-        should further filter the result set when showing only users
-        that are eligible for a specific share relationship.
+        Used for sharee picker UIs and admin user listings.  Soft-deleted
+        accounts are excluded so they never surface in share dialogs or
+        admin listings.  Callers should further filter the result set when
+        showing only users that are eligible for a specific share
+        relationship.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def soft_delete_user(self, user_id: str) -> User | None:
+        """Mark a user as soft-deleted (deleted=True, deleted_at=now).
+
+        Also bumps ``token_version`` so the user's outstanding JWTs stop
+        validating immediately.  The row itself is kept so historical
+        references (skill shares, thread ownership) stay resolvable.
+
+        Args:
+            user_id: User UUID as string
+
+        Returns:
+            Updated User, or None when no row exists for ``user_id``
         """
         raise NotImplementedError

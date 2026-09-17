@@ -507,6 +507,15 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User not found").model_dump(),
         )
 
+    # Soft-deleted accounts are rejected even with an otherwise valid
+    # token (soft_delete_user also bumps token_version, this is a
+    # belt-and-suspenders check).
+    if user.deleted:
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User account has been deleted").model_dump(),
+        )
+
     # Token version mismatch → password was changed, token is stale
     if user.token_version != payload.ver:
         raise HTTPException(

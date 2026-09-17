@@ -45,6 +45,10 @@ class LocalAuthProvider(AuthProvider):
         if user is None:
             return None
 
+        if user.deleted:
+            # Soft-deleted accounts can never authenticate.
+            return None
+
         if user.password_hash is None:
             # OAuth user without local password
             return None

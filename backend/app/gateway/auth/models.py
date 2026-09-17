@@ -31,6 +31,11 @@ class User(BaseModel):
     needs_setup: bool = Field(default=False, description="True when a reset account must complete setup")
     token_version: int = Field(default=0, description="Incremented on password change to invalidate old JWTs")
 
+    # Soft delete (admin user management). Deleted accounts cannot
+    # authenticate and are hidden from user listings / share pickers.
+    deleted: bool = Field(default=False, description="True once an admin soft-deleted the account")
+    deleted_at: datetime | None = Field(default=None, description="When the account was soft-deleted")
+
 
 class UserResponse(BaseModel):
     """Response model for user info endpoint."""

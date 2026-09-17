@@ -12,7 +12,7 @@ construct this after ``init_engine_from_config()`` has run.
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -46,6 +46,12 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=row.oauth_id,
             needs_setup=row.needs_setup,
             token_version=row.token_version,
+            deleted=row.deleted,
+            deleted_at=(
+                row.deleted_at
+                if row.deleted_at is None or row.deleted_at.tzinfo
+                else row.deleted_at.replace(tzinfo=UTC)
+            ),
         )
 
     @staticmethod
@@ -60,6 +66,8 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=user.oauth_id,
             needs_setup=user.needs_setup,
             token_version=user.token_version,
+            deleted=user.deleted,
+            deleted_at=user.deleted_at,
         )
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -113,16 +121,22 @@ class SQLiteUserRepository(UserRepository):
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
+            row.deleted = user.deleted
+            row.deleted_at = user.deleted_at
             await session.commit()
         return user
 
     async def count_users(self) -> int:
-        stmt = select(func.count()).select_from(UserRow)
+        stmt = select(func.count()).select_from(UserRow).where(UserRow.deleted.is_(False))
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
     async def count_admin_users(self) -> int:
-        stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")
+        stmt = (
+            select(func.count())
+            .select_from(UserRow)
+            .where(UserRow.system_role == "admin", UserRow.deleted.is_(False))
+        )
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
@@ -139,8 +153,22 @@ class SQLiteUserRepository(UserRepository):
             return self._row_to_user(row) if row is not None else None
 
     async def list_users(self) -> list[User]:
-        stmt = select(UserRow).order_by(UserRow.email.asc())
+        stmt = select(UserRow).where(UserRow.deleted.is_(False)).order_by(UserRow.email.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             rows = result.scalars().all()
             return [self._row_to_user(row) for row in rows]
+
+    async def soft_delete_user(self, user_id: str) -> User | None:
+        async with self._sf() as session:
+            row = await session.get(UserRow, user_id)
+            if row is None:
+                return None
+            row.deleted = True
+            row.deleted_at = datetime.now(UTC)
+            # Bump token_version so outstanding JWTs stop validating
+            # immediately (same mechanism as a password change).
+            row.token_version = row.token_version + 1
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_user(row)

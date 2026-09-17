@@ -9,6 +9,7 @@ import {
   PlugIcon,
   SparklesIcon,
   UserIcon,
+  UsersIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -27,6 +28,9 @@ import { ModelSettingsPage } from "@/components/workspace/settings/model-setting
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
+import { UserManagementSettingsPage } from "@/components/workspace/settings/user-management-settings-page";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { isAdminUser } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -38,7 +42,8 @@ type SettingsSection =
   | "models"
   | "tools"
   | "skills"
-  | "notification";
+  | "notification"
+  | "userManagement";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
@@ -47,6 +52,8 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
+  const { user } = useAuth();
+  const isAdmin = isAdminUser(user);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
   const [connectorFormOpen, setConnectorFormOpen] = useState(false);
@@ -78,40 +85,50 @@ export function SettingsDialog(props: SettingsDialogProps) {
   }, [activeSection]);
 
   const sections = useMemo(
-    () => [
-      {
-        id: "account",
-        label: t.settings.sections.account,
-        icon: UserIcon,
-      },
-      {
-        id: "appearance",
-        label: t.settings.sections.appearance,
-        icon: PaletteIcon,
-      },
-      {
-        id: "notification",
-        label: t.settings.sections.notification,
-        icon: BellIcon,
-      },
-      {
-        id: "memory",
-        label: t.settings.sections.memory,
-        icon: BrainIcon,
-      },
-      {
-        id: "connectors",
-        label: t.settings.sections.connectors,
-        icon: DatabaseIcon,
-      },
-      {
-        id: "models",
-        label: t.settings.sections.models,
-        icon: BotIcon,
-      },
-      { id: "tools", label: t.settings.sections.tools, icon: PlugIcon },
-      { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
-    ],
+    () => {
+      const base: { id: SettingsSection; label: string; icon: typeof UserIcon }[] = [
+        {
+          id: "account",
+          label: t.settings.sections.account,
+          icon: UserIcon,
+        },
+        {
+          id: "appearance",
+          label: t.settings.sections.appearance,
+          icon: PaletteIcon,
+        },
+        {
+          id: "notification",
+          label: t.settings.sections.notification,
+          icon: BellIcon,
+        },
+        {
+          id: "memory",
+          label: t.settings.sections.memory,
+          icon: BrainIcon,
+        },
+        {
+          id: "connectors",
+          label: t.settings.sections.connectors,
+          icon: DatabaseIcon,
+        },
+        {
+          id: "models",
+          label: t.settings.sections.models,
+          icon: BotIcon,
+        },
+        { id: "tools", label: t.settings.sections.tools, icon: PlugIcon },
+        { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
+      ];
+      if (isAdmin) {
+        base.push({
+          id: "userManagement",
+          label: t.settings.sections.userManagement,
+          icon: UsersIcon,
+        });
+      }
+      return base;
+    },
     [
       t.settings.sections.account,
       t.settings.sections.appearance,
@@ -121,6 +138,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
+      t.settings.sections.userManagement,
+      isAdmin,
     ],
   );
   return (
@@ -190,6 +209,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 />
               )}
               {activeSection === "notification" && <NotificationSettingsPage />}
+              {activeSection === "userManagement" && isAdmin && (
+                <UserManagementSettingsPage />
+              )}
             </div>
           </ScrollArea>
         </div>

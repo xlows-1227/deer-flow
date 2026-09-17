@@ -35,6 +35,10 @@ class AuthConfig(BaseModel):
     # LDAP (corporate intranet AD) login. Defaults to disabled so existing
     # deployments are unaffected. Resolved once at first config access.
     ldap: LdapConfig = Field(default_factory=LdapConfig)
+    # Password applied by the admin "reset user password" action
+    # (Settings → User Management).  Configurable via the
+    # AUTH_USER_RESET_PASSWORD environment variable (.env).
+    user_reset_password: str = Field(default="DeerFlow@2026")
 
 
 _auth_config: AuthConfig | None = None
@@ -122,7 +126,11 @@ def get_auth_config() -> AuthConfig:
                 "For production, add AUTH_JWT_SECRET to your .env file: "
                 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
-        _auth_config = AuthConfig(jwt_secret=jwt_secret, ldap=load_ldap_config_from_env())
+        _auth_config = AuthConfig(
+            jwt_secret=jwt_secret,
+            ldap=load_ldap_config_from_env(),
+            user_reset_password=os.environ.get("AUTH_USER_RESET_PASSWORD") or "DeerFlow@2026",
+        )
     return _auth_config
 
 

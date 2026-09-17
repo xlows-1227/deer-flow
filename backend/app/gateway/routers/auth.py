@@ -336,7 +336,9 @@ async def _resolve_login(identifier: str, password: str) -> User | None:
         return await _authenticate_dispatch(identifier, password)
 
     registered = await _lookup_user_for_login(identifier)
-    if registered is None:
+    if registered is None or registered.deleted:
+        # Deleted accounts are indistinguishable from unregistered ones
+        # so the login error does not leak account state.
         raise _LoginNotRegistered(_bare_login_identifier(identifier))
 
     if registered.oauth_provider == LDAP_PROVIDER_TAG:
