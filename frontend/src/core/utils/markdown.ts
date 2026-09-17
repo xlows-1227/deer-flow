@@ -229,6 +229,17 @@ function mergeRowsToCellCount(
   return out;
 }
 
+/**
+ * True when the character at `offset` sits inside a URL token — i.e. the
+ * whitespace-free run ending just before `offset` starts with http(s):// or
+ * www.  Heading-recovery rules must not fire there: `http://h/#/route` and
+ * `...index#section` would otherwise be split into a bogus `# heading`.
+ */
+function inUrlToken(full: string, offset: number): boolean {
+  const prefix = full.slice(Math.max(0, offset - 2048), offset);
+  return /(?:https?:\/\/|www\.)\S*$/i.test(prefix);
+}
+
 export function preprocessMarkdown(raw: string): string {
   if (!raw) return raw;
 
@@ -249,10 +260,26 @@ export function preprocessMarkdown(raw: string): string {
     };
 
     // 0a. Chapter separator pattern: ---##Title  →  \n---\n## Title
-    text = text.replace(/(---)(#{1,6})(?=\S)/g, "\n$1\n$2 ");
+    //     Skip inside URLs (http://h/x---#/route): fragment stays intact.
+    text = text.replace(/(---)(#{1,6})(?=\S)/g, (match, dashes: string, hashes: string, offset: number, full: string) => {
+      if (inUrlToken(full, offset + dashes.length)) return match;
+      return `\n${dashes}\n${hashes} `;
+    });
 
     // 0b. Inline headers: word##Title  →  word\n## Title
-    text = text.replace(/(?<=[^\s\n-])(#{1,6})(?=[^\s#])/g, "\n$1 ");
+    //     Skip inside URLs: `http://h/#/route` and `...index#section` are
+    //     URL fragments, not glued headings — splitting them eats the `#`
+    //     and renders the path as a giant heading.
+    //     The lookbehind excludes `#` so a line-start `###标题` keeps its
+    //     full marker run for Step 2a to space-fix, instead of being
+    //     half-eaten into `#` + `## 标题`.
+    text = text.replace(
+      /(?<=[^\s\n#-])(#{1,6})(?=[^\s#])/g,
+      (match, hashes: string, offset: number, full: string) => {
+        if (inUrlToken(full, offset)) return match;
+        return `\n${hashes} `;
+      },
+    );
 
     // 0c. Table separator row: |---|---|  → ensure newline before it
     //     SKIP if we're inside ** block (would split bold marker).
@@ -377,8 +404,11 @@ export function preprocessMarkdown(raw: string): string {
   for (const rawLine of lines) {
     let line = rawLine;
 
-    // 2a/2b: Fix header spacing (`###title` → `### title`)
-    line = line.replace(/^(#{1,6})([^\s#])/, "$1 $2");
+    // 2a/2b: Fix header spacing (`###title` → `### title`).  A `/` after the
+    //        hashes means a wrapped URL fragment (`#/workForecast/index`
+    //        alone on a line) — adding the space would turn it into a real
+    //        heading, so `/` is excluded from the fix-up.
+    line = line.replace(/^(#{1,6})([^\s#/])/, "$1 $2");
     line = line.replace(/^(\d+\.)([^\s])/, "$1 $2");
 
     // 2c: Fix bare list markers — LLM often outputs `-内容` instead of `- 内容`.

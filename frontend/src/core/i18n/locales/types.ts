@@ -423,6 +423,11 @@ export interface Translations {
       delete: string;
       apiExamplesTitle: string;
       apiExamplesDescription: string;
+      createConversation: string;
+      apiKeyPlaceholder: string;
+      createConversationFailed: string;
+      conversationCreated: string;
+      conversationHint: string;
       sync: string;
       sse: string;
       async: string;

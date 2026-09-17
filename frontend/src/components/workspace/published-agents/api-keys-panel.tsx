@@ -5,11 +5,12 @@ import {
   ClipboardIcon,
   Code2Icon,
   KeyRoundIcon,
+  Loader2Icon,
   PlusIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -27,7 +28,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   useAgentKeys,
   useCreateAgentKey,
@@ -35,6 +35,7 @@ import {
   type AgentApiKey,
   type RevealedAgentApiKey,
 } from "@/core/published-agents";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 function formatTimestamp(value: string | null): string {
   if (!value) {
@@ -117,26 +118,113 @@ export function ApiKeysPanel({
   );
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentApiKey | null>(null);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [conversationId, setConversationId] = useState("");
+  const [resolvedApiKey, setResolvedApiKey] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [copiedConversationId, setCopiedConversationId] = useState(false);
 
-  const apiBase = `/api/v1/agents/${agentId}/conversations/$CONVERSATION_ID/runs`;
+  const conversationsUrl = `/api/v1/agents/${agentId}/conversations`;
+  const runsUrl = `${conversationsUrl}/${conversationId || "$CONVERSATION_ID"}/runs`;
+  // After a successful creation both placeholders resolve to real values.
+  const bearerKey = conversationId ? resolvedApiKey : "$AGENT_API_KEY";
+  // Same-origin after mount so the examples show this deployment's real URL;
+  // placeholder keeps server and first client render identical.
+  const [origin, setOrigin] = useState("");
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
+  const baseUrl = origin || "https://deerflow.example.com";
   const examples = useMemo(
     () => ({
-      sync: `curl --request POST "$DEER_FLOW_URL${apiBase}/wait" \\
-  --header "Authorization: Bearer $AGENT_API_KEY" \\
+      create: `curl --request POST "${baseUrl}${conversationsUrl}" \\
+  --header "Authorization: Bearer ${bearerKey}" \\
+  --header "Content-Type: application/json" \\
+  --data '{"metadata": {}}'`,
+      sync: `curl --request POST "${baseUrl}${runsUrl}/wait" \\
+  --header "Authorization: Bearer ${bearerKey}" \\
   --header "Content-Type: application/json" \\
   --data '{"message":"Summarize today’s incidents"}'`,
-      stream: `curl --no-buffer --request POST "$DEER_FLOW_URL${apiBase}/stream" \\
-  --header "Authorization: Bearer $AGENT_API_KEY" \\
+      stream: `curl --no-buffer --request POST "${baseUrl}${runsUrl}/stream" \\
+  --header "Authorization: Bearer ${bearerKey}" \\
   --header "Content-Type: application/json" \\
   --data '{"message":"Stream an incident report"}'`,
-      async: `curl --request POST "$DEER_FLOW_URL${apiBase}" \\
-  --header "Authorization: Bearer $AGENT_API_KEY" \\
+      async: `curl --request POST "${baseUrl}${runsUrl}" \\
+  --header "Authorization: Bearer ${bearerKey}" \\
   --header "Idempotency-Key: your-stable-request-id" \\
   --header "Content-Type: application/json" \\
   --data '{"message":"Start the analysis"}'`,
     }),
-    [apiBase],
+    [baseUrl, bearerKey, conversationsUrl, runsUrl],
   );
+
+  async function submitCreateConversation() {
+    const key = apiKeyInput.trim();
+    if (!key || creating) {
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await fetch(conversationsUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ metadata: {} }),
+      });
+      const body = res.headers.get("content-type")?.includes("application/json")
+        ? await res.json().catch(() => null)
+        : null;
+      if (!res.ok) {
+        const message =
+          (typeof body === "object" &&
+            body !== null &&
+            "error" in body &&
+            typeof (body as { error?: { message?: unknown } }).error?.message ===
+              "string" &&
+            (body as { error: { message: string } }).error.message) ||
+          `HTTP ${res.status}`;
+        toast.error(
+          `${t.publishedAgents.integrations.createConversationFailed}: ${message}`,
+        );
+        return;
+      }
+      const id =
+        typeof body === "object" &&
+        body !== null &&
+        "conversation_id" in body &&
+        typeof (body as { conversation_id?: unknown }).conversation_id ===
+          "string"
+          ? (body as { conversation_id: string }).conversation_id
+          : "";
+      if (!id) {
+        toast.error(t.publishedAgents.integrations.createConversationFailed);
+        return;
+      }
+      setConversationId(id);
+      setResolvedApiKey(key);
+      toast.success(t.publishedAgents.integrations.conversationCreated);
+    } catch (error) {
+      toast.error(
+        `${t.publishedAgents.integrations.createConversationFailed}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function copyConversationId() {
+    const ok = await copyTextToClipboard(conversationId);
+    if (!ok) {
+      toast.error(t.publishedAgents.integrations.copyKeyUnavailable);
+      return;
+    }
+    setCopiedConversationId(true);
+    window.setTimeout(() => setCopiedConversationId(false), 1_500);
+  }
 
   function closeCreate() {
     setCreateOpen(false);
@@ -332,9 +420,77 @@ export function ApiKeysPanel({
             </div>
           </div>
         </CardHeader>
-        <CardContent>
-          <Tabs defaultValue="sync">
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              value={apiKeyInput}
+              onChange={(event) => setApiKeyInput(event.target.value)}
+              placeholder={
+                t.publishedAgents.integrations.apiKeyPlaceholder
+              }
+              aria-label={t.publishedAgents.integrations.apiKeyPlaceholder}
+              className="font-mono"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  void submitCreateConversation();
+                }
+              }}
+            />
+            <Button
+              className="shrink-0"
+              disabled={!apiKeyInput.trim() || creating}
+              onClick={() => void submitCreateConversation()}
+            >
+              {creating ? (
+                <Loader2Icon className="animate-spin" />
+              ) : (
+                <PlusIcon />
+              )}
+              {t.publishedAgents.integrations.createConversation}
+            </Button>
+          </div>
+          {conversationId ? (
+            <div className="bg-muted/30 flex flex-wrap items-center gap-2 rounded-lg border p-3">
+              <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                conversation_id
+              </span>
+              <code className="min-w-0 flex-1 font-mono text-xs break-all">
+                {conversationId}
+              </code>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                aria-label={
+                  copiedConversationId
+                    ? t.publishedAgents.integrations.keyCopied
+                    : t.publishedAgents.integrations.copy
+                }
+                onClick={() => void copyConversationId()}
+              >
+                {copiedConversationId ? (
+                  <CheckIcon />
+                ) : (
+                  <ClipboardIcon />
+                )}
+                {copiedConversationId
+                  ? t.publishedAgents.integrations.keyCopied
+                  : t.publishedAgents.integrations.copy}
+              </Button>
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-xs leading-5">
+              {t.publishedAgents.integrations.conversationHint}
+            </p>
+          )}
+          <Tabs defaultValue="create">
             <TabsList>
+              <TabsTrigger value="create">
+                {t.publishedAgents.integrations.createConversation}
+              </TabsTrigger>
               <TabsTrigger value="sync">
                 {t.publishedAgents.integrations.sync}
               </TabsTrigger>
@@ -345,6 +501,12 @@ export function ApiKeysPanel({
                 {t.publishedAgents.integrations.async}
               </TabsTrigger>
             </TabsList>
+            <TabsContent value="create">
+              <ApiExample
+                title={t.publishedAgents.integrations.createConversation}
+                code={examples.create}
+              />
+            </TabsContent>
             <TabsContent value="sync">
               <ApiExample
                 title={t.publishedAgents.integrations.sync}

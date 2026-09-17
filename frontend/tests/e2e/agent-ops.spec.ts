@@ -227,3 +227,55 @@ test("shows inherited quota limits and saves a bounded owner override", async ({
   await page.getByRole("button", { name: "Save quota draft" }).click();
   await expect(page.getByText("Quota draft saved")).toBeVisible();
 });
+
+test("integration examples lead with conversation creation that captures conversation_id", async ({
+  page,
+}) => {
+  await mockOpsStudio(page);
+  await page.route("**/api/v1/agents/pa_ops/conversations", (route) =>
+    route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        conversation_id: "conv_e2e_1",
+        status: "active",
+        created_at: "2026-09-17T10:00:00Z",
+        updated_at: "2026-09-17T10:00:00Z",
+      }),
+    }),
+  );
+  await page.goto("/workspace/agents/pa_ops");
+  await page.getByRole("tab", { name: "Integrations" }).click();
+
+  // The create example is a single plain curl against this deployment's URL.
+  const createExample = page.getByLabel("Create conversation");
+  await expect(createExample).toBeVisible();
+  const code = await createExample.textContent();
+  expect(code).toContain(
+    `"${new URL(page.url()).origin}/api/v1/agents/pa_ops/conversations"`,
+  );
+  expect(code).toContain(`--data '{"metadata": {}}'`);
+  expect(code).not.toContain("CONVERSATION_ID=");
+  expect(code).not.toContain("$DEER_FLOW_URL");
+
+  // Before creation, run examples keep the placeholder.
+  await page.getByRole("tab", { name: "Synchronous" }).click();
+  const placeholderSync = await page
+    .getByLabel("Synchronous")
+    .textContent();
+  expect(placeholderSync).toContain(
+    "/api/v1/agents/pa_ops/conversations/$CONVERSATION_ID/runs/wait",
+  );
+
+  // Creating a conversation through the form replaces the placeholders.
+  await page
+    .getByLabel("Paste an Agent API key (starts with dfa_)")
+    .fill("dfa_e2e_key");
+  await page.getByRole("button", { name: "Create conversation" }).click();
+  await expect(page.getByText("conv_e2e_1")).toBeVisible();
+  const sync = await page.getByLabel("Synchronous").textContent();
+  expect(sync).toContain(
+    "/api/v1/agents/pa_ops/conversations/conv_e2e_1/runs/wait",
+  );
+  expect(sync).toContain('Authorization: Bearer dfa_e2e_key');
+});
