@@ -559,7 +559,14 @@ export const enUS: Translations = {
       delete: "Delete",
       apiExamplesTitle: "Stable API examples",
       apiExamplesDescription:
-        "These paths use the stable Agent ID and never expose an internal Release. Create a conversation first and set CONVERSATION_ID.",
+        "These paths use the stable Agent ID and this deployment's URL, and never expose an internal Release.",
+      createConversation: "Create conversation",
+      apiKeyPlaceholder: "Paste an Agent API key (starts with dfa_)",
+      createConversationFailed: "Failed to create conversation",
+      conversationCreated:
+        "Conversation created; examples now use its conversation_id and your API key",
+      conversationHint:
+        "Paste an Agent API key and click \"Create conversation\" — $CONVERSATION_ID and $AGENT_API_KEY in the examples are replaced with real values.",
       sync: "Synchronous",
       sse: "SSE stream",
       async: "Asynchronous",

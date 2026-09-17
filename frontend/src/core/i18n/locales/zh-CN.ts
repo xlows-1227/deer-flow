@@ -528,7 +528,14 @@ export const zhCN: Translations = {
       delete: "删除",
       apiExamplesTitle: "稳定 API 示例",
       apiExamplesDescription:
-        "这些路径使用稳定 Agent ID，绝不暴露内部 Release。请先创建 Conversation，并设置 CONVERSATION_ID。",
+        "这些路径使用稳定 Agent ID 和当前系统地址，绝不暴露内部 Release。",
+      createConversation: "创建对话",
+      apiKeyPlaceholder: "粘贴 Agent API Key（dfa_ 开头）",
+      createConversationFailed: "创建对话失败",
+      conversationCreated:
+        "对话已创建，示例中的 CONVERSATION_ID 与 API Key 已自动替换",
+      conversationHint:
+        "填入 Agent API Key 并点击“创建对话”，示例中的 $CONVERSATION_ID 与 $AGENT_API_KEY 将自动替换为真实值。",
       sync: "同步",
       sse: "SSE 流式",
       async: "异步",
