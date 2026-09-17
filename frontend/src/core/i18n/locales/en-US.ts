@@ -868,6 +868,7 @@ export const enUS: Translations = {
       skills: "Skills",
       notification: "Notification",
       userManagement: "User Management",
+      logViewer: "Logs",
       about: "About",
     },
     memory: {
@@ -1206,6 +1207,19 @@ export const enUS: Translations = {
       deleteSuccess: "User deleted",
       operationFailed: "Operation failed",
       empty: "No users",
+    },
+    logViewer: {
+      title: "Logs",
+      description:
+        "View backend (gateway.log) or frontend (frontend.log) log output.",
+      backend: "Backend",
+      frontend: "Frontend",
+      refresh: "Refresh",
+      loadError: "Failed to load logs",
+      empty: "No log content yet",
+      truncatedHint: "Log file is large; showing only the last 256 KB.",
+      sizeLabel: "Size",
+      pathLabel: "Path",
     },
   },
 };

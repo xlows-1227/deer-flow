@@ -828,6 +828,7 @@ export const zhCN: Translations = {
       skills: "技能",
       notification: "通知",
       userManagement: "用户管理",
+      logViewer: "日志查看",
       about: "关于",
     },
     memory: {
@@ -1152,6 +1153,18 @@ export const zhCN: Translations = {
       deleteSuccess: "用户已删除",
       operationFailed: "操作失败",
       empty: "暂无用户",
+    },
+    logViewer: {
+      title: "日志查看",
+      description: "查看后端（gateway.log）或前端（frontend.log）的日志输出。",
+      backend: "后端",
+      frontend: "前端",
+      refresh: "刷新",
+      loadError: "加载日志失败",
+      empty: "暂无日志内容",
+      truncatedHint: "日志文件较大，仅显示最后 256 KB。",
+      sizeLabel: "文件大小",
+      pathLabel: "路径",
     },
   },
 };

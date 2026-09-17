@@ -18,6 +18,7 @@ from app.gateway.effective_config_middleware import EffectiveConfigMiddleware
 from app.gateway.external.agent_auth import AgentAPIAuthMiddleware
 from app.gateway.external.audit import ExternalAuditMiddleware
 from app.gateway.routers import (
+    admin_logs,
     admin_users,
     agent_public_api,
     agents,
@@ -671,6 +672,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Admin user management (list / reset password / soft delete).
     # Mounted at /api/admin/users.
     app.include_router(admin_users.router)
+
+    # Admin log viewer (tail of gateway.log / frontend.log).
+    # Mounted at /api/admin/logs.
+    app.include_router(admin_logs.router)
 
     # Browser-session management API for External API Keys.
     app.include_router(api_keys.router)

@@ -669,6 +669,7 @@ export interface Translations {
       skills: string;
       notification: string;
       userManagement: string;
+      logViewer: string;
       about: string;
     };
     memory: {
@@ -974,6 +975,18 @@ export interface Translations {
       deleteSuccess: string;
       operationFailed: string;
       empty: string;
+    };
+    logViewer: {
+      title: string;
+      description: string;
+      backend: string;
+      frontend: string;
+      refresh: string;
+      loadError: string;
+      empty: string;
+      truncatedHint: string;
+      sizeLabel: string;
+      pathLabel: string;
     };
   };
 }
