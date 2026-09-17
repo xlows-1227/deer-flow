@@ -668,6 +668,7 @@ export interface Translations {
       tools: string;
       skills: string;
       notification: string;
+      userManagement: string;
       about: string;
     };
     memory: {
@@ -954,6 +955,25 @@ export interface Translations {
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
+    };
+    userManagement: {
+      title: string;
+      description: string;
+      emailColumn: string;
+      actionsColumn: string;
+      resetPassword: string;
+      deleteUser: string;
+      resetConfirmTitle: string;
+      resetConfirmBody: string;
+      deleteConfirmTitle: string;
+      deleteConfirmBody: string;
+      confirm: string;
+      cancel: string;
+      loadError: string;
+      resetSuccess: string;
+      deleteSuccess: string;
+      operationFailed: string;
+      empty: string;
     };
   };
 }

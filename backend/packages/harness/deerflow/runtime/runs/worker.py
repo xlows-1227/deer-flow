@@ -144,6 +144,15 @@ def _restore_english_spaces(text: str) -> str:
         r"|[\">][A-Za-z]"                 # quote or ">" directly followed by letter
         r"|[A-Za-z][\"]"                  # letter directly followed by quote (e.g. "word\"")
     )
+    # Damage already stored by earlier versions of this function: they
+    # appended one extra space after contraction suffixes on every pass
+    # ("Here's  some") and inserted a space between an opening quote and
+    # its word ('said " Hello').  Detected here so such text skips the
+    # fast path below and gets repaired in _repair_legacy_spacing.
+    _LEGACY_SPACING_RE = re.compile(
+        r"['\u2019](?:ll|re|ve|s|t|m|d)[ \t\u00a0]{2,}[A-Za-z]"
+        r'|(?:^|[\s(\[{<\u2014\u201c\u2018])["\u201c][ \u00a0]+[A-Za-z]'
+    )
     if " " in text.strip() and re.search(r"[A-Za-z]\s+[A-Za-z]", text):
         # Text already has letter-spaces-letter.  But still check for glued
         # punctuation, CamelCase, or long glue runs inside — "andHello" or
@@ -156,6 +165,7 @@ def _restore_english_spaces(text: str) -> str:
             or re.search(r"[A-Za-z][.?!,;:\">][A-Za-z\"']", text)  # letter-punct-glue
             or re.search(r'[">][A-Za-z]', text)            # quote/-letter glue
             or re.search(r"[A-Za-z]{8,}", text)            # long glue run (≥8 chars)
+            or _LEGACY_SPACING_RE.search(text)             # legacy over-spacing damage
         ):
             return text
     else:
@@ -1193,8 +1203,15 @@ def _restore_english_spaces(text: str) -> str:
                         else:
                             parts.append(before)
                         parts.append("'" + matched_sfx)
-                        # Insert boundary marker
-                        parts.append("\u200b")
+                        # Insert boundary marker — but only when more
+                        # letters follow inside the same run (glued
+                        # continuation such as "I'lladjustforyou").  When
+                        # the run ends at the contraction the next char is
+                        # already a separator, and the marker would become
+                        # a spurious extra space next to it ("Here's some"
+                        # grew double spaces because of this).
+                        if sfx_end < raw_n:
+                            parts.append("\u200b")
                         sub_i = sfx_end
                         continue
                 else:
@@ -1229,12 +1246,46 @@ def _restore_english_spaces(text: str) -> str:
                         ):
                             parts.append("\u200b")
                     elif ch in _SPACE_AFTER_PUNCT:
-                        if nxt.isalpha() or nxt in ('"', "'"):
+                        # Split between punctuation and a following quote
+                        # only when the quote OPENS a word glued right
+                        # after it (you:"Everyday).  A closing quote glued
+                        # to sentence punctuation (there!" she) is correct
+                        # English and must stay attached.
+                        if nxt.isalpha() or (
+                            nxt in ('"', "'")
+                            and i + 2 < n
+                            and plain[i + 2].isalpha()
+                        ):
                             parts.append("\u200b")
                 i += 1
-        # Remove the zero-width markers that survived (they're visual noise)
-        return "".join(parts).replace("\u200b", " ")
+        # Remove the zero-width markers.  A marker sitting next to real
+        # whitespace must be dropped instead of becoming a second space —
+        # otherwise already-spaced text ("Here's some") grows a double
+        # space, and because restoration runs at BOTH write time
+        # (_clean_model_text) and read time (message_patch), each pass
+        # would add one more space.
+        text = "".join(parts)
+        text = re.sub(r"\u200b(?=\s)|(?<=\s)\u200b", "", text)
+        return text.replace("\u200b", " ")
 
+
+    def _repair_legacy_spacing(chunk: str) -> str:
+        # Undo the over-spacing stored by earlier versions (see
+        # _LEGACY_SPACING_RE above): collapse runs of spaces after a
+        # contraction suffix back to one, and re-attach a word to its
+        # opening quote.  Only spaces/tabs are touched, so paragraph
+        # breaks and markdown hard line breaks survive.
+        chunk = re.sub(
+            r"(['\u2019](?:ll|re|ve|s|t|m|d))[ \t\u00a0]{2,}(?=[A-Za-z])",
+            r"\1 ",
+            chunk,
+        )
+        chunk = re.sub(
+            r'(^|[\s(\[{<\u2014\u201c\u2018])(["\u201c])[ \u00a0]+(?=[A-Za-z])',
+            r"\1\2",
+            chunk,
+        )
+        return chunk
 
     # Process segments
     out: list[str] = []
@@ -1242,24 +1293,34 @@ def _restore_english_spaces(text: str) -> str:
         if is_protected:
             out.append(chunk)
         else:
-            out.append(_split_plain(chunk))
+            out.append(_repair_legacy_spacing(_split_plain(chunk)))
     final_text = "".join(out)
 
     # Post-process: ensure space after common quote/punct patterns that
     # the Latin splitter never sees because they're not pure letters.
-    # Examples: '">What' -> '"> What', '"Hello' -> '" Hello'.
+    # Examples: '">What' -> '"> What', 'end."Anda' -> 'end." And a'.
     # NOTE: intentionally omit '.' from the punct class — dot-after-letter
     # commonly appears in URLs (.baidu, .com), abbreviations (U.S.A., Mr.),
     # and file extensions (.pdf); adding a space there would break those.
     # Protected segments (code, URLs, markdown links) are already passed
     # through unchanged.
-    # NOTE: char class below is ONLY [">] (quote + angle-bracket).
-    # We intentionally EXCLUDE '.' — dot-after-letter commonly appears
-    # in URLs (.baidu, .com), abbreviations (U.S.A., Mr.), and file
-    # extensions (.pdf); adding a space there would break those.
-    # Protected segments (code, URLs, markdown links) already pass through.
-    final_text = re.sub(r'([">])([A-Za-z])', r'\1 \2', final_text)
-    final_text = re.sub(r'([A-Za-z])(")', r'\1 \2', final_text)
+    # The quote rules are position-aware so repeated passes (write-time
+    # clean plus read-time patch) cannot compound:
+    #   * letter + '"' + UPPERCASE letter — the quote OPENS a quoted phrase
+    #     glued to the previous word: 'said"Hello' -> 'said "Hello'.
+    #   * '"' or '>' glued directly after a word/digit/punctuation and
+    #     followed by a letter is in CLOSING position: 'end."And',
+    #     'end">What' -> split after it.
+    # An OPENING quote attached to its word ('"Hello' at start of text or
+    # after whitespace/an opening bracket) is correct English and must
+    # stay attached — the old unconditional rules turned it into
+    # '" Hello' on every pass.
+    final_text = re.sub(r'([A-Za-z])"(?=[A-Z])', r'\1 "', final_text)
+    final_text = re.sub(
+        r'(?<=[A-Za-z0-9.,!?;:)\]}"' + "'”’…])([\">])(?=[A-Za-z])",
+        r"\1 ",
+        final_text,
+    )
 
     return final_text
 

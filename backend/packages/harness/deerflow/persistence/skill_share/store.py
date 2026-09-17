@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.skill_share.model import SkillShareRow
@@ -132,3 +132,42 @@ class SkillShareRepository:
                 session.add(row)
             await session.commit()
         return len(sharee_user_ids)
+
+    async def transfer_ownership(self, *, from_user_id: str, to_user_id: str) -> int:
+        """Reassign all share grants from one owner to another.
+
+        Used by the admin user-deletion flow so a soft-deleted account's
+        share rows don't end up orphaned alongside its on-disk skill
+        ownership. Deletes any pre-existing grants on the target owner
+        with the same ``(skill_name, shared_with_user_id)`` pair first,
+        so the ``uq_skill_shares_grant`` unique constraint cannot reject
+        the update. Returns the number of rows moved.
+        """
+        if not from_user_id or not to_user_id or from_user_id == to_user_id:
+            return 0
+        async with self._sf() as session:
+            # Drop grants the target owner already holds for the same
+            # (skill_name, sharee) pairs to avoid unique-constraint
+            # violations on the subsequent UPDATE.
+            dup_del = delete(SkillShareRow).where(
+                SkillShareRow.owner_user_id == from_user_id,
+                SkillShareRow.skill_name.in_(
+                    select(SkillShareRow.skill_name).where(
+                        SkillShareRow.owner_user_id == to_user_id,
+                    )
+                ),
+                SkillShareRow.shared_with_user_id.in_(
+                    select(SkillShareRow.shared_with_user_id).where(
+                        SkillShareRow.owner_user_id == to_user_id,
+                    )
+                ),
+            )
+            await session.execute(dup_del)
+            stmt = (
+                update(SkillShareRow)
+                .where(SkillShareRow.owner_user_id == from_user_id)
+                .values(owner_user_id=to_user_id)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount or 0

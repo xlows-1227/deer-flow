@@ -48,6 +48,13 @@ class UserRow(Base):
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
+    # Soft-delete lifecycle: admin "delete user" marks the row instead of
+    # dropping it so historical references (skill shares, thread ownership)
+    # stay resolvable.  Deleted accounts cannot log in and are excluded
+    # from user listings and share pickers.
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     __table_args__ = (
         Index(
             "idx_users_oauth_identity",

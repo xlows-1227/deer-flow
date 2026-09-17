@@ -157,6 +157,12 @@ class LdapAuthProvider(AuthProvider):
             logger.info("LDAP auth succeeded for %r but no local registration exists", username)
             return None
 
+        if existing.deleted:
+            # Soft-deleted accounts can never authenticate, even when the
+            # directory bind itself succeeded.
+            logger.info("LDAP auth succeeded for %r but the account is soft-deleted", username)
+            return None
+
         email = self._pick_email(username, attrs)
         desired = email
         if desired and desired.lower() != existing.email.lower():

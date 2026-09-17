@@ -867,6 +867,7 @@ export const enUS: Translations = {
       tools: "Tools",
       skills: "Skills",
       notification: "Notification",
+      userManagement: "User Management",
       about: "About",
     },
     memory: {
@@ -1183,6 +1184,28 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+    userManagement: {
+      title: "User Management",
+      description:
+        "Manage system user accounts: reset passwords or delete users.",
+      emailColumn: "Email",
+      actionsColumn: "Actions",
+      resetPassword: "Reset Password",
+      deleteUser: "Delete User",
+      resetConfirmTitle: "Confirm Password Reset",
+      resetConfirmBody:
+        "The password will be reset to \"{value}\". Confirm?",
+      deleteConfirmTitle: "Confirm User Deletion",
+      deleteConfirmBody:
+        "Are you sure you want to delete user {email}? This action cannot be undone; any skills they own will be reassigned to the first system admin.",
+      confirm: "Confirm",
+      cancel: "Cancel",
+      loadError: "Failed to load user list",
+      resetSuccess: "Password has been reset",
+      deleteSuccess: "User deleted",
+      operationFailed: "Operation failed",
+      empty: "No users",
     },
   },
 };

@@ -827,6 +827,7 @@ export const zhCN: Translations = {
       tools: "工具",
       skills: "技能",
       notification: "通知",
+      userManagement: "用户管理",
       about: "关于",
     },
     memory: {
@@ -1132,6 +1133,25 @@ export const zhCN: Translations = {
     acknowledge: {
       emptyTitle: "致谢",
       emptyDescription: "相关的致谢信息会展示在这里。",
+    },
+    userManagement: {
+      title: "用户管理",
+      description: "管理系统用户账号：重置密码或删除用户。",
+      emailColumn: "账号",
+      actionsColumn: "操作",
+      resetPassword: "重置密码",
+      deleteUser: "删除用户",
+      resetConfirmTitle: "确认重置密码",
+      resetConfirmBody: "密码将重置为「{value}」，是否确认？",
+      deleteConfirmTitle: "确认删除用户",
+      deleteConfirmBody: "是否确认删除用户 {email}？此操作不可恢复，其名下技能将转交给系统首个 admin。",
+      confirm: "确认",
+      cancel: "取消",
+      loadError: "加载用户列表失败",
+      resetSuccess: "密码已重置",
+      deleteSuccess: "用户已删除",
+      operationFailed: "操作失败",
+      empty: "暂无用户",
     },
   },
 };
