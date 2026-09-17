@@ -7,6 +7,7 @@ import {
   DatabaseIcon,
   PaletteIcon,
   PlugIcon,
+  ScrollTextIcon,
   SparklesIcon,
   UserIcon,
   UsersIcon,
@@ -28,6 +29,7 @@ import { ModelSettingsPage } from "@/components/workspace/settings/model-setting
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
+import { LogViewerSettingsPage } from "@/components/workspace/settings/log-viewer-settings-page";
 import { UserManagementSettingsPage } from "@/components/workspace/settings/user-management-settings-page";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { isAdminUser } from "@/core/auth/types";
@@ -43,7 +45,8 @@ type SettingsSection =
   | "tools"
   | "skills"
   | "notification"
-  | "userManagement";
+  | "userManagement"
+  | "logViewer";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
@@ -126,6 +129,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
           label: t.settings.sections.userManagement,
           icon: UsersIcon,
         });
+        base.push({
+          id: "logViewer",
+          label: t.settings.sections.logViewer,
+          icon: ScrollTextIcon,
+        });
       }
       return base;
     },
@@ -139,6 +147,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.skills,
       t.settings.sections.notification,
       t.settings.sections.userManagement,
+      t.settings.sections.logViewer,
       isAdmin,
     ],
   );
@@ -211,6 +220,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "userManagement" && isAdmin && (
                 <UserManagementSettingsPage />
+              )}
+              {activeSection === "logViewer" && isAdmin && (
+                <LogViewerSettingsPage />
               )}
             </div>
           </ScrollArea>
