@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -27,9 +28,14 @@ type ConfirmAction =
   | { type: "delete"; user: AdminUserItem }
   | null;
 
+const PAGE_SIZE = 20;
+
 export function UserManagementSettingsPage() {
   const { t } = useI18n();
   const [users, setUsers] = useState<AdminUserItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
   const [resetPasswordValue, setResetPasswordValue] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
@@ -37,31 +43,53 @@ export function UserManagementSettingsPage() {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
 
+  // Debounced search: hold the latest input in a ref, fire after 300ms idle.
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleSearchChange = useCallback((value: string) => {
+    setSearch(value);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      setPage(1);
+    }, 300);
+  }, []);
+
   const loadUsers = useCallback(async () => {
     setLoading(true);
     setError("");
+    const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) });
+    if (search.trim()) params.set("search", search.trim());
     try {
       const [listRes, configRes] = await Promise.all([
-        fetch("/api/admin/users"),
+        fetch(`/api/admin/users?${params.toString()}`),
         fetch("/api/admin/users/reset-password-config"),
       ]);
       if (!listRes.ok || !configRes.ok) {
         throw new Error("Failed to load");
       }
-      const listBody = (await listRes.json()) as { users: AdminUserItem[] };
+      const listBody = (await listRes.json()) as { users: AdminUserItem[]; total: number };
       const configBody = (await configRes.json()) as { value: string };
       setUsers(listBody.users ?? []);
+      setTotal(listBody.total ?? 0);
       setResetPasswordValue(configBody.value ?? "");
     } catch {
       setError(t.settings.userManagement.loadError);
     } finally {
       setLoading(false);
     }
-  }, [t.settings.userManagement.loadError]);
+  }, [page, search, t.settings.userManagement.loadError]);
 
   useEffect(() => {
     void loadUsers();
   }, [loadUsers]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, []);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const handleConfirm = async () => {
     if (!confirmAction) return;
@@ -80,9 +108,8 @@ export function UserManagementSettingsPage() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        const detail =
-          (body && (body.detail || body.message)) ||
-          t.settings.userManagement.operationFailed;
+        // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+        const detail = (body && (body.detail || body.message)) || t.settings.userManagement.operationFailed;
         setError(typeof detail === "string" ? detail : t.settings.userManagement.operationFailed);
         return;
       }
@@ -123,61 +150,104 @@ export function UserManagementSettingsPage() {
         {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
         {message && <p className="mb-3 text-sm text-green-500">{message}</p>}
 
+        {/* Search bar */}
+        <div className="mb-3 flex items-center gap-2">
+          <Input
+            type="text"
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            placeholder={t.settings.userManagement.searchPlaceholder}
+            className="max-w-xs"
+          />
+        </div>
+
         {loading ? (
           <p className="text-muted-foreground text-sm">
             {t.common.loading}...
           </p>
         ) : users.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            {t.settings.userManagement.empty}
+            {search.trim() ? t.settings.userManagement.noResults : t.settings.userManagement.empty}
           </p>
         ) : (
-          <div className="overflow-hidden rounded-lg border">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/50">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">
-                    {t.settings.userManagement.emailColumn}
-                  </th>
-                  <th className="px-3 py-2 text-right font-medium">
-                    {t.settings.userManagement.actionsColumn}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((user) => (
-                  <tr key={user.id} className="border-t">
-                    <td className="px-3 py-2 align-middle">{user.email}</td>
-                    <td className="px-3 py-2 text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            setConfirmAction({ type: "reset", user })
-                          }
-                        >
-                          {t.settings.userManagement.resetPassword}
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="text-red-600 hover:bg-red-50 hover:text-red-700"
-                          onClick={() =>
-                            setConfirmAction({ type: "delete", user })
-                          }
-                        >
-                          {t.settings.userManagement.deleteUser}
-                        </Button>
-                      </div>
-                    </td>
+          <>
+            <div className="overflow-hidden rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">
+                      {t.settings.userManagement.emailColumn}
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      {t.settings.userManagement.actionsColumn}
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {users.map((user) => (
+                    <tr key={user.id} className="border-t">
+                      <td className="px-3 py-2 align-middle">{user.email}</td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              setConfirmAction({ type: "reset", user })
+                            }
+                          >
+                            {t.settings.userManagement.resetPassword}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                            onClick={() =>
+                              setConfirmAction({ type: "delete", user })
+                            }
+                          >
+                            {t.settings.userManagement.deleteUser}
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            <div className="mt-3 flex items-center justify-between">
+              <span className="text-muted-foreground text-xs">
+                {t.settings.userManagement.pageOf
+                  .replace("{current}", String(page))
+                  .replace("{total}", String(totalPages))
+                  .replace("{count}", String(total))}
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={page <= 1 || loading}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  {t.settings.userManagement.prevPage}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={page >= totalPages || loading}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  {t.settings.userManagement.nextPage}
+                </Button>
+              </div>
+            </div>
+          </>
         )}
       </SettingsSection>
 

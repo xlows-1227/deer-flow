@@ -114,6 +114,20 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def list_users_paginated(
+        self,
+        *,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[User], int]:
+        """Return a page of active users matching ``search`` (email ilike).
+
+        Returns ``(users, total)`` so callers can render pagination metadata.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def soft_delete_user(self, user_id: str) -> User | None:
         """Mark a user as soft-deleted (deleted=True, deleted_at=now).
 

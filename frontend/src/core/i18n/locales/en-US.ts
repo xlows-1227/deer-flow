@@ -1207,6 +1207,11 @@ export const enUS: Translations = {
       deleteSuccess: "User deleted",
       operationFailed: "Operation failed",
       empty: "No users",
+      searchPlaceholder: "Search account…",
+      prevPage: "Previous",
+      nextPage: "Next",
+      pageOf: "Page {current} / {total} ({count} total)",
+      noResults: "No matching users",
     },
     logViewer: {
       title: "Logs",
