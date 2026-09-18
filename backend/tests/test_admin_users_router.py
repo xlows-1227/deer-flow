@@ -284,6 +284,47 @@ async def test_skill_share_repo_transfer_ownership_moves_rows(user_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_transfer_ownership_cross_overlap_not_false_positive(user_env) -> None:
+    """Cross-overlapping (skill, sharee) pairs must not be false-positive deleted.
+
+    Before the fix, ``transfer_ownership`` used two independent ``IN``
+    subqueries — one for ``skill_name``, one for ``shared_with_user_id``.
+    When source and target owners each hold grants whose skill and sharee
+    individually overlap but whose full (skill, sharee) combination does
+    not conflict, the old code deleted all source grants instead of
+    transferring them.
+    """
+    share_repo = SkillShareRepository(
+        __import__("deerflow.persistence.engine", fromlist=["get_session_factory"]).get_session_factory()
+    )
+    provider = get_local_provider()
+    carol = await provider.create_user("carol@example.com", "carol-pw-123")
+    admin_id = str(user_env.admin.id)
+    alice_id = str(user_env.alice.id)
+    bob_id = str(user_env.bob.id)
+    carol_id = str(carol.id)
+
+    # Target (admin) already holds (skillA→bob, skillB→carol).
+    await share_repo.replace_sharees(skill_name="skillA", owner_user_id=admin_id, sharee_user_ids={bob_id})
+    await share_repo.replace_sharees(skill_name="skillB", owner_user_id=admin_id, sharee_user_ids={carol_id})
+    # Source (alice) holds (skillA→carol, skillB→bob) — different combos,
+    # no true conflict.
+    await share_repo.replace_sharees(skill_name="skillA", owner_user_id=alice_id, sharee_user_ids={carol_id})
+    await share_repo.replace_sharees(skill_name="skillB", owner_user_id=alice_id, sharee_user_ids={bob_id})
+
+    moved = await share_repo.transfer_ownership(from_user_id=alice_id, to_user_id=admin_id)
+    # Both grants must be moved (no false-positive deletion).
+    assert moved == 2
+    # Admin should now hold all four distinct grants.
+    skill_a_rows = await share_repo.list_sharees_for_skill("skillA")
+    skill_b_rows = await share_repo.list_sharees_for_skill("skillB")
+    assert {r.shared_with_user_id for r in skill_a_rows} == {bob_id, carol_id}
+    assert {r.shared_with_user_id for r in skill_b_rows} == {bob_id, carol_id}
+    # All rows now belong to admin.
+    assert all(r.owner_user_id == admin_id for r in skill_a_rows + skill_b_rows)
+
+
+@pytest.mark.asyncio
 async def test_transfer_custom_skill_ownership_rewrites_owner_files(user_env, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """_transfer_custom_skill_ownership rewrites on-disk .owners/<name>.json."""
     import json

@@ -138,36 +138,39 @@ class SkillShareRepository:
 
         Used by the admin user-deletion flow so a soft-deleted account's
         share rows don't end up orphaned alongside its on-disk skill
-        ownership. Deletes any pre-existing grants on the target owner
-        with the same ``(skill_name, shared_with_user_id)`` pair first,
-        so the ``uq_skill_shares_grant`` unique constraint cannot reject
-        the update. Returns the number of rows moved.
+        ownership. Drops any pre-existing grants on the target owner with
+        the same ``(skill_name, shared_with_user_id)`` pair first, so the
+        ``uq_skill_shares_grant`` unique constraint cannot reject the
+        update. Returns the number of rows moved.
         """
         if not from_user_id or not to_user_id or from_user_id == to_user_id:
             return 0
         async with self._sf() as session:
-            # Drop grants the target owner already holds for the same
-            # (skill_name, sharee) pairs to avoid unique-constraint
-            # violations on the subsequent UPDATE.
-            dup_del = delete(SkillShareRow).where(
-                SkillShareRow.owner_user_id == from_user_id,
-                SkillShareRow.skill_name.in_(
-                    select(SkillShareRow.skill_name).where(
-                        SkillShareRow.owner_user_id == to_user_id,
-                    )
-                ),
-                SkillShareRow.shared_with_user_id.in_(
-                    select(SkillShareRow.shared_with_user_id).where(
-                        SkillShareRow.owner_user_id == to_user_id,
-                    )
-                ),
+            # Match on the full composite key in Python: SQLite does not
+            # support row-value ``IN`` subqueries, and two independent
+            # ``IN`` subqueries would over-match (deleting grants whose
+            # skill and sharee individually overlap but whose combination
+            # does not actually conflict). Share-grant volume is small
+            # (tens to low hundreds of rows), so loading into memory is fine.
+            to_pairs_result = await session.execute(
+                select(SkillShareRow.skill_name, SkillShareRow.shared_with_user_id).where(
+                    SkillShareRow.owner_user_id == to_user_id
+                )
             )
-            await session.execute(dup_del)
-            stmt = (
-                update(SkillShareRow)
-                .where(SkillShareRow.owner_user_id == from_user_id)
-                .values(owner_user_id=to_user_id)
+            to_pairs: set[tuple[str, str]] = set(to_pairs_result.all())
+
+            from_rows_result = await session.execute(
+                select(SkillShareRow).where(SkillShareRow.owner_user_id == from_user_id)
             )
-            result = await session.execute(stmt)
+            from_rows = list(from_rows_result.scalars().all())
+
+            moved = 0
+            for row in from_rows:
+                if (row.skill_name, row.shared_with_user_id) in to_pairs:
+                    # Target already holds this exact grant — drop it.
+                    await session.delete(row)
+                else:
+                    row.owner_user_id = to_user_id
+                    moved += 1
             await session.commit()
-            return result.rowcount or 0
+            return moved
