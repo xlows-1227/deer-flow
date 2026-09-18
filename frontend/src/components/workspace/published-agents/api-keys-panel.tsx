@@ -26,8 +26,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
+import { cn } from "@/lib/utils";
 import {
   useAgentKeys,
   useCreateAgentKey,
@@ -64,7 +64,17 @@ function KeyStatusBadge({ keyStatus }: { keyStatus: AgentApiKey["status"] }) {
   );
 }
 
-function ApiExample({ title, code }: { title: string; code: string }) {
+function ApiExample({
+  title,
+  code,
+  method,
+  path,
+}: {
+  title: string;
+  code: string;
+  method: string;
+  path: string;
+}) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
 
@@ -79,22 +89,37 @@ function ApiExample({ title, code }: { title: string; code: string }) {
   }
 
   return (
-    <div className="relative">
+    <div className="overflow-hidden rounded-lg border">
+      {/* Header bar: HTTP method badge + endpoint path + copy button */}
+      <div className="flex items-center justify-between gap-2 border-b bg-muted/40 px-4 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-blue-700 uppercase dark:bg-blue-900 dark:text-blue-300">
+            {method}
+          </span>
+          <code
+            className="truncate font-mono text-xs text-muted-foreground"
+            title={path}
+          >
+            {path}
+          </code>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+          aria-label={t.publishedAgents.integrations.copyExample}
+          onClick={() => void copy()}
+        >
+          {copied ? <CheckIcon /> : <ClipboardIcon />}
+        </Button>
+      </div>
+      {/* Code block: light theme matching the app */}
       <pre
         aria-label={title}
-        className="max-h-72 overflow-auto rounded-lg border bg-zinc-950 p-4 pr-12 font-mono text-xs leading-5 text-zinc-100"
+        className="max-h-72 overflow-auto bg-muted/20 p-4 font-mono text-xs leading-5 text-foreground"
       >
         {code}
       </pre>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className="absolute top-2 right-2 text-zinc-300 hover:bg-zinc-800 hover:text-white"
-        aria-label={t.publishedAgents.integrations.copyExample}
-        onClick={() => void copy()}
-      >
-        {copied ? <CheckIcon /> : <ClipboardIcon />}
-      </Button>
     </div>
   );
 }
@@ -123,6 +148,9 @@ export function ApiKeysPanel({
   const [resolvedApiKey, setResolvedApiKey] = useState("");
   const [creating, setCreating] = useState(false);
   const [copiedConversationId, setCopiedConversationId] = useState(false);
+  const [activeExample, setActiveExample] = useState<
+    "create" | "sync" | "stream" | "async"
+  >("create");
 
   const conversationsUrl = `/api/v1/agents/${agentId}/conversations`;
   const runsUrl = `${conversationsUrl}/${conversationId || "$CONVERSATION_ID"}/runs`;
@@ -486,46 +514,94 @@ export function ApiKeysPanel({
               {t.publishedAgents.integrations.conversationHint}
             </p>
           )}
-          <Tabs defaultValue="create">
-            <TabsList>
-              <TabsTrigger value="create">
-                {t.publishedAgents.integrations.createConversation}
-              </TabsTrigger>
-              <TabsTrigger value="sync">
-                {t.publishedAgents.integrations.sync}
-              </TabsTrigger>
-              <TabsTrigger value="stream">
-                {t.publishedAgents.integrations.sse}
-              </TabsTrigger>
-              <TabsTrigger value="async">
-                {t.publishedAgents.integrations.async}
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="create">
-              <ApiExample
-                title={t.publishedAgents.integrations.createConversation}
-                code={examples.create}
-              />
-            </TabsContent>
-            <TabsContent value="sync">
-              <ApiExample
-                title={t.publishedAgents.integrations.sync}
-                code={examples.sync}
-              />
-            </TabsContent>
-            <TabsContent value="stream">
-              <ApiExample
-                title={t.publishedAgents.integrations.sse}
-                code={examples.stream}
-              />
-            </TabsContent>
-            <TabsContent value="async">
-              <ApiExample
-                title={t.publishedAgents.integrations.async}
-                code={examples.async}
-              />
-            </TabsContent>
-          </Tabs>
+          {/* Example selector: pill buttons with HTTP method badges */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  {
+                    id: "create" as const,
+                    label: t.publishedAgents.integrations.createConversation,
+                    method: "POST",
+                    path: conversationsUrl,
+                  },
+                  {
+                    id: "sync" as const,
+                    label: t.publishedAgents.integrations.sync,
+                    method: "POST",
+                    path: `${runsUrl}/wait`,
+                  },
+                  {
+                    id: "stream" as const,
+                    label: t.publishedAgents.integrations.sse,
+                    method: "POST",
+                    path: `${runsUrl}/stream`,
+                  },
+                  {
+                    id: "async" as const,
+                    label: t.publishedAgents.integrations.async,
+                    method: "POST",
+                    path: runsUrl,
+                  },
+                ]
+              ).map((meta) => {
+                const isActive = activeExample === meta.id;
+                return (
+                  <button
+                    key={meta.id}
+                    type="button"
+                    onClick={() => setActiveExample(meta.id)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                      isActive
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "rounded px-1 py-0.5 text-[10px] font-bold tracking-wide uppercase",
+                        isActive
+                          ? "bg-primary-foreground/20 text-primary-foreground"
+                          : "bg-muted text-muted-foreground",
+                      )}
+                    >
+                      {meta.method}
+                    </span>
+                    {meta.label}
+                  </button>
+                );
+              })}
+            </div>
+            {(() => {
+              const meta = {
+                create: {
+                  label: t.publishedAgents.integrations.createConversation,
+                  path: conversationsUrl,
+                },
+                sync: {
+                  label: t.publishedAgents.integrations.sync,
+                  path: `${runsUrl}/wait`,
+                },
+                stream: {
+                  label: t.publishedAgents.integrations.sse,
+                  path: `${runsUrl}/stream`,
+                },
+                async: {
+                  label: t.publishedAgents.integrations.async,
+                  path: runsUrl,
+                },
+              }[activeExample];
+              return (
+                <ApiExample
+                  title={meta.label}
+                  code={examples[activeExample]}
+                  method="POST"
+                  path={meta.path}
+                />
+              );
+            })()}
+          </div>
         </CardContent>
       </Card>
 
