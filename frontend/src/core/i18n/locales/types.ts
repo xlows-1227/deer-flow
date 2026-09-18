@@ -975,6 +975,12 @@ export interface Translations {
       deleteSuccess: string;
       operationFailed: string;
       empty: string;
+      searchPlaceholder: string;
+      prevPage: string;
+      nextPage: string;
+      pageOf: string;
+      noResults: string;
+      cannotDeleteSelf: string;
     };
     logViewer: {
       title: string;

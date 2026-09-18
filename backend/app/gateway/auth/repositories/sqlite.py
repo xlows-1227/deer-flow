@@ -159,6 +159,32 @@ class SQLiteUserRepository(UserRepository):
             rows = result.scalars().all()
             return [self._row_to_user(row) for row in rows]
 
+    async def list_users_paginated(
+        self,
+        *,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[User], int]:
+        """Return a page of active users matching ``search`` (email ilike).
+
+        Returns ``(users, total)`` so callers can render pagination metadata.
+        ``page`` is 1-indexed; ``page_size`` is clamped to [1, 200].
+        """
+        page = max(1, page)
+        page_size = max(1, min(200, page_size))
+        conditions = [UserRow.deleted.is_(False)]
+        if search:
+            conditions.append(UserRow.email.ilike(f"%{search}%"))
+        base = select(UserRow).where(*conditions)
+        count_stmt = select(func.count()).select_from(base.subquery())
+        list_stmt = base.order_by(UserRow.email.asc()).limit(page_size).offset((page - 1) * page_size)
+        async with self._sf() as session:
+            total = await session.scalar(count_stmt) or 0
+            result = await session.execute(list_stmt)
+            rows = result.scalars().all()
+            return [self._row_to_user(row) for row in rows], total
+
     async def soft_delete_user(self, user_id: str) -> User | None:
         async with self._sf() as session:
             row = await session.get(UserRow, user_id)

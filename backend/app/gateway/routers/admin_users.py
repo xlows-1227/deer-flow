@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.auth.config import get_auth_config
@@ -38,6 +38,9 @@ class AdminUserItemResponse(BaseModel):
 
 class AdminUsersListResponse(BaseModel):
     users: list[AdminUserItemResponse]
+    total: int = Field(..., description="Total active users matching the search filter")
+    page: int = Field(..., description="Current page number (1-indexed)")
+    page_size: int = Field(..., description="Page size used for this response")
 
 
 class ResetPasswordConfigResponse(BaseModel):
@@ -61,14 +64,26 @@ async def _require_admin_user(
     "",
     response_model=AdminUsersListResponse,
     summary="List User Accounts (admin)",
-    description="Return all active (non-deleted) accounts ordered by email. Admin only.",
+    description="Return active (non-deleted) accounts ordered by email, with optional email search and pagination. Admin only.",
 )
 async def list_admin_users(
     admin: User = Depends(_require_admin_user),
+    search: str | None = Query(default=None, description="Email substring filter (case-insensitive ilike)"),
+    page: int = Query(default=1, ge=1, description="Page number, 1-indexed"),
+    page_size: int = Query(default=20, ge=1, le=200, description="Page size, 1-200"),
 ) -> AdminUsersListResponse:
     provider = get_local_provider()
-    users = await provider.repository.list_users()
-    return AdminUsersListResponse(users=[AdminUserItemResponse(id=str(u.id), email=str(u.email), system_role=u.system_role) for u in users])
+    users, total = await provider.repository.list_users_paginated(
+        search=search,
+        page=page,
+        page_size=page_size,
+    )
+    return AdminUsersListResponse(
+        users=[AdminUserItemResponse(id=str(u.id), email=str(u.email), system_role=u.system_role) for u in users],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get(

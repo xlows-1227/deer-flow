@@ -1153,6 +1153,12 @@ export const zhCN: Translations = {
       deleteSuccess: "用户已删除",
       operationFailed: "操作失败",
       empty: "暂无用户",
+      searchPlaceholder: "搜索账号…",
+      prevPage: "上一页",
+      nextPage: "下一页",
+      pageOf: "第 {current} / {total} 页（共 {count} 条）",
+      noResults: "无匹配用户",
+      cannotDeleteSelf: "不能删除当前登录账号",
     },
     logViewer: {
       title: "日志查看",
