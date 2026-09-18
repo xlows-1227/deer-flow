@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -32,9 +33,15 @@ const PAGE_SIZE = 20;
 
 export function UserManagementSettingsPage() {
   const { t } = useI18n();
+  const { user: currentUser } = useAuth();
   const [users, setUsers] = useState<AdminUserItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  // `searchInput` is the value bound to the input box; `search` is the
+  // value actually sent to the backend. They only sync when the user
+  // explicitly submits (click button or press Enter), so typing no longer
+  // fires a request per keystroke.
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [resetPasswordValue, setResetPasswordValue] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
@@ -82,14 +89,21 @@ export function UserManagementSettingsPage() {
     void loadUsers();
   }, [loadUsers]);
 
-  // Cleanup debounce timer on unmount
-  useEffect(() => {
-    return () => {
-      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
-    };
-  }, []);
-
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // Manual search submit: only fire a request when the user clicks the
+  // search button or presses Enter inside the input box.
+  const handleSearchSubmit = useCallback(() => {
+    const next = searchInput.trim();
+    if (next === search) {
+      // Same query — if user edited it back to the original, still reset
+      // to page 1 so they see the first page of the same filter.
+      if (page !== 1) setPage(1);
+      return;
+    }
+    setSearch(next);
+    if (page !== 1) setPage(1);
+  }, [searchInput, search, page]);
 
   const handleConfirm = async () => {
     if (!confirmAction) return;
@@ -150,15 +164,30 @@ export function UserManagementSettingsPage() {
         {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
         {message && <p className="mb-3 text-sm text-green-500">{message}</p>}
 
-        {/* Search bar */}
+        {/* Search bar — manual submit (button or Enter) to avoid a
+            request per keystroke under heavy load. */}
         <div className="mb-3 flex items-center gap-2">
           <Input
             type="text"
-            value={search}
-            onChange={(e) => handleSearchChange(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleSearchSubmit();
+              }
+            }}
             placeholder={t.settings.userManagement.searchPlaceholder}
             className="max-w-xs"
           />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleSearchSubmit}
+          >
+            {t.common.search}
+          </Button>
         </div>
 
         {loading ? (
@@ -184,7 +213,12 @@ export function UserManagementSettingsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((user) => (
+                  {users.map((user) => {
+                    const isSelf =
+                      !!currentUser &&
+                      user.id.toLowerCase() ===
+                        currentUser.id.toLowerCase();
+                    return (
                     <tr key={user.id} className="border-t">
                       <td className="px-3 py-2 align-middle">{user.email}</td>
                       <td className="px-3 py-2 text-right">
@@ -204,6 +238,12 @@ export function UserManagementSettingsPage() {
                             variant="outline"
                             size="sm"
                             className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                            disabled={isSelf}
+                            title={
+                              isSelf
+                                ? t.settings.userManagement.cannotDeleteSelf
+                                : undefined
+                            }
                             onClick={() =>
                               setConfirmAction({ type: "delete", user })
                             }
@@ -213,7 +253,8 @@ export function UserManagementSettingsPage() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

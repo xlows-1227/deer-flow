@@ -1158,6 +1158,7 @@ export const zhCN: Translations = {
       nextPage: "下一页",
       pageOf: "第 {current} / {total} 页（共 {count} 条）",
       noResults: "无匹配用户",
+      cannotDeleteSelf: "不能删除当前登录账号",
     },
     logViewer: {
       title: "日志查看",

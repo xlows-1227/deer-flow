@@ -1212,6 +1212,7 @@ export const enUS: Translations = {
       nextPage: "Next",
       pageOf: "Page {current} / {total} ({count} total)",
       noResults: "No matching users",
+      cannotDeleteSelf: "You cannot delete your own account",
     },
     logViewer: {
       title: "Logs",

@@ -980,6 +980,7 @@ export interface Translations {
       nextPage: string;
       pageOf: string;
       noResults: string;
+      cannotDeleteSelf: string;
     };
     logViewer: {
       title: string;
