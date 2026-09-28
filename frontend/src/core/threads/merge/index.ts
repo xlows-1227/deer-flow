@@ -85,56 +85,12 @@ export function mergeMessages(
     timestampedThreadMessages,
   );
 
-  // Only log when there's actual content to inspect — otherwise the initial
-  // render (empty history & thread) spams the console and triggers the
-  // Next.js dev error overlay.
-  if (
-    typeof window !== "undefined" &&
-    (filteredHistory.length > 0 || timestampedThreadMessages.length > 0)
-  ) {
-    console.debug(
-      "[mergeMessages] history vs thread overlap:",
-      {
-        historyLen: filteredHistory.length,
-        threadLen: timestampedThreadMessages.length,
-        cutoff,
-        threadOverlapLen,
-      },
-      "history:",
-      filteredHistory.map((m, i) => ({
-        hIdx: i,
-        type: m.type,
-        id: m.id ?? "no-id",
-        ts: getMessageTimestamp(m)?.slice(0, 19) ?? "null",
-        text: m.type === "human"
-          ? normalizeHumanMessageText(m)
-          : extractTextFromMessage(m).slice(0, 40),
-      })),
-      "thread:",
-      timestampedThreadMessages.map((m, i) => ({
-        tIdx: i,
-        type: m.type,
-        id: m.id ?? "no-id",
-        ts: getMessageTimestamp(m)?.slice(0, 19) ?? "null",
-        text: m.type === "human"
-          ? normalizeHumanMessageText(m)
-          : extractTextFromMessage(m).slice(0, 40),
-      })),
-    );
-  }
-
   if (threadOverlapLen === 0) {
     const suffixMerged = mergeHistoryAsThreadSuffix(
       filteredHistory,
       timestampedThreadMessages,
       optimisticMessages,
     );
-    if (typeof window !== "undefined") {
-      console.debug(
-        "[mergeMessages] mergeHistoryAsThreadSuffix result:",
-        suffixMerged ? "SUCCESS" : "null (fallback to filter)",
-      );
-    }
     if (suffixMerged) {
       return finalizeMergedMessages(
         suffixMerged,

@@ -750,6 +750,12 @@ export function SkillAiCreateWorkspace({
       return;
     }
 
+    // 兜底：AI 流式响应未结束时禁止发布（避免技能文件不完整）
+    if (thread.isLoading) {
+      toast.error("AI 正在生成中，请等待完成后再发布");
+      return;
+    }
+
     const dirtyTab = openTabs.find((tab) => tab.dirty);
     if (dirtyTab) {
       toast.error("请先保存未提交的编辑内容");
@@ -945,7 +951,12 @@ export function SkillAiCreateWorkspace({
   const showDraftBadge =
     !hasPublished && (!draftIsEmpty || hasDirtyTabs || binaryFiles.length > 0);
   const showEditorPanel = openTabs.length > 0;
-  const canComplete = !hasPublished && workspaceSkillMdPath !== null;
+  // 发布前提：未发布过 + SKILL.md 存在 + AI 流式响应已结束
+  // （AI 还在处理时发布，会导致技能文件不完整）
+  const canComplete =
+    !hasPublished &&
+    workspaceSkillMdPath !== null &&
+    !thread.isLoading;
 
   const handleCreateFile = useCallback(
     async (path: string) => {
