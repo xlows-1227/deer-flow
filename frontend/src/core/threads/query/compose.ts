@@ -71,18 +71,6 @@ export function mergeLoadedRunMessages(
   appendedMessages: Message[] = [],
 ): Message[] {
   const sortedRuns = sortRunsChronologically(runs);
-  if (typeof window !== "undefined") {
-    console.debug(
-      "[mergeLoadedRunMessages] runs (after sort):",
-      sortedRuns.map((r, i) => ({
-        sortIdx: i,
-        run_id: r.run_id?.slice(0, 8),
-        created_at: (r as { created_at?: string }).created_at,
-        parsedMs: getRunCreatedAtMs(r),
-        msgCount: messagesByRunId.get(r.run_id)?.length ?? 0,
-      })),
-    );
-  }
   const orderedMessages = sortedRuns.flatMap((run) =>
     (messagesByRunId.get(run.run_id) ?? []).map((entry) => entry.message),
   );
@@ -93,30 +81,6 @@ export function mergeLoadedRunMessages(
       ...appendedMessages,
     ]),
   );
-  if (typeof window !== "undefined") {
-    console.debug(
-      "[mergeLoadedRunMessages] orderedMessages (pre-dedup):",
-      orderedMessages.map((m, i) => ({
-        idx: i,
-        type: m.type,
-        id: m.id ?? "no-id",
-        text: m.type === "human"
-          ? normalizeHumanMessageText(m)
-          : extractTextFromMessage(m).slice(0, 40),
-      })),
-    );
-    console.debug(
-      "[mergeLoadedRunMessages] deduped result:",
-      deduped.map((m, i) => ({
-        idx: i,
-        type: m.type,
-        id: m.id ?? "no-id",
-        text: m.type === "human"
-          ? normalizeHumanMessageText(m)
-          : extractTextFromMessage(m).slice(0, 40),
-      })),
-    );
-  }
   return deduped;
 }
 

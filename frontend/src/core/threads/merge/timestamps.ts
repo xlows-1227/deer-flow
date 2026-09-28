@@ -86,19 +86,8 @@ export function mergeMissingTimestamps(
         if (timestampByTextAndOrder.has(key)) {
           return withMessageTimestamp(message, timestampByTextAndOrder.get(key));
         }
-        // Debug-only: a missing match is expected when history hasn't
-        // finished loading yet (early renders). Logging it as `error`
-        // triggers the Next.js dev error overlay, so use `debug` instead.
-        if (typeof window !== "undefined") {
-          console.debug(
-            "[mergeMissingTimestamps] FAIL text match",
-            "text=" + JSON.stringify(text),
-            "key=" + key,
-            "id=" + (message.id ?? "null"),
-            "content=" + JSON.stringify(message.content).slice(0, 200),
-            "availableKeys=" + JSON.stringify(Array.from(timestampByTextAndOrder.keys())),
-          );
-        }
+        // a missing match is expected when history hasn't finished loading
+        // yet (early renders); skip silently to avoid console spam.
       }
     }
     return message;

@@ -178,22 +178,6 @@ export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     const chosenMsg = messages[chosenIdx]!;
     const chosenHasTs = getMessageTimestamp(chosenMsg) !== null;
     result.push(chosenMsg);
-    if (typeof window !== "undefined") {
-      console.debug(
-        "[dedupe] chose idx",
-        chosenIdx,
-        "for identity",
-        resolvedIdentity,
-        "type=",
-        chosenMsg.type,
-        "hasTs=",
-        chosenHasTs,
-        "ts=",
-        getMessageTimestamp(chosenMsg)?.slice(0, 19) ?? "null",
-        "id=",
-        chosenMsg.id,
-      );
-    }
   }
   return result;
 }

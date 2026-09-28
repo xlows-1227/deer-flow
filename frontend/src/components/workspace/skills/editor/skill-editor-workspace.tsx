@@ -444,6 +444,9 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
   const [versionDraft, setVersionDraft] = useState<SkillLocalDraft | null>(
     null,
   );
+  // 前一版本快照，用于计算"该版本相对前一版本"的变动文件（v1=create 无前一版本）
+  const [previousVersionDraft, setPreviousVersionDraft] =
+    useState<SkillLocalDraft | null>(null);
   const [selectedVersionChangePath, setSelectedVersionChangePath] = useState<
     string | null
   >(null);
@@ -507,11 +510,14 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
   const latestVersionSeq = versions[0]?.seq ?? null;
   const isSelectedCurrent = selectedVersionSeq !== null && selectedVersionSeq === latestVersionSeq;
   const versionChanges = useMemo(
-    () =>
-      versionDraft && baselineDraft
-        ? buildSkillDraftChanges(versionDraft, baselineDraft)
-        : [],
-    [baselineDraft, versionDraft],
+    () => {
+      if (!versionDraft) return [];
+      // 变动文件 = 该版本相对前一版本的 diff
+      // v1 (create) 无前一版本：用空 draft 当 baseline，所有文件都算 added
+      const baselineForDiff = previousVersionDraft ?? createEmptyLocalDraft();
+      return buildSkillDraftChanges(baselineForDiff, versionDraft);
+    },
+    [versionDraft, previousVersionDraft],
   );
   const selectedVersionChange =
     versionChanges.find(
@@ -611,6 +617,7 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
   useEffect(() => {
     if (!versionsOpen || selectedVersionSeq === null) {
       setVersionDraft(null);
+      setPreviousVersionDraft(null);
       return;
     }
 
@@ -641,10 +648,39 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
         if (!cancelled) setIsLoadingVersionDraft(false);
       });
 
+    // 同时加载前一版本快照，用于计算"该版本相对前一版本"的变动文件
+    // versions 按 seq 倒序（最新在前），找第一个 seq 比当前小的就是前一版本
+    const previousVersionSeq = versions
+      .filter((v) => v.seq < selectedVersionSeq)
+      .sort((a, b) => b.seq - a.seq)[0]?.seq;
+    if (previousVersionSeq === undefined) {
+      // v1 (create) 无前一版本
+      setPreviousVersionDraft(null);
+    } else {
+      void loadCustomSkillVersionSnapshot(skillName, previousVersionSeq)
+        .then(({ entries, contents }) => {
+          if (cancelled) return;
+          const { draft: prevDraft } = mergeCustomSkillSnapshotIntoDraft(
+            { ...createEmptyLocalDraft(), skillName },
+            skillName,
+            entries,
+            contents,
+            { replaceExisting: true },
+          );
+          setPreviousVersionDraft(
+            normalizeSkillEditorDraft(prevDraft, skillName),
+          );
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setPreviousVersionDraft(null);
+        });
+    }
+
     return () => {
       cancelled = true;
     };
-  }, [selectedVersionSeq, skillName, versionsOpen]);
+  }, [selectedVersionSeq, skillName, versionsOpen, versions]);
 
   useEffect(() => {
     const nextSkillName = parsedSkill.name?.trim();
@@ -1499,16 +1535,6 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
                     <Loader2Icon className="mr-2 size-4 animate-spin" />
                     加载版本文件...
                   </div>
-                ) : isSelectedCurrent ? (
-                  <div className="flex flex-1 items-center justify-center text-sm text-gray-400 bg-[#fbfbfb]">
-                    <div className="text-center">
-                      <HistoryIcon className="mx-auto mb-3 size-8 text-gray-300" />
-                      <div>当前版本</div>
-                      <div className="mt-1 text-xs text-gray-400">
-                        {versions.find(v => v.seq === selectedVersionSeq)?.message || "最新的技能状态"}
-                      </div>
-                    </div>
-                  </div>
                 ) : (
                   <div className="flex min-h-0 flex-1 flex-col">
                     <div className="shrink-0 border-b border-gray-100 bg-white">
@@ -1523,7 +1549,9 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
                       <div className="overflow-x-auto px-4 pb-3 [scrollbar-width:thin]">
                         {versionChanges.length === 0 ? (
                           <div className="text-xs text-gray-400">
-                            与当前版本无差异
+                            {previousVersionDraft
+                              ? "该版本与前一版本无变化"
+                              : "首个版本，无前一版本"}
                           </div>
                         ) : (
                           <div className="flex min-w-max gap-2">
@@ -1567,17 +1595,17 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
                             旧
                           </div>
                           <div className="border-r border-gray-200 px-3 py-2">
-                            历史版本
+                            前一版本
                           </div>
                           <div className="border-r border-gray-200 px-2 py-2 text-right">
                             新
                           </div>
-                          <div className="px-3 py-2">当前版本</div>
+                          <div className="px-3 py-2">该版本</div>
                         </div>
                         {selectedVersionDiffRows.length === 0 ? (
                           <div className="p-10 text-center text-sm text-gray-400">
                             {versionChanges.length === 0
-                              ? "该版本与当前内容一致"
+                              ? "该版本与前一版本无变化"
                               : "暂无可展示的文本差异"}
                           </div>
                         ) : (

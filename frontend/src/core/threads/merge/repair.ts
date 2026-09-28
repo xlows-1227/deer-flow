@@ -228,23 +228,5 @@ export function finalizeMergedMessages(
     ? turnRepaired
     : repairDynamicContextUserMessageOrder(turnRepaired);
 
-  // DEBUG: log timestamp state to diagnose "time changes on refresh"
-  if (typeof window !== "undefined") {
-    const tsSummary = repaired.map((m, i) => ({
-      idx: i,
-      type: m.type,
-      id: m.id ?? (m as Record<string, unknown>).tool_call_id ?? "no-id",
-      ts: getMessageTimestamp(m),
-      hasResponseTs: !!m.response_metadata?.created_at,
-      hasKwargsTs: !!m.additional_kwargs?.timestamp,
-      aiText: m.type === "ai" ? extractTextFromMessage(m).slice(0, 30) : undefined,
-    }));
-    console.groupCollapsed(
-      "[mergeMessages DEBUG] final messages timestamp check",
-    );
-    console.table(tsSummary);
-    console.groupEnd();
-  }
-
   return repaired;
 }
