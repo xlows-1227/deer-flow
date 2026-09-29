@@ -109,6 +109,15 @@ def _runtime_connector_ids(runtime: Runtime | None) -> tuple[str, ...]:
     return tuple(str(item) for item in raw if item)
 
 
+def _runtime_target_skill_name(runtime: Runtime | None) -> str | None:
+    """Extract the target skill being edited from the runtime context."""
+    context = runtime.context if runtime is not None else {}
+    if not isinstance(context, dict):
+        return None
+    value = context.get("target_skill_name")
+    return str(value) if value else None
+
+
 def _xml_value(value: Any) -> str:
     return escape(str(value))
 
@@ -260,7 +269,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._app_config = app_config
         self._include_memory = include_memory
 
-    def _build_full_reminder(self, *, connector_ids: tuple[str, ...] = (), connector_summaries: list[dict[str, Any]] | None = None) -> str:
+    def _build_full_reminder(self, *, connector_ids: tuple[str, ...] = (), connector_summaries: list[dict[str, Any]] | None = None, target_skill_name: str | None = None) -> str:
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
         # Memory injection is gated by injection_enabled; date is always included.
@@ -273,6 +282,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             lines.append(memory_context.strip())
             lines.append("")  # blank line separating memory from date
         lines.append(f"<current_date>{current_date}</current_date>")
+        if target_skill_name:
+            lines.append(f"<target_skill>\u7528\u6237\u6b63\u5728\u7f16\u8f91\u6280\u80fd '{_xml_value(target_skill_name)}'\u3002\u8bf7\u4f7f\u7528 skill_manage \u5de5\u5177\uff08name='{_xml_value(target_skill_name)}'\uff09\u5e94\u7528\u7528\u6237\u8bf7\u6c42\u7684\u4fee\u6539\u3002</target_skill>")
         if connector_ids:
             lines.append("")
             lines.append(_build_selected_connectors_section(connector_ids, connector_summaries))
@@ -280,39 +291,29 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         return "\n".join(lines)
 
-    def _build_date_update_reminder(self) -> str:
+    def _build_date_update_reminder(self, *, target_skill_name: str | None = None) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        lines = ["<system-reminder>", f"<current_date>{current_date}</current_date>"]
+        if target_skill_name:
+            lines.append(f"<target_skill>\u7528\u6237\u6b63\u5728\u7f16\u8f91\u6280\u80fd '{_xml_value(target_skill_name)}'\u3002\u8bf7\u4f7f\u7528 skill_manage \u5de5\u5177\uff08name='{_xml_value(target_skill_name)}'\uff09\u5e94\u7528\u7528\u6237\u8bf7\u6c42\u7684\u4fee\u6539\u3002</target_skill>")
+        lines.append("</system-reminder>")
+        return "\n".join(lines)
 
-    def _build_connector_update_reminder(self, connector_ids: tuple[str, ...], connector_summaries: list[dict[str, Any]] | None = None) -> str:
+    def _build_connector_update_reminder(self, connector_ids: tuple[str, ...], connector_summaries: list[dict[str, Any]] | None = None, *, target_skill_name: str | None = None) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "",
-                _build_selected_connectors_section(connector_ids, connector_summaries),
-                "</system-reminder>",
-            ]
-        )
+        lines = ["<system-reminder>", f"<current_date>{current_date}</current_date>", "", _build_selected_connectors_section(connector_ids, connector_summaries)]
+        if target_skill_name:
+            lines.append(f"<target_skill>\u7528\u6237\u6b63\u5728\u7f16\u8f91\u6280\u80fd '{_xml_value(target_skill_name)}'\u3002\u8bf7\u4f7f\u7528 skill_manage \u5de5\u5177\uff08name='{_xml_value(target_skill_name)}'\uff09\u5e94\u7528\u7528\u6237\u8bf7\u6c42\u7684\u4fee\u6539\u3002</target_skill>")
+        lines.append("</system-reminder>")
+        return "\n".join(lines)
 
-    def _build_date_and_connector_update_reminder(self, connector_ids: tuple[str, ...], connector_summaries: list[dict[str, Any]] | None = None) -> str:
+    def _build_date_and_connector_update_reminder(self, connector_ids: tuple[str, ...], connector_summaries: list[dict[str, Any]] | None = None, *, target_skill_name: str | None = None) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "",
-                _build_selected_connectors_section(connector_ids, connector_summaries),
-                "</system-reminder>",
-            ]
-        )
+        lines = ["<system-reminder>", f"<current_date>{current_date}</current_date>", "", _build_selected_connectors_section(connector_ids, connector_summaries)]
+        if target_skill_name:
+            lines.append(f"<target_skill>\u7528\u6237\u6b63\u5728\u7f16\u8f91\u6280\u80fd '{_xml_value(target_skill_name)}'\u3002\u8bf7\u4f7f\u7528 skill_manage \u5de5\u5177\uff08name='{_xml_value(target_skill_name)}'\uff09\u5e94\u7528\u7528\u6237\u8bf7\u6c42\u7684\u4fee\u6539\u3002</target_skill>")
+        lines.append("</system-reminder>")
+        return "\n".join(lines)
 
     @staticmethod
     def _make_reminder_and_user_messages(original: HumanMessage, reminder_content: str) -> tuple[HumanMessage, HumanMessage]:
@@ -378,12 +379,19 @@ class DynamicContextMiddleware(AgentMiddleware):
             last_connector_ids,
         )
 
+        target_skill_name = _runtime_target_skill_name(runtime)
+        logger.info(
+            "DynamicContextMiddleware._inject: target_skill_name=%r runtime_context_keys=%r",
+            target_skill_name,
+            list(runtime.context.keys()) if runtime and isinstance(runtime.context, dict) else None,
+        )
+
         if last_date is None:
             # ── First turn: inject full reminder as a separate HumanMessage ─────
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            full_reminder = self._build_full_reminder(connector_ids=connector_ids, connector_summaries=connector_summaries)
+            full_reminder = self._build_full_reminder(connector_ids=connector_ids, connector_summaries=connector_summaries, target_skill_name=target_skill_name)
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (len=%d, has_memory=%s, has_connectors=%s) into first HumanMessage id=%r",
                 len(full_reminder),
@@ -404,11 +412,11 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
 
         if last_date != current_date and connector_selection_changed:
-            reminder_content = self._build_date_and_connector_update_reminder(connector_ids, connector_summaries)
+            reminder_content = self._build_date_and_connector_update_reminder(connector_ids, connector_summaries, target_skill_name=target_skill_name)
         elif last_date != current_date:
-            reminder_content = self._build_date_update_reminder()
+            reminder_content = self._build_date_update_reminder(target_skill_name=target_skill_name)
         else:
-            reminder_content = self._build_connector_update_reminder(connector_ids, connector_summaries)
+            reminder_content = self._build_connector_update_reminder(connector_ids, connector_summaries, target_skill_name=target_skill_name)
 
         reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[last_human_idx], reminder_content)
         logger.info(

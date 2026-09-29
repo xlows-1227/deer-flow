@@ -941,13 +941,15 @@ export function SkillEditorWorkspace({ skillName }: { skillName: string }) {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      const submitPromise = sendMessage(threadId, message);
+      const submitPromise = sendMessage(threadId, message, {
+        target_skill_name: skillName,
+      });
       if (message.files.length > 0) {
         return submitPromise;
       }
       void submitPromise;
     },
-    [sendMessage, threadId],
+    [sendMessage, threadId, skillName],
   );
 
   function openFile(path: string) {
