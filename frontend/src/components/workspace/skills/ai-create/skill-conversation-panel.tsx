@@ -103,7 +103,7 @@ export function SkillConversationPanel({
       threadId={threadId}
       isWelcomeMode={showEmptyHero}
       autoFocus={showEmptyHero}
-      initialValue={initialPrompt}
+      customPlaceholder={initialPrompt}
       lockedSkillName={SKILL_CREATOR_NAME}
       context={context}
       status={thread.error ? "error" : thread.isLoading ? "streaming" : "ready"}

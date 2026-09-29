@@ -148,6 +148,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "external_allowed_skills",
         "connector_ids",
         "thread_id",
+        "target_skill_name",
     }
 )
 _SERVER_ONLY_SKILL_CONTEXT_KEYS = frozenset({"skill_projection_manifest", "skill_grants"})

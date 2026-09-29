@@ -157,6 +157,7 @@ export function InputBox({
   isWelcomeMode,
   threadId,
   initialValue,
+  customPlaceholder,
   onContextChange,
   onFollowupsVisibilityChange,
   onSubmit,
@@ -189,6 +190,8 @@ export function InputBox({
   isWelcomeMode?: boolean;
   threadId: string;
   initialValue?: string;
+  /** Override the default placeholder text shown when the input is empty. */
+  customPlaceholder?: string;
   onContextChange?: (
     context: Omit<
       AgentThreadContext,
@@ -1333,7 +1336,7 @@ export function InputBox({
           <PromptInputTextarea
             className={cn("size-full")}
             disabled={disabled}
-            placeholder={t.inputBox.placeholder}
+            placeholder={customPlaceholder ?? t.inputBox.placeholder}
             autoFocus={autoFocus}
           />
         </PromptInputBody>
