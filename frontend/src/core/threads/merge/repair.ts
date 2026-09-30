@@ -3,6 +3,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   extractTextFromMessage,
   getMessageTimestamp,
+  isClarificationToolMessage,
   repairDynamicContextUserMessageOrder,
 } from "../../messages/utils";
 import {
@@ -20,6 +21,10 @@ export function messageIsAssistantSide(message: Message): boolean {
  * [AI/tool..., human]. Only repair that narrow tail shape. Historical slices
  * may contain multiple user turns; moving the first human there scrambles the
  * conversation.
+ *
+ * A human that directly follows a clarification card (ask_clarification
+ * ToolMessage) is the user's ANSWER to that card, not a misordered streaming
+ * input — the card must stay immediately before its answer.
  */
 export function moveSingleTrailingHumanInputToFront(messages: Message[]): Message[] {
   const humanIndexes = messages.flatMap((message, index) =>
@@ -33,6 +38,10 @@ export function moveSingleTrailingHumanInputToFront(messages: Message[]): Messag
     firstHumanIndex <= 0 ||
     !messages.slice(0, firstHumanIndex).every(messageIsAssistantSide)
   ) {
+    return messages;
+  }
+  const predecessor = messages[firstHumanIndex - 1]!;
+  if (isClarificationToolMessage(predecessor)) {
     return messages;
   }
 

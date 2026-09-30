@@ -134,6 +134,19 @@ export function messagesEquivalent(
     const threadText = extractTextFromMessage(threadMessage).trim();
     return historyText.length > 0 && historyText === threadText;
   }
+  if (historyMessage.type === "tool") {
+    // run-event tool messages carry id=null (no tool_call_id either), while
+    // checkpoint tool copies get fresh UUIDs.  Without text matching they
+    // never align across the two sources, so findHistoryThreadOverlap fails
+    // on the first tool call and the merge falls back to suffix-merge —
+    // which pushes thread-only messages (clarification cards) to the end.
+    // The tool result body (JSON search output, etc.) is stable across
+    // run-event and checkpoint copies, so text matching is safe within a
+    // single thread.
+    const historyText = extractTextFromMessage(historyMessage).trim();
+    const threadText = extractTextFromMessage(threadMessage).trim();
+    return historyText.length > 0 && historyText === threadText;
+  }
   return false;
 }
 
@@ -189,22 +202,34 @@ export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
  * appears within a small window (≤3 messages apart) — this catches
  * overlapping history/thread copies that land adjacent after merge without
  * removing legitimately repeated user questions that are far apart.
+ *
+ * A repeated text with parseable timestamps more than the tolerance window
+ * apart is a genuinely repeated question (e.g. the user said "暂时不用了"
+ * twice in different runs), not an overlapping copy — keep both.
  */
 export function dedupeAdjacentHumanByText(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages;
   const result: Message[] = [];
-  const recentTexts: string[] = [];
+  const recent: Array<{ text: string; ts: string | null }> = [];
 
   for (const m of messages) {
     if (m.type === "human") {
       const text = normalizeHumanMessageText(m);
-      if (text && recentTexts.includes(text)) {
-        continue; // skip adjacent duplicate
+      if (text) {
+        const ts = getMessageTimestamp(m) ?? null;
+        const duplicate = recent.some(
+          (entry) =>
+            entry.text === text &&
+            (entry.ts === null || ts === null || timestampsAreClose(entry.ts, ts)),
+        );
+        if (duplicate) {
+          continue; // skip adjacent duplicate
+        }
+        recent.push({ text, ts });
+        if (recent.length > 3) recent.shift();
       }
-      recentTexts.push(text ?? "");
-      if (recentTexts.length > 3) recentTexts.shift();
     } else {
-      recentTexts.length = 0;
+      recent.length = 0;
     }
     result.push(m);
   }

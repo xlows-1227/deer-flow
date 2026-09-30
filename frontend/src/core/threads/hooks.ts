@@ -894,6 +894,10 @@ export function useThreadHistory(threadId: string) {
     );
   }, []);
 
+  // Lets the finally-block below re-enter loadMessages for runs discovered
+  // mid-flight without adding loadMessages to its own dependency list.
+  const loadMessagesRef = useRef<(() => Promise<void>) | null>(null);
+
   const loadMessages = useCallback(async () => {
     if (loadingRef.current) {
       const pendingRunIndex = findLatestUnloadedRunIndex(
@@ -1008,9 +1012,17 @@ export function useThreadHistory(threadId: string) {
         if (abortControllerRef.current === controller) {
           abortControllerRef.current = null;
         }
+        // A run discovered while this request was in flight set
+        // pendingLoadRef; the runs.data effect won't re-fire just because
+        // this load finished, so kick the next load off here.
+        if (pendingLoadRef.current) {
+          pendingLoadRef.current = false;
+          void loadMessagesRef.current?.();
+        }
       }
     }
   }, [getComposedMessages]);
+  loadMessagesRef.current = loadMessages;
 
   // Reset all thread-local state when the active thread changes. This also
   // aborts any in-flight fetch for the previous thread and bumps the request

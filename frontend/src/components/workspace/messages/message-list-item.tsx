@@ -59,6 +59,7 @@ import {
   type FileInMessage,
 } from "@/core/messages/utils";
 import {
+  rehypeEscapeUnknownTags,
   rehypeStripBlockWhitespace,
   useRehypeSplitWordsIntoSpans,
 } from "@/core/rehype";
@@ -466,6 +467,7 @@ function MessageContent_({
           isLoading={isLoading}
           rehypePlugins={[
             rehypeRaw,
+            rehypeEscapeUnknownTags,
             ...rehypePlugins,
             [rehypeKatex, { output: "html" }],
             rehypeStripBlockWhitespace,
@@ -479,6 +481,7 @@ function MessageContent_({
           isLoading={isLoading}
           rehypePlugins={[
             rehypeRaw,
+            rehypeEscapeUnknownTags,
             ...rehypePlugins,
             [rehypeKatex, { output: "html" }],
             rehypeStripBlockWhitespace,

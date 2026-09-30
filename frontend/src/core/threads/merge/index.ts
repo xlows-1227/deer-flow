@@ -1,13 +1,11 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
 import {
-  extractTextFromMessage,
-  getMessageTimestamp,
-} from "../../messages/utils";
-import {
-  normalizeHumanMessageText,
-} from "./identity";
-import { findHistoryThreadOverlap } from "./overlap";
+  containsHumanSubsequence,
+  findHistoryThreadOverlap,
+  lastHistoryMatchThreadIndex,
+  threadCoversHistory,
+} from "./overlap";
 import { finalizeMergedMessages } from "./repair";
 import {
   mergeHistoryAsThreadSuffix,
@@ -86,6 +84,36 @@ export function mergeMessages(
   );
 
   if (threadOverlapLen === 0) {
+    // When the thread (checkpoint state) still covers the run-event history,
+    // the thread is the authoritative order. This must be tried BEFORE the
+    // suffix-merge strategy: suffix-merge appends checkpoint-only messages
+    // (clarification cards injected via Command(goto=END)) after the whole
+    // history, displacing them to the very end of the conversation. Strict
+    // positional overlap fails on such extras and on order divergence
+    // (tool results journaled in completion order but stored in call
+    // order), so threadCoversHistory falls back to human-anchored matching
+    // with identity containment before declaring coverage.
+    if (
+      filteredHistory.length > 0 &&
+      timestampedThreadMessages.length > 0 &&
+      threadCoversHistory(timestampedThreadMessages, filteredHistory)
+    ) {
+      // Split at the deepest matched thread position so optimistic input is
+      // inserted against the trailing (newer-than-history) segment, exactly
+      // like the overlap path would.
+      const boundary = lastHistoryMatchThreadIndex(
+        timestampedThreadMessages,
+        filteredHistory,
+      );
+      return finalizeMergedMessages(
+        mergeThreadAndOptimisticMessages(
+          timestampedThreadMessages.slice(0, boundary + 1),
+          timestampedThreadMessages.slice(boundary + 1),
+          optimisticMessages,
+        ),
+        filteredHistory.length > 0,
+      );
+    }
     const suffixMerged = mergeHistoryAsThreadSuffix(
       filteredHistory,
       timestampedThreadMessages,
@@ -94,6 +122,29 @@ export function mergeMessages(
     if (suffixMerged) {
       return finalizeMergedMessages(
         suffixMerged,
+        filteredHistory.length > 0,
+      );
+    }
+    // Looser fallback: when the thread genuinely lacks some history
+    // messages (removed ids, e.g. after summarization) but every history
+    // question is still found in order inside the thread, use the thread
+    // order directly so middleware-injected messages (clarification cards)
+    // keep their correct position instead of being displaced to the end.
+    if (
+      filteredHistory.length > 0 &&
+      timestampedThreadMessages.length > 0 &&
+      containsHumanSubsequence(timestampedThreadMessages, filteredHistory)
+    ) {
+      const boundary = lastHistoryMatchThreadIndex(
+        timestampedThreadMessages,
+        filteredHistory,
+      );
+      return finalizeMergedMessages(
+        mergeThreadAndOptimisticMessages(
+          timestampedThreadMessages.slice(0, boundary + 1),
+          timestampedThreadMessages.slice(boundary + 1),
+          optimisticMessages,
+        ),
         filteredHistory.length > 0,
       );
     }
@@ -127,8 +178,12 @@ export {
   getHumanMessageVisibilityKeys,
 } from "./identity";
 export {
+  containsAsSubsequence,
+  containsHumanSubsequence,
   isAlignmentNoiseMessage,
   findHistoryThreadOverlap,
+  lastHistoryMatchThreadIndex,
+  threadCoversHistory,
 } from "./overlap";
 export {
   mergeHistoryAsThreadSuffix,
