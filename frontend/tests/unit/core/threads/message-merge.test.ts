@@ -283,6 +283,355 @@ test("mergeMessages places optimistic user input before streaming assistant outp
   ).toEqual([previousHuman, previousAi, optimisticHuman, streamingAi]);
 });
 
+test("mergeMessages keeps checkpoint-only clarification card after its AI message", () => {
+  // Regression: ClarificationMiddleware injects the ask_clarification
+  // ToolMessage via Command(goto=END); on_tool_end never fires for it, so
+  // run-event history has no copy while the checkpoint does. Strict
+  // history-suffix/thread-prefix alignment failed on the extra message and
+  // the fallback merge appended the card (plus duplicate question copies)
+  // to the very end of the conversation.
+  const q1History = {
+    id: null,
+    type: "human",
+    content: "搜索点新闻",
+    additional_kwargs: { timestamp: "2026-09-29T10:00:00+08:00" },
+  } as unknown as Message;
+  const q1Thread = {
+    id: "q1-orig__user",
+    type: "human",
+    content: "搜索点新闻",
+  } as Message;
+  const hiddenReminder = {
+    id: "q1-orig",
+    type: "human",
+    content: "<system-reminder>memory</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as unknown as Message;
+  const clarifyAi = {
+    id: "ai-clar",
+    type: "ai",
+    content: "您的需求「搜索点新闻」比较宽泛，我需要确认一下方向：",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification:call-1",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "call-1",
+    content: "您想搜索哪方面的新闻？",
+  } as unknown as Message;
+  const q2History = {
+    id: null,
+    type: "human",
+    content: "今日国内外综合头条新闻",
+    additional_kwargs: { timestamp: "2026-09-29T10:01:00+08:00" },
+  } as unknown as Message;
+  const q2Thread = {
+    id: "q2-orig",
+    type: "human",
+    content: "今日国内外综合头条新闻",
+  } as Message;
+  const searchAi = {
+    id: "ai-search",
+    type: "ai",
+    content: "I'll search for today's top news.",
+    tool_calls: [{ id: "call-web-1", name: "web_search", args: {} }],
+  } as unknown as Message;
+  const searchTool = {
+    id: "tool-live",
+    type: "tool",
+    tool_call_id: "call-web-1",
+    name: "web_search",
+    content: '{"results": []}',
+  } as unknown as Message;
+  const finalAi = {
+    id: "ai-final",
+    type: "ai",
+    content: "Here is the news summary.",
+  } as Message;
+
+  const history = [
+    q1History,
+    clarifyAi,
+    q2History,
+    searchAi,
+    searchTool,
+    finalAi,
+  ];
+  const thread = [
+    hiddenReminder,
+    q1Thread,
+    clarifyAi,
+    clarificationCard,
+    q2Thread,
+    searchAi,
+    searchTool,
+    finalAi,
+  ];
+
+  const merged = mergeMessages(history, thread, []);
+
+  // Timestamps are backfilled from history copies onto the thread copies.
+  const q1ThreadWithTs = {
+    ...q1Thread,
+    additional_kwargs: { timestamp: "2026-09-29T10:00:00+08:00" },
+  } as Message;
+  const q2ThreadWithTs = {
+    ...q2Thread,
+    additional_kwargs: { timestamp: "2026-09-29T10:01:00+08:00" },
+  } as Message;
+
+  expect(merged).toEqual([
+    q1ThreadWithTs,
+    clarifyAi,
+    clarificationCard,
+    q2ThreadWithTs,
+    searchAi,
+    searchTool,
+    finalAi,
+  ]);
+  // The card must sit between the clarification AI message and the second
+  // question, not after the final answer. (Compare by id — timestamp
+  // backfilling creates new message objects.)
+  expect(merged[2]).toBe(clarificationCard);
+  expect(merged.findIndex((m) => m.id === q2Thread.id)).toBe(3);
+  expect(
+    merged.findIndex((m) => m.id === clarificationCard.id),
+  ).toBeLessThan(merged.findIndex((m) => m.id === q2Thread.id));
+  expect(
+    merged.findIndex((m) => m.id === clarificationCard.id),
+  ).toBeLessThan(merged.findIndex((m) => m.id === finalAi.id));
+});
+
+test("mergeMessages keeps clarification card in place when run-event tool order diverges from checkpoint", () => {
+  // Regression (real thread 8126cdd4): after "load more" loads the
+  // clarification run, history (run events) and thread (checkpoint) diverge
+  // in two ways:
+  //   1. web_search ToolMessages are journaled in COMPLETION order
+  //      (call_00, call_02, call_01) but stored in the checkpoint in CALL
+  //      order (call_00, call_01, call_02) — strict subsequence alignment
+  //      fails on the first swapped pair;
+  //   2. the ask_clarification ToolMessage only exists in the checkpoint
+  //      (injected via Command(goto=END), never journaled as a run event).
+  // The suffix-merge fallback used to append checkpoint-only messages after
+  // the whole history, displacing the option card to the very bottom.
+  const run1CreatedAt = "2026-09-29T08:47:50+00:00";
+  const run2CreatedAt = "2026-09-29T08:52:00+00:00";
+  const q1History = {
+    id: null,
+    type: "human",
+    content: "搜索点新闻",
+    additional_kwargs: { timestamp: run1CreatedAt },
+  } as unknown as Message;
+  const clarifyAiHistory = {
+    id: "lc_run--01a0ec59-9588-7790-b207-de5e1eca2427",
+    type: "ai",
+    content:
+      "您的需求「搜索点新闻」比较宽泛，为了给您更精准的结果，我需要确认一下方向：[工具调用: ask_clarification]",
+    tool_calls: [
+      {
+        name: "ask_clarification",
+        id: "call_00_6fHlswEXwi38BfZ9ZxWf1712",
+        args: { question: "您想搜索哪方面的新闻？" },
+      },
+    ],
+    additional_kwargs: { timestamp: "2026-09-29T08:48:13+00:00" },
+  } as unknown as Message;
+  const q2History = {
+    id: null,
+    type: "human",
+    content: "今日国内外综合头条新闻",
+    additional_kwargs: { timestamp: run2CreatedAt },
+  } as unknown as Message;
+  const searchAi = {
+    id: "lc_run--01a0ec59-fcdb-71c2-9f9d-d605717dc988",
+    type: "ai",
+    content:
+      "I'll search for today's top domestic and international news.[工具调用: web_search][工具调用: web_search][工具调用: web_search]",
+    tool_calls: [
+      { name: "web_search", id: "call_00_CjcQVvzeG6", args: {} },
+      { name: "web_search", id: "call_01_oaRe0UAeRMs", args: {} },
+      { name: "web_search", id: "call_02_qCkm391B9", args: {} },
+    ],
+    additional_kwargs: { timestamp: "2026-09-29T08:52:11+00:00" },
+  } as unknown as Message;
+  const searchToolEvent =
+    (toolCallId: string, query: string) =>
+    ({
+      id: null,
+      type: "tool",
+      name: "web_search",
+      tool_call_id: toolCallId,
+      content: `{"query": "${query}", "results": []}`,
+    }) as unknown as Message;
+  const finalAi = {
+    id: "lc_run--01a0ec5c-57f8-7291-b711-cc3fe0b1e046",
+    type: "ai",
+    content: "Here is the news summary.",
+  } as Message;
+
+  // useThreadHistory composes: [run.kwargs.input.messages(seq -1), ...run
+  // events]. Web-search results are journaled in completion order:
+  // call_00, call_02, call_01.
+  const history = [
+    q1History,
+    clarifyAiHistory,
+    q2History,
+    searchAi,
+    searchToolEvent("call_00_CjcQVvzeG6", "今日头条新闻"),
+    searchToolEvent("call_02_qCkm391B9", "国内新闻"),
+    searchToolEvent("call_01_oaRe0UAeRMs", "国际新闻"),
+    finalAi,
+  ];
+
+  const hiddenReminder = {
+    id: "97a3acf8-2dbd-4be6-bd9b-15c94ca20c38",
+    type: "human",
+    content: "<system-reminder>memory</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as unknown as Message;
+  const q1Thread = {
+    id: "97a3acf8-2dbd-4be6-bd9b-15c94ca20c38__user",
+    type: "human",
+    name: "user-input",
+    content: "搜索点新闻",
+  } as Message;
+  // Checkpoint copy of the clarification AI message carries the marker at the
+  // FRONT (middleware re-serialization) — same id, different text.
+  const clarifyAiThread = {
+    ...clarifyAiHistory,
+    content:
+      "[工具调用: ask_clarification]\n您的需求「搜索点新闻」比较宽泛，为了给您更精准的结果，我需要确认一下方向：",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification:call_00_6fHlswEXwi38BfZ9ZxWf1712",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "call_00_6fHlswEXwi38BfZ9ZxWf1712",
+    content:
+      "🤔 「搜索点新闻」没有指明主题、地区或时间范围，不同方向结果差异很大。\n\n您想搜索哪方面的新闻？\n\n  1. 今日国内外综合头条新闻\n  2. 科技/AI 领域新闻",
+  } as unknown as Message;
+  const q2Thread = {
+    id: "bb9c2605-4205-4119-ba05-720499f8e992",
+    type: "human",
+    name: "user-input",
+    content: "今日国内外综合头条新闻",
+  } as Message;
+  const searchToolCheckpoint =
+    (id: string, toolCallId: string, query: string) =>
+    ({
+      id,
+      type: "tool",
+      name: "web_search",
+      tool_call_id: toolCallId,
+      content: `{"query": "${query}", "results": []}`,
+    }) as unknown as Message;
+
+  // Checkpoint stores tool results in CALL order: call_00, call_01, call_02.
+  const thread = [
+    hiddenReminder,
+    q1Thread,
+    clarifyAiThread,
+    clarificationCard,
+    q2Thread,
+    searchAi,
+    searchToolCheckpoint("231c7ce3", "call_00_CjcQVvzeG6", "今日头条新闻"),
+    searchToolCheckpoint("11924881", "call_01_oaRe0UAeRMs", "国际新闻"),
+    searchToolCheckpoint("85a8d5e3", "call_02_qCkm391B9", "国内新闻"),
+    finalAi,
+  ];
+
+  const merged = mergeMessages(history, thread, []);
+
+  expect(merged.map((message) => message.id)).toEqual([
+    q1Thread.id,
+    clarifyAiThread.id,
+    clarificationCard.id,
+    q2Thread.id,
+    searchAi.id,
+    "231c7ce3",
+    "11924881",
+    "85a8d5e3",
+    finalAi.id,
+  ]);
+  // The card must stay between the clarification AI message and the answer
+  // to the clarification (Q2), not after the final answer.
+  expect(merged.findIndex((m) => m.id === clarificationCard.id)).toBe(2);
+  expect(
+    merged.findIndex((m) => m.id === clarificationCard.id),
+  ).toBeLessThan(merged.findIndex((m) => m.id === q2Thread.id));
+  expect(
+    merged.findIndex((m) => m.id === clarificationCard.id),
+  ).toBeLessThan(merged.findIndex((m) => m.id === finalAi.id));
+});
+
+test("mergeMessages keeps clarification card before the answer even when the card is journaled after the run input", () => {
+  // Future shape once the backend journals the clarification ToolMessage as
+  // a run event: the card event belongs to the RESUMED run, so it lands
+  // after that run's input message (Q2) in composed history, while the
+  // checkpoint stores it BEFORE Q2 (tool result must precede the next human
+  // message). History order alone would show the option card one turn too
+  // low; the thread (checkpoint) order must win.
+  const clarifyAi = {
+    id: "ai-clar",
+    type: "ai",
+    content: "需要确认一下方向：[工具调用: ask_clarification]",
+    tool_calls: [
+      { name: "ask_clarification", id: "call-1", args: {} },
+    ],
+  } as unknown as Message;
+  const q1History = {
+    id: null,
+    type: "human",
+    content: "搜索点新闻",
+    additional_kwargs: { timestamp: "2026-09-29T10:00:00+08:00" },
+  } as unknown as Message;
+  const clarificationCardEvent = {
+    id: "clarification:call-1",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "call-1",
+    content: "您想搜索哪方面的新闻？\n\n  1. 头条\n  2. 科技",
+  } as unknown as Message;
+  const q2History = {
+    id: null,
+    type: "human",
+    content: "今日国内外综合头条新闻",
+    additional_kwargs: { timestamp: "2026-09-29T10:05:00+08:00" },
+  } as unknown as Message;
+  const finalAi = {
+    id: "ai-final",
+    type: "ai",
+    content: "Here is the news summary.",
+  } as Message;
+
+  const history = [q1History, clarifyAi, q2History, clarificationCardEvent, finalAi];
+  const thread = [
+    {
+      id: "q1-orig__user",
+      type: "human",
+      content: "搜索点新闻",
+    },
+    clarifyAi,
+    clarificationCardEvent,
+    {
+      id: "q2-orig",
+      type: "human",
+      content: "今日国内外综合头条新闻",
+    },
+    finalAi,
+  ] as Message[];
+
+  const merged = mergeMessages(history, thread, []);
+
+  expect(merged.map((message) => message.id)).toEqual([
+    "q1-orig__user",
+    "ai-clar",
+    "clarification:call-1",
+    "q2-orig",
+    "ai-final",
+  ]);
+});
+
 test("mergeMessages appends optimistic follow-up after prior turn when history is empty", () => {
   const previousHuman = {
     id: "human-1",
@@ -743,13 +1092,17 @@ test("mergeMessages repairs dynamic context user copy order from checkpoint stat
     content: [{ type: "text", text: "今天天气怎么样" }],
   } as Message;
 
+  // The hidden reminder (id turn-1) and the visible __user copy share an
+  // identity after __user-stripping, so dedupe collapses them into the
+  // (visible) __user copy at the reminder's position. The rendered order is
+  // identical: 今天天气怎么样 → clarification → 南京天气.
   expect(
     mergeMessages(
       [],
       [reminder, clarificationAi, secondHuman, firstHumanCopy],
       [],
     ).map((message) => message.id),
-  ).toEqual(["turn-1", "turn-1__user", "ai-1", "turn-2"]);
+  ).toEqual(["turn-1__user", "ai-1", "turn-2"]);
 });
 
 test("mergeMessages keeps older checkpoint turns before a newest-run history suffix", () => {

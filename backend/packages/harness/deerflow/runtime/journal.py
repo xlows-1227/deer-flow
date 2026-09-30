@@ -95,6 +95,10 @@ class RunJournal(BaseCallbackHandler):
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
 
+        # Dedup for clarification ToolMessages emitted from on_chain_end
+        # (nested chains may report the same node Command more than once).
+        self._emitted_clarification_event_ids: set[str] = set()
+
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
@@ -140,6 +144,14 @@ class RunJournal(BaseCallbackHandler):
             return text
         return ""
 
+    @staticmethod
+    def _is_clarification_message(message: BaseMessage) -> bool:
+        name = getattr(message, "name", None)
+        msg_id = getattr(message, "id", None)
+        return name == "ask_clarification" or (
+            isinstance(msg_id, str) and msg_id.startswith("clarification:")
+        )
+
     def _record_clarification_reply(self, message: BaseMessage) -> None:
         """Record an ask_clarification ToolMessage as the run's user-facing reply.
 
@@ -150,11 +162,7 @@ class RunJournal(BaseCallbackHandler):
         """
         if not isinstance(message, ToolMessage) and getattr(message, "type", None) != "tool":
             return
-        name = getattr(message, "name", None)
-        msg_id = getattr(message, "id", None)
-        if name != "ask_clarification" and not (
-            isinstance(msg_id, str) and msg_id.startswith("clarification:")
-        ):
+        if not self._is_clarification_message(message):
             return
         text = self._message_text(message).strip()
         if text:
@@ -263,6 +271,14 @@ class RunJournal(BaseCallbackHandler):
         so ``on_tool_end`` never fires for it; the formatted ToolMessage only
         reaches LangChain callbacks inside the ``Command`` the tools node
         returns (``Command(update={"messages": [...]}, goto=END)``).
+
+        Besides the convenience fields, the ToolMessage is also journaled as a
+        ``llm.tool.result`` message event — without it the run-event history
+        lacks the clarification card while the checkpoint contains it, and the
+        frontend history/thread merge appends checkpoint-only messages to the
+        end of the conversation.  Nested chains may report the same ``Command``
+        multiple times, so events are deduplicated by message id (which
+        ClarificationMiddleware makes deterministic).
         """
         candidates = outputs if isinstance(outputs, list) else [outputs]
         for item in candidates:
@@ -275,8 +291,22 @@ class RunJournal(BaseCallbackHandler):
             if not isinstance(messages, (list, tuple)):
                 continue
             for message in messages:
-                if isinstance(message, BaseMessage):
+                if not isinstance(message, BaseMessage):
+                    continue
+                if not self._is_clarification_message(message):
                     self._record_clarification_reply(message)
+                    continue
+                msg_id = getattr(message, "id", None)
+                dedupe_key = msg_id if isinstance(msg_id, str) and msg_id else str(id(message))
+                if dedupe_key in self._emitted_clarification_event_ids:
+                    continue
+                self._emitted_clarification_event_ids.add(dedupe_key)
+                self._put(
+                    event_type="llm.tool.result",
+                    category="message",
+                    content=message.model_dump(),
+                )
+                self._record_message_summary(message)
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._put(

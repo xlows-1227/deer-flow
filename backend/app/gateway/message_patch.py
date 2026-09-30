@@ -224,31 +224,39 @@ def patch_channel_values_messages(channel_values: Mapping[str, Any]) -> None:
             mcopy = dict(msg)
             if patch_message_dict(mcopy):
                 messages[idx] = mcopy
-    # Remove __user copies: DynamicContextMiddleware appends a visible
-    # ``__user`` copy of each human message to the end of the checkpoint
-    # message list.  The original message is already in the correct position,
-    # so the __user copy is a duplicate that causes the frontend to show
-    # messages twice (once in-position, once at the bottom).  Strip them
-    # before returning to the frontend.
+    # Remove __user copies only when they are true duplicates, i.e. another
+    # message with the same base id is still present AND visible.  Two data
+    # shapes exist:
+    #
+    # 1. Legacy: DynamicContextMiddleware appended a visible ``__user`` copy
+    #    at the END of the list while the visible original stayed in place —
+    #    the copy duplicates it and must be stripped.
+    # 2. Current (ID-swap split): the message carrying the original id is the
+    #    HIDDEN reminder (``hide_from_ui``) and the ``__user`` copy right
+    #    after it is the ONLY visible version of the user's message.
+    #    Stripping it here made /threads/{id}/history drop the user's
+    #    question entirely while /threads/{id}/state kept it, so the frontend
+    #    intermittently lost the first Q depending on which response landed
+    #    first.
     original_len = len(messages)
-    # Log all message IDs/types before filtering for debugging
-    for i, m in enumerate(messages):
-        if isinstance(m, Mapping):
-            mid = m.get("id", "NULL")
-            mtype = m.get("type", "?")
-            ak = m.get("additional_kwargs", {})
-            hidden = ak.get("hide_from_ui", False) if isinstance(ak, Mapping) else False
-            content_str = str(m.get("content", ""))[:60]
-            logger.info(
-                "patch_channel_values_messages: msg[%d] id=%r type=%s hidden=%s content=%s",
-                i, mid, mtype, hidden, content_str,
-            )
+    visible_base_ids = {
+        m["id"]
+        for m in messages
+        if isinstance(m, Mapping)
+        and isinstance(m.get("id"), str)
+        and not m["id"].endswith("__user")
+        and not (
+            isinstance(m.get("additional_kwargs"), Mapping)
+            and m["additional_kwargs"].get("hide_from_ui")
+        )
+    }
     messages[:] = [
         m for m in messages
         if not (
             isinstance(m, Mapping)
             and isinstance(m.get("id"), str)
             and m["id"].endswith("__user")
+            and m["id"][: -len("__user")] in visible_base_ids
         )
     ]
     removed = original_len - len(messages)

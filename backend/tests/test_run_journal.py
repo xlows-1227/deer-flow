@@ -206,6 +206,49 @@ class TestToolCallbacks:
         assert messages[0]["content"]["type"] == "tool"
 
     @pytest.mark.anyio
+    async def test_chain_end_clarification_command_journals_tool_result(self, journal_setup):
+        """ClarificationMiddleware intercepts the tool call before execution, so the
+        formatted ToolMessage only reaches callbacks via the tools-node Command.
+        It must be journaled as a message event or run-event history lacks the
+        clarification card the checkpoint contains."""
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        clarification = ToolMessage(
+            content="Which topic?",
+            tool_call_id="call_00_clar",
+            name="ask_clarification",
+            id="clarification:call_00_clar",
+        )
+        cmd = Command(update={"messages": [clarification]}, goto="__end__")
+        # Nested chains may report the same Command multiple times.
+        j.on_chain_end(cmd, run_id=uuid4())
+        j.on_chain_end(cmd, run_id=uuid4())
+        await j.flush()
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["event_type"] == "llm.tool.result"
+        assert messages[0]["content"]["name"] == "ask_clarification"
+        assert messages[0]["content"]["content"] == "Which topic?"
+        assert j._last_ai_msg == "Which topic?"
+
+    @pytest.mark.anyio
+    async def test_chain_end_command_skips_non_clarification_messages(self, journal_setup):
+        """Non-clarification messages in Command updates stay on_tool_end's turf —
+        on_chain_end must not duplicate them."""
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        inner = ToolMessage(content="file list", tool_call_id="call_2", name="present_files")
+        cmd = Command(update={"messages": [inner]})
+        j.on_chain_end(cmd, run_id=uuid4())
+        await j.flush()
+        messages = await store.list_messages("t1")
+        assert messages == []
+
+    @pytest.mark.anyio
     async def test_tool_end_with_command_unwraps_tool_message(self, journal_setup):
         """on_tool_end with Command(update={'messages':[ToolMessage]}) unwraps inner message."""
         from langchain_core.messages import ToolMessage

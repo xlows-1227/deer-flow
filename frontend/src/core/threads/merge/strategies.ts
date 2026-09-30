@@ -2,8 +2,8 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import { findLastMessageIndex } from "./identity";
 import {
+  firstEquivalentIndex,
   isAlignmentNoiseMessage,
-  isMessageInHistory,
   lastEquivalentIndex,
 } from "./overlap";
 import {
@@ -59,26 +59,49 @@ export function mergeHistoryAsThreadSuffix(
   }
 
   const prefix = threadMessages.slice(0, firstMatch);
-  // Filter the "after" segment (thread messages not in history) to exclude
-  // hidden/noise messages such as DynamicContext reminders.  These reminders
-  // are injected by middleware into checkpoint state but never appear in
-  // run-event history, so they always land in `after`.  When they accumulate
-  // after all of history, `repairDynamicContextUserMessageOrder` then moves
-  // every `__user` copy to follow its reminder — pulling all user questions
-  // to the bottom and stratifying the conversation into answers-first,
-  // questions-last.  Since these messages are hidden from the UI anyway,
-  // dropping them from `after` prevents the misordering.
-  const after = threadMessages
-    .slice(firstMatch)
-    .filter(
-      (message) =>
-        !isMessageInHistory(message, historyMessages) &&
-        !isAlignmentNoiseMessage(message),
-    );
+  // Thread-only extras — e.g. the ask_clarification ToolMessage injected
+  // into checkpoint state via Command(goto=END), which never produces a run
+  // event — must keep their checkpoint position. Appending them after the
+  // whole history displaces them to the very end of the conversation, so
+  // each extra is anchored right after the history message corresponding to
+  // its nearest preceding matched thread message. Alignment noise such as
+  // DynamicContext reminders is dropped: it is injected into checkpoint
+  // state but never appears in run-event history, so it always lands in the
+  // extras bucket and would otherwise re-appear at every anchor.
+  const extrasByHistoryIndex = new Map<number, Message[]>();
+  const extrasBeforeHistory: Message[] = [];
+  let anchorHistoryIndex = -1;
+  for (let index = firstMatch; index < threadMessages.length; index += 1) {
+    const message = threadMessages[index]!;
+    if (isAlignmentNoiseMessage(message)) {
+      continue;
+    }
+    const matchedHistoryIndex = firstEquivalentIndex(historyMessages, message);
+    if (matchedHistoryIndex >= 0) {
+      anchorHistoryIndex = matchedHistoryIndex;
+      continue;
+    }
+    if (anchorHistoryIndex === -1) {
+      extrasBeforeHistory.push(message);
+    } else {
+      const bucket = extrasByHistoryIndex.get(anchorHistoryIndex) ?? [];
+      bucket.push(message);
+      extrasByHistoryIndex.set(anchorHistoryIndex, bucket);
+    }
+  }
+
+  const tail: Message[] = [...extrasBeforeHistory];
+  historyMessages.forEach((message, index) => {
+    tail.push(message);
+    const extras = extrasByHistoryIndex.get(index);
+    if (extras && extras.length > 0) {
+      tail.push(...extras);
+    }
+  });
 
   return mergeThreadAndOptimisticMessages(
     prefix,
-    [...historyMessages, ...after],
+    tail,
     optimisticMessages,
   );
 }
