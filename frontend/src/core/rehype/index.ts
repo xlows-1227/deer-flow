@@ -143,7 +143,7 @@ function nodeToRawString(node: ElementContent): string {
     return "";
   }
   if (node.type === "element") {
-    const el = node as Element;
+    const el = node;
     const attrs = Object.entries(el.properties ?? {})
       .map(([k, v]) =>
         v === true || v == null ? ` ${k}` : ` ${k}="${String(v)}"`,
@@ -164,7 +164,7 @@ function escapeUnknownNode(
   if (node.type !== "element") {
     return node;
   }
-  const el = node as Element;
+  const el = node;
   const isSvg = el.tagName.toLowerCase() === "svg";
   const newInSvg = inSvg || isSvg;
   if (el.children) {
@@ -187,6 +187,11 @@ function escapeUnknownNode(
  */
 export function rehypeEscapeUnknownTags() {
   return (tree: Root) => {
-    tree.children = tree.children.map((c) => escapeUnknownNode(c, false));
+    // Root.children is RootContent (Doctype/Raw/MDX nodes beyond
+    // ElementContent); escapeUnknownNode only transforms elements and returns
+    // everything else unchanged, so only elements are passed in.
+    tree.children = tree.children.map((c) =>
+      c.type === "element" ? escapeUnknownNode(c, false) : c,
+    );
   };
 }
