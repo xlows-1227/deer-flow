@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, Users2Icon } from "lucide-react";
+import { CheckIcon, Loader2Icon, MinusIcon, PlusIcon, Users2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +20,7 @@ import { useAllUsers, useSkillShares, useUpdateSkillShares } from "@/core/skills
 import type { SkillSharedUser, UserInfo } from "@/core/skills/type";
 import { cn } from "@/lib/utils";
 
-type ShareUserRow = SkillSharedUser & { selected?: boolean };
+type ShareUserRow = SkillSharedUser;
 
 function useSortedShareLists(args: {
   skillName: string | null;
@@ -52,18 +52,6 @@ function useSortedShareLists(args: {
         candidates.push(row);
       }
     }
-    console.log("[SkillShareDialog] useSortedShareLists:", {
-      skillName,
-      ownerUserId,
-      allUsersCount: allUsers.length,
-      shareStateShareesCount: shareStateSharees?.length ?? 0,
-      shareStateShareesIds: shareStateSharees?.map((s) => s.id) ?? [],
-      allUsersIds: allUsers.map((u) => u.id),
-      candidatesCount: candidates.length,
-      shareesCount: sharees.length,
-      candidateEmails: candidates.map((c) => c.email),
-      shareeEmails: sharees.map((s) => s.email),
-    });
     const byEmail = (a: { email: string }, b: { email: string }) =>
       a.email.localeCompare(b.email);
     candidates.sort(byEmail);
@@ -89,57 +77,25 @@ export function SkillShareDialog({
   const { shares, isLoading: loadingShares, error: sharesError } = useSkillShares(open ? skillName : null);
   const updateShares = useUpdateSkillShares();
 
-  useEffect(() => {
-    if (open) {
-      console.log("[SkillShareDialog] state dump:", {
-        skillName,
-        skillNameLower: skillName?.toLowerCase(),
-        ownerUserId,
-        ownerUserIdLower: ownerUserId?.toLowerCase(),
-        shares: shares ? {
-          skill_name: shares.skill_name,
-          owner_user_id: shares.owner_user_id,
-          owner_email: shares.owner_email,
-          count: shares.sharees.length,
-          sharees: shares.sharees.map((s) => ({ id: s.id, email: s.email })),
-        } : null,
-        allUsersCount: allUsers.length,
-        allUsers: allUsers.map((u) => ({ id: u.id, email: u.email })),
-        error: sharesError?.message ?? null,
-        loading: { loadingUsers, loadingShares },
-      });
-    }
-  }, [open, shares, allUsers, sharesError, skillName, ownerUserId, loadingUsers, loadingShares]);
-
-  const initialShareeIds = useMemo(
-    () => new Set<string>(shares?.sharees?.map((s) => s.id.toLowerCase()) ?? []),
-    [shares],
-  );
-
   // Local working set — only persisted on "确认".  Stored as a Set for easy
   // right-list membership testing; the UI reads a derived sorted list.
   const [workingIds, setWorkingIds] = useState<Set<string>>(new Set());
   const [candidateFilter, setCandidateFilter] = useState("");
   const [shareeFilter, setShareeFilter] = useState("");
-  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set());
-  const [selectedShareeIds, setSelectedShareeIds] = useState<Set<string>>(new Set());
 
   // Seed the working copy when the dialog opens *or* when the server payload
   // arrives for the first time (avoids flashing stale state while the share
   // list query is in flight).
   useEffect(() => {
     if (!open) return;
-    if (!initialShareeIds.size && !shares) return;
-    // Use the original-case IDs from shares for the working set
+    if (!shares) return;
     const originalIds = new Set<string>(
-      shares?.sharees?.map((s) => s.id) ?? []
+      shares.sharees?.map((s) => s.id) ?? []
     );
     setWorkingIds(originalIds);
-    setSelectedCandidateIds(new Set());
-    setSelectedShareeIds(new Set());
     setCandidateFilter("");
     setShareeFilter("");
-  }, [open, initialShareeIds, shares]);
+  }, [open, shares]);
 
   const { candidates, sharees } = useSortedShareLists({
     skillName,
@@ -149,23 +105,31 @@ export function SkillShareDialog({
   });
 
   // Re-split users through the working set instead of server state so that
-  // the middle-column buttons reflect local changes immediately.
+  // toggling a row reflects local changes immediately.
+  //
+  // Both columns iterate over the full user pool (candidates + sharees)
+  // because a user's column depends on the *local* working set, not the
+  // server's snapshot.  If the left column only scanned `candidates`, a
+  // server-side sharee that the user just un-shared would vanish from both
+  // lists (it's in `sharees`, not `candidates`).
+  const allRows = useMemo(() => [...candidates, ...sharees], [candidates, sharees]);
+
   const { leftList, rightList } = useMemo(() => {
     const left: ShareUserRow[] = [];
     const right: ShareUserRow[] = [];
-    for (const c of candidates) {
-      if (workingIds.has(c.id)) continue;
-      if (candidateFilter && !c.email.toLowerCase().includes(candidateFilter.toLowerCase())) {
-        continue;
+    for (const row of allRows) {
+      const isShared = workingIds.has(row.id);
+      if (isShared) {
+        if (shareeFilter && !row.email.toLowerCase().includes(shareeFilter.toLowerCase())) {
+          continue;
+        }
+        right.push(row);
+      } else {
+        if (candidateFilter && !row.email.toLowerCase().includes(candidateFilter.toLowerCase())) {
+          continue;
+        }
+        left.push(row);
       }
-      left.push({ ...c, selected: selectedCandidateIds.has(c.id) });
-    }
-    for (const row of [...candidates, ...sharees]) {
-      if (!workingIds.has(row.id)) continue;
-      if (shareeFilter && !row.email.toLowerCase().includes(shareeFilter.toLowerCase())) {
-        continue;
-      }
-      right.push({ ...row, selected: selectedShareeIds.has(row.id) });
     }
     const byEmail = (a: { email: string }, b: { email: string }) =>
       a.email.localeCompare(b.email);
@@ -173,38 +137,31 @@ export function SkillShareDialog({
     right.sort(byEmail);
     return { leftList: left, rightList: right };
   }, [
-    candidates,
-    sharees,
+    allRows,
     workingIds,
     candidateFilter,
     shareeFilter,
-    selectedCandidateIds,
-    selectedShareeIds,
   ]);
 
-  const moveSelectedToSharees = () => {
-    if (!selectedCandidateIds.size) return;
+  const toggleSharee = (id: string, shouldShare: boolean) => {
     setWorkingIds((prev) => {
       const next = new Set(prev);
-      selectedCandidateIds.forEach((id) => next.add(id));
+      if (shouldShare) next.add(id);
+      else next.delete(id);
       return next;
     });
-    setSelectedCandidateIds(new Set());
   };
 
-  const moveSelectedToCandidates = () => {
-    if (!selectedShareeIds.size) return;
-    setWorkingIds((prev) => {
-      const next = new Set(prev);
-      selectedShareeIds.forEach((id) => next.delete(id));
-      return next;
-    });
-    setSelectedShareeIds(new Set());
-  };
-
-  const dirty =
-    workingIds.size !== initialShareeIds.size ||
-    [...workingIds].some((id) => !initialShareeIds.has(id));
+  const dirty = useMemo(() => {
+    if (workingIds.size !== (shares?.sharees?.length ?? 0)) return true;
+    const serverIds = new Set(
+      (shares?.sharees ?? []).map((s) => s.id.toLowerCase())
+    );
+    for (const id of workingIds) {
+      if (!serverIds.has(id.toLowerCase())) return true;
+    }
+    return false;
+  }, [workingIds, shares]);
 
   async function handleConfirm() {
     if (!skillName) return;
@@ -242,7 +199,7 @@ export function SkillShareDialog({
               加载共享列表失败：{sharesError.message}
             </div>
           ) : null}
-          <div className="grid min-h-0 flex-1 grid-cols-1 items-stretch gap-3 md:grid-cols-[1fr_auto_1fr]">
+          <div className="grid min-h-0 flex-1 grid-cols-1 items-stretch gap-3 md:grid-cols-2">
             {/* Left column: candidates */}
             <div className="flex min-h-[260px] min-w-0 flex-col rounded-lg border border-gray-200 bg-white">
               <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
@@ -269,31 +226,23 @@ export function SkillShareDialog({
                   </div>
                 ) : !leftList.length ? (
                   <div className="flex h-40 items-center justify-center text-sm text-gray-400">
-                    没有可共享的用户
+                    {candidateFilter ? "没有匹配的用户" : "没有可共享的用户"}
                   </div>
                 ) : (
                   <ul className="divide-y divide-gray-50 p-1">
                     {leftList.map((u) => (
                       <li key={u.id}>
-                        <label
+                        <button
+                          type="button"
+                          onClick={() => toggleSharee(u.id, true)}
                           className={cn(
-                            "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                            u.selected ? "bg-blue-50" : "hover:bg-gray-50",
+                            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-blue-50",
                           )}
+                          title="点击加入共享列表"
                         >
-                          <input
-                            type="checkbox"
-                            className="size-3.5 accent-blue-600"
-                            checked={!!u.selected}
-                            onChange={(e) => {
-                              setSelectedCandidateIds((prev) => {
-                                const next = new Set(prev);
-                                if (e.target.checked) next.add(u.id);
-                                else next.delete(u.id);
-                                return next;
-                              });
-                            }}
-                          />
+                          <span className="flex size-5 items-center justify-center rounded text-gray-400 group-hover:text-blue-600">
+                            <PlusIcon className="size-3.5" />
+                          </span>
                           <span className="min-w-0 flex-1 truncate text-gray-800">
                             {u.email}
                           </span>
@@ -302,40 +251,12 @@ export function SkillShareDialog({
                               admin
                             </Badge>
                           ) : null}
-                        </label>
+                        </button>
                       </li>
                     ))}
                   </ul>
                 )}
               </ScrollArea>
-            </div>
-
-            {/* Middle column: add / remove buttons */}
-            <div className="flex items-center justify-center gap-2 md:flex-col">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={moveSelectedToSharees}
-                disabled={!selectedCandidateIds.size || loading}
-                title="把选中的用户加入共享列表"
-                className="h-9 min-w-0 px-3 md:h-10 md:px-3"
-              >
-                <ChevronRightIcon className="size-4 md:mr-0" />
-                <span className="md:hidden">共享</span>
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={moveSelectedToCandidates}
-                disabled={!selectedShareeIds.size || loading}
-                title="把选中的用户移出共享列表"
-                className="h-9 min-w-0 px-3 md:h-10 md:px-3"
-              >
-                <ChevronLeftIcon className="size-4 md:mr-0" />
-                <span className="md:hidden">取消</span>
-              </Button>
             </div>
 
             {/* Right column: sharees */}
@@ -359,31 +280,23 @@ export function SkillShareDialog({
               <ScrollArea className="min-h-0 flex-1">
                 {!rightList.length ? (
                   <div className="flex h-40 items-center justify-center text-sm text-gray-400">
-                    尚未共享给任何用户
+                    {shareeFilter ? "没有匹配的用户" : "尚未共享给任何用户"}
                   </div>
                 ) : (
                   <ul className="divide-y divide-gray-50 p-1">
                     {rightList.map((u) => (
                       <li key={u.id}>
-                        <label
+                        <button
+                          type="button"
+                          onClick={() => toggleSharee(u.id, false)}
                           className={cn(
-                            "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                            u.selected ? "bg-blue-50" : "hover:bg-gray-50",
+                            "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-red-50",
                           )}
+                          title="点击移出共享列表"
                         >
-                          <input
-                            type="checkbox"
-                            className="size-3.5 accent-blue-600"
-                            checked={!!u.selected}
-                            onChange={(e) => {
-                              setSelectedShareeIds((prev) => {
-                                const next = new Set(prev);
-                                if (e.target.checked) next.add(u.id);
-                                else next.delete(u.id);
-                                return next;
-                              });
-                            }}
-                          />
+                          <span className="flex size-5 items-center justify-center rounded text-green-600">
+                            <CheckIcon className="size-3.5" />
+                          </span>
                           <span className="min-w-0 flex-1 truncate text-gray-800">
                             {u.email}
                           </span>
@@ -392,7 +305,8 @@ export function SkillShareDialog({
                               admin
                             </Badge>
                           ) : null}
-                        </label>
+                          <MinusIcon className="size-3.5 text-gray-300 opacity-0 transition-opacity group-hover:text-red-500 group-hover:opacity-100" />
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -402,7 +316,7 @@ export function SkillShareDialog({
           </div>
 
           <div className="text-xs text-gray-400">
-            提示：技能创建者不会出现在任何一侧（创建者已有全部访问权限）。共享后的用户可以查看该 Skill，但无法进行编辑。
+            提示：点击左侧用户可加入共享，点击右侧用户可移出共享。技能创建者不会出现在任何一侧（创建者已有全部访问权限）。共享后的用户可以查看该 Skill，但无法进行编辑。
           </div>
         </div>
 

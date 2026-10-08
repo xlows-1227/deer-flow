@@ -141,6 +141,10 @@ export function useThreadStream({
   // (e.g. query_database) are not reattached ~500ms later.
   const suppressAutoRejoinRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  // Timestamp of the last stream event received. Used by the watchdog to
+  // detect half-open connections (backend died mid-run, TCP still open,
+  // reader.read() hangs forever → isLoading stuck at true).
+  const lastStreamEventAtRef = useRef<number>(0);
   const listeners = useRef({
     onSend,
     onStart,
@@ -226,6 +230,7 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data) {
+      lastStreamEventAtRef.current = Date.now();
       const eventThreadId = activeRunThreadIdRef.current;
       if (!eventThreadId || !isCurrentStreamThread(eventThreadId)) {
         return;
@@ -339,6 +344,30 @@ export function useThreadStream({
           queryKey: threadTokenUsageQueryKey(eventThreadId),
         });
       }
+      // Stream may have dropped because the backend restarted (e.g. during
+      // local dev). The run could already be finished — if so, calling
+      // onFinish resets isLoading instead of leaving the UI stuck on the
+      // spinner. If it's still running, try to rejoin it.
+      void (async () => {
+        try {
+          const apiClient = getAPIClient(isMock);
+          const runs = await apiClient.runs.list(eventThreadId);
+          const activeRun = findRunToRejoin(runs, {
+            suppressRejoin: suppressAutoRejoinRef.current,
+          });
+          if (activeRun && threadRef.current) {
+            await threadRef.current.joinStream(activeRun.run_id);
+          }
+          // No active run: it already finished. The SDK's onFinish will fire
+          // after joinStream resolves for a completed run; if not, the
+          // history refresh below will reflect the final state.
+          void queryClient.invalidateQueries({
+            queryKey: ["threads", eventThreadId, "history"],
+          });
+        } catch {
+          // Ignore — transient failure; user can retry.
+        }
+      })();
     },
     onFinish(state) {
       const eventThreadId = activeRunThreadIdRef.current;
@@ -372,6 +401,43 @@ export function useThreadStream({
 
   const threadRef = useRef(thread);
   threadRef.current = thread;
+
+  // Watchdog: if the stream is "loading" but no event has arrived for
+  // STALE_STREAM_TIMEOUT_MS, the connection is half-open (backend died,
+  // TCP still open, reader.read() hangs). Query the run status and either
+  // rejoin (still running) or stop the local stream (run finished).
+  const STALE_STREAM_TIMEOUT_MS = 90_000;
+  const WATCHDOG_INTERVAL_MS = 30_000;
+  useEffect(() => {
+    if (!thread.isLoading || isMock) return;
+    const interval = window.setInterval(() => {
+      const lastEvent = lastStreamEventAtRef.current;
+      const now = Date.now();
+      if (lastEvent > 0 && now - lastEvent < STALE_STREAM_TIMEOUT_MS) return;
+      const eventThreadId = activeRunThreadIdRef.current;
+      if (!eventThreadId) return;
+      void (async () => {
+        try {
+          const apiClient = getAPIClient(isMock);
+          const runs = await apiClient.runs.list(eventThreadId);
+          const activeRun = findRunToRejoin(runs, {
+            suppressRejoin: suppressAutoRejoinRef.current,
+          });
+          if (activeRun && threadRef.current) {
+            lastStreamEventAtRef.current = Date.now();
+            await threadRef.current.joinStream(activeRun.run_id);
+          } else {
+            // Run already finished on the backend but our stream hung.
+            // Stop the local stream so isLoading resets to false.
+            await threadRef.current?.stop();
+          }
+        } catch {
+          // Ignore — transient failure; next tick will retry.
+        }
+      })();
+    }, WATCHDOG_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [thread.isLoading, isMock]);
 
   // Re-attach to a still-running backend task when the SSE stream drops
   // (common during long tool calls such as image generation). The SDK only
@@ -812,6 +878,7 @@ export function useThreadStream({
     history,
     thread.messages,
     visibleOptimisticMessages,
+    thread.isLoading,
   );
 
   // Copy timestamps from optimistic human messages to server human messages
@@ -848,7 +915,21 @@ export function useThreadStream({
     // Set before awaiting stop so the isLoading→false rejoin effect cannot
     // race cancel and reattach a still-running backend tool call.
     suppressAutoRejoinRef.current = true;
-    await thread.stop();
+    try {
+      await thread.stop();
+    } catch (err) {
+      // The backend returns 409 when the run has already finished
+      // (status: success/error/etc.) — in that case there is nothing to
+      // cancel, and the final result is already (or will be) reflected in
+      // the thread state.  Swallow this so the UI doesn't crash with an
+      // unhandled Runtime Error; the user just sees the run stop.
+      const status =
+        (err as { status?: number })?.status ??
+        (err as { response?: { status?: number } })?.response?.status;
+      if (status !== 409) {
+        throw err;
+      }
+    }
   }, [thread]);
 
   // Merge history, live stream, and optimistic messages for display

@@ -48,6 +48,7 @@ export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
+  isLoading: boolean = true,
 ): Message[] {
   // NOTE: We previously filtered out history human messages without a
   // stable ID to avoid duplicate Q messages.  But filtering causes those
@@ -110,6 +111,7 @@ export function mergeMessages(
           timestampedThreadMessages.slice(0, boundary + 1),
           timestampedThreadMessages.slice(boundary + 1),
           optimisticMessages,
+          isLoading,
         ),
         filteredHistory.length > 0,
       );
@@ -118,6 +120,7 @@ export function mergeMessages(
       filteredHistory,
       timestampedThreadMessages,
       optimisticMessages,
+      isLoading,
     );
     if (suffixMerged) {
       return finalizeMergedMessages(
@@ -144,6 +147,7 @@ export function mergeMessages(
           timestampedThreadMessages.slice(0, boundary + 1),
           timestampedThreadMessages.slice(boundary + 1),
           optimisticMessages,
+          isLoading,
         ),
         filteredHistory.length > 0,
       );
@@ -163,6 +167,7 @@ export function mergeMessages(
         establishedThreadPrefix,
         threadNewSegment,
         optimisticMessages,
+        isLoading,
       ),
     ],
     filteredHistory.length > 0,

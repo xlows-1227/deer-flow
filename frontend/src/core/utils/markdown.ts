@@ -240,11 +240,41 @@ function inUrlToken(full: string, offset: number): boolean {
   return /(?:https?:\/\/|www\.)\S*$/i.test(prefix);
 }
 
+/**
+ * 折叠 LLM 退化产生的连续重复短文本。
+ *
+ * 当模型在长对话中退化时，会输出成百上千次相同的短标记（如
+ * `[工具_call]`、`[工具调用: xxx]`、`tool_call` 等）。这些重复文本
+ * 经过 Markdown 解析和分词动画后会产生海量 DOM 节点，导致浏览器
+ * 主线程阻塞、页面无法点击或滚动。
+ *
+ * 本函数在预处理阶段将连续重复 6 次以上的短模式（1-80 字符）折叠为
+ * `模式 × 次数`，从源头控制内容体量。匹配使用非回溯的锚定策略，
+ * 避免灾难性回溯。
+ */
+function collapseRepeatedPatterns(text: string): string {
+  // 匹配连续重复的短模式：1-80 字符，重复 6 次及以上。
+  // 用反向引用捕获模式，\1{5,} 表示至少再重复 5 次（共 6 次起）。
+  // 模式后不允许紧跟相同模式（避免过度折叠）。
+  return text.replace(
+    /([\s\S]{1,80}?)\1{5,}(?!\1)/g,
+    (match: string, pattern: string) => {
+      const count = Math.floor(match.length / pattern.length);
+      if (count < 6) return match;
+      return `${pattern} × ${count}`;
+    },
+  );
+}
+
 export function preprocessMarkdown(raw: string): string {
   if (!raw) return raw;
 
+  // ── Pre-Step 0: 折叠 LLM 退化产生的连续重复文本 ──────────────
+  // 必须在所有其他处理之前执行，否则重复模式可能被换行/标签处理打散。
+  let text = collapseRepeatedPatterns(raw);
+
   // ── Pre-Step: Strip LangGraph tool-call blocks + stray tags ────
-  let text = raw
+  text = text
     .replace(LANGGRAPH_TOOL_CALL_BLOCK_REGEX, "")
     .replace(LANGGRAPH_STRAY_TAG_REGEX, "");
   // Also strip <!--DF_RAW_ERROR:...--> HTML comment (belt-and-suspenders).
