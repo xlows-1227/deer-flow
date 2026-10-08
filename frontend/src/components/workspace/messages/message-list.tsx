@@ -29,14 +29,12 @@ import {
   getMessageGroups,
   getMessageRenderKey,
   getMessageTimestamp,
-  getStreamingMessageLookup,
   getToolCalls,
   hasContent,
   hasPresentFiles,
   hasReasoning,
   hasToolCalls,
   isAiMessage,
-  isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -195,6 +193,7 @@ export function MessageList({
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
+  const lastGroup = groupedMessages[groupedMessages.length - 1];
   const parsedChoicesByGroupId = useMemo(() => {
     const parsed = new Map<string, ParsedMessageChoiceOptions>();
 
@@ -246,15 +245,6 @@ export function MessageList({
   const tokenDebugSteps = useMemo(
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
-  );
-  const streamingMessages = useMemo(
-    () =>
-      getStreamingMessageLookup(
-        messages,
-        thread.isLoading,
-        thread.getMessagesMetadata,
-      ),
-    [messages, thread.getMessagesMetadata, thread.isLoading],
   );
 
   const renderAssistantCopyButton = useCallback(
@@ -437,6 +427,7 @@ export function MessageList({
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
           const groupKey = getMessageGroupRenderKey(group, groupIndex);
+          const isLastGroup = groupIndex === groupedMessages.length - 1;
 
           if (group.type === "human" || group.type === "assistant") {
             return (
@@ -472,6 +463,11 @@ export function MessageList({
                       )}
                       message={msg}
                       isLoading={thread.isLoading}
+                      isStreaming={
+                        thread.isLoading &&
+                        isLastGroup &&
+                        group.type === "assistant"
+                      }
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
                       precomputedToolNames={precomputedToolNames}
@@ -482,6 +478,11 @@ export function MessageList({
                     />
                   );
                 })}
+                {group.type === "assistant" &&
+                  isLastGroup &&
+                  thread.isLoading && (
+                    <StreamingIndicator className="mb-1 mt-1" />
+                  )}
                 {group.type === "assistant" && (
                   <div className="flex min-h-7 w-full items-center gap-2">
                     {renderTokenUsage({
@@ -491,10 +492,7 @@ export function MessageList({
                     })}
                     {renderAssistantCopyButton(
                       group.messages,
-                      isAssistantMessageGroupStreaming(
-                        group.messages,
-                        streamingMessages,
-                      ),
+                      thread.isLoading && isLastGroup,
                     )}
                   </div>
                 )}
@@ -512,7 +510,9 @@ export function MessageList({
                 <div key={groupKey} className="w-full">
                   <MarkdownContent
                     content={cleaned}
-                    isLoading={thread.isLoading}
+                    isLoading={
+                      thread.isLoading && isLastGroup
+                    }
                     rehypePlugins={rehypePlugins}
                   />
                   {parsedChoices && (
@@ -547,7 +547,9 @@ export function MessageList({
                     <>
                       <MarkdownContent
                         content={cleaned}
-                        isLoading={thread.isLoading}
+                        isLoading={
+                          thread.isLoading && isLastGroup
+                        }
                         rehypePlugins={rehypePlugins}
                         className="mb-4"
                       />
@@ -691,6 +693,9 @@ export function MessageList({
                   className="mb-4"
                 />
               )}
+              {isLastGroup && thread.isLoading && (
+                <StreamingIndicator className="mb-1 mt-1" />
+              )}
               {renderTokenUsage({
                 messages: group.messages,
                 turnUsageMessages,
@@ -700,8 +705,11 @@ export function MessageList({
             </div>
           );
         })}
-        {thread.isLoading && <StreamingIndicator className="my-4" />}
-        <div style={{ height: `${paddingBottom}px` }} />
+        {thread.isLoading &&
+          (!lastGroup || lastGroup.type === "human") && (
+          <StreamingIndicator className="my-4" />
+        )}
+        <div style={{ height: `${paddingBottom}px`}} />
       </ConversationContent>
     </Conversation>
   );

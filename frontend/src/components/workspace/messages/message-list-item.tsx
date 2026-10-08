@@ -141,6 +141,7 @@ export function MessageListItem({
   className,
   message,
   isLoading,
+  isStreaming,
   feedback,
   runId,
   threadId,
@@ -151,6 +152,7 @@ export function MessageListItem({
   className?: string;
   message: Message;
   isLoading?: boolean;
+  isStreaming?: boolean;
   threadId: string;
   feedback?: FeedbackData | null;
   runId?: string;
@@ -169,6 +171,7 @@ export function MessageListItem({
         className={isHuman ? "w-fit" : "w-full"}
         message={message}
         isLoading={isLoading}
+        isStreaming={isStreaming}
         threadId={threadId}
         precomputedToolNames={precomputedToolNames}
       />
@@ -247,12 +250,14 @@ function MessageContent_({
   className,
   message,
   isLoading = false,
+  isStreaming = false,
   threadId,
   precomputedToolNames,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  isStreaming?: boolean;
   threadId: string;
   precomputedToolNames?: string[][];
 }) {
@@ -464,7 +469,7 @@ function MessageContent_({
       {hasSubstantiveContent ? (
         <MarkdownContent
           content={toolOmissionResult.content}
-          isLoading={isLoading}
+          isLoading={isStreaming}
           rehypePlugins={[
             rehypeRaw,
             rehypeEscapeUnknownTags,
@@ -478,7 +483,7 @@ function MessageContent_({
       ) : !showErrorBanner && contentToDisplay ? (
         <MarkdownContent
           content={toolOmissionResult.content}
-          isLoading={isLoading}
+          isLoading={isStreaming}
           rehypePlugins={[
             rehypeRaw,
             rehypeEscapeUnknownTags,

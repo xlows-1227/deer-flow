@@ -182,8 +182,12 @@ export function SkillDetailDialog({
                     </SidebarSection>
                     <SidebarSection label="分类">
                       <div className="flex flex-wrap gap-2">
-                        <Badge variant="secondary" className="capitalize">
-                          {displaySkill.category}
+                        <Badge variant="secondary">
+                          {displaySkill.category === "public"
+                            ? "公共"
+                            : displaySkill.category === "custom"
+                              ? "自定义"
+                              : displaySkill.category}
                         </Badge>
                         {displaySkill.license ? (
                           <Badge variant="outline">
@@ -208,32 +212,27 @@ export function SkillDetailDialog({
                     {(isCustom && displaySkill?.owner_email) || canDownload || canShare ? (
                       <SidebarSection label="归属">
                         {isCustom && displaySkill?.owner_email && (
-                          <div className="mb-3 flex items-center gap-2 text-sm text-gray-700">
-                            <span className="text-xs uppercase tracking-wider text-gray-400">
+                          <div className="mb-3 flex gap-2 text-sm text-gray-700">
+                            <span className="shrink-0 text-xs uppercase tracking-wider text-gray-400">
                               创建者：
                             </span>
-                            <span className="truncate">{displaySkill.owner_email}</span>
+                            <span className="min-w-0 flex-1 break-all leading-relaxed">
+                              {displaySkill.owner_email}
+                            </span>
                           </div>
                         )}
-                        {isCustom && (displaySkill as Skill).shared_with !== undefined && ((displaySkill as Skill).shared_with?.length ?? 0) > 0 && (
-                          <div className="mb-3">
-                            <div className="text-xs uppercase tracking-wider text-gray-400 mb-1">
-                              已共享给：
+                        {isCustom &&
+                          (displaySkill as Skill).shared_with !== undefined &&
+                          ((displaySkill as Skill).shared_with?.length ?? 0) > 0 && (
+                            <div className="mb-3 flex gap-2 text-sm text-gray-700">
+                              <span className="shrink-0 text-xs uppercase tracking-wider text-gray-400">
+                                已共享给：
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                {(displaySkill as Skill).shared_with!.length} 人
+                              </span>
                             </div>
-                            <div className="flex flex-wrap gap-1">
-                              {(displaySkill as Skill).shared_with!.slice(0, 6).map((u) => (
-                                <Badge key={u.id} variant="outline" className="text-[10px] font-normal">
-                                  {u.email}
-                                </Badge>
-                              ))}
-                              {(displaySkill as Skill).shared_with!.length > 6 && (
-                                <Badge variant="outline" className="text-[10px] font-normal">
-                                  +{(displaySkill as Skill).shared_with!.length - 6}
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
-                        )}
+                          )}
                         <div className="flex flex-col gap-2">
                           {canDownload && (
                             <Button

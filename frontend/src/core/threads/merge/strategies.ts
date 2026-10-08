@@ -6,11 +6,7 @@ import {
   isAlignmentNoiseMessage,
   lastEquivalentIndex,
 } from "./overlap";
-import {
-  messageIsAssistantSide,
-  moveSingleTrailingHumanInputToFront,
-  splitThreadForOptimisticHuman,
-} from "./repair";
+import { moveSingleTrailingHumanInputToFront } from "./repair";
 
 /**
  * When a historical thread is opened, run-event history is loaded
@@ -27,6 +23,7 @@ export function mergeHistoryAsThreadSuffix(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
+  isLoading: boolean = true,
 ): Message[] | null {
   if (historyMessages.length === 0 || threadMessages.length === 0) {
     return null;
@@ -103,6 +100,7 @@ export function mergeHistoryAsThreadSuffix(
     prefix,
     tail,
     optimisticMessages,
+    isLoading,
   );
 }
 
@@ -114,16 +112,24 @@ export function mergeHistoryAsThreadSuffix(
  * processed through `moveSingleTrailingHumanInputToFront` to handle
  * the streaming edge case where [AI..., human] is temporarily exposed.
  *
- * When there IS a human optimistic message, the thread segment is split
- * into established turns and a current tail.  The optimistic human is
- * inserted BEFORE the first streaming assistant message in the tail,
- * so it appears between the user's question and the AI's streaming
- * response.
+ * When there IS a human optimistic message, the optimistic human is
+ * appended to the END of the merged array. Reasoning: opt-human exists
+ * only in the brief window after the user submits but before the server
+ * echoes back the real human message (visibleOptimisticMessages filters
+ * out opt-human once the server copy arrives). During that window the
+ * LLM cannot have already started generating a new AI reply — it has
+ * not received the new human input yet — so thread.messages contains
+ * only completed prior turns. Any AI in thread.messages is therefore a
+ * PRIOR turn's already-completed AI, not an in-flight streaming AI.
+ * The previous logic (splitThreadForOptimisticHuman) mis-classified
+ * that prior-completed AI as in-flight and inserted opt-human before
+ * it, producing the "new question covers the previous Q" misordering.
  */
 export function mergeThreadAndOptimisticMessages(
   establishedThreadPrefix: Message[],
   threadNewSegment: Message[],
   optimisticMessages: Message[],
+  isLoading: boolean = true,
 ): Message[] {
   const humanOptimistic = optimisticMessages.filter(
     (message) => message.type === "human",
@@ -133,26 +139,29 @@ export function mergeThreadAndOptimisticMessages(
   );
 
   if (humanOptimistic.length === 0) {
-    const currentTurnTail =
-      moveSingleTrailingHumanInputToFront(threadNewSegment);
+    // 当 threadNewSegment 包含 tool 消息时，说明上一轮 AI 正在调用工具
+    //（in-flight 状态）。此时 segment 末尾的 human 是用户刚提交的新问题，
+    // 不是"流式边缘 case"中错位的输入。不能调用 moveSingleTrailingHumanInputToFront
+    // 把它移到 tool/AI 前面，否则会造成"新Q替换上一条Q"的视觉错位。
+    const hasInFlightTools = threadNewSegment.some(
+      (m) => m.type === "tool",
+    );
+    const currentTurnTail = hasInFlightTools
+      ? threadNewSegment
+      : moveSingleTrailingHumanInputToFront(threadNewSegment);
     return [...establishedThreadPrefix, ...currentTurnTail, ...otherOptimistic];
   }
 
-  const { established: peeledEstablished, currentTail } =
-    splitThreadForOptimisticHuman(threadNewSegment);
-  const established = [...establishedThreadPrefix, ...peeledEstablished];
-  const base = [...established, ...currentTail];
-
-  const firstStreamingIndex = currentTail.findIndex(messageIsAssistantSide);
-  if (firstStreamingIndex === -1) {
-    return [...base, ...humanOptimistic, ...otherOptimistic];
-  }
-
-  const insertAt = established.length + firstStreamingIndex;
+  // opt-human 存在 ⟹ 服务器还没回显新 human ⟹ LLM 不可能已在生成新 AI ⟹
+  // thread.messages 里没有新一轮 in-flight AI ⟹ opt-human 直接 append 到末尾。
+  // 不再调用 splitThreadForOptimisticHuman（它会把上一轮已完成 AI 误判为
+  // in-flight tail）。`isLoading` 参数仍下传以保留调用链签名兼容，但当前
+  // 实现不再依赖它。
+  void isLoading;
   return [
-    ...base.slice(0, insertAt),
+    ...establishedThreadPrefix,
+    ...threadNewSegment,
     ...humanOptimistic,
     ...otherOptimistic,
-    ...base.slice(insertAt),
   ];
 }

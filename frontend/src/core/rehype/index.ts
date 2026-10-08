@@ -6,6 +6,13 @@ import type { BuildVisitor } from "unist-util-visit";
 const CJK_TEXT_RE =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
+/**
+ * 超过此长度的文本节点跳过分词动画。LLM 退化时可能生成数万字的
+ * 重复文本（如连续的 "[工具_call]"），若逐词包成 <span> 会创建
+ * 海量 DOM 节点，导致主线程阻塞、页面无法点击或滚动。
+ */
+const WORD_SPAN_MAX_TEXT_LENGTH = 8000;
+
 export function rehypeSplitWordsIntoSpans() {
   return (tree: Root) => {
     visit(tree, "element", ((node: Element) => {
@@ -19,6 +26,11 @@ export function rehypeSplitWordsIntoSpans() {
         node.children.forEach((child) => {
           if (child.type === "text") {
             if (CJK_TEXT_RE.test(child.value)) {
+              newChildren.push(child);
+              return;
+            }
+            // 超长文本不做分词，避免 DOM 节点爆炸导致页面卡死。
+            if (child.value.length > WORD_SPAN_MAX_TEXT_LENGTH) {
               newChildren.push(child);
               return;
             }

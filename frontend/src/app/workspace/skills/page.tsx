@@ -263,7 +263,13 @@ export default function WorkspaceSkillsPage() {
                           checked={skill.enabled}
                           disabled={
                             isPending ||
-                            (skill.category === "public" && !isAdmin)
+                            (skill.category === "public" && !isAdmin) ||
+                            (skill.category === "custom" &&
+                              !(
+                                user &&
+                                skill.owner_user_id?.toLowerCase() ===
+                                  user.id.toLowerCase()
+                              ))
                           }
                           onCheckedChange={(enabled) =>
                             enableSkill({ skillName: skill.name, enabled })
@@ -274,7 +280,13 @@ export default function WorkspaceSkillsPage() {
                   </CardHeader>
                   <CardFooter className="mt-auto flex items-center justify-between gap-2 pt-0">
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                      <Badge variant="secondary">{skill.category}</Badge>
+                      <Badge variant="secondary">
+                        {skill.category === "public"
+                          ? "公共"
+                          : skill.category === "custom"
+                            ? "自定义"
+                            : skill.category}
+                      </Badge>
                       {skill.license ? (
                         <Badge variant="outline">{skill.license}</Badge>
                       ) : null}

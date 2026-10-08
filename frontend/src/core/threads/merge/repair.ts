@@ -46,6 +46,13 @@ export function moveSingleTrailingHumanInputToFront(messages: Message[]): Messag
   }
 
   const human = messages[firstHumanIndex]!;
+  // opt-human 是用户刚提交的新问题占位符，必须留在末尾（在上一轮 in-flight
+  // tool/AI 之后）。如果把它移到前面，会插到上一轮正在生成的 tool/AI 消息之前，
+  // 导致"新Q替换上一条Q"的视觉错位。
+  if (isOptimisticMessage(human)) {
+    return messages;
+  }
+
   return [
     human,
     ...messages.slice(0, firstHumanIndex),
@@ -59,11 +66,23 @@ export function moveSingleTrailingHumanInputToFront(messages: Message[]): Messag
  * assistant message appears after an earlier completed reply, treat only
  * the trailing block as the new turn so optimistic input stays after prior
  * turns.
+ *
+ * `isLoading` 短路：当 `thread.isLoading === false`（上一轮已结束、本轮
+ * 流式尚未启动）时，整个 `thread.messages` 都是已完成 turn，没有
+ * in-flight tail —— opt-human 应直接 append 到末尾，而不是被插入到
+ * 上一轮的最后一个 AI 之前。否则会触发"新提问先在上一个回答之上"
+ * 的临时错位。
  */
-export function splitThreadForOptimisticHuman(messages: Message[]): {
+export function splitThreadForOptimisticHuman(
+  messages: Message[],
+  isLoading: boolean = true,
+): {
   established: Message[];
   currentTail: Message[];
 } {
+  if (!isLoading) {
+    return { established: messages, currentTail: [] };
+  }
   const lastAiIndex = findLastMessageIndex(messages, messageIsAssistantSide);
   if (lastAiIndex === -1) {
     return { established: messages, currentTail: [] };
