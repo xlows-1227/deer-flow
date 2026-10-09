@@ -44,3 +44,4 @@ class UserResponse(BaseModel):
     email: str
     system_role: Literal["admin", "user"]
     needs_setup: bool = False
+    oauth_id: str | None = None

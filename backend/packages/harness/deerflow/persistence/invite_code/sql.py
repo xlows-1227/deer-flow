@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import secrets
+import string
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.invite_code.model import InviteCodeRow
+from deerflow.persistence.user.model import UserRow
+
+_CODE_ALPHABET = string.ascii_uppercase + string.digits
+_CODE_LENGTH = 8
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _generate_code() -> str:
+    """Generate a random 8-char uppercase alphanumeric invite code."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
 
 
 class InviteCodeRepository:
@@ -48,3 +59,55 @@ class InviteCodeRepository:
         async with self._sf() as session:
             rows = (await session.execute(select(InviteCodeRow.code))).scalars().all()
             return len(rows)
+
+    async def batch_create(self, count: int) -> list[str]:
+        """Generate *count* unique invite codes and persist them."""
+        codes: list[str] = []
+        async with self._sf() as session:
+            # Fetch existing codes to avoid collisions
+            existing = set((await session.execute(select(InviteCodeRow.code))).scalars().all())
+            for _ in range(count):
+                code = _generate_code()
+                while code in existing:
+                    code = _generate_code()
+                existing.add(code)
+                codes.append(code)
+                session.add(InviteCodeRow(code=code, used=False))
+            await session.commit()
+        return codes
+
+    async def list_paginated(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict], int]:
+        """Paginated list sorted by: unused first, then earliest created.
+
+        Returns (rows, total) where each row is a dict with keys:
+        code, used, used_by_email, created_at, used_at.
+        """
+        async with self._sf() as session:
+            # Total count
+            total = (await session.execute(select(func.count()).select_from(InviteCodeRow))).scalar_one()
+
+            # Join with users to get email of the consumer
+            stmt = (
+                select(InviteCodeRow, UserRow.email.label("used_by_email"))
+                .outerjoin(UserRow, InviteCodeRow.used_by_user_id == UserRow.id)
+                .order_by(InviteCodeRow.used.asc(), InviteCodeRow.created_at.asc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            result = await session.execute(stmt)
+            rows = []
+            for row in result.all():
+                ic = row[0]  # InviteCodeRow
+                email = row[1]  # used_by_email or None
+                rows.append({
+                    "code": ic.code,
+                    "used": ic.used,
+                    "used_by_email": email,
+                    "created_at": ic.created_at,
+                    "used_at": ic.used_at,
+                })
+            return rows, total

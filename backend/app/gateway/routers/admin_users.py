@@ -18,10 +18,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import LDAP_PROVIDER_TAG
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.models import User
 from app.gateway.auth.password import hash_password_async
 from app.gateway.deps import get_current_user_from_request, get_local_provider, get_skill_share_repo
+from app.gateway.routers.auth import _normalize_ldap_account_name
 from app.gateway.routers.skills import _transfer_custom_skill_ownership
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ class AdminUserItemResponse(BaseModel):
     id: str = Field(..., description="User UUID")
     email: str = Field(..., description="Account email")
     system_role: str = Field(..., description="Either 'admin' or 'user'")
+    oauth_id: str | None = Field(None, description="SAM/domain account (LDAP oauth_id)")
 
 
 class AdminUsersListResponse(BaseModel):
@@ -45,6 +48,12 @@ class AdminUsersListResponse(BaseModel):
 
 class ResetPasswordConfigResponse(BaseModel):
     value: str = Field(..., description="Password applied by the reset-password action")
+
+
+class UpdateUserOauthIdRequest(BaseModel):
+    """Request body for admin updating a user's SAM account."""
+
+    oauth_id: str | None = Field(None, description="New sAMAccountName; null/empty to clear")
 
 
 class AdminUserActionResponse(BaseModel):
@@ -79,7 +88,7 @@ async def list_admin_users(
         page_size=page_size,
     )
     return AdminUsersListResponse(
-        users=[AdminUserItemResponse(id=str(u.id), email=str(u.email), system_role=u.system_role) for u in users],
+        users=[AdminUserItemResponse(id=str(u.id), email=str(u.email), system_role=u.system_role, oauth_id=u.oauth_id) for u in users],
         total=total,
         page=page,
         page_size=page_size,
@@ -118,6 +127,46 @@ async def reset_user_password(
     user.token_version = user.token_version + 1
     await provider.repository.update_user(user)
     logger.info("Admin %s reset password for user %s", admin.email, user.email)
+    return AdminUserActionResponse(id=str(user.id), email=str(user.email))
+
+
+@router.patch(
+    "/{user_id}/oauth-id",
+    response_model=AdminUserActionResponse,
+    summary="Update User SAM Account (admin)",
+    description=(
+        "Set the user's SAM (domain) account stored in ``oauth_id``. "
+        "The value is normalised to a bare sAMAccountName. Uniqueness is "
+        "enforced — another user already linked to the same account is "
+        "rejected with 409. Admin only."
+    ),
+)
+async def update_user_oauth_id(
+    user_id: str,
+    body: UpdateUserOauthIdRequest,
+    admin: User = Depends(_require_admin_user),
+) -> AdminUserActionResponse:
+    provider = get_local_provider()
+    user = await provider.repository.get_user_by_id(user_id)
+    if user is None or user.deleted:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if body.oauth_id is not None and body.oauth_id.strip():
+        new_id = _normalize_ldap_account_name(body.oauth_id)
+        existing = await provider.get_user_by_oauth(LDAP_PROVIDER_TAG, new_id)
+        if existing is not None and str(existing.id) != str(user.id):
+            raise HTTPException(
+                status_code=409,
+                detail=f"域账号 {new_id} 已绑定其他用户（{existing.email}）",
+            )
+        user.oauth_provider = LDAP_PROVIDER_TAG
+        user.oauth_id = new_id
+    else:
+        user.oauth_id = None
+        user.oauth_provider = None
+
+    await provider.repository.update_user(user)
+    logger.info("Admin %s updated SAM account for user %s to %s", admin.email, user.email, user.oauth_id or "(cleared)")
     return AdminUserActionResponse(id=str(user.id), email=str(user.email))
 
 

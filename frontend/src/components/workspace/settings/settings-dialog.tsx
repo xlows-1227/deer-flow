@@ -9,6 +9,7 @@ import {
   PlugIcon,
   ScrollTextIcon,
   SparklesIcon,
+  TicketIcon,
   UserIcon,
   UsersIcon,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { ConnectorSettingsPage } from "@/components/workspace/settings/connector-settings-page";
+import { InviteCodeSettingsPage } from "@/components/workspace/settings/invite-code-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { ModelSettingsPage } from "@/components/workspace/settings/model-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
@@ -46,6 +48,7 @@ type SettingsSection =
   | "skills"
   | "notification"
   | "userManagement"
+  | "inviteCodes"
   | "logViewer";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
@@ -130,6 +133,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
           icon: UsersIcon,
         });
         base.push({
+          id: "inviteCodes",
+          label: t.settings.sections.inviteCodes,
+          icon: TicketIcon,
+        });
+        base.push({
           id: "logViewer",
           label: t.settings.sections.logViewer,
           icon: ScrollTextIcon,
@@ -147,6 +155,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.skills,
       t.settings.sections.notification,
       t.settings.sections.userManagement,
+      t.settings.sections.inviteCodes,
       t.settings.sections.logViewer,
       isAdmin,
     ],
@@ -220,6 +229,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "userManagement" && isAdmin && (
                 <UserManagementSettingsPage />
+              )}
+              {activeSection === "inviteCodes" && isAdmin && (
+                <InviteCodeSettingsPage />
               )}
               {activeSection === "logViewer" && isAdmin && (
                 <LogViewerSettingsPage />
