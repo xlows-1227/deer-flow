@@ -28,6 +28,7 @@ from app.gateway.routers import (
     auth,
     channels,
     connectors,
+    invite_codes,
     external,
     feedback,
     files,
@@ -672,6 +673,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Admin user management (list / reset password / soft delete).
     # Mounted at /api/admin/users.
     app.include_router(admin_users.router)
+    app.include_router(invite_codes.router)
 
     # Admin log viewer (tail of gateway.log / frontend.log).
     # Mounted at /api/admin/logs.

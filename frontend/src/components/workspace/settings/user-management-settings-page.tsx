@@ -22,12 +22,16 @@ type AdminUserItem = {
   id: string;
   email: string;
   system_role: "admin" | "user";
+  oauth_id?: string | null;
 };
 
 type ConfirmAction =
   | { type: "reset"; user: AdminUserItem }
   | { type: "delete"; user: AdminUserItem }
   | null;
+
+type SamEditState = { user: AdminUserItem } | null;
+type SamConfirmState = { user: AdminUserItem; newOauthId: string } | null;
 
 const PAGE_SIZE = 20;
 
@@ -49,6 +53,13 @@ export function UserManagementSettingsPage() {
   const [message, setMessage] = useState<string>("");
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
+
+  // SAM account editing flow: first dialog (form), then second dialog
+  // (double confirmation) before the actual API call.
+  const [samEdit, setSamEdit] = useState<SamEditState>(null);
+  const [samInput, setSamInput] = useState("");
+  const [samConfirm, setSamConfirm] = useState<SamConfirmState>(null);
+  const [samLoading, setSamLoading] = useState<boolean>(false);
 
   // Debounced search: hold the latest input in a ref, fire after 300ms idle.
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -141,6 +152,73 @@ export function UserManagementSettingsPage() {
     }
   };
 
+  // ── SAM account editing ────────────────────────────────────────────
+
+  const openSamEdit = (user: AdminUserItem) => {
+    setSamEdit({ user });
+    setSamInput(user.oauth_id ?? "");
+    setSamLoading(false);
+    setError("");
+    setMessage("");
+  };
+
+  const closeSamEdit = () => {
+    setSamEdit(null);
+    setSamInput("");
+  };
+
+  // First dialog "确认": stash the input and open the second confirmation.
+  const submitSamEdit = () => {
+    if (!samEdit) return;
+    setSamConfirm({ user: samEdit.user, newOauthId: samInput.trim() });
+    setSamEdit(null);
+  };
+
+  const closeSamConfirm = () => {
+    setSamConfirm(null);
+    setSamInput("");
+  };
+
+  // Second dialog "确认": actually call the API.
+  const handleSamConfirm = async () => {
+    if (!samConfirm) return;
+    setSamLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      const res = await fetch(
+        `/api/admin/users/${samConfirm.user.id}/oauth-id`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            ...getCsrfHeaders(),
+          },
+          body: JSON.stringify({
+            oauth_id: samConfirm.newOauthId || null,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+        const detail = (body && (body.detail?.message || body.detail || body.message)) || t.settings.userManagement.operationFailed;
+        setError(typeof detail === "string" ? detail : t.settings.userManagement.operationFailed);
+        setSamConfirm(null);
+        return;
+      }
+      setMessage(t.settings.userManagement.samUpdated);
+      setSamConfirm(null);
+      setSamInput("");
+      await loadUsers();
+    } catch {
+      setError(t.settings.userManagement.operationFailed);
+      setSamConfirm(null);
+    } finally {
+      setSamLoading(false);
+    }
+  };
+
   const renderConfirmBody = () => {
     if (!confirmAction) return null;
     if (confirmAction.type === "reset") {
@@ -207,6 +285,9 @@ export function UserManagementSettingsPage() {
                     <th className="px-3 py-2 text-left font-medium">
                       {t.settings.userManagement.emailColumn}
                     </th>
+                    <th className="px-3 py-2 text-left font-medium">
+                      {t.settings.userManagement.samAccountColumn}
+                    </th>
                     <th className="px-3 py-2 text-right font-medium">
                       {t.settings.userManagement.actionsColumn}
                     </th>
@@ -221,8 +302,19 @@ export function UserManagementSettingsPage() {
                     return (
                     <tr key={user.id} className="border-t">
                       <td className="px-3 py-2 align-middle">{user.email}</td>
+                      <td className="px-3 py-2 align-middle text-muted-foreground">
+                        {user.oauth_id ?? "—"}
+                      </td>
                       <td className="px-3 py-2 text-right">
                         <div className="flex justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openSamEdit(user)}
+                          >
+                            {t.settings.userManagement.editSamAccount}
+                          </Button>
                           <Button
                             type="button"
                             variant="outline"
@@ -292,6 +384,7 @@ export function UserManagementSettingsPage() {
         )}
       </SettingsSection>
 
+      {/* Reset / Delete confirmation dialog */}
       <Dialog
         open={confirmAction !== null}
         onOpenChange={(open) => {
@@ -331,6 +424,121 @@ export function UserManagementSettingsPage() {
               }
             >
               {t.settings.userManagement.confirm}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* SAM account edit dialog — step 1: enter new value */}
+      <Dialog
+        open={samEdit !== null}
+        onOpenChange={(open) => {
+          if (!open) closeSamEdit();
+        }}
+      >
+        <DialogContent className="sm:max-w-md" showCloseButton>
+          <DialogHeader>
+            <DialogTitle>
+              {t.settings.userManagement.editSamTitle}
+            </DialogTitle>
+            <DialogDescription>
+              {t.settings.userManagement.editSamDescription.replace(
+                "{email}",
+                samEdit?.user.email ?? "",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label className="text-muted-foreground text-sm">
+                {t.settings.userManagement.oldSamAccount}
+              </label>
+              <Input
+                type="text"
+                value={samEdit?.user.oauth_id ?? ""}
+                disabled
+                readOnly
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-muted-foreground text-sm">
+                {t.settings.userManagement.newSamAccount}
+              </label>
+              <Input
+                type="text"
+                value={samInput}
+                onChange={(e) => setSamInput(e.target.value)}
+                placeholder={t.settings.userManagement.newSamPlaceholder}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitSamEdit();
+                  }
+                }}
+              />
+            </div>
+          </div>
+          <DialogFooter className="mt-4 flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={closeSamEdit}
+            >
+              {t.settings.userManagement.cancel}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={submitSamEdit}
+            >
+              {t.settings.userManagement.confirm}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* SAM account edit dialog — step 2: double confirmation */}
+      <Dialog
+        open={samConfirm !== null}
+        onOpenChange={(open) => {
+          if (!samLoading && !open) {
+            closeSamConfirm();
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md" showCloseButton={!samLoading}>
+          <DialogHeader>
+            <DialogTitle>
+              {t.settings.userManagement.editSamConfirmTitle}
+            </DialogTitle>
+            <DialogDescription>
+              {t.settings.userManagement.editSamConfirmBody.replace(
+                "{value}",
+                samConfirm?.newOauthId || "(空 — 清除绑定)",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-4 flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={samLoading}
+              onClick={closeSamConfirm}
+            >
+              {t.settings.userManagement.cancel}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={samLoading}
+              onClick={() => void handleSamConfirm()}
+            >
+              {samLoading
+                ? t.common.loading
+                : t.settings.userManagement.confirm}
             </Button>
           </DialogFooter>
         </DialogContent>

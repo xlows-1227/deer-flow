@@ -184,6 +184,12 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class UpdateOauthIdRequest(BaseModel):
+    """Request body for updating the SAM (domain) account."""
+
+    oauth_id: str | None = Field(None, description="New sAMAccountName; null/empty to clear")
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
@@ -649,7 +655,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 
     await invite_repo.complete(body.invite_code, str(user.id))
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_id=user.oauth_id)
 
 
 @router.post("/logout", response_model=MessageResponse)
@@ -718,7 +724,48 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, needs_setup=user.needs_setup)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, needs_setup=user.needs_setup, oauth_id=user.oauth_id)
+
+
+@router.patch("/me/oauth-id", response_model=UserResponse, summary="Update current user SAM account")
+async def update_my_oauth_id(request: Request, body: UpdateOauthIdRequest):
+    """Update the SAM (domain) account for the currently authenticated user.
+
+    Stores the value in ``users.oauth_id`` with ``oauth_provider`` set to
+    the LDAP tag. The value is normalised to a bare sAMAccountName (strip
+    whitespace + drop any ``@domain`` suffix). Uniqueness is enforced —
+    another user already linked to the same account is rejected.
+    """
+    user = await get_current_user_from_request(request)
+    provider = get_local_provider()
+
+    new_id: str | None
+    if body.oauth_id is not None and body.oauth_id.strip():
+        new_id = _normalize_ldap_account_name(body.oauth_id)
+        existing = await provider.get_user_by_oauth(LDAP_PROVIDER_TAG, new_id)
+        if existing is not None and str(existing.id) != str(user.id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.EMAIL_ALREADY_EXISTS,
+                    message=f"域账号 {new_id} 已绑定其他用户",
+                ).model_dump(),
+            )
+        user.oauth_provider = LDAP_PROVIDER_TAG
+        user.oauth_id = new_id
+    else:
+        user.oauth_id = None
+        user.oauth_provider = None
+
+    await provider.update_user(user)
+    logger.info("User %s updated own SAM account to %s", user.email, user.oauth_id or "(cleared)")
+    return UserResponse(
+        id=str(user.id),
+        email=user.email,
+        system_role=user.system_role,
+        needs_setup=user.needs_setup,
+        oauth_id=user.oauth_id,
+    )
 
 
 # Per-IP cache: ip → (timestamp, result_dict).
