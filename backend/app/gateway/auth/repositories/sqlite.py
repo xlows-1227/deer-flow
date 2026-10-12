@@ -166,7 +166,10 @@ class SQLiteUserRepository(UserRepository):
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[User], int]:
-        """Return a page of active users matching ``search`` (email ilike).
+        """Return a page of active users matching ``search``.
+
+        The filter matches either the email or the SAM account
+        (``oauth_id``) via case-insensitive substring.
 
         Returns ``(users, total)`` so callers can render pagination metadata.
         ``page`` is 1-indexed; ``page_size`` is clamped to [1, 200].
@@ -175,7 +178,10 @@ class SQLiteUserRepository(UserRepository):
         page_size = max(1, min(200, page_size))
         conditions = [UserRow.deleted.is_(False)]
         if search:
-            conditions.append(UserRow.email.ilike(f"%{search}%"))
+            like = f"%{search}%"
+            conditions.append(
+                UserRow.email.ilike(like) | UserRow.oauth_id.ilike(like)
+            )
         base = select(UserRow).where(*conditions)
         count_stmt = select(func.count()).select_from(base.subquery())
         list_stmt = base.order_by(UserRow.email.asc()).limit(page_size).offset((page - 1) * page_size)

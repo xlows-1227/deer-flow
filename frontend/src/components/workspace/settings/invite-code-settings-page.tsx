@@ -140,29 +140,30 @@ export function InviteCodeSettingsPage() {
         {message && <p className="mb-3 text-sm text-green-500">{message}</p>}
 
         {/* Batch create form */}
-        <div className="mb-4 flex flex-wrap items-end gap-3">
-          <div className="space-y-1">
-            <label className="text-muted-foreground text-sm">
-              {t.settings.inviteCodes.countLabel}
-            </label>
-            <Input
-              type="number"
-              min={1}
-              max={500}
-              step={1}
-              value={countInput}
-              onChange={(e) => setCountInput(e.target.value)}
-              placeholder={t.settings.inviteCodes.countPlaceholder}
-              className="w-48"
-              disabled={creating}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void handleBatchCreate();
-                }
-              }}
-            />
-          </div>
+        <div className="mb-4 flex items-center gap-3">
+          <span className="text-muted-foreground shrink-0 text-sm">
+            {t.settings.inviteCodes.countLabel}
+          </span>
+          <Input
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={countInput}
+            onChange={(e) => {
+              // 只保留数字字符，彻底拦截 e/E（科学计数法）、小数点、负号
+              const digits = e.target.value.replace(/\D/g, "");
+              setCountInput(digits);
+            }}
+            placeholder={t.settings.inviteCodes.countPlaceholder}
+            className="h-9 w-44"
+            disabled={creating}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void handleBatchCreate();
+              }
+            }}
+          />
           <Button
             type="button"
             size="sm"
@@ -187,25 +188,22 @@ export function InviteCodeSettingsPage() {
         ) : (
           <>
             <div className="overflow-hidden rounded-lg border">
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
                 <thead className="bg-muted/50">
                   <tr>
-                    <th className="px-3 py-2 text-left font-medium">
+                    <th className="w-36 px-3 py-2 text-left font-medium">
                       {t.settings.inviteCodes.columnCode}
                     </th>
-                    <th className="px-3 py-2 text-left font-medium">
+                    <th className="w-28 px-3 py-2 text-left font-medium">
                       {t.settings.inviteCodes.columnUsed}
                     </th>
-                    <th className="px-3 py-2 text-left font-medium">
-                      {t.settings.inviteCodes.columnUsedBy}
+                    <th className="w-64 px-3 py-2 text-left font-medium">
+                      {t.settings.inviteCodes.columnUsage}
                     </th>
-                    <th className="px-3 py-2 text-left font-medium">
+                    <th className="w-44 px-3 py-2 text-left font-medium">
                       {t.settings.inviteCodes.columnCreatedAt}
                     </th>
-                    <th className="px-3 py-2 text-left font-medium">
-                      {t.settings.inviteCodes.columnUsedAt}
-                    </th>
-                    <th className="px-3 py-2 text-right font-medium">
+                    <th className="w-20 px-3 py-2 text-right font-medium">
                       {t.common.view}
                     </th>
                   </tr>
@@ -230,15 +228,23 @@ export function InviteCodeSettingsPage() {
                         </span>
                       </td>
                       <td className="px-3 py-2 align-middle">
-                        {item.used_by_email ?? "—"}
+                        {item.used || item.used_by_email || item.used_at ? (
+                          <div className="leading-tight">
+                            <div className="truncate">
+                              {item.used_by_email ?? "—"}
+                            </div>
+                            <div className="text-muted-foreground text-xs">
+                              {formatDateTime(item.used_at)}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </td>
                       <td className="px-3 py-2 align-middle text-muted-foreground">
                         {formatDateTime(item.created_at)}
                       </td>
-                      <td className="px-3 py-2 align-middle text-muted-foreground">
-                        {formatDateTime(item.used_at)}
-                      </td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 text-right align-middle">
                         <Button
                           type="button"
                           variant="ghost"
