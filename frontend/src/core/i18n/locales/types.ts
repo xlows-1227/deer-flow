@@ -1009,9 +1009,8 @@ export interface Translations {
       createFailed: string;
       columnCode: string;
       columnUsed: string;
-      columnUsedBy: string;
+      columnUsage: string;
       columnCreatedAt: string;
-      columnUsedAt: string;
       used: string;
       unused: string;
       copy: string;

@@ -77,7 +77,7 @@ async def _require_admin_user(
 )
 async def list_admin_users(
     admin: User = Depends(_require_admin_user),
-    search: str | None = Query(default=None, description="Email substring filter (case-insensitive ilike)"),
+    search: str | None = Query(default=None, description="Email or SAM account (oauth_id) substring filter, case-insensitive"),
     page: int = Query(default=1, ge=1, description="Page number, 1-indexed"),
     page_size: int = Query(default=20, ge=1, le=200, description="Page size, 1-200"),
 ) -> AdminUsersListResponse:

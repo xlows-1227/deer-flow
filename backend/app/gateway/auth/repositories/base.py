@@ -121,7 +121,10 @@ class UserRepository(ABC):
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[User], int]:
-        """Return a page of active users matching ``search`` (email ilike).
+        """Return a page of active users matching ``search``.
+
+        The filter matches either the email or the SAM account
+        (``oauth_id``) via case-insensitive substring.
 
         Returns ``(users, total)`` so callers can render pagination metadata.
         """
