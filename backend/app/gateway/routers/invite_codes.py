@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.auth.models import User
-from app.gateway.deps import get_current_user_from_request, get_invite_code_repo
+from app.gateway.deps import get_invite_code_repo
+from app.gateway.routers.admin_users import _require_admin_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin/invite-codes", tags=["admin-invite-codes"])
@@ -39,15 +40,7 @@ class BatchCreateResponse(BaseModel):
     created: list[str] = Field(..., description="The newly generated invite codes")
 
 
-async def _require_admin_user(
-    user: User = Depends(get_current_user_from_request),
-) -> User:
-    if user.system_role != "admin":
-        raise HTTPException(status_code=403, detail="Admin privileges required")
-    return user
-
-
-def _fmt_dt(dt) -> str:
+def _fmt_dt(dt) -> str | None:
     """Format a datetime to ISO string; None stays None."""
     if dt is None:
         return None
