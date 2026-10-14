@@ -38,6 +38,8 @@ import { isAdminUser } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { useOnboardingGuide } from "../onboarding/onboarding-guide-provider";
+
 type SettingsSection =
   | "account"
   | "appearance"
@@ -60,6 +62,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const { t } = useI18n();
   const { user } = useAuth();
   const isAdmin = isAdminUser(user);
+  const { step } = useOnboardingGuide();
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
   const [connectorFormOpen, setConnectorFormOpen] = useState(false);
@@ -187,7 +190,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   <li key={id}>
                     <button
                       type="button"
-                      onClick={() => setActiveSection(id as SettingsSection)}
+                      id={id === "models" ? "onboarding-models-tab" : undefined}
+                      onClick={() => {
+                        setActiveSection(id as SettingsSection);
+                        if (id === "models" && step === 2) {
+                          window.dispatchEvent(new Event("onboarding:advance"));
+                        }
+                      }}
                       className={cn(
                         "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                         active

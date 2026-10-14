@@ -42,6 +42,9 @@ from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFi
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+from deerflow.agents.middlewares.tool_call_text_parser_middleware import (
+    ToolCallTextParserMiddleware,
+)
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -420,7 +423,6 @@ def _build_middlewares(
     class _MultimodalNormalizerMiddleware(AgentMiddleware[AgentState]):  # type: ignore[valid-type, misc]
         async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:  # type: ignore[override]
             import logging as _logging
-            import json as _json
 
             from deerflow.runtime.runs.worker import (
                 _normalize_human_multimodal_content_for_provider,
@@ -437,44 +439,6 @@ def _build_middlewares(
                 a is b for a, b in zip(normalized, messages, strict=False)
             )
             if changed:
-                # Log only the *last* human message preview (95% of the time
-                # this is what triggered a provider-side 'text content is
-                # empty' / schema 400).  Keep a small preview (not the full
-                # list) so the log lines stay readable.
-                last_human_idx = next(
-                    (
-                        i
-                        for i in range(len(normalized) - 1, -1, -1)
-                        if getattr(normalized[i], "type", "") == "human"
-                    ),
-                    -1,
-                )
-                try:
-                    last_content = (
-                        normalized[last_human_idx].content
-                        if last_human_idx >= 0
-                        else None
-                    )
-                    if isinstance(last_content, list):
-                        preview = ", ".join(
-                            f"type={_blk.get('type') if isinstance(_blk, dict) else type(_blk).__name__}"
-                            + (
-                                f" text[:40]={str(_blk.get('text'))[:40]!r}"
-                                if isinstance(_blk, dict) and _blk.get("type") == "text"
-                                else ""
-                            )
-                            for _blk in last_content[:6]
-                        )
-                    else:
-                        preview = str(last_content)[:160]
-                    _log.debug(
-                        "[LLM_INPUT_PREVIEW] GRAPH path last_human idx=%s changed=%s preview=%s",
-                        last_human_idx,
-                        changed,
-                        preview,
-                    )
-                except Exception:  # noqa: BLE001 — logging is strictly best-effort
-                    pass
                 # NOTE: we intentionally DO NOT return {"messages": normalized}.
                 # The multimodal normalisation (incl. default-text injection
                 # for media-only messages) is applied at the model wrapper
@@ -498,39 +462,6 @@ def _build_middlewares(
                     return {"messages": normalized}
                 return None
 
-            # Even if nothing changed, dump the last human preview once per
-            # model call so operators can confirm the text / images that are
-            # actually about to be sent downstream.
-            try:
-                last_human_idx = next(
-                    (
-                        i
-                        for i in range(len(messages) - 1, -1, -1)
-                        if getattr(messages[i], "type", "") == "human"
-                    ),
-                    -1,
-                )
-                if last_human_idx >= 0:
-                    lc = messages[last_human_idx].content
-                    if isinstance(lc, list):
-                        preview = ", ".join(
-                            f"type={_blk.get('type') if isinstance(_blk, dict) else type(_blk).__name__}"
-                            + (
-                                f" text[:40]={str(_blk.get('text'))[:40]!r}"
-                                if isinstance(_blk, dict) and _blk.get("type") == "text"
-                                else ""
-                            )
-                            for _blk in lc[:6]
-                        )
-                    else:
-                        preview = str(lc)[:160]
-                    _log.debug(
-                        "[LLM_INPUT_PREVIEW] GRAPH path last_human idx=%s unchanged preview=%s",
-                        last_human_idx,
-                        preview,
-                    )
-            except Exception:  # noqa: BLE001
-                pass
             return None
 
     middlewares.insert(0, _MultimodalNormalizerMiddleware())
@@ -617,8 +548,16 @@ def _build_middlewares(
     if token_usage_middleware is not None:
         middlewares.append(token_usage_middleware)
 
+    # ToolCallTextParserMiddleware — converts text-embedded tool calls (e.g.
+    # from YUMC models) to standard tool_calls so downstream middlewares can
+    # intercept them. Placed before ClarificationMiddleware so that
+    # ask_clarification text calls are converted before clarification
+    # interception.
+    middlewares.append(ToolCallTextParserMiddleware())
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
+
     return middlewares
 
 
@@ -876,19 +815,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             app_config=resolved_app_config,
         )
     filtered_tools = filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy)
-    # 取证日志：工具描述可能包含输出格式约束（如要求单行输出），
-    # 记录每个工具的名称与描述头部用于排查。
-    try:
-        for _tool in filtered_tools:
-            _desc = getattr(_tool, "description", "") or ""
-            logger.debug(
-                "[TOOL_DESC] name=%s desc_len=%d desc_head=%r",
-                getattr(_tool, "name", "?"),
-                len(_desc),
-                _desc[:120],
-            )
-    except Exception:
-        pass
     cache_key = (
         *base_cache_key,
         _tool_cache_signature(filtered_tools),

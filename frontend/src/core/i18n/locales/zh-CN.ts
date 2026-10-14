@@ -706,6 +706,18 @@ export const zhCN: Translations = {
     logout: "退出登录",
   },
 
+  // Onboarding guide
+  onboarding: {
+    confirmTitle: "配置 YUMC 模型",
+    confirmMessage: "将引导配置 YUMC 模型，确认前往吗？",
+    confirm: "确认",
+    exitGuide: "退出引导",
+    stepIndicator: "{n}/4",
+    step4GetKey: "获取 API Key",
+    step4GetKeyLink: "前往 GAIA 平台获取个人令牌",
+    step4Example: "API Key 示例: ng_pk_xxxxxx...",
+  },
+
   // Conversation
   conversation: {
     noMessages: "还没有消息",

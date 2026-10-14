@@ -547,6 +547,15 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
     tasks = [{"id": getattr(t, "id", ""), "name": getattr(t, "name", "")} for t in tasks_raw]
 
     values = redact_channel_values(channel_values, boundary_id=thread_id)
+    # Repair legacy DynamicContext layouts where the visible ``__user`` copy was
+    # stranded at the end of the list (the middleware's ID-swap appends a fresh
+    # id there); otherwise the first user message renders in the middle of the
+    # conversation with the reminder-injection timestamp.
+    from app.gateway.message_patch import restore_stranded_dynamic_context_copies
+
+    state_messages = values.get("messages")
+    if isinstance(state_messages, list):
+        restore_stranded_dynamic_context_copies(state_messages)
     safe_metadata = redact_user_payload(metadata, boundary_id=thread_id, mode="metadata")
 
     return ThreadStateResponse(

@@ -5,6 +5,7 @@ import string
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.invite_code.model import InviteCodeRow
@@ -12,6 +13,7 @@ from deerflow.persistence.user.model import UserRow
 
 _CODE_ALPHABET = string.ascii_uppercase + string.digits
 _CODE_LENGTH = 8
+_MAX_COLLISION_RETRIES = 3
 
 
 def _now() -> datetime:
@@ -61,18 +63,36 @@ class InviteCodeRepository:
             return len(rows)
 
     async def batch_create(self, count: int) -> list[str]:
-        """Generate *count* unique invite codes and persist them."""
+        """Generate *count* unique invite codes and persist them.
+
+        Uses the database UNIQUE constraint on ``code`` as the collision
+        guard. Each code is flushed individually in a nested savepoint so a
+        collision only rolls back that one row, not the whole batch. On
+        collision a new code is generated and retried up to
+        ``_MAX_COLLISION_RETRIES`` times.
+        """
         codes: list[str] = []
         async with self._sf() as session:
-            # Fetch existing codes to avoid collisions
-            existing = set((await session.execute(select(InviteCodeRow.code))).scalars().all())
-            for _ in range(count):
+            produced = 0
+            while produced < count:
                 code = _generate_code()
-                while code in existing:
-                    code = _generate_code()
-                existing.add(code)
-                codes.append(code)
-                session.add(InviteCodeRow(code=code, used=False))
+                inserted = False
+                for _retry in range(_MAX_COLLISION_RETRIES):
+                    try:
+                        async with session.begin_nested():
+                            session.add(InviteCodeRow(code=code, used=False))
+                        codes.append(code)
+                        produced += 1
+                        inserted = True
+                        break
+                    except IntegrityError:
+                        code = _generate_code()
+                        continue
+                if not inserted:
+                    raise ValueError(
+                        f"Failed to generate unique invite code after "
+                        f"{_MAX_COLLISION_RETRIES} retries"
+                    )
             await session.commit()
         return codes
 

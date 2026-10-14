@@ -353,12 +353,17 @@ export function MessageList({
       }
 
       if (tokenUsageInlineMode === "per_turn") {
+        // Per-message timestamps are rendered in MessageListItem. Only pass a
+        // turn-level timestamp here when the assistant message has none, so we
+        // don't render the same timestamp twice.
+        const hasBackendTimestamp =
+          !!aiMessage && !!getMessageTimestamp(aiMessage);
         return (
           <MessageTokenUsageList
             enabled={true}
             isLoading={thread.isLoading}
             messages={turnUsageMessages ?? []}
-            timestamp={aiTimestamp}
+            timestamp={hasBackendTimestamp ? undefined : aiTimestamp}
           />
         );
       }
@@ -471,10 +476,12 @@ export function MessageList({
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
                       precomputedToolNames={precomputedToolNames}
-                      showTimestamp={
-                        group.type !== "assistant" ||
-                        tokenUsageInlineMode !== "per_turn"
-                      }
+                      // Always show per-message timestamps on both human and
+                      // AI bubbles.  Previously suppressed for assistant
+                      // bubbles when tokenUsageInlineMode === "per_turn", but
+                      // that relied on the TokenUsage banner to show the time —
+                      // and users expect the time directly under each message.
+                      showTimestamp
                     />
                   );
                 })}

@@ -212,6 +212,91 @@ def _backfill_message_timestamps(messages: list[Any]) -> None:
         )
 
 
+def _message_timestamp(msg: Mapping[str, Any]) -> str | None:
+    """Return a message's ``additional_kwargs.timestamp`` if present."""
+    ak = msg.get("additional_kwargs")
+    if not isinstance(ak, Mapping):
+        return None
+    ts = ak.get("timestamp")
+    return ts if isinstance(ts, str) and ts else None
+
+
+def _is_ai_message(msg: Any) -> bool:
+    return isinstance(msg, Mapping) and msg.get("type") in ("ai", "AIMessage", "AIMessageChunk")
+
+
+def restore_stranded_dynamic_context_copies(messages: list) -> None:
+    """Move a stranded DynamicContext ``__user`` copy back beside its reminder.
+
+    ``DynamicContextMiddleware`` injects the reminder with an ID-swap: the
+    reminder takes the target's id (replacing it in place) while the visible
+    ``{id}__user`` copy gets a fresh id, which ``add_messages`` APPENDS at the
+    end of the list. On a genuine first turn the target already is the last
+    message, so the copy lands immediately after the reminder. But when the
+    reminder is deferred to a later turn — e.g. the earlier turns ran through
+    the flash-direct path, which bypasses the graph — the conversation's first
+    user message is yanked to the very end and stamped with the injection time,
+    so it renders in the middle of the conversation with a wrong timestamp.
+    Restore the copy to its slot and replace that stale stamp with the nearest
+    assistant timestamp (a proxy, mirroring ``_backfill_message_timestamps``).
+    """
+    reminder_index_by_id: dict[str, int] = {}
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, Mapping):
+            continue
+        mid = msg.get("id")
+        ak = msg.get("additional_kwargs")
+        if isinstance(mid, str) and isinstance(ak, Mapping) and ak.get("dynamic_context_reminder"):
+            reminder_index_by_id[mid] = idx
+    if not reminder_index_by_id:
+        return
+
+    def _nearest_ai_ts(insert_idx: int) -> str | None:
+        for msg in messages[insert_idx:]:
+            if _is_ai_message(msg):
+                ts = _message_timestamp(msg)
+                if ts:
+                    return ts
+        for msg in reversed(messages[:insert_idx]):
+            if _is_ai_message(msg):
+                ts = _message_timestamp(msg)
+                if ts:
+                    return ts
+        return None
+
+    stranded_by_base: dict[int, list[Mapping]] = {}
+    dropped_indexes: set[int] = set()
+    for idx, msg in enumerate(messages):
+        if not (isinstance(msg, Mapping) and isinstance(msg.get("id"), str) and msg["id"].endswith("__user")):
+            continue
+        base_idx = reminder_index_by_id.get(msg["id"][: -len("__user")])
+        if base_idx is None or base_idx + 1 == idx:
+            continue
+        mcopy = dict(msg)
+        ak_copy = dict(mcopy.get("additional_kwargs") or {})
+        proxy_ts = _nearest_ai_ts(base_idx + 1)
+        if proxy_ts:
+            ak_copy["timestamp"] = proxy_ts
+        mcopy["additional_kwargs"] = ak_copy
+        stranded_by_base.setdefault(base_idx, []).append(mcopy)
+        dropped_indexes.add(idx)
+
+    if not dropped_indexes:
+        return
+
+    ordered: list[Any] = []
+    for idx, msg in enumerate(messages):
+        if idx in dropped_indexes:
+            continue
+        ordered.append(msg)
+        ordered.extend(stranded_by_base.get(idx, []))
+    messages[:] = ordered
+    logger.info(
+        "restore_stranded_dynamic_context_copies: relocated %d __user copy/copies",
+        len(dropped_indexes),
+    )
+
+
 def patch_channel_values_messages(channel_values: Mapping[str, Any]) -> None:
     """Patch ``channel_values["messages"]`` in-place (used by ``/threads/{id}/history``)."""
     if not isinstance(channel_values, Mapping):
@@ -224,6 +309,7 @@ def patch_channel_values_messages(channel_values: Mapping[str, Any]) -> None:
             mcopy = dict(msg)
             if patch_message_dict(mcopy):
                 messages[idx] = mcopy
+    restore_stranded_dynamic_context_copies(messages)
     # Remove __user copies only when they are true duplicates, i.e. another
     # message with the same base id is still present AND visible.  Two data
     # shapes exist:

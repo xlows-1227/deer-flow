@@ -124,9 +124,6 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         now_iso = datetime.now(UTC).isoformat()
         changed = False
 
-        ai_count = sum(1 for m in messages if isinstance(m, AIMessage))
-        logger.info("[after_model] %d AI messages in state, checking for missing timestamps", ai_count)
-
         for i, msg in enumerate(messages):
             if isinstance(msg, AIMessage) and "timestamp" not in msg.additional_kwargs:
                 messages[i] = msg.model_copy(
@@ -138,9 +135,5 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
                     }
                 )
                 changed = True
-                logger.info("[after_model] Added timestamp %s to AI message idx=%d id=%s", now_iso, i, msg.id)
-
-        if not changed:
-            logger.debug("[after_model] No AI messages needed timestamp injection")
 
         return {"messages": messages} if changed else None

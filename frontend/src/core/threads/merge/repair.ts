@@ -156,10 +156,16 @@ export function isOptimisticMessage(message: Message): boolean {
 /**
  * Stable, last-resort ordering for merged messages.
  *
- * Sorts by:
- *   1. `seq` (backend-assigned per-message ordering) if available
- *   2. parsed timestamp for messages that carry one
- *   3. original array index as a tiebreaker so the sort remains stable
+ * Only reorders pairs that are CLEARLY out of chronological order:
+ *
+ *   1. Both carry a timestamp AND are more than 5 seconds apart — this
+ *      catches real cross-turn misalignment (e.g. overlap detection that
+ *      mixed up Q1A1 with Q2A2).
+ *   2. Otherwise falls through to `seq` then original array index, which
+ *      preserves the correct intra-turn order (Human → AI(tool_calls) →
+ *      ToolMessage → AI follow-up).  ToolMessage timestamps are often 1-2
+ *      ms earlier than the AIMessage that invoked them, so strict
+ *      timestamp sorting would flip them and break tool-call flow.
  */
 export function sortMessagesByTime(messages: Message[]): Message[] {
   if (messages.length <= 1) return messages;
@@ -177,24 +183,54 @@ export function sortMessagesByTime(messages: Message[]): Message[] {
     }
   });
 
+  // Pre-parse timestamps to ms once per message (avoid repeated Date.parse).
+  const parsedTsCache = new Map<number, number | null>();
+  const getTsMs = (m: Message, idx: number): number | null => {
+    if (parsedTsCache.has(idx)) return parsedTsCache.get(idx) ?? null;
+    // A DynamicContext ``__user`` copy is stamped by the middleware when the
+    // reminder is injected — not when the user typed. Its real position is
+    // anchored to the base message it replaced, so that stamp must never be
+    // used to reorder it (doing so stranded the first user message in the
+    // middle of the conversation). Fall through to seq/index instead.
+    const isDynamicContextCopy =
+      m.type === "human" &&
+      typeof m.id === "string" &&
+      m.id.endsWith("__user");
+    if (isDynamicContextCopy) {
+      parsedTsCache.set(idx, null);
+      return null;
+    }
+    const ts = getMessageTimestamp(m);
+    if (!ts) {
+      parsedTsCache.set(idx, null);
+      return null;
+    }
+    const ms = Date.parse(ts);
+    const val = Number.isFinite(ms) ? ms : null;
+    parsedTsCache.set(idx, val);
+    return val;
+  };
+
+  const TURN_GUARD_MS = 5_000; // 5s — intra-turn messages stay in original order
+
   const sortedServerMsgs = serverMsgs.map((m, index) => ({ m, index }));
   sortedServerMsgs.sort((a, b) => {
-    // Only sort by timestamp when BOTH messages have one.
-    const tsA = getMessageTimestamp(a.m);
-    const tsB = getMessageTimestamp(b.m);
-    if (tsA && tsB) {
-      const cmp = tsA.localeCompare(tsB);
-      if (cmp !== 0) return cmp;
+    const tsA = getTsMs(a.m, a.index);
+    const tsB = getTsMs(b.m, b.index);
+    // Only timestamp-compare when BOTH have a parseable timestamp AND
+    // they are sufficiently far apart (>5s) to be across turns.
+    if (tsA !== null && tsB !== null && Math.abs(tsA - tsB) > TURN_GUARD_MS) {
+      return tsA - tsB; // ascending chronological: older (smaller ts) first
     }
 
-    // 第二优先级：seq（后端分配的同一 run 内的序号）
+    // Second priority: seq (backend-assigned run-internal ordering).
     const seqA = getMessageSeq(a.m);
     const seqB = getMessageSeq(b.m);
     if (Number.isFinite(seqA) && Number.isFinite(seqB) && seqA !== seqB) {
       return seqA - seqB;
     }
 
-    // 第三优先级：原数组索引（稳定排序）
+    // Final tiebreaker: original array index (stable, preserves input order).
     return a.index - b.index;
   });
 
@@ -229,7 +265,8 @@ export function sortMessagesByTime(messages: Message[]): Message[] {
 
 /**
  * Final cleanup pass after merging: deduplicate by identity, remove adjacent
- * text-duplicate human messages, and repair trailing turn order.
+ * text-duplicate human messages, repair trailing turn order, then sort by
+ * timestamp as a last-resort chronological safety net.
  *
  * `repairDynamicContextUserMessageOrder` is only called when
  * `hasHistoryMerge` is false (streaming-only case).  When history is
@@ -240,10 +277,16 @@ export function sortMessagesByTime(messages: Message[]): Message[] {
  * to follow their reminders — pulling them to the end and stratifying
  * the conversation into "answers first, questions last".
  *
- * NOTE: `sortMessagesByTime` is intentionally NOT called here — the merge
- * logic already preserves correct chronological order (history → thread →
- * optimistic).  The timestamp sort was causing Q1,Q2,Q3,Q4,A1,A2 ordering
- * when AI messages lacked timestamps but human messages had them.
+ * `sortMessagesByTime` is called LAST (after dedupe + repair) because it
+ * only reorders pairs where BOTH sides carry a timestamp — messages still
+ * missing a timestamp fall through to the stable original-index tiebreaker,
+ * so this does not displace newly-injected middleware messages or optimistic
+ * placeholders.  Previously disabled because AI messages lacked timestamps
+ * entirely, which caused the "Q1Q2Q3Q4A1A2" stratification bug when humans
+ * had timestamps but AI did not.  With the backend fix (every AIMessage
+ * now carries `additional_kwargs.timestamp` from the moment it enters the
+ * system), the sort correctly restores Q1A1Q2A2 ordering even when the
+ * merge logic's overlap detection misaligns.
  */
 export function finalizeMergedMessages(
   messages: Message[],
@@ -256,5 +299,9 @@ export function finalizeMergedMessages(
     ? turnRepaired
     : repairDynamicContextUserMessageOrder(turnRepaired);
 
-  return repaired;
+  // Last-resort chronological sort — safe now that every message carries a
+  // backend-assigned timestamp.  Falls back to seq then original index for
+  // pairs where one or both sides still lack a timestamp (e.g. optimistic
+  // placeholders, older messages from before the backend fix).
+  return sortMessagesByTime(repaired);
 }

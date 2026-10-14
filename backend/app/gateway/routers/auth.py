@@ -746,10 +746,7 @@ async def update_my_oauth_id(request: Request, body: UpdateOauthIdRequest):
         if existing is not None and str(existing.id) != str(user.id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=AuthErrorResponse(
-                    code=AuthErrorCode.EMAIL_ALREADY_EXISTS,
-                    message=f"域账号 {new_id} 已绑定其他用户",
-                ).model_dump(),
+                detail=f"域账号 {new_id} 已绑定其他用户（{existing.email}）",
             )
         user.oauth_provider = LDAP_PROVIDER_TAG
         user.oauth_id = new_id

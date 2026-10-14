@@ -387,19 +387,31 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
 
         if last_date is None:
-            # ── First turn: inject full reminder as a separate HumanMessage ─────
-            first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
-            if first_idx is None:
+            # ── Inject the full reminder once per conversation as a separate
+            #    HumanMessage ────────────────────────────────────────────────────
+            # ``_make_reminder_and_user_messages`` uses an ID-swap: the reminder
+            # takes the target's id (so add_messages replaces it in place) and the
+            # visible ``{id}__user`` copy gets a fresh id, which add_messages
+            # APPENDS at the very end of the list. That only keeps the user
+            # message in place when the target is the LAST message. On a genuine
+            # first turn it is the only human message, so targeting "the last user
+            # message" is identical. But when the reminder is deferred — e.g. the
+            # earlier turns ran through the flash-direct path, which bypasses the
+            # graph — targeting the conversation's first user message would yank
+            # it to the end of the list and stamp it with the current time. Target
+            # the current turn's user message instead.
+            target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
+            if target_idx is None:
                 return None
             full_reminder = self._build_full_reminder(connector_ids=connector_ids, connector_summaries=connector_summaries, target_skill_name=target_skill_name)
             logger.info(
-                "DynamicContextMiddleware: injecting full reminder (len=%d, has_memory=%s, has_connectors=%s) into first HumanMessage id=%r",
+                "DynamicContextMiddleware: injecting full reminder (len=%d, has_memory=%s, has_connectors=%s) into current HumanMessage id=%r",
                 len(full_reminder),
                 "<memory>" in full_reminder,
                 bool(connector_ids),
-                messages[first_idx].id,
+                messages[target_idx].id,
             )
-            reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[first_idx], full_reminder)
+            reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[target_idx], full_reminder)
             return {"messages": [reminder_msg, user_msg]}
 
         if last_date == current_date and not connector_selection_changed:
