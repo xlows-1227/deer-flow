@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/core/i18n/hooks";
+import { useOnboardingGuide } from "../onboarding/onboarding-guide-provider";
 import {
   buildApiKeyUpdateValue,
   createCustomModel,
@@ -121,6 +122,7 @@ export function ModelSettingsPage({
   onFormOpenChange,
 }: ModelSettingsPageProps) {
   const { t } = useI18n();
+  const { step, exitGuide, clearOnboarding, markOnboardingNeeded } = useOnboardingGuide();
   const queryClient = useQueryClient();
   const [localSettings, setLocalSettings] = useLocalSettings();
   const [models, setModels] = useState<CustomModel[]>([]);
@@ -156,6 +158,9 @@ export function ModelSettingsPage({
   const openCreateDialog = () => {
     setForm(emptyForm);
     setDialogOpen(true);
+    if (step === 3) {
+      window.dispatchEvent(new Event("onboarding:advance"));
+    }
   };
 
   const openEditDialog = (model: CustomModel) => {
@@ -204,6 +209,26 @@ export function ModelSettingsPage({
         });
         toast.success(t.settings.models.createSuccess);
       }
+      // Sync onboarding state based on provider changes
+      if (form.id) {
+        // Editing existing model — check if provider changed
+        const original = models.find((m) => m.id === form.id);
+        const oldProvider = original?.provider;
+        const newProvider = form.provider;
+        if (oldProvider === "gaia" && newProvider !== "gaia") {
+          // Gaia → non-Gaia: re-check if any Gaia remain
+          const remaining = await loadCustomModels();
+          if (!remaining.some((m) => m.provider === "gaia")) {
+            markOnboardingNeeded();
+          }
+        } else if (oldProvider !== "gaia" && newProvider === "gaia") {
+          // Non-Gaia → Gaia: clear onboarding
+          clearOnboarding();
+        }
+      } else if (form.provider === "gaia") {
+        // New Gaia model created
+        clearOnboarding();
+      }
       setDialogOpen(false);
       await invalidateModelLists();
     } catch (error) {
@@ -227,6 +252,14 @@ export function ModelSettingsPage({
       await deleteCustomModel(model.id);
       toast.success(t.settings.models.deleteSuccess);
       await invalidateModelLists();
+      // If the deleted model was Gaia, check if any Gaia models remain
+      if (model.provider === "gaia") {
+        const remaining = await loadCustomModels();
+        const hasGaiaLeft = remaining.some((m) => m.provider === "gaia");
+        if (!hasGaiaLeft) {
+          markOnboardingNeeded();
+        }
+      }
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : t.settings.models.deleteFailed,
@@ -264,7 +297,12 @@ export function ModelSettingsPage({
         <p className="text-muted-foreground text-sm">
           {t.settings.models.hint}
         </p>
-        <Button type="button" size="sm" onClick={openCreateDialog}>
+        <Button
+          id="onboarding-add-model-button"
+          type="button"
+          size="sm"
+          onClick={openCreateDialog}
+        >
           <PlusIcon className="size-4" />
           {t.settings.models.addModel}
         </Button>
@@ -393,7 +431,19 @@ export function ModelSettingsPage({
       )}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
+        {/* During onboarding, the guide UI (spotlight card, image lightbox)
+            renders in a body-level portal outside this dialog's DOM. Clicks
+            on it would be treated as "outside" by Radix DismissableLayer and
+            close the dialog — block that while the guide is active. */}
+        <DialogContent
+          className="sm:max-w-lg"
+          onPointerDownOutside={
+            step != null ? (e) => e.preventDefault() : undefined
+          }
+          onInteractOutside={
+            step != null ? (e) => e.preventDefault() : undefined
+          }
+        >
           <DialogHeader>
             <DialogTitle>
               {form.id
@@ -422,7 +472,12 @@ export function ModelSettingsPage({
                 </SelectContent>
               </Select>
             </label>
+          </div>
 
+          {/* Onboarding spotlight starts at the Name field so the dialog
+               header (incl. close button) stays covered during the guide */}
+          <div id="onboarding-add-model-form" className="grid gap-4">
+            <div className="grid gap-4">
             <label className="grid gap-2 text-sm">
               <span>{t.settings.models.name}</span>
               <Input
@@ -540,33 +595,42 @@ export function ModelSettingsPage({
                 }
               />
             </div>
-          </div>
+            </div>
 
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setDialogOpen(false)}
-              disabled={saving}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void handleSave()}
-              disabled={saving}
-              className={cn(saving && "pointer-events-none")}
-            >
-              {saving ? (
-                <>
-                  <Loader2Icon className="size-4 animate-spin" />
-                  {t.common.loading}
-                </>
-              ) : (
-                t.common.save
-              )}
-            </Button>
-          </DialogFooter>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setDialogOpen(false);
+                  // If the guide is active, canceling means the user is
+                  // abandoning model setup — exit the guide too so it does
+                  // not point at a dialog that is no longer open.
+                  if (step != null) {
+                    exitGuide();
+                  }
+                }}
+                disabled={saving}
+              >
+                {t.common.cancel}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void handleSave()}
+                disabled={saving}
+                className={cn(saving && "pointer-events-none")}
+              >
+                {saving ? (
+                  <>
+                    <Loader2Icon className="size-4 animate-spin" />
+                    {t.common.loading}
+                  </>
+                ) : (
+                  t.common.save
+                )}
+              </Button>
+            </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
     </SettingsSection>

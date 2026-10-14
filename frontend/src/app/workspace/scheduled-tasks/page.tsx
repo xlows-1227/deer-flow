@@ -28,6 +28,7 @@ import type {
   ScheduledTask,
   ScheduledTaskPayload,
 } from "@/core/scheduled-tasks/types";
+import { updateThreadSettings } from "@/core/settings";
 
 function Stat({
   icon,
@@ -141,6 +142,15 @@ export default function WorkspaceScheduledTasksPage() {
         const result = await runScheduledTask(task.id);
         toast.success("任务已开始执行");
         await loadTasks(true);
+        // Persist the task's model/mode into the new thread's context so the
+        // chat page shows the same model that will actually run, instead of
+        // falling back to the default (models[0]).
+        if (result.thread_id) {
+          updateThreadSettings(result.thread_id, "context", {
+            ...(task.model_name ? { model_name: task.model_name } : {}),
+            mode: task.mode,
+          });
+        }
         router.push(`/workspace/chats/${result.thread_id}`);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "执行失败");

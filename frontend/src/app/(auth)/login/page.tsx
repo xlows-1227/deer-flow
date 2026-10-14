@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { encryptLoginPassword } from "@/core/auth/login-encryption";
 import { parseAuthError } from "@/core/auth/types";
+import { checkAndPromptOnboarding } from "@/components/workspace/onboarding/onboarding-guide-provider";
 
 /**
  * Validate next parameter
@@ -169,8 +170,16 @@ export default function LoginPage() {
       } catch {
         /* ignore — 即使 refresh 失败，依赖 SSR 的 fallback 机制也会兜底 */
       }
-      router.push(redirectPath);
-      router.refresh(); // 让 Next 重拉 workspace layout 的 server component，确保注入 initialUser
+      // Check if user has Gaia model; if not, flag for onboarding guide
+      try {
+        await checkAndPromptOnboarding();
+      } catch {
+        /* ignore — onboarding check failure should not block login */
+      }
+      // 登录成功后用整页跳转，不用 router.push + router.refresh：
+      // refresh() 会取消正在进行的 push 导航（竞态，页面卡在 login 且无报错），
+      // 整页跳转同时保证 SSR 重新执行 workspace layout，注入最新 initialUser。
+      window.location.assign(redirectPath);
     } catch {
       setError("Network error. Please try again.");
     } finally {

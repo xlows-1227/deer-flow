@@ -742,6 +742,18 @@ export const enUS: Translations = {
     logout: "Log out",
   },
 
+  // Onboarding guide
+  onboarding: {
+    confirmTitle: "Configure YUMC Model",
+    confirmMessage: "You will be guided to configure the YUMC model. Continue?",
+    confirm: "Confirm",
+    exitGuide: "Exit Guide",
+    stepIndicator: "{n}/4",
+    step4GetKey: "Get API Key",
+    step4GetKeyLink: "Go to GAIA platform to get your personal token",
+    step4Example: "API Key example: ng_pk_xxxxxx...",
+  },
+
   // Conversation
   conversation: {
     noMessages: "No messages yet",

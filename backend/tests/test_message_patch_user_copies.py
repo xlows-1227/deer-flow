@@ -32,7 +32,11 @@ def _hidden_reminder(content: str = "搜索点新闻") -> dict:
         "id": BASE_ID,
         "type": "human",
         "content": content,
-        "additional_kwargs": {"hide_from_ui": True, "timestamp": "2026-08-01T10:00:00"},
+        "additional_kwargs": {
+            "hide_from_ui": True,
+            "dynamic_context_reminder": True,
+            "timestamp": "2026-08-01T10:00:00",
+        },
     }
 
 
@@ -143,6 +147,61 @@ def test_mixed_turns_each_handled_independently() -> None:
         USER_COPY_ID,
         "ai-2",
     ]
+
+
+def test_stranded_user_copy_is_restored_beside_reminder() -> None:
+    """Deferred reminder injection stranded the FIRST user message at the end.
+
+    When the opening turns ran through the flash-direct path (which bypasses the
+    graph) the reminder is only injected on a later turn, so the ID-swap moves
+    the conversation's first user message to the end of the list and stamps it
+    with the injection time. It must be moved back beside the reminder and get a
+    sane (nearest-assistant) timestamp.
+    """
+    messages = [
+        _hidden_reminder("今日天气"),
+        {
+            "id": "ai-1",
+            "type": "ai",
+            "content": "我需要知道你所在的城市",
+            "additional_kwargs": {"timestamp": "2026-10-14T08:47:20.579"},
+        },
+        {"id": "h-2", "type": "human", "content": "北京今天天气怎么样？", "additional_kwargs": {}},
+        {"id": "ai-2", "type": "ai", "content": "无法查询", "additional_kwargs": {"timestamp": "2026-10-14T08:47:33"}},
+        {"id": "h-3", "type": "human", "content": "帮我通过百度查一下呢？", "additional_kwargs": {}},
+        {"id": "ai-3", "type": "ai", "content": "百度结果", "additional_kwargs": {"timestamp": "2026-10-14T08:48:02"}},
+        {
+            "id": "h-4",
+            "type": "human",
+            "name": "user-input",
+            "content": "帮我再查一下广州天气呢？",
+            "additional_kwargs": {"timestamp": "2026-10-14T08:48:42.717"},
+        },
+        {
+            "id": USER_COPY_ID,
+            "type": "human",
+            "name": "user-input",
+            "content": "今日天气",
+            "additional_kwargs": {"timestamp": "2026-10-14T08:48:42.916339+00:00"},
+        },
+        {"id": "ai-4", "type": "ai", "content": "不能联网", "additional_kwargs": {"timestamp": "2026-10-14T08:48:55"}},
+    ]
+    channel_values = {"messages": messages}
+    patch_channel_values_messages(channel_values)
+    assert _ids(channel_values["messages"]) == [
+        BASE_ID,
+        USER_COPY_ID,
+        "ai-1",
+        "h-2",
+        "ai-2",
+        "h-3",
+        "ai-3",
+        "h-4",
+        "ai-4",
+    ]
+    restored = channel_values["messages"][1]
+    assert restored["content"] == "今日天气"
+    assert restored["additional_kwargs"]["timestamp"] == "2026-10-14T08:47:20.579"
 
 
 def test_input_not_mutated_beyond_documented_patching() -> None:

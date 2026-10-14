@@ -274,40 +274,8 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
     orig_ainvoke_raw = getattr(instance, "ainvoke_raw", None)
     orig_invoke_raw = getattr(instance, "invoke_raw", None)
 
-    def _preview(name: str, messages: Any) -> None:
-        # Small summary log, bounded and strictly best-effort.
-        try:
-            parts: list[str] = []
-            msgs = messages if isinstance(messages, list) else [messages]
-            for i, msg in enumerate(msgs[-8:]):  # keep tail only
-                mtype = getattr(msg, "type", "?")
-                content = getattr(msg, "content", None)
-                if isinstance(content, list):
-                    ps = ", ".join(
-                        f"{(p.get('type') if isinstance(p, dict) else type(p).__name__)}"
-                        + (
-                            f"[:20]={str(p.get('text'))[:20]!r}"
-                            if isinstance(p, dict) and p.get("type") == "text"
-                            else ""
-                        )
-                        for p in content[:6]
-                    )
-                    parts.append(f"[{i - len(msgs) + len(msgs[-8:]):+d}] {mtype}({ps})")
-                else:
-                    parts.append(f"[{i - len(msgs) + len(msgs[-8:]):+d}] {mtype}={str(content)[:40]!r}")
-            logger.debug(
-                "[LLM_INPUT_PREVIEW] model=%s wrapper=%s tail=%s",
-                resolved_name,
-                name,
-                " | ".join(parts),
-            )
-        except Exception:  # noqa: BLE001
-            pass
-
     async def wrapped_agenerate(messages, *args, **kwargs):
-        logger.debug("[MODEL_WRAPPER] wrapped_agenerate CALLED (messages=%s)", len(messages) if isinstance(messages, list) else "?")
-        nm, changed = _nmcp_normalize_messages(messages)
-        _preview("agenerate" + ("(norm)" if changed else ""), nm)
+        nm, _ = _nmcp_normalize_messages(messages)
         last_exc = None
         for attempt in range(5):
             try:
@@ -328,8 +296,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
         raise last_exc  # type: ignore[misc]
 
     def wrapped_generate(messages, *args, **kwargs):
-        nm, changed = _nmcp_normalize_messages(messages)
-        _preview("generate" + ("(norm)" if changed else ""), nm)
+        nm, _ = _nmcp_normalize_messages(messages)
         return orig_generate(nm, *args, **kwargs)
 
     object.__setattr__(instance, "_agenerate", wrapped_agenerate)
@@ -338,9 +305,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
     if callable(orig_astream):
 
         async def wrapped_astream(messages, *args, **kwargs):
-            logger.debug("[MODEL_WRAPPER] wrapped_astream CALLED (messages=%s)", len(messages) if isinstance(messages, list) else "?")
-            nm, changed = _nmcp_normalize_messages(messages)
-            _preview("astream" + ("(norm)" if changed else ""), nm)
+            nm, _ = _nmcp_normalize_messages(messages)
             last_exc = None
             for attempt in range(5):
                 try:
@@ -367,8 +332,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
     if callable(orig_stream):
 
         def wrapped_stream(messages, *args, **kwargs):
-            nm, changed = _nmcp_normalize_messages(messages)
-            _preview("stream" + ("(norm)" if changed else ""), nm)
+            nm, _ = _nmcp_normalize_messages(messages)
             yield from orig_stream(nm, *args, **kwargs)
 
         object.__setattr__(instance, "_stream", wrapped_stream)
@@ -378,7 +342,6 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
         async def wrapped_ainvoke_raw(input, *args, **kwargs):  # noqa: A002 — matches signature
             if isinstance(input, (list, BaseMessage)):
                 nm, _ = _nmcp_normalize_messages(input)
-                _preview("ainvoke_raw", nm)
                 return await orig_ainvoke_raw(nm, *args, **kwargs)
             return await orig_ainvoke_raw(input, *args, **kwargs)
 
@@ -389,7 +352,6 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
         def wrapped_invoke_raw(input, *args, **kwargs):  # noqa: A002 — matches signature
             if isinstance(input, (list, BaseMessage)):
                 nm, _ = _nmcp_normalize_messages(input)
-                _preview("invoke_raw", nm)
                 return orig_invoke_raw(nm, *args, **kwargs)
             return orig_invoke_raw(input, *args, **kwargs)
 
@@ -419,10 +381,8 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
         orig_stream_runnable = instance.stream
 
         async def _wrapped_runnable_ainvoke(input, config=None, **kwargs):  # noqa: A002
-            logger.debug("[MODEL_WRAPPER] _wrapped_runnable_ainvoke CALLED")
             if isinstance(input, (list, BaseMessage)):
-                nm, _changed = _nmcp_normalize_messages(input)
-                _preview("ainvoke-runnable", nm)
+                nm, _ = _nmcp_normalize_messages(input)
                 last_exc = None
                 for attempt in range(5):
                     try:
@@ -445,16 +405,13 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
 
         def _wrapped_runnable_invoke(input, config=None, **kwargs):  # noqa: A002
             if isinstance(input, (list, BaseMessage)):
-                nm, _changed = _nmcp_normalize_messages(input)
-                _preview("invoke-runnable", nm)
+                nm, _ = _nmcp_normalize_messages(input)
                 return orig_invoke_runnable(nm, config=config, **kwargs)
             return orig_invoke_runnable(input, config=config, **kwargs)
 
         async def _wrapped_runnable_astream(input, config=None, **kwargs):  # noqa: A002
-            logger.debug("[MODEL_WRAPPER] _wrapped_runnable_astream CALLED")
             if isinstance(input, (list, BaseMessage)):
-                nm, _changed = _nmcp_normalize_messages(input)
-                _preview("astream-runnable", nm)
+                nm, _ = _nmcp_normalize_messages(input)
                 last_exc = None
                 for attempt in range(5):
                     try:
@@ -481,8 +438,7 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
 
         def _wrapped_runnable_stream(input, config=None, **kwargs):  # noqa: A002
             if isinstance(input, (list, BaseMessage)):
-                nm, _changed = _nmcp_normalize_messages(input)
-                _preview("stream-runnable", nm)
+                nm, _ = _nmcp_normalize_messages(input)
                 yield from orig_stream_runnable(nm, config=config, **kwargs)
             else:
                 yield from orig_stream_runnable(input, config=config, **kwargs)
@@ -705,183 +661,6 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # TypeError when both dicts contain the same key.
     final_kwargs = {**model_settings_from_config, **kwargs}
     model_instance = model_class(**final_kwargs)
-
-    # 取证日志：暴露该模型实际使用的实现类与端点（不含密钥），用于定位
-    # 不同模型输出格式差异的来源。
-    _endpoint = (
-        model_settings_from_config.get("base_url")
-        or model_settings_from_config.get("api_base")
-        or getattr(model_instance, "openai_api_base", None)
-    )
-    logger.info(
-        "[MODEL_FACTORY] created model=%s use=%s model_id=%s endpoint=%s thinking=%s",
-        name,
-        model_config.use,
-        model_settings_from_config.get("model"),
-        _endpoint,
-        thinking_enabled,
-    )
-
-    # 取证包装：在最底层（_agenerate / _astream）记录模型原始返回的结构、
-    # 换行与空格计数。若此处已无换行，问题在 SDK/网络层；若此处有换行，
-    # 问题在上层（LangChain 聚合、中间件或图节点）。
-    def _raw_content_stats(content: Any) -> str:
-        if isinstance(content, str):
-            return f"str len={len(content)} nl={content.count(chr(10))} sp={content.count(' ')} head={content[:60]!r}"
-        if isinstance(content, list):
-            texts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    texts.append(block)
-                elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                    texts.append(block["text"])
-            joined = "".join(texts)
-            types = [
-                block.get("type") if isinstance(block, dict) else "str"
-                for block in content[:6]
-            ]
-            return (
-                f"list blocks={len(content)} types={types} "
-                f"joined_len={len(joined)} joined_nl={joined.count(chr(10))} joined_sp={joined.count(' ')} head={joined[:60]!r}"
-            )
-        return type(content).__name__
-
-    def _log_raw_request(mode: str, messages: Any, kwargs: dict) -> None:
-        try:
-            msgs = messages if isinstance(messages, list) else [messages]
-            last_human = ""
-            for m in reversed(msgs):
-                if getattr(m, "type", "") == "human":
-                    last_human = str(getattr(m, "content", ""))[:60]
-                    break
-            logger.debug(
-                "[RAW_MODEL_OUTPUT] model=%s mode=%s request: msgs=%d last_human=%r instance_params=(temperature=%s extra_body=%s reasoning_effort=%s stream_usage=%s max_tokens=%s) call_kwargs_keys=%s",
-                name,
-                mode,
-                len(msgs),
-                last_human,
-                getattr(model_instance, "temperature", None),
-                getattr(model_instance, "extra_body", None),
-                getattr(model_instance, "reasoning_effort", None),
-                getattr(model_instance, "stream_usage", None),
-                getattr(model_instance, "max_tokens", None),
-                sorted(k for k in kwargs.keys() if k not in {"run_manager", "stop"}),
-            )
-        except Exception:  # noqa: BLE001
-            pass
-
-    # 将最终发送给端点的 payload（消息、tools、参数）落盘，供离线精确重放
-    # 与两条路径（图/flash）逐字节 diff。密钥字段不落盘。
-    _forensic_payload_seq = 0
-
-    def _forensic_dump_payload(payload: Any) -> None:
-        nonlocal _forensic_payload_seq
-        try:
-            import json as _json
-            import time as _time
-            from pathlib import Path as _Path
-
-            out_dir = _Path(".deer-flow/forensic")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            _forensic_payload_seq += 1
-            fname = out_dir / f"payload_{name}_{int(_time.time() * 1000)}_{_forensic_payload_seq}.json"
-            safe = {k: v for k, v in (payload or {}).items() if "key" not in k.lower()}
-            fname.write_text(
-                _json.dumps(safe, ensure_ascii=False, indent=1, default=str),
-                encoding="utf-8",
-            )
-            logger.debug("[RAW_MODEL_OUTPUT] payload dumped: model=%s file=%s", name, fname)
-        except Exception:  # noqa: BLE001
-            pass
-
-    _orig_get_request_payload = getattr(model_instance, "_get_request_payload", None)
-    if callable(_orig_get_request_payload):
-
-        def _forensic_get_request_payload(input_, *args, **kwargs):  # type: ignore[no-untyped-def]
-            payload = _orig_get_request_payload(input_, *args, **kwargs)
-            _forensic_dump_payload(payload)
-            return payload
-
-        object.__setattr__(model_instance, "_get_request_payload", _forensic_get_request_payload)
-
-    _orig_forensic_agenerate = model_instance._agenerate
-
-    async def _forensic_agenerate(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
-        _log_raw_request("agenerate", messages, kwargs)
-        result = await _orig_forensic_agenerate(messages, *args, **kwargs)
-        try:
-            for gen_list in getattr(result, "generations", []) or []:
-                for gen in gen_list:
-                    gen_message = getattr(gen, "message", None)
-                    if gen_message is not None:
-                        logger.debug(
-                            "[RAW_MODEL_OUTPUT] model=%s mode=agenerate msg=%s content=%s",
-                            name,
-                            type(gen_message).__name__,
-                            _raw_content_stats(getattr(gen_message, "content", None)),
-                        )
-        except Exception:  # noqa: BLE001
-            pass
-        return result
-
-    object.__setattr__(model_instance, "_agenerate", _forensic_agenerate)
-
-    _orig_forensic_astream = getattr(model_instance, "_astream", None)
-    if callable(_orig_forensic_astream):
-
-        async def _forensic_astream(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
-            _log_raw_request("astream", messages, kwargs)
-            parts: list[str] = []
-            blocks = 0
-            chunk_count = 0
-            chunks_with_nl = 0
-            samples: list[str] = []
-            async for chunk in _orig_forensic_astream(messages, *args, **kwargs):
-                # Chunks may be AIMessageChunk (content 直接可读) 或
-                # ChatGenerationChunk（content 在 .message 上），统一取值。
-                chunk_source = getattr(chunk, "message", chunk)
-                chunk_content = getattr(chunk_source, "content", None)
-                chunk_count += 1
-                if isinstance(chunk_content, str):
-                    parts.append(chunk_content)
-                    if "\n" in chunk_content:
-                        chunks_with_nl += 1
-                elif isinstance(chunk_content, list):
-                    blocks += len(chunk_content)
-                    for block in chunk_content:
-                        if isinstance(block, str):
-                            parts.append(block)
-                        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                            parts.append(block["text"])
-                if len(samples) < 3:
-                    samples.append(
-                        f"#{chunk_count} cls={type(chunk_source).__name__} "
-                        f"content={str(chunk_content)[:140]!r}"
-                    )
-                yield chunk
-            joined = "".join(parts)
-            try:
-                for sample in samples:
-                    logger.debug(
-                        "[RAW_MODEL_OUTPUT] model=%s mode=astream chunk_sample %s",
-                        name,
-                        sample,
-                    )
-                logger.debug(
-                    "[RAW_MODEL_OUTPUT] model=%s mode=astream merged_len=%d nl=%d sp=%d list_blocks=%d chunks=%d chunks_with_nl=%d head=%r",
-                    name,
-                    len(joined),
-                    joined.count("\n"),
-                    joined.count(" "),
-                    blocks,
-                    chunk_count,
-                    chunks_with_nl,
-                    joined[:60],
-                )
-            except Exception:  # noqa: BLE001
-                pass
-
-        object.__setattr__(model_instance, "_astream", _forensic_astream)
 
     if attach_tracing:
         callbacks = build_tracing_callbacks()

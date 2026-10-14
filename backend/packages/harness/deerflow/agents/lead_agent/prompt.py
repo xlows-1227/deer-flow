@@ -270,6 +270,28 @@ Only use `task` when you can launch 2+ subagents in parallel. A single sub-task 
 </subagent_system>"""
 
 
+FLASH_MODE_SECTION = """
+<flash_mode>
+**Flash mode is active.** In this mode you have NO tools at all: you cannot
+search the web, fetch URLs, run shell commands, read or write files, produce
+artifacts, launch subagents, or load skills. Every tool/skill/subagent
+reference elsewhere in this prompt is inert here — ignore it completely.
+
+Answer directly from your own knowledge, in a clear and concise form.
+
+Hard rules:
+- NEVER emit tool-call syntax of any kind: no `tool_name(...)` text, no
+  `<invoke>` / `<|DSML|...>` XML markup, no JSON argument objects, and do not
+  narrate "let me call the search tool" or similar.
+- If you genuinely lack the information needed, say so plainly instead of
+  pretending to call a tool.
+- Sole exception: `ask_clarification` (see the clarification section above)
+  is still available and must be emitted as text when you truly need the user
+  to supply missing information before you can answer.
+</flash_mode>
+"""
+
+
 SYSTEM_PROMPT_TEMPLATE = """
 <role>
 You are {agent_name}, a capable and helpful AI assistant.
@@ -715,6 +737,7 @@ def _apply_prompt_template_impl(
     agent_soul: str | None = None,
     agent_instructions: str | None = None,
     published: bool = False,
+    flash_mode: bool = False,
 ) -> str:
     """Internal prompt builder — not cached; callers should use ``apply_prompt_template``."""
     # Include subagent section only if enabled (from runtime parameter)
@@ -748,10 +771,24 @@ def _apply_prompt_template_impl(
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
     # identical across users and sessions for maximum prefix-cache reuse.
+    self_update_section = _build_self_update_section(agent_name)
+
+    if flash_mode:
+        # Flash mode binds no tools to the model.  Blank out every section that
+        # advertises tools / skills / mounts / subagents so the model does not
+        # try to emit tool calls it cannot actually execute.
+        skills_section = ""
+        deferred_tools_section = ""
+        subagent_section = ""
+        subagent_reminder = ""
+        subagent_thinking = ""
+        acp_and_mounts_section = ""
+        self_update_section = ""
+
     final_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "Friday",
         soul=instruction_section,
-        self_update_section=_build_self_update_section(agent_name),
+        self_update_section=self_update_section,
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
         subagent_section=subagent_section,
@@ -759,18 +796,8 @@ def _apply_prompt_template_impl(
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
     )
-    # 取证日志：记录最终系统提示词与自定义指令的规模和首尾内容，
-    # 用于排查“单行/无空格输出”类格式约束是否被写进了提示词。
-    logger.info(
-        "[SYSTEM_PROMPT] agent=%s published=%s total_len=%d total_nl=%d instructions_len=%d instructions_head=%r instructions_tail=%r",
-        agent_name or "default",
-        published,
-        len(final_prompt),
-        final_prompt.count("\n"),
-        len(instruction_section or ""),
-        (instruction_section or "")[:200],
-        (instruction_section or "")[-200:],
-    )
+    if flash_mode:
+        final_prompt = f"{final_prompt}\n{FLASH_MODE_SECTION}"
     return final_prompt
 
 
@@ -783,6 +810,7 @@ def _cached_apply_prompt_template(
     agent_soul: str | None,
     agent_instructions: str | None,
     published: bool,
+    flash_mode: bool,
 ) -> str:
     """Cached variant that uses the global app_config singleton.
 
@@ -798,6 +826,7 @@ def _cached_apply_prompt_template(
         agent_soul=agent_soul,
         agent_instructions=agent_instructions,
         published=published,
+        flash_mode=flash_mode,
     )
 
 
@@ -811,6 +840,7 @@ def apply_prompt_template(
     agent_soul: str | None = None,
     agent_instructions: str | None = None,
     published: bool = False,
+    flash_mode: bool = False,
 ) -> str:
     """Build the system prompt, caching the result for identical parameters.
 
@@ -828,6 +858,7 @@ def apply_prompt_template(
             agent_soul=agent_soul,
             agent_instructions=agent_instructions,
             published=published,
+            flash_mode=flash_mode,
         )
 
     return _cached_apply_prompt_template(
@@ -838,4 +869,5 @@ def apply_prompt_template(
         agent_soul=agent_soul,
         agent_instructions=agent_instructions,
         published=published,
+        flash_mode=flash_mode,
     )

@@ -3,6 +3,7 @@
 import json
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import override
 
@@ -143,6 +144,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             content=formatted_message,
             tool_call_id=tool_call_id,
             name="ask_clarification",
+            additional_kwargs={"timestamp": datetime.now(UTC).isoformat()},
         )
 
         # Return a Command that:

@@ -547,6 +547,18 @@ export interface Translations {
     logout: string;
   };
 
+  // Onboarding guide
+  onboarding: {
+    confirmTitle: string;
+    confirmMessage: string;
+    confirm: string;
+    exitGuide: string;
+    stepIndicator: string;
+    step4GetKey: string;
+    step4GetKeyLink: string;
+    step4Example: string;
+  };
+
   // Conversation
   conversation: {
     noMessages: string;

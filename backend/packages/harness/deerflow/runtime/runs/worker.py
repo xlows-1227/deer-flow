@@ -22,6 +22,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -3471,25 +3472,6 @@ def _cache_and_patch_values_messages(run_id: str, messages: list[Any]) -> None:
                     pass
 
 
-def _log_values_last_ai(stage: str, messages: Any) -> None:
-    """取证日志：values 快照中最后一条 AI 消息的头部（%r 显示换行）。"""
-    if not isinstance(messages, list):
-        return
-    for m in reversed(messages):
-        if isinstance(m, dict):
-            if m.get("type") not in ("ai", "AIMessage", "AIMessageChunk"):
-                continue
-            content = m.get("content", "")
-        else:
-            if getattr(m, "type", "") not in ("ai", "AIMessage", "AIMessageChunk"):
-                continue
-            content = getattr(m, "content", "")
-        if not isinstance(content, str):
-            content = repr(content)
-        logger.debug("[Worker] values last AI (%s): len=%d head=%r", stage, len(content), content[:120])
-        return
-
-
 def _enrich_tool_call_content_in_serialized(obj: Any, *, run_id: str = "") -> None:
     """After serialization, patch content from [工具调用已省略] → [工具调用: name1, name2].
 
@@ -4017,7 +3999,7 @@ async def _run_flash_direct_model(
     pre_run_checkpoint_tuple: Any | None,
     redactor: SkillContentRedactor,
 ) -> bool:
-    from langchain_core.messages import AIMessage, SystemMessage, message_chunk_to_message
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage, message_chunk_to_message
 
     from deerflow.agents.lead_agent.agent import _resolve_available_skill_names, _resolve_model_name
     from deerflow.agents.lead_agent.prompt import apply_prompt_template
@@ -4064,35 +4046,6 @@ async def _run_flash_direct_model(
         for msg in conversation_messages
     ]
 
-    # Debug log: summarize every message that is about to be sent to the
-    # provider so 400 "text content is empty" / multimodal issues can be
-    # diagnosed without a debug traceback.
-    _preview: list[str] = []
-    for i, msg in enumerate(conversation_messages):
-        mtype = getattr(msg, "type", "?")
-        content = getattr(msg, "content", None)
-        if isinstance(content, list):
-            parts_summary = ", ".join(
-                f"{(p.get('type') if isinstance(p, dict) else type(p).__name__)}"
-                for p in content[:6]
-            )
-            if len(content) > 6:
-                parts_summary += f", …(+{len(content) - 6})"
-            _preview.append(f"[{i}] {mtype}(list:{parts_summary})")
-        else:
-            snippet = (
-                str(content).replace("\n", " ")[:120]
-                if content is not None
-                else ""
-            )
-            _preview.append(f"[{i}] {mtype}: {snippet}")
-    logger.debug(
-        "[LLM_INPUT_PREVIEW] run=%s total=%s messages:\n%s",
-        record.run_id,
-        len(conversation_messages),
-        "\n".join(_preview),
-    )
-
     system_prompt = apply_prompt_template(
         subagent_enabled=False,
         max_concurrent_subagents=cfg.get("max_concurrent_subagents", 3),
@@ -4106,6 +4059,7 @@ async def _run_flash_direct_model(
         ),
         app_config=app_config,
         agent_instructions=agent_instructions,
+        flash_mode=True,
     )
     model_messages = [SystemMessage(content=system_prompt), *conversation_messages]
 
@@ -4130,13 +4084,100 @@ async def _run_flash_direct_model(
         streamed_chunks.append(chunk)
 
     final_ai_message = message_chunk_to_message(accumulated_chunk) if accumulated_chunk is not None else AIMessage(content="")
-    if not record.abort_event.is_set() and _message_has_tool_call_request(final_ai_message):
+
+    # Apply text-based tool call parser (e.g. YUMC returns ask_clarification as text)
+    if not record.abort_event.is_set():
+        try:
+            from deerflow.agents.middlewares.tool_call_text_parser_middleware import process_text_tool_calls
+            final_ai_message = process_text_tool_calls(final_ai_message)
+        except Exception:
+            logger.debug("Failed to apply text tool call parser in flash direct path", exc_info=True)
+
+    # If tool calls detected (either standard or text-parsed), check if it's ask_clarification
+    # which we can handle directly in flash direct (avoid agent graph streaming raw text).
+    if not record.abort_event.is_set() and final_ai_message.tool_calls:
+        tc = final_ai_message.tool_calls[0]
+        if tc.get("name") == "ask_clarification":
+            # Handle clarification directly in flash direct path
+            logger.info("Run %s: flash direct handling ask_clarification directly", record.run_id)
+            from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+            mw = ClarificationMiddleware()
+            formatted = mw._format_clarification_message(tc.get("args", {}))
+            tool_call_id = tc.get("id", "")
+            now_iso = datetime.now(UTC).isoformat()
+
+            # Add timestamp to the AIMessage
+            final_ai_message = final_ai_message.model_copy(update={
+                "additional_kwargs": {**final_ai_message.additional_kwargs, "timestamp": now_iso},
+            })
+
+            # Create ToolMessage with timestamp
+            tool_message = ToolMessage(
+                id=f"flash_clar_{tool_call_id}",
+                content=formatted,
+                tool_call_id=tool_call_id,
+                name="ask_clarification",
+                additional_kwargs={"timestamp": now_iso},
+            )
+
+            # Stream the cleaned AIMessage (content stripped, tool_calls set)
+            if "messages" in lg_modes:
+                ai_meta = {"langgraph_node": "agent", "tags": ["lead_agent"], "flash_direct": True}
+                safe_ai = redactor.redact_stream_payload("messages", (final_ai_message, ai_meta), run_id=record.run_id)
+                await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize(safe_ai, mode="messages"))
+
+                tool_meta = {"langgraph_node": "tools", "tags": ["lead_agent"], "flash_direct": True}
+                safe_tool = redactor.redact_stream_payload("messages", (tool_message, tool_meta), run_id=record.run_id)
+                await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialize(safe_tool, mode="messages"))
+
+            final_messages = [*conversation_messages, final_ai_message, tool_message]
+            channel_values = {
+                **existing_values,
+                "messages": final_messages,
+                "artifacts": existing_values.get("artifacts") or [],
+            }
+
+            if "values" in lg_modes:
+                _cache_and_patch_values_messages(record.run_id, final_messages)
+                channel_values["messages"] = final_messages
+                safe_values = redactor.redact_stream_payload("values", channel_values, run_id=record.run_id)
+                await bridge.publish(record.run_id, "values", serialize(safe_values, mode="values"))
+
+            if not record.abort_event.is_set():
+                await _persist_flash_direct_checkpoint(
+                    checkpointer=checkpointer,
+                    thread_id=record.thread_id,
+                    ckpt_tuple=pre_run_checkpoint_tuple,
+                    channel_values=channel_values,
+                    changed_channels={"messages", "artifacts"},
+                )
+                _queue_flash_memory_capture(
+                    thread_id=record.thread_id,
+                    messages=final_messages,
+                    app_config=app_config,
+                )
+
+            _drop_values_cache(record.run_id)
+            return True
+
+        # Other tool calls — fall back to full agent graph
         logger.info("Run %s: flash direct model requested tool calls; falling back to full agent graph", record.run_id)
         return False
 
     if "messages" in lg_modes:
+        # Use a single timestamp for the entire streamed response so every
+        # chunk (and the final message) carries one.  This lets the frontend
+        # reliably sort stream-accumulated messages even before the checkpoint
+        # persists and history (run events) catches up.
+        stream_ts_iso = datetime.now(UTC).isoformat()
         for chunk in streamed_chunks:
             cleaned_chunk = _clean_aimessage_content(chunk)
+            # Stamp each chunk so frontend sorting never sees a missing timestamp.
+            if hasattr(cleaned_chunk, "additional_kwargs"):
+                cleaned_chunk.additional_kwargs = {
+                    **(cleaned_chunk.additional_kwargs or {}),
+                    "timestamp": stream_ts_iso,
+                }
             safe_chunk = redactor.redact_stream_payload(
                 "messages",
                 (cleaned_chunk, metadata),
@@ -4147,6 +4188,11 @@ async def _run_flash_direct_model(
             await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialized)
 
     final_ai_message = _clean_aimessage_content(final_ai_message)
+    # Add timestamp so frontend can sort messages correctly
+    now_iso = datetime.now(UTC).isoformat()
+    final_ai_message = final_ai_message.model_copy(update={
+        "additional_kwargs": {**final_ai_message.additional_kwargs, "timestamp": now_iso},
+    })
     final_messages = [*conversation_messages, final_ai_message]
     channel_values = {
         **existing_values,
@@ -4868,6 +4914,10 @@ async def run_agent(
                 graph_input = cleaned_graph_input
 
         # 7. Stream using graph.astream
+        # Single shared timestamp for the entire graph run's streamed messages.
+        # Guarantees every chunk carries a timestamp so frontend sorting is
+        # reliable before history (run events) catches up.
+        run_stream_ts = datetime.now(UTC).isoformat()
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
             single_mode = lg_modes[0]
@@ -4877,6 +4927,12 @@ async def run_agent(
                     break
                 # Skip space restoration in streaming (chunks too small for correct restoration)
                 cleaned_chunk = _clean_aimessage_content(chunk, is_streaming_chunk=True, skip_space_restoration=True) if single_mode == "messages" else chunk
+                # Stamp messages-mode chunks so frontend sorting never sees a missing timestamp.
+                if single_mode == "messages" and hasattr(cleaned_chunk, "additional_kwargs"):
+                    cleaned_chunk.additional_kwargs = {
+                        **(cleaned_chunk.additional_kwargs or {}),
+                        "timestamp": run_stream_ts,
+                    }
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 if single_mode == "values" and isinstance(cleaned_chunk, dict):
                     # Pre-process values: ensure every AI message in state has
@@ -4916,6 +4972,12 @@ async def run_agent(
 
                 # Skip space restoration in streaming (chunks too small for correct restoration)
                 cleaned_chunk = _clean_aimessage_content(chunk, is_streaming_chunk=(mode == "messages"), skip_space_restoration=(mode == "messages")) if mode == "messages" else chunk
+                # Stamp messages-mode chunks so frontend sorting never sees a missing timestamp.
+                if mode == "messages" and hasattr(cleaned_chunk, "additional_kwargs"):
+                    cleaned_chunk.additional_kwargs = {
+                        **(cleaned_chunk.additional_kwargs or {}),
+                        "timestamp": run_stream_ts,
+                    }
                 sse_event = _lg_mode_to_sse_event(mode)
                 if mode == "values":
                     if isinstance(cleaned_chunk, dict):
@@ -4923,7 +4985,6 @@ async def run_agent(
                         if isinstance(msgs, list):
                             _cache_and_patch_values_messages(run_id, msgs)
                             cleaned_chunk["messages"] = msgs
-                            _log_values_last_ai("post-patch", msgs)
                 safe_chunk = redactor.redact_stream_payload(mode, cleaned_chunk, run_id=run_id)
                 serialized_chunk = serialize(safe_chunk, mode=mode)
                 if mode == "messages":
@@ -4933,7 +4994,6 @@ async def run_agent(
                         msgs = serialized_chunk.get("messages")
                         if isinstance(msgs, list):
                             _cache_ai_tool_names_from_values(run_id, msgs)
-                            _log_values_last_ai("post-serialize", msgs)
                 await bridge.publish(run_id, sse_event, serialized_chunk)
 
         # 7b. Final-content patch for glued-English output.

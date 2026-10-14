@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { useOnboardingGuide } from "./onboarding/onboarding-guide-provider";
 import { SettingsDialog } from "./settings";
 
 function NavMenuButtonContent({ t }: { t: ReturnType<typeof useI18n>["t"] }) {
@@ -33,6 +34,7 @@ export function WorkspaceNavMenu() {
   >("appearance");
   const [mounted, setMounted] = useState(false);
   const { t } = useI18n();
+  const { step } = useOnboardingGuide();
 
   useEffect(() => {
     setMounted(true);
@@ -41,6 +43,10 @@ export function WorkspaceNavMenu() {
   const handleOpenSettings = () => {
     setSettingsDefaultSection("appearance");
     setSettingsOpen(true);
+    // Advance onboarding guide if on step 1
+    if (step === 1) {
+      window.dispatchEvent(new Event("onboarding:advance"));
+    }
   };
 
   return (
@@ -54,6 +60,7 @@ export function WorkspaceNavMenu() {
         <SidebarMenuItem>
           {mounted ? (
             <SidebarMenuButton
+              id="onboarding-settings-button"
               size="lg"
               tooltip={t.workspace.settingsAndMore}
               className="h-10 rounded-lg text-gray-700 hover:bg-gray-200 data-[state=open]:bg-gray-200 data-[state=open]:text-gray-900"
