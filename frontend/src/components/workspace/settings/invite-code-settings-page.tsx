@@ -5,6 +5,13 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -24,6 +31,10 @@ type InviteCodesListResponse = {
   page: number;
   page_size: number;
 };
+
+// Sort value combines field and direction; "default" keeps the backend's
+// built-in order (unused first, earliest created).
+type SortValue = "default" | "created_at:asc" | "created_at:desc" | "used_at:asc" | "used_at:desc";
 
 const PAGE_SIZE = 20;
 
@@ -53,14 +64,22 @@ export function InviteCodeSettingsPage() {
   const [countInput, setCountInput] = useState("");
   const [creating, setCreating] = useState(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortValue>("default");
 
   const loadCodes = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(
-        `/api/admin/invite-codes?page=${page}&page_size=${PAGE_SIZE}`,
-      );
+      const params = new URLSearchParams({
+        page: String(page),
+        page_size: String(PAGE_SIZE),
+      });
+      if (sort !== "default") {
+        const [sortBy, sortOrder] = sort.split(":");
+        params.set("sort_by", sortBy);
+        params.set("sort_order", sortOrder);
+      }
+      const res = await fetch(`/api/admin/invite-codes?${params.toString()}`);
       if (!res.ok) throw new Error("load failed");
       const body = (await res.json()) as InviteCodesListResponse;
       setCodes(body.codes ?? []);
@@ -70,7 +89,7 @@ export function InviteCodeSettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, t.settings.inviteCodes.loadError]);
+  }, [page, sort, t.settings.inviteCodes.loadError]);
 
   useEffect(() => {
     void loadCodes();
@@ -174,6 +193,44 @@ export function InviteCodeSettingsPage() {
               ? t.settings.inviteCodes.generating
               : t.settings.inviteCodes.generate}
           </Button>
+
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-muted-foreground shrink-0 text-sm">
+              {t.settings.inviteCodes.sortLabel}
+            </span>
+            <Select
+              value={sort}
+              onValueChange={(value) => {
+                setSort(value as SortValue);
+                setPage(1);
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-56"
+                aria-label={t.settings.inviteCodes.sortLabel}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="default">
+                  {t.settings.inviteCodes.sortDefault}
+                </SelectItem>
+                <SelectItem value="created_at:asc">
+                  {t.settings.inviteCodes.sortCreatedAtAsc}
+                </SelectItem>
+                <SelectItem value="created_at:desc">
+                  {t.settings.inviteCodes.sortCreatedAtDesc}
+                </SelectItem>
+                <SelectItem value="used_at:asc">
+                  {t.settings.inviteCodes.sortUsedAtAsc}
+                </SelectItem>
+                <SelectItem value="used_at:desc">
+                  {t.settings.inviteCodes.sortUsedAtDesc}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         {/* Table */}

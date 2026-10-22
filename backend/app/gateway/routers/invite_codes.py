@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -68,16 +69,27 @@ async def batch_create_invite_codes(
     "",
     response_model=InviteCodesListResponse,
     summary="List Invite Codes (admin)",
-    description="Paginated list of invite codes sorted by: unused first, then earliest created. Admin only.",
+    description=(
+        "Paginated list of invite codes. Default sort: unused first, then "
+        "earliest created. Pass sort_by=created_at|used_at and "
+        "sort_order=asc|desc to let the user choose the ordering. Admin only."
+    ),
 )
 async def list_invite_codes(
     request: Request,
     admin: User = Depends(_require_admin_user),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
+    sort_by: Literal["created_at", "used_at"] | None = Query(default=None),
+    sort_order: Literal["asc", "desc"] | None = Query(default=None),
 ) -> InviteCodesListResponse:
     repo = get_invite_code_repo(request)
-    rows, total = await repo.list_paginated(page=page, page_size=page_size)
+    rows, total = await repo.list_paginated(
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
     return InviteCodesListResponse(
         codes=[
             InviteCodeItemResponse(

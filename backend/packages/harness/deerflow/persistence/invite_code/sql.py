@@ -100,8 +100,16 @@ class InviteCodeRepository:
         self,
         page: int = 1,
         page_size: int = 20,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
     ) -> tuple[list[dict], int]:
-        """Paginated list sorted by: unused first, then earliest created.
+        """Paginated list with optional user-chosen ordering.
+
+        Default order: unused first, then earliest created. When ``sort_by``
+        is ``created_at`` or ``used_at`` and ``sort_order`` is ``asc`` or
+        ``desc``, sort by that column instead; rows with NULL ``used_at``
+        (unused codes) always sort last in ``used_at`` ordering. Ties break
+        by created_at then code for a stable order.
 
         Returns (rows, total) where each row is a dict with keys:
         code, used, used_by_email, created_at, used_at.
@@ -110,11 +118,21 @@ class InviteCodeRepository:
             # Total count
             total = (await session.execute(select(func.count()).select_from(InviteCodeRow))).scalar_one()
 
+            if sort_by in ("created_at", "used_at") and sort_order in ("asc", "desc"):
+                column = InviteCodeRow.created_at if sort_by == "created_at" else InviteCodeRow.used_at
+                order = column.asc() if sort_order == "asc" else column.desc()
+                if sort_by == "used_at":
+                    # Unused codes (NULL used_at) sink to the bottom either way.
+                    order = order.nulls_last()
+                order_by = [order, InviteCodeRow.created_at.asc(), InviteCodeRow.code.asc()]
+            else:
+                order_by = [InviteCodeRow.used.asc(), InviteCodeRow.created_at.asc()]
+
             # Join with users to get email of the consumer
             stmt = (
                 select(InviteCodeRow, UserRow.email.label("used_by_email"))
                 .outerjoin(UserRow, InviteCodeRow.used_by_user_id == UserRow.id)
-                .order_by(InviteCodeRow.used.asc(), InviteCodeRow.created_at.asc())
+                .order_by(*order_by)
                 .offset((page - 1) * page_size)
                 .limit(page_size)
             )

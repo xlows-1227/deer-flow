@@ -1191,7 +1191,7 @@ export const zhCN: Translations = {
     },
     inviteCodes: {
       title: "邀请码管理",
-      description: "批量生成邀请码，查看使用情况。排序：未使用优先，更早创建优先。",
+      description: "批量生成邀请码，查看使用情况。默认排序：未使用优先，更早创建优先；可在右上方调整排序方式。",
       batchCreate: "批量生成",
       countLabel: "生成数量",
       countPlaceholder: "输入正整数（1-500）",
@@ -1212,6 +1212,12 @@ export const zhCN: Translations = {
       pageOf: "第 {current} / {total} 页（共 {count} 条）",
       generate: "生成",
       generating: "生成中...",
+      sortLabel: "排序方式",
+      sortDefault: "默认（未使用优先，早创建优先）",
+      sortCreatedAtAsc: "创建时间：从早到晚",
+      sortCreatedAtDesc: "创建时间：从晚到早",
+      sortUsedAtAsc: "使用时间：从早到晚",
+      sortUsedAtDesc: "使用时间：从晚到早",
     },
     logViewer: {
       title: "日志查看",
