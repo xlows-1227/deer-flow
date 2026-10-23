@@ -75,7 +75,7 @@ export function InviteCodeSettingsPage() {
         page_size: String(PAGE_SIZE),
       });
       if (sort !== "default") {
-        const [sortBy, sortOrder] = sort.split(":");
+        const [sortBy = "", sortOrder = ""] = sort.split(":");
         params.set("sort_by", sortBy);
         params.set("sort_order", sortOrder);
       }
