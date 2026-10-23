@@ -1245,7 +1245,7 @@ export const enUS: Translations = {
     },
     inviteCodes: {
       title: "Invite Code Management",
-      description: "Batch-generate invite codes and view usage. Sorted by: unused first, earliest created first.",
+      description: "Batch-generate invite codes and view usage. Default sort: unused first, earliest created; change it via the sort control above the list.",
       batchCreate: "Batch Generate",
       countLabel: "Count",
       countPlaceholder: "Enter a positive integer (1-500)",
@@ -1266,6 +1266,12 @@ export const enUS: Translations = {
       pageOf: "Page {current} / {total} ({count} total)",
       generate: "Generate",
       generating: "Generating...",
+      sortLabel: "Sort by",
+      sortDefault: "Default (unused first, earliest created)",
+      sortCreatedAtAsc: "Created: oldest first",
+      sortCreatedAtDesc: "Created: newest first",
+      sortUsedAtAsc: "Used: oldest first",
+      sortUsedAtDesc: "Used: newest first",
     },
     logViewer: {
       title: "Logs",

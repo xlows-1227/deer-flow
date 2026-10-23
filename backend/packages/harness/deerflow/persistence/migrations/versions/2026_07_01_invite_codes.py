@@ -44,7 +44,7 @@ def upgrade() -> None:
         op.create_table(
             "invite_codes",
             sa.Column("code", sa.String(32), primary_key=True),
-            sa.Column("used", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("used", sa.Boolean(), nullable=False, server_default=sa.false()),
             sa.Column("used_by_user_id", sa.String(36)),
             sa.Column("used_at", sa.DateTime(timezone=True)),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -60,7 +60,7 @@ def upgrade() -> None:
                 "invite_codes",
                 sa.column("code", sa.String),
                 sa.column("used", sa.Boolean),
-                sa.column("created_at", sa.DateTime),
+                sa.column("created_at", sa.DateTime(timezone=True)),
             ),
             [{"code": code, "used": False, "created_at": now} for code in _generate_unique_codes(_SEED_COUNT)],
         )

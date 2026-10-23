@@ -1034,6 +1034,12 @@ export interface Translations {
       pageOf: string;
       generate: string;
       generating: string;
+      sortLabel: string;
+      sortDefault: string;
+      sortCreatedAtAsc: string;
+      sortCreatedAtDesc: string;
+      sortUsedAtAsc: string;
+      sortUsedAtDesc: string;
     };
     logViewer: {
       title: string;

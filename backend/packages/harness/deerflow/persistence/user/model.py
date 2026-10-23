@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import Boolean, DateTime, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -52,7 +52,7 @@ class UserRow(Base):
     # dropping it so historical references (skill shares, thread ownership)
     # stay resolvable.  Deleted accounts cannot log in and are excluded
     # from user listings and share pickers.
-    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
