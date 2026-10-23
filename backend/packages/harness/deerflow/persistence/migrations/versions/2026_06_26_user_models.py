@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column("base_url", sa.String(512)),
         sa.Column("api_key_ref", sa.String(512)),
         sa.Column("api_key_last_four", sa.String(4)),
-        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True)),
