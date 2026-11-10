@@ -158,15 +158,28 @@ def _format_public_answer(text: str) -> str:
 
     s = _SQL_FENCE_RE.sub(_pad_sql_start, s)
     # Prefix close-fence with newline unless already has one; postfix too.
-    # We only touch ``` that closes a fenced block: look for closing markers.
+    # We only touch ``` that closes a fenced block.  A fence is an *opening*
+    # fence when it sits at the start of a line (indentation allowed) and is
+    # immediately followed by an info string, e.g. ```text / ```json /
+    # ```python; padding those would push the language tag into the code body.
+    def _is_opening_fence(match: re.Match[str]) -> bool:
+        line_prefix = s[: match.start()].rsplit("\n", 1)[-1]
+        return not line_prefix.strip() and bool(re.match(r"[^\s`]", s[match.end() :]))
+
+    def _pad_close_fence_before(match: re.Match[str]) -> str:
+        return match.group(0) if _is_opening_fence(match) else "\n" + match.group(0)
+
+    def _pad_close_fence_after(match: re.Match[str]) -> str:
+        return match.group(0) if _is_opening_fence(match) else match.group(0) + "\n"
+
     s = re.sub(
         r"(?<!\n)```(?=\s*[^`]|$)",
-        lambda m: "\n" + m.group(0),
+        _pad_close_fence_before,
         s,
     )
     s = re.sub(
         r"```(?!\s*\n)",
-        lambda m: m.group(0) + "\n",
+        _pad_close_fence_after,
         s,
     )
 

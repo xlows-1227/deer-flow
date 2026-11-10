@@ -888,6 +888,22 @@ memory:
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================
+# Stream Bridge Configuration
+# ============================================================================
+# Connects agent workers to SSE endpoints; the memory bridge buffers events
+# per run so late subscribers can replay from Last-Event-ID.
+stream_bridge:
+  type: memory # "memory" (in-process, single-process only) or "redis" (planned)
+  queue_maxsize: 256 # Maximum number of events buffered per run
+  # Idle interval between `: heartbeat` comment lines on a silent stream.
+  # Range 5-60 seconds; field default 15, explicitly set to 5 here. Clients
+  # should use an idle timeout of at least 2-3x this value (5s -> 10-15s).
+  # To read it from the environment instead, replace the value with
+  # $STREAM_HEARTBEAT_INTERVAL_SECONDS -- that env var must then be set,
+  # otherwise config loading fails.
+  heartbeat_interval_seconds: 5
+
+# ============================================================================
 # Custom Agent Management API
 # ============================================================================
 # Controls whether the HTTP gateway exposes custom-agent SOUL/USER.md management.

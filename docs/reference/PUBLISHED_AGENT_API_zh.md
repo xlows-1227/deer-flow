@@ -200,7 +200,8 @@ curl --no-buffer --request POST \
 - `metadata`：包含公开的 `run_id` 和 `conversation_id`。
 - `messages-tuple`、`values`、`custom`：经过安全字段白名单过滤的运行内容。
 - `end`：流结束。
-- `: heartbeat`：保持连接活跃的注释行。
+- `: heartbeat`：保持连接活跃的注释行（默认每 15 秒一次，服务端可配置为 5–60 秒）。
+  客户端侧的空闲超时阈值应不低于心跳间隔的 2–3 倍（默认 15 秒对应 45–60 秒），否则会出现误判超时。
 
 客户端应按标准 SSE 协议解析 `event`、`id` 和 `data`，不要依赖未公开的内部字段。断线重连时可以发送 `Last-Event-ID`。
 

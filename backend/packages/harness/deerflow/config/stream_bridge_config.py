@@ -22,6 +22,15 @@ class StreamBridgeConfig(BaseModel):
         default=256,
         description="Maximum number of events buffered per run in the memory bridge.",
     )
+    # Idle interval between SSE heartbeat comments on a silent stream, in
+    # seconds. 5-60 keeps heartbeats frequent enough for typical proxy idle
+    # timeouts (60s) without waking every subscriber too often; default 15.
+    heartbeat_interval_seconds: float = Field(
+        default=15.0,
+        ge=5,
+        le=60,
+        description="Idle interval in seconds between SSE heartbeat comments on a silent stream. Allowed range 5-60; default 15.",
+    )
 
 
 # Global configuration instance — None means no stream bridge is configured

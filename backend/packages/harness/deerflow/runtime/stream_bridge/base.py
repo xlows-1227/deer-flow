@@ -51,13 +51,15 @@ class StreamBridge(abc.ABC):
         run_id: str,
         *,
         last_event_id: str | None = None,
-        heartbeat_interval: float = 15.0,
+        heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Async iterator that yields events for *run_id* (consumer side).
 
         Yields :data:`HEARTBEAT_SENTINEL` when no event arrives within
-        *heartbeat_interval* seconds.  Yields :data:`END_SENTINEL` once
-        the producer calls :meth:`publish_end`.
+        *heartbeat_interval* seconds.  ``None`` means "read the configured
+        ``stream_bridge.heartbeat_interval_seconds``" (15s when unset).
+        Yields :data:`END_SENTINEL` once the producer calls
+        :meth:`publish_end`.
         """
 
     @abc.abstractmethod
