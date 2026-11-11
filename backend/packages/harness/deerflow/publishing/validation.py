@@ -32,15 +32,50 @@ logger = logging.getLogger(__name__)
 MAX_INSTRUCTION_BYTES = 200 * 1024
 
 # Platform hard limits. Owner overrides may be more restrictive but never above
-# these. M2's quota engine consumes the same values; defined here so the
-# validator stays self-contained.
+# these. The live values come from ``publishing.platform_quota`` via
+# :func:`load_platform_quota_limits`; this map is the fail-open fallback so
+# publishing keeps working when the app config is unavailable.
 PLATFORM_QUOTA_DEFAULTS: dict[str, int] = {
     "max_concurrent_runs": 8,
     "daily_runs": 1000,
     "daily_tokens": 2_000_000,
     "max_run_seconds": 600,
     "max_tokens_per_run": 200_000,
+    "max_input_bytes": 256 * 1024,
+    "inbound_rps": 20,
 }
+
+# ``PlatformQuota`` field name -> override key used by drafts, Releases, and
+# Agent Keys. The two names differ for the three "default"-suffixed fields.
+_PLATFORM_QUOTA_FIELDS: dict[str, str] = {
+    "max_concurrent_runs": "max_concurrent_runs_per_agent",
+    "daily_runs": "daily_runs_default",
+    "daily_tokens": "daily_tokens_default",
+    "max_run_seconds": "max_run_seconds",
+    "max_tokens_per_run": "max_tokens_per_run",
+    "max_input_bytes": "max_input_bytes",
+    "inbound_rps": "inbound_rps",
+}
+
+
+def load_platform_quota_limits() -> dict[str, int]:
+    """Return publish-time hard limits from ``publishing.platform_quota``.
+
+    Falls back to :data:`PLATFORM_QUOTA_DEFAULTS` (with a warning) when the app
+    config is missing or fails to load, so a config problem can never break
+    publishing.
+    """
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        platform = get_app_config().publishing.platform_quota
+        return {key: int(getattr(platform, field)) for key, field in _PLATFORM_QUOTA_FIELDS.items()}
+    except Exception:
+        logger.warning(
+            "Could not load publishing.platform_quota; publish validation falls back to PLATFORM_QUOTA_DEFAULTS",
+            exc_info=True,
+        )
+        return dict(PLATFORM_QUOTA_DEFAULTS)
 
 
 @dataclass(frozen=True)

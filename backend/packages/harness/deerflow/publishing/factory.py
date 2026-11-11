@@ -133,7 +133,7 @@ def build_publish_service():
     from deerflow.publishing.content_store import get_content_store
     from deerflow.publishing.publish_service import PublishService
     from deerflow.publishing.skills_index import ConnectorServiceRepo
-    from deerflow.publishing.validation import PLATFORM_QUOTA_DEFAULTS
+    from deerflow.publishing.validation import load_platform_quota_limits
 
     try:
         from deerflow.connectors.service import make_connector_service
@@ -152,7 +152,7 @@ def build_publish_service():
         connector_repo=ConnectorServiceRepo(make_connector_service()),
         model_index=_resolve_available_model_names(),
         tool_group_whitelist=_resolve_tool_group_whitelist(),
-        platform_quota=dict(PLATFORM_QUOTA_DEFAULTS),
+        platform_quota=load_platform_quota_limits(),
         model_resolver=_resolve_effective_models,
     )
 

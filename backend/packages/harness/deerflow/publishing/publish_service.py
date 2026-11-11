@@ -36,8 +36,8 @@ from deerflow.persistence.skill_revision import SkillRevisionRepository
 from deerflow.publishing.content_store import ImmutableContentStore
 from deerflow.publishing.skills_index import SkillPublishSnapshot
 from deerflow.publishing.validation import (
-    PLATFORM_QUOTA_DEFAULTS,
     PublishViolation,
+    load_platform_quota_limits,
     validate_draft_for_publish,
 )
 
@@ -125,7 +125,7 @@ class PublishService:
         self._connectors = connector_repo
         self._model_index = model_index
         self._tool_group_whitelist = tool_group_whitelist
-        self._platform_quota = platform_quota or dict(PLATFORM_QUOTA_DEFAULTS)
+        self._platform_quota = platform_quota or load_platform_quota_limits()
         # Session factory shared by all repos — used to open a single transaction
         # spanning skill-revision upserts + release creation + pointer switch
         # (fourth-review Important-1).

@@ -904,6 +904,22 @@ stream_bridge:
   heartbeat_interval_seconds: 5
 
 # ============================================================================
+# Published Agent Runtime Quotas
+# ============================================================================
+# Platform hard caps. Release(owner) and Agent Key overrides may only reduce
+# these; omitted override fields inherit the previous layer. Sized for 1000
+# stores x ~5 runs/day x ~13k tokens/run; all values must be positive integers.
+publishing:
+  platform_quota:
+    max_concurrent_runs_per_agent: 64 # In-flight runs per agent (peak ≈ stores x 10%)
+    max_input_bytes: 262144 # Request body cap, 256 KiB
+    max_run_seconds: 600 # Per-run wall clock cap, 10 min
+    max_tokens_per_run: 80000 # Per-run token cap, ~6x the 13k average
+    inbound_rps: 50 # Inbound requests per second for one agent
+    daily_runs_default: 10000 # Runs/day/agent: 1000 x 5 = 5000, 2x headroom
+    daily_tokens_default: 100000000 # Tokens/day/agent: 5000 x 13k ≈ 65M, ~1.5x headroom
+
+# ============================================================================
 # Custom Agent Management API
 # ============================================================================
 # Controls whether the HTTP gateway exposes custom-agent SOUL/USER.md management.
