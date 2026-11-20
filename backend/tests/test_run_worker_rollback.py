@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -254,6 +255,12 @@ async def test_run_agent_flash_without_attachments_uses_direct_model_path(monkey
         def with_config(self, **_kwargs):
             return self
 
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="hello!"))])
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="hello!"))])
+
         async def astream(self, messages, config=None):
             assert messages[0].type == "system"
             assert messages[0].content == combined_instructions
@@ -325,6 +332,29 @@ async def test_run_agent_flash_direct_tool_call_falls_back_to_full_graph(monkeyp
         def with_config(self, **_kwargs):
             return self
 
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            additional_kwargs={
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {"name": "read_file", "arguments": "{}"},
+                                    }
+                                ]
+                            },
+                        )
+                    )
+                ]
+            )
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return self._generate(messages)
+
         async def astream(self, messages, config=None):
             yield AIMessageChunk(
                 content="",
@@ -392,6 +422,18 @@ async def test_flash_direct_path_persists_checkpoint_history(monkeypatch):
     app_config = SimpleNamespace(get_model_config=lambda _name: MockModelConfig())
 
     class FakeModel:
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(content=f"response-{len(captured_model_messages) + 1}")
+                    )
+                ]
+            )
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return self._generate(messages)
+
         async def astream(self, messages, config=None):
             captured_model_messages.append([getattr(message, "content", "") for message in messages])
             yield AIMessageChunk(content=f"response-{len(captured_model_messages)}")

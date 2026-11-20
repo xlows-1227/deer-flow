@@ -289,8 +289,13 @@ class RunRepository(RunStore):
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
-    ) -> None:
-        """Update token usage + convenience fields while a run is still active."""
+    ) -> bool:
+        """Update token usage + convenience fields while a run is still active.
+
+        The update is guarded by ``status='running'`` so a run cancelled on
+        another worker is not overwritten. Returns ``False`` when no row was
+        updated, which the owning worker uses as a cancellation signal.
+        """
         values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
         optional_counters = {
             "total_input_tokens": total_input_tokens,
@@ -310,8 +315,9 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()
+            return result.rowcount != 0
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage via a single SQL GROUP BY query."""

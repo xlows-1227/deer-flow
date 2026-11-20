@@ -14,7 +14,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   context: {
     model_name: undefined,
-    mode: "flash",
+    mode: "thinking",
     // No default reasoning_effort: leave it undefined so per-mode defaults
     // apply at submit time. Advanced users can set a global override from
     // the Settings page.

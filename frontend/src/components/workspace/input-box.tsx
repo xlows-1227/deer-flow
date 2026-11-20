@@ -144,7 +144,7 @@ function getResolvedMode(
   if (mode) {
     return mode;
   }
-  return "flash";
+  return supportsThinking ? "thinking" : "flash";
 }
 
 export function InputBox({
@@ -1360,7 +1360,9 @@ export function InputBox({
                   context.mode === "pro" ||
                   context.mode === "ultra"
                     ? context.mode
-                    : "flash"
+                    : supportThinking
+                      ? "thinking"
+                      : "flash"
                 }
               >
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">

@@ -132,6 +132,7 @@ export function useThreadStream({
   const { t } = useI18n();
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  const [flashFallback, setFlashFallback] = useState(false);
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
@@ -180,6 +181,7 @@ export function useThreadStream({
     // Switching chats clears stop suppression so scheduled/other-client runs
     // can still be auto-joined on the newly selected thread.
     suppressAutoRejoinRef.current = false;
+    setFlashFallback(false);
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -193,6 +195,7 @@ export function useThreadStream({
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
     activeRunThreadIdRef.current = _threadId;
+    setFlashFallback(false);
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
@@ -292,6 +295,16 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "flash_direct_fallback"
+      ) {
+        setFlashFallback(true);
+        return;
+      }
+
       if (
         typeof event === "object" &&
         event !== null &&
@@ -812,7 +825,7 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
-            streamMode: ["values", "messages"],
+            streamMode: ["values", "messages", "custom"],
             streamSubgraphs: true,
             streamResumable: true,
             onDisconnect: "continue",
@@ -944,6 +957,7 @@ export function useThreadStream({
     thread: mergedThread,
     pendingUsageMessages,
     sendMessage,
+    flashFallback,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,

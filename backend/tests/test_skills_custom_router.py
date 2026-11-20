@@ -63,7 +63,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     scan_calls = []
     refresh_calls = []
 
-    async def _scan(content, *, executable, location, app_config=None):
+    async def _scan(content, *, executable, location, app_config=None, model=None):
         from deerflow.skills.security_scanner import ScanResult
 
         scan_calls.append({"content": content, "executable": executable, "location": location})
@@ -83,6 +83,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda: None)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -129,6 +130,7 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     )
     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda: None)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -161,6 +163,7 @@ def test_upload_skill_archive_security_scan_block_returns_reason(monkeypatch, tm
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda: None)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -199,6 +202,7 @@ def test_upload_skill_archive_force_skips_security_scan(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda: None)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 

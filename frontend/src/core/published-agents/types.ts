@@ -122,6 +122,7 @@ export interface AgentRelease {
   quota_overrides: QuotaOverrides;
   manifest_checksum: string;
   created_by: string;
+  created_by_email?: string | null;
   created_at: string;
   skills: AgentReleaseSkill[];
   connector_grants: AgentConnectorGrant[];

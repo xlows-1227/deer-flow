@@ -60,7 +60,7 @@ def allow_skill_security_scan():
 
         return ScanResult(decision="allow", reason="ok")
 
-    with patch("deerflow.skills.installer.scan_skill_content", _scan):
+    with patch("deerflow.skills.installer.create_scan_model", return_value=None), patch("deerflow.skills.installer.scan_skill_content", _scan):
         yield
 
 

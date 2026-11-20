@@ -89,6 +89,10 @@ export const enUS: Translations = {
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
+    flashToolHint:
+      "This conversation needs tool calls. Please choose a higher mode.",
+    flashToolFallbackHint:
+      "This turn needed tool calls, so the mode was temporarily raised.",
     reasoningMode: "Reasoning",
     reasoningModeDescription:
       "Reasoning before action, balance between time and accuracy",
@@ -354,6 +358,7 @@ export const enUS: Translations = {
       skillsTab: "Skills",
       connectorsTab: "Connectors",
       sandboxTab: "Sandbox",
+      quotaTab: "Quota",
       publishTab: "Publish",
       integrationsTab: "Integrations",
       operationsTab: "Operations",
@@ -513,6 +518,19 @@ export const enUS: Translations = {
       toolGroups: "Tool groups",
       skills: "Skills",
       connectorGrants: "Connector grants",
+      quota: "Quota",
+      quotaInherited: "Inherit",
+      quotaInheritAll: "Inherit platform defaults",
+      quotaFieldLabel: (field) =>
+        ({
+          max_concurrent_runs: "Concurrent runs",
+          daily_runs: "Daily runs",
+          daily_tokens: "Daily tokens",
+          max_run_seconds: "Run duration",
+          max_tokens_per_run: "Tokens per run",
+          max_input_bytes: "Input bytes",
+          inbound_rps: "Inbound RPS",
+        })[field] ?? field,
       historyTitle: "Release history",
       historyDescription:
         "History is owner-only. Releases are immutable; rollback only changes the current pointer.",
@@ -1033,6 +1051,28 @@ export const enUS: Translations = {
         userBadge: "Mine",
         readOnlyHint:
           "System MCP servers can only be enabled or disabled for your account. Configuration is managed by administrators.",
+        nameRequired: "Please enter an MCP name.",
+        invalidName:
+          "Name must start with a letter and contain only letters, digits, underscores, or hyphens (max 32 characters).",
+        refreshConnection: "Refresh connection",
+        refreshing: "Connecting…",
+        untested: "Not tested",
+        connecting: "Connecting",
+        connectedCount: (count: number) =>
+          `Connected · ${count} tool${count === 1 ? "" : "s"}`,
+        connectFailed: "Connection failed",
+        connectSuccess: (name: string) => `${name} connected`,
+        connectSuccessDescription: (count: number) =>
+          `${count} tool${count === 1 ? "" : "s"} found`,
+        connectFailedTitle: (name: string) => `${name} failed to connect`,
+        toolList: "Tools",
+        toolListHint: (count: number) =>
+          `${count} tools · scroll inside the list to see all`,
+        toolListEmpty: "This MCP server exposes no tools.",
+        toolListIdle:
+          'Not tested yet. Click "Refresh connection" to load its tools.',
+        toolListDisabled:
+          "Enable this server to test the connection and load its tools.",
       },
       imageGeneration: {
         title: "Image Generation",
@@ -1122,6 +1162,8 @@ export const enUS: Translations = {
       oneDataResponseStrict: "Validate business status",
       oneDataSummary: "OneData API",
       oneDataPolicy: "API calls",
+      connectionUrlSpecialCharHint:
+        'In the connection URL, a username or password containing "@" or "/" is currently truncated and fails authentication. Use Username & password mode instead.',
       credentialUpdateHint:
         "Leave empty to keep the existing credential reference.",
       credentialUpdateHintInline:

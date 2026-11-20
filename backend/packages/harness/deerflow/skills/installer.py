@@ -14,7 +14,7 @@ import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.security_scanner import create_scan_model, get_scan_concurrency, scan_skill_content
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +199,7 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
             shutil.rmtree(target)
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool) -> None:
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, model=None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
@@ -208,7 +208,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8", can_force=True) from e
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location)
+        result = await scan_skill_content(content, executable=executable, location=location, model=model)
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}", reason=str(e), can_force=True) from e
 
@@ -224,12 +224,55 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}", reason=reason, can_force=True)
 
 
+async def _scan_paths_or_raise(
+    skill_dir: Path,
+    targets: list[tuple[Path, bool]],
+    skill_name: str,
+    *,
+    model,
+    max_concurrency: int,
+) -> None:
+    """Scan support files concurrently; fail fast on the first rejection."""
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _scan_one(path: Path, executable: bool) -> None:
+        async with semaphore:
+            await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=executable, model=model)
+
+    tasks = [asyncio.create_task(_scan_one(path, executable)) for path, executable in targets]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            exception = task.exception()
+            if exception is not None:
+                raise exception
+    finally:
+        leftover = [task for task in tasks if not task.done()]
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
+
+
 async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, skip_security_scan: bool = False) -> None:
     """Run the skill security scanner against all installable text and script files."""
     skill_md = skill_dir / "SKILL.md"
+    scan_model = None
     if not skip_security_scan:
-        await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
+        try:
+            scan_model = create_scan_model()
+        except Exception:
+            # Keep the previous behaviour: a per-file attempt inside
+            # scan_skill_content applies the conservative degradation rules.
+            logger.warning("Security scan model unavailable; falling back to per-file creation", exc_info=True)
+            scan_model = None
+        await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, model=scan_model)
 
+    scan_targets: list[tuple[Path, bool]] = []
     for path in sorted(skill_dir.rglob("*")):
         if not path.is_file():
             continue
@@ -244,7 +287,16 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
         if not _should_scan_support_file(rel_path):
             continue
 
-        await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
+        scan_targets.append((path, _is_script_support_file(rel_path)))
+
+    if scan_targets:
+        await _scan_paths_or_raise(
+            skill_dir,
+            scan_targets,
+            skill_name,
+            model=scan_model,
+            max_concurrency=get_scan_concurrency(),
+        )
 
 
 def _run_async_install(coro):

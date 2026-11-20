@@ -2,12 +2,16 @@
 
 import {
   CheckCircleIcon,
+  ChevronDownIcon,
   DownloadIcon,
+  Loader2Icon,
   PencilIcon,
   PlugIcon,
   PlusIcon,
+  RefreshCwIcon,
   TerminalIcon,
   Trash2Icon,
+  WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -37,11 +41,16 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   createMCPServer,
   deleteMCPServer,
+  fetchMCPServerTools,
   loadMCPConfig,
   setMCPServerEnabled,
   updateMCPServer,
 } from "@/core/mcp/api";
-import type { MCPConfig, MCPServerConfig } from "@/core/mcp/types";
+import type {
+  MCPConfig,
+  MCPServerConfig,
+  MCPToolInfo,
+} from "@/core/mcp/types";
 import { cn } from "@/lib/utils";
 
 type MCPForm = {
@@ -55,6 +64,22 @@ type MCPForm = {
   url: string;
   envText: string;
   headersText: string;
+};
+
+const MCP_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
+type MCPToolCheck = {
+  status: "idle" | "loading" | "success" | "error";
+  tools: MCPToolInfo[];
+  error: string | null;
+  expanded: boolean;
+};
+
+const emptyToolCheck: MCPToolCheck = {
+  status: "idle",
+  tools: [],
+  error: null,
+  expanded: false,
 };
 
 const emptyForm: MCPForm = {
@@ -163,6 +188,53 @@ export function MCPManagementPage({
   const [saving, setSaving] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<MCPForm>(emptyForm);
+  const [toolChecks, setToolChecks] = useState<Record<string, MCPToolCheck>>(
+    {},
+  );
+
+  function getToolCheck(name: string): MCPToolCheck {
+    return toolChecks[name] ?? emptyToolCheck;
+  }
+
+  function updateToolCheck(name: string, patch: Partial<MCPToolCheck>) {
+    setToolChecks((current) => ({
+      ...current,
+      [name]: { ...(current[name] ?? emptyToolCheck), ...patch },
+    }));
+  }
+
+  function toggleToolList(name: string) {
+    updateToolCheck(name, { expanded: !getToolCheck(name).expanded });
+  }
+
+  async function handleRefreshTools(name: string) {
+    updateToolCheck(name, { status: "loading", error: null });
+    try {
+      const result = await fetchMCPServerTools(name);
+      updateToolCheck(name, {
+        status: "success",
+        tools: result.tools,
+        error: null,
+        expanded: true,
+      });
+      toast.success(t.settings.tools.mcp.connectSuccess(name), {
+        description: t.settings.tools.mcp.connectSuccessDescription(
+          result.tools.length,
+        ),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      updateToolCheck(name, {
+        status: "error",
+        tools: [],
+        error: message,
+        expanded: true,
+      });
+      toast.error(t.settings.tools.mcp.connectFailedTitle(name), {
+        description: message,
+      });
+    }
+  }
 
   const servers = useMemo(
     () => Object.entries(config?.mcp_servers ?? {}),
@@ -212,7 +284,11 @@ export function MCPManagementPage({
   async function handleSave() {
     const trimmedName = form.name.trim();
     if (!trimmedName) {
-      toast.error("请输入 MCP 名称");
+      toast.error(t.settings.tools.mcp.nameRequired);
+      return;
+    }
+    if (trimmedName.length > 32 || !MCP_NAME_PATTERN.test(trimmedName)) {
+      toast.error(t.settings.tools.mcp.invalidName);
       return;
     }
 
@@ -236,6 +312,10 @@ export function MCPManagementPage({
       }
       toast.success("MCP 配置已保存");
       setFormOpen(false);
+      if (form.originalName && form.originalName !== trimmedName) {
+        updateToolCheck(form.originalName, emptyToolCheck);
+      }
+      updateToolCheck(trimmedName, emptyToolCheck);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
@@ -268,6 +348,9 @@ export function MCPManagementPage({
     try {
       const updated = await setMCPServerEnabled(name, enabled);
       patchServer(name, updated);
+      if (!enabled) {
+        updateToolCheck(name, emptyToolCheck);
+      }
       toast.success(enabled ? "MCP 已启用" : "MCP 已停用");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -362,8 +445,10 @@ export function MCPManagementPage({
             </Card>
           ) : (
             <div className="grid gap-4">
-              {servers.map(([name, server]) => (
-                <Card key={name} className="rounded-lg">
+              {servers.map(([name, server]) => {
+                const toolCheck = getToolCheck(name);
+                return (
+                  <Card key={name} className="rounded-lg">
                   <CardHeader className="gap-3">
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0">
@@ -388,12 +473,66 @@ export function MCPManagementPage({
                             )}
                             {server.enabled ? "启用" : "停用"}
                           </Badge>
+                          {server.enabled &&
+                          toolCheck.status === "loading" ? (
+                            <Badge variant="secondary">
+                              <Loader2Icon className="h-3 w-3 animate-spin" />
+                              {t.settings.tools.mcp.connecting}
+                            </Badge>
+                          ) : null}
+                          {server.enabled && toolCheck.status === "success" ? (
+                            <Badge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                              <CheckCircleIcon className="h-3 w-3" />
+                              {t.settings.tools.mcp.connectedCount(
+                                toolCheck.tools.length,
+                              )}
+                            </Badge>
+                          ) : null}
+                          {server.enabled && toolCheck.status === "error" ? (
+                            <Badge
+                              variant="outline"
+                              className="border-destructive/40 bg-destructive/10 text-destructive"
+                            >
+                              <XCircleIcon className="h-3 w-3" />
+                              {t.settings.tools.mcp.connectFailed}
+                            </Badge>
+                          ) : null}
+                          {server.enabled && toolCheck.status === "idle" ? (
+                            <Badge variant="outline">
+                              {t.settings.tools.mcp.untested}
+                            </Badge>
+                          ) : null}
                         </div>
                         <CardDescription className="mt-2">
                           {server.description || "暂无描述"}
                         </CardDescription>
+                        {toolCheck.status === "error" && toolCheck.error ? (
+                          <p className="text-destructive mt-1 text-xs">
+                            {toolCheck.error}
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={
+                            !server.enabled ||
+                            saving ||
+                            toolCheck.status === "loading"
+                          }
+                          onClick={() => void handleRefreshTools(name)}
+                        >
+                          <RefreshCwIcon
+                            className={cn(
+                              "h-3.5 w-3.5",
+                              toolCheck.status === "loading" && "animate-spin",
+                            )}
+                          />
+                          {toolCheck.status === "loading"
+                            ? t.settings.tools.mcp.refreshing
+                            : t.settings.tools.mcp.refreshConnection}
+                        </Button>
                         <Switch
                           checked={server.enabled}
                           disabled={saving}
@@ -434,9 +573,87 @@ export function MCPManagementPage({
                         {stringValue(server.url)}
                       </code>
                     ) : null}
+                    <div className="border-t pt-2">
+                      <button
+                        type="button"
+                        aria-expanded={toolCheck.expanded}
+                        className="hover:bg-muted/60 flex w-full items-center justify-between gap-2 rounded-md py-1.5 text-left"
+                        onClick={() => toggleToolList(name)}
+                      >
+                        <span className="flex items-center gap-1.5 text-xs font-medium">
+                          <WrenchIcon className="h-3.5 w-3.5" />
+                          {t.settings.tools.mcp.toolList}
+                          {toolCheck.status === "success" ? (
+                            <span className="text-muted-foreground font-normal">
+                              {toolCheck.tools.length}
+                            </span>
+                          ) : null}
+                        </span>
+                        <ChevronDownIcon
+                          className={cn(
+                            "text-muted-foreground h-4 w-4 transition-transform",
+                            toolCheck.expanded && "rotate-180",
+                          )}
+                        />
+                      </button>
+                      {toolCheck.expanded ? (
+                        <div className="mt-1" data-role="tool-list-panel">
+                          {toolCheck.status === "success" ? (
+                            toolCheck.tools.length === 0 ? (
+                              <p className="text-muted-foreground px-1 py-2 text-xs">
+                                {t.settings.tools.mcp.toolListEmpty}
+                              </p>
+                            ) : (
+                              <>
+                                <ul className="max-h-52 space-y-2 overflow-y-auto pr-1">
+                                  {toolCheck.tools.map((tool) => (
+                                    <li
+                                      key={tool.name}
+                                      className="rounded-md border px-3 py-2"
+                                    >
+                                      <div className="font-mono text-xs break-all">
+                                        {tool.name}
+                                      </div>
+                                      {tool.description ? (
+                                        <p className="text-muted-foreground mt-0.5 line-clamp-2 text-xs">
+                                          {tool.description}
+                                        </p>
+                                      ) : null}
+                                    </li>
+                                  ))}
+                                </ul>
+                                {toolCheck.tools.length > 4 ? (
+                                  <p className="text-muted-foreground mt-2 text-xs">
+                                    {t.settings.tools.mcp.toolListHint(
+                                      toolCheck.tools.length,
+                                    )}
+                                  </p>
+                                ) : null}
+                              </>
+                            )
+                          ) : toolCheck.status === "loading" ? (
+                            <p className="text-muted-foreground flex items-center gap-2 px-1 py-2 text-xs">
+                              <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+                              {t.settings.tools.mcp.refreshing}
+                            </p>
+                          ) : toolCheck.status === "error" ? (
+                            <p className="bg-destructive/10 text-destructive rounded-md px-3 py-2 text-xs break-all">
+                              {toolCheck.error}
+                            </p>
+                          ) : (
+                            <p className="text-muted-foreground px-1 py-2 text-xs">
+                              {server.enabled
+                                ? t.settings.tools.mcp.toolListIdle
+                                : t.settings.tools.mcp.toolListDisabled}
+                            </p>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
                   </CardContent>
-                </Card>
-              ))}
+                  </Card>
+                );
+              })}
             </div>
           )}
         </div>
@@ -459,6 +676,7 @@ export function MCPManagementPage({
               <Input
                 value={form.name}
                 disabled={Boolean(form.originalName)}
+                maxLength={32}
                 onChange={(event) =>
                   setForm((current) => ({
                     ...current,

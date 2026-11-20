@@ -5,6 +5,7 @@ import type {
   MCPConfig,
   MCPServerConfig,
   MCPServerCreatePayload,
+  MCPServerToolsResponse,
   MCPServerUpdatePayload,
 } from "./types";
 
@@ -79,4 +80,15 @@ export async function deleteMCPServer(name: string) {
   if (!response.ok) {
     throw new Error(await readErrorMessage(response));
   }
+}
+
+export async function fetchMCPServerTools(name: string) {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/mcp/servers/${encodeURIComponent(name)}/tools`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+  return response.json() as Promise<MCPServerToolsResponse>;
 }

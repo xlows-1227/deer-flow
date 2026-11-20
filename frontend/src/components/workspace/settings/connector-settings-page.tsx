@@ -986,19 +986,24 @@ export function ConnectorSettingsPage({
                     </Select>
                   </Field>
                   {form.authMode === "env" ? (
-                    <Field label={copy.credentialRef}>
-                      <Input
-                        value={form.credentialRef}
-                        onChange={(event) =>
-                          updateForm({ credentialRef: event.target.value })
-                        }
-                        placeholder={
-                          form.type === "starrocks"
-                            ? "ADS_STARROCKS_URL"
-                            : "PROD_MYSQL_URL"
-                        }
-                      />
-                    </Field>
+                    <div className="grid gap-4">
+                      <Field label={copy.credentialRef}>
+                        <Input
+                          value={form.credentialRef}
+                          onChange={(event) =>
+                            updateForm({ credentialRef: event.target.value })
+                          }
+                          placeholder={
+                            form.type === "starrocks"
+                              ? "ADS_STARROCKS_URL"
+                              : "PROD_MYSQL_URL"
+                          }
+                        />
+                      </Field>
+                      <p className="text-muted-foreground text-xs">
+                        {copy.connectionUrlSpecialCharHint}
+                      </p>
+                    </div>
                   ) : (
                     <div className="grid gap-4">
                       <Field label={copy.username}>

@@ -942,6 +942,7 @@ agents_api:
 skill_evolution:
   enabled: false # Set to true to allow agent-managed writes under skills/custom
   moderation_model_name: null # Model for LLM-based security scanning (null = use default model)
+  security_scan_concurrency: 3 # Max files scanned concurrently during skill upload (1-32)
 
 # ============================================================================
 # Checkpointer Configuration (DEPRECATED — use `database` instead)

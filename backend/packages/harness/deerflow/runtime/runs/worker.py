@@ -4162,6 +4162,14 @@ async def _run_flash_direct_model(
 
         # Other tool calls — fall back to full agent graph
         logger.info("Run %s: flash direct model requested tool calls; falling back to full agent graph", record.run_id)
+        if "custom" in lg_modes:
+            # Standalone notice so clients can explain the mode upgrade without
+            # touching message content or the messages stream.
+            await bridge.publish(
+                record.run_id,
+                _lg_mode_to_sse_event("custom"),
+                {"type": "flash_direct_fallback", "reason": "tool_calls"},
+            )
         return False
 
     if "messages" in lg_modes:

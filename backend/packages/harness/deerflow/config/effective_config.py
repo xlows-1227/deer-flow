@@ -14,7 +14,7 @@ from deerflow.config.model_config import ModelConfig
 logger = logging.getLogger(__name__)
 
 _USER_MODEL_CACHE_TTL_SECONDS = 30.0
-_USER_EXTENSIONS_CACHE_TTL_SECONDS = 30.0
+_USER_EXTENSIONS_CACHE_TTL_SECONDS = 5.0
 _user_model_cache: dict[str, tuple[float, list[ModelConfig]]] = {}
 _user_extensions_cache: dict[str, tuple[float, ExtensionsConfig]] = {}
 _user_model_cache_lock = asyncio.Lock()
@@ -53,6 +53,15 @@ def invalidate_user_extensions_cache(user_id: str) -> None:
         invalidate_mcp_tools_cache_for_user(user_id)
     except Exception:
         logger.debug("Could not invalidate MCP cache for user %s", user_id, exc_info=True)
+
+    # Extensions changed: compiled agent graphs in this process may embed the old
+    # MCP tool set, so drop them as well (lazy import avoids a circular import).
+    try:
+        from deerflow.agents.lead_agent.agent import clear_agent_graph_cache
+
+        clear_agent_graph_cache()
+    except Exception:
+        logger.warning("Could not clear agent graph cache after extensions change for %s", user_id, exc_info=True)
 
 
 async def load_user_model_configs(user_id: str) -> list[ModelConfig]:

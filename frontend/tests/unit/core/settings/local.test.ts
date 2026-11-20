@@ -27,8 +27,8 @@ test("defaults token usage to header total plus per-turn breakdown", () => {
   });
 });
 
-test("defaults chat mode to flash", () => {
-  expect(DEFAULT_LOCAL_SETTINGS.context.mode).toBe("flash");
+test("defaults chat mode to thinking", () => {
+  expect(DEFAULT_LOCAL_SETTINGS.context.mode).toBe("thinking");
   // No default reasoning_effort: per-mode defaults apply at submit time and
   // an explicit value would permanently override them.
   expect(DEFAULT_LOCAL_SETTINGS.context.reasoning_effort).toBeUndefined();

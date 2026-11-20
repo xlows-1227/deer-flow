@@ -7,8 +7,14 @@ import logging
 import re
 from dataclasses import dataclass
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.skill_evolution_config import (
+    DEFAULT_SECURITY_SCAN_CONCURRENCY,
+    MAX_SECURITY_SCAN_CONCURRENCY,
+)
 from deerflow.models import create_chat_model
 from deerflow.skills.types import SKILL_MD_FILE
 
@@ -67,7 +73,41 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
-async def scan_skill_content(content: str, *, executable: bool = False, location: str = SKILL_MD_FILE, app_config: AppConfig | None = None) -> ScanResult:
+def create_scan_model(app_config: AppConfig | None = None) -> BaseChatModel:
+    """Create the chat model used by :func:`scan_skill_content`.
+
+    Batch callers (e.g. archive install) create it once and pass it in, so the
+    per-file cost of instantiating the model is paid once per batch.
+    """
+    config = app_config or get_app_config()
+    model_name = config.skill_evolution.moderation_model_name
+    if model_name:
+        return create_chat_model(name=model_name, thinking_enabled=False, app_config=config)
+    return create_chat_model(thinking_enabled=False, app_config=config)
+
+
+def get_scan_concurrency(app_config: AppConfig | None = None) -> int:
+    """Return how many skill files may be security-scanned concurrently.
+
+    Falls back to the default when the config is unavailable or the stored
+    value is not usable, so scanning never breaks on bad configuration.
+    """
+    try:
+        config = app_config or get_app_config()
+        value = int(getattr(getattr(config, "skill_evolution", None), "security_scan_concurrency", DEFAULT_SECURITY_SCAN_CONCURRENCY))
+    except Exception:
+        return DEFAULT_SECURITY_SCAN_CONCURRENCY
+    return max(1, min(value, MAX_SECURITY_SCAN_CONCURRENCY))
+
+
+async def scan_skill_content(
+    content: str,
+    *,
+    executable: bool = False,
+    location: str = SKILL_MD_FILE,
+    app_config: AppConfig | None = None,
+    model: BaseChatModel | None = None,
+) -> ScanResult:
     """Screen skill content before it is written to disk."""
     rubric = (
         "You are a security reviewer for AI agent skills. "
@@ -81,10 +121,8 @@ async def scan_skill_content(content: str, *, executable: bool = False, location
 
     model_responded = False
     try:
-        config = app_config or get_app_config()
-        model_name = config.skill_evolution.moderation_model_name
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config) if model_name else create_chat_model(thinking_enabled=False, app_config=config)
-        response = await model.ainvoke(
+        scan_model = model if model is not None else create_scan_model(app_config)
+        response = await scan_model.ainvoke(
             [
                 {"role": "system", "content": rubric},
                 {"role": "user", "content": prompt},

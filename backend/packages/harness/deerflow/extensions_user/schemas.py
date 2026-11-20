@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 MASKED_VALUE = "***"
+
+# Model-side function names must start with an ASCII letter; MCP tools are
+# exposed as ``{server_name}_{tool_name}`` without any sanitization.
+MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+MCP_TRANSPORT_TYPES = ("stdio", "sse", "http", "streamable_http")
 
 
 class McpOAuthConfigSchema(BaseModel):
@@ -43,10 +49,21 @@ class McpConfigResponse(BaseModel):
     mcp_servers: dict[str, McpServerRecord] = Field(default_factory=dict)
 
 
-class McpServerCreateRequest(BaseModel):
+class McpToolInfo(BaseModel):
     name: str
+    description: str = ""
+
+
+class McpServerToolsResponse(BaseModel):
+    server: str
+    tools: list[McpToolInfo] = Field(default_factory=list)
+    checked_at: str
+
+
+class McpServerCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
     enabled: bool = True
-    type: str = "stdio"
+    type: Literal["stdio", "sse", "http", "streamable_http"] = "stdio"
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
@@ -55,10 +72,20 @@ class McpServerCreateRequest(BaseModel):
     oauth: McpOAuthConfigSchema | None = None
     description: str = ""
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def _validate_name(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not MCP_SERVER_NAME_RE.fullmatch(normalized):
+            raise ValueError("name must match ^[A-Za-z][A-Za-z0-9_-]*$ (max 32 characters)")
+        return normalized
+
 
 class McpServerUpdateRequest(BaseModel):
     enabled: bool | None = None
-    type: str | None = None
+    type: Literal["stdio", "sse", "http", "streamable_http"] | None = None
     command: str | None = None
     args: list[str] | None = None
     env: dict[str, str] | None = None
