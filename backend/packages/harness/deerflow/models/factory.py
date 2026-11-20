@@ -591,6 +591,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config.thinking is not None:
         merged_thinking = {**(effective_wte.get("thinking") or {}), **model_config.thinking}
         effective_wte = {**effective_wte, "thinking": merged_thinking}
+    if thinking_enabled and not has_thinking_settings:
+        # User-defined models only carry a thinking protocol when one is
+        # explicitly configured; without it pro/ultra mode silently degrades
+        # to a plain request (no enable_thinking / thinking flags).
+        logger.warning(
+            "Model %r is in thinking mode but has no thinking settings "
+            "(when_thinking_enabled/thinking); no thinking parameters will be sent.",
+            name,
+        )
     if thinking_enabled and has_thinking_settings:
         if not model_config.supports_thinking:
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None

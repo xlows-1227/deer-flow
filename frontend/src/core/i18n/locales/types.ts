@@ -791,6 +791,10 @@ export interface Translations {
       supportsThinkingDescription: string;
       supportsReasoningEffort: string;
       supportsReasoningEffortDescription: string;
+      thinkingProtocol: string;
+      thinkingProtocolDescription: string;
+      thinkingProtocolNone: string;
+      thinkingProtocolQwen: string;
       reasoningEffortOverride: string;
       reasoningEffortOverrideDescription: string;
       reasoningEffortAuto: string;

@@ -148,6 +148,84 @@ async def test_user_model_service_persists_capability_flags(user_model_service):
     assert updated.supports_reasoning_effort is True
 
 
+def test_to_model_config_defaults_to_no_thinking_settings():
+    row = {
+        "name": "plain-openai",
+        "provider": "openai",
+        "model": "gpt-4o",
+        "base_url": "https://example.com/v1",
+        "api_key_ref": ModelSecretStore().encrypt_api_key("sk-test"),
+    }
+    config = to_model_config(row, secret_store=ModelSecretStore())
+    assert config.when_thinking_enabled is None
+    assert config.when_thinking_disabled is None
+
+
+def test_to_model_config_qwen_protocol_emits_chat_template_kwargs():
+    row = {
+        "name": "yumcode-pro",
+        "provider": "gaia",
+        "model": "qwen3.6-27b",
+        "base_url": "http://api.llm.prd.yumc.local/v1",
+        "api_key_ref": ModelSecretStore().encrypt_api_key("sk-gaia"),
+        "thinking_protocol": "qwen",
+    }
+    config = to_model_config(row, secret_store=ModelSecretStore())
+    assert config.when_thinking_enabled == {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
+    assert config.when_thinking_disabled == {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+
+
+def test_to_model_config_qwen_protocol_skips_when_thinking_disabled():
+    row = {
+        "name": "yumcode-pro",
+        "provider": "gaia",
+        "model": "qwen3.6-27b",
+        "api_key_ref": ModelSecretStore().encrypt_api_key("sk-gaia"),
+        "thinking_protocol": "qwen",
+        "supports_thinking": False,
+    }
+    config = to_model_config(row, secret_store=ModelSecretStore())
+    assert config.supports_thinking is False
+    assert config.when_thinking_enabled is None
+    assert config.when_thinking_disabled is None
+
+
+@pytest.mark.asyncio
+async def test_thinking_protocol_persists_and_survives_partial_update(user_model_service):
+    service, _secret_store = user_model_service
+    created = await service.create_model(
+        "user-a",
+        UserModelCreateRequest(
+            name="yumcode-pro",
+            provider="gaia",
+            model="qwen3.6-27b",
+            base_url="http://api.llm.prd.yumc.local/v1",
+            api_key="sk-gaia",
+            thinking_protocol="qwen",
+        ),
+    )
+    assert created.thinking_protocol == "qwen"
+
+    configs = await service.list_model_configs("user-a")
+    assert configs[0].when_thinking_enabled is not None
+
+    renamed = await service.update_model(
+        "user-a",
+        created.id,
+        UserModelUpdateRequest(display_name="Renamed"),
+    )
+    assert renamed.thinking_protocol == "qwen"
+
+    cleared = await service.update_model(
+        "user-a",
+        created.id,
+        UserModelUpdateRequest(thinking_protocol="none"),
+    )
+    assert cleared.thinking_protocol == "none"
+    configs = await service.list_model_configs("user-a")
+    assert configs[0].when_thinking_enabled is None
+
+
 def test_merge_model_configs_appends_and_overrides_by_name():
     from deerflow.config.app_config import AppConfig
     from deerflow.config.sandbox_config import SandboxConfig

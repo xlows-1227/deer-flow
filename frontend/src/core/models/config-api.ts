@@ -3,6 +3,8 @@ import { getBackendBaseURL } from "@/core/config";
 
 export type ModelProvider = "gaia" | "openai" | "anthropic";
 
+export type ThinkingProtocol = "none" | "qwen";
+
 export interface CustomModel {
   id: string;
   user_id: string;
@@ -14,6 +16,7 @@ export interface CustomModel {
   enabled: boolean;
   supports_thinking: boolean;
   supports_reasoning_effort: boolean;
+  thinking_protocol: ThinkingProtocol;
   has_api_key: boolean;
   api_key_last_four: string | null;
   created_at: string | null;
@@ -30,6 +33,7 @@ export interface CustomModelCreateInput {
   enabled?: boolean;
   supports_thinking?: boolean;
   supports_reasoning_effort?: boolean;
+  thinking_protocol?: ThinkingProtocol;
 }
 
 export interface CustomModelUpdateInput {
@@ -42,6 +46,7 @@ export interface CustomModelUpdateInput {
   enabled?: boolean;
   supports_thinking?: boolean;
   supports_reasoning_effort?: boolean;
+  thinking_protocol?: ThinkingProtocol;
 }
 
 export const MASKED_API_KEY = "***";

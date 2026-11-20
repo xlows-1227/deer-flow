@@ -453,3 +453,64 @@ async def test_circuit_breaker_trips_after_threshold_failures_async(
     assert result.content == "Success"
     assert middleware._circuit_failure_count == 0  # RESET
     assert middleware._check_circuit() is False
+
+
+# ---------------------------------------------------------------------------
+# Failure diagnostics (P0): log request shape, never content
+# ---------------------------------------------------------------------------
+
+
+class BadRequestError(Exception):
+    def __init__(self, message: str, *, body: dict | None = None, headers: dict | None = None) -> None:
+        super().__init__(message)
+        self.status_code = 400
+        self.body = body
+        self.response = SimpleNamespace(status_code=400, headers=headers or {})
+
+
+def test_summarize_messages_counts_shape_only() -> None:
+    from deerflow.agents.middlewares.llm_error_handling_middleware import _summarize_messages
+
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "human", "content": "hello"},
+        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "c1"}]),
+        {"role": "tool", "content": "x" * 120},
+    ]
+
+    summary = _summarize_messages(messages)
+
+    assert "count=4" in summary
+    assert "roles={'system': 1, 'human': 1, 'ai': 1, 'tool': 1}" in summary
+    assert "chars=128" in summary  # 3 + 5 + 0 + 120
+    assert "tool_call_msgs=1" in summary
+    assert "first=system(len=3" in summary
+    # previews are capped at 60 chars and no full content is leaked
+    assert "x" * 61 not in summary
+
+
+def test_failure_diagnostics_logged_without_content(caplog: pytest.LogCaptureFixture) -> None:
+    middleware = _build_middleware(retry_max_attempts=0)
+    secret = "secret-token-value-" + "x" * 80  # longer than the 60-char preview cap
+    request = SimpleNamespace(messages=[{"role": "human", "content": secret}])
+
+    def handler(_request):
+        raise BadRequestError(
+            "Range of input length should be [1, 983616]",
+            body={"error": {"code": "invalid_parameter_error", "request_id": "req-abc"}},
+        )
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.llm_error_handling_middleware"):
+        result = middleware.wrap_model_call(request, handler)
+
+    assert isinstance(result, AIMessage)
+    diagnostics = [r.getMessage() for r in caplog.records if "LLM request diagnostics" in r.getMessage()]
+    assert diagnostics, "diagnostics line must be emitted at WARNING level"
+    line = diagnostics[0]
+    assert "count=1" in line
+    assert "roles={'human': 1}" in line
+    assert "chars=99" in line
+    assert "request_id=req-abc" in line
+    assert "error_code=invalid_parameter_error" in line
+    assert secret not in line  # only a <=60-char preview may appear
+    assert "x" * 61 not in line

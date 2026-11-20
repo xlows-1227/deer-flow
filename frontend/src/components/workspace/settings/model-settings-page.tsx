@@ -49,6 +49,7 @@ import {
   updateCustomModel,
   type CustomModel,
   type ModelProvider,
+  type ThinkingProtocol,
 } from "@/core/models/config-api";
 import { useLocalSettings } from "@/core/settings";
 import { cn } from "@/lib/utils";
@@ -66,6 +67,7 @@ type ModelForm = {
   enabled: boolean;
   supportsThinking: boolean;
   supportsReasoningEffort: boolean;
+  thinkingProtocol: ThinkingProtocol;
 };
 
 const GAIA_DEFAULTS = {
@@ -91,6 +93,7 @@ const emptyForm: ModelForm = {
   enabled: true,
   supportsThinking: true,
   supportsReasoningEffort: true,
+  thinkingProtocol: "none",
 };
 
 type ModelSettingsPageProps = {
@@ -110,6 +113,7 @@ function formFromModel(model: CustomModel): ModelForm {
     enabled: model.enabled,
     supportsThinking: model.supports_thinking ?? true,
     supportsReasoningEffort: model.supports_reasoning_effort ?? true,
+    thinkingProtocol: model.thinking_protocol ?? "none",
   };
 }
 
@@ -193,6 +197,7 @@ export function ModelSettingsPage({
           enabled: form.enabled,
           supports_thinking: form.supportsThinking,
           supports_reasoning_effort: form.supportsReasoningEffort,
+          thinking_protocol: form.thinkingProtocol,
           ...(apiKey !== undefined ? { api_key: apiKey } : {}),
         });
         toast.success(t.settings.models.updateSuccess);
@@ -206,6 +211,7 @@ export function ModelSettingsPage({
           enabled: form.enabled,
           supports_thinking: form.supportsThinking,
           supports_reasoning_effort: form.supportsReasoningEffort,
+          thinking_protocol: form.thinkingProtocol,
         });
         toast.success(t.settings.models.createSuccess);
       }
@@ -578,6 +584,34 @@ export function ModelSettingsPage({
                 }
               />
             </div>
+
+            <label className="grid gap-2 text-sm">
+              <span>{t.settings.models.thinkingProtocol}</span>
+              <Select
+                value={form.thinkingProtocol}
+                onValueChange={(value) =>
+                  setForm((current) => ({
+                    ...current,
+                    thinkingProtocol: value as ThinkingProtocol,
+                  }))
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">
+                    {t.settings.models.thinkingProtocolNone}
+                  </SelectItem>
+                  <SelectItem value="qwen">
+                    {t.settings.models.thinkingProtocolQwen}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-muted-foreground text-xs">
+                {t.settings.models.thinkingProtocolDescription}
+              </span>
+            </label>
 
             <div className="flex items-center justify-between rounded-lg border px-3 py-2">
               <div>

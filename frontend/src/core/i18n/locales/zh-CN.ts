@@ -967,6 +967,11 @@ export const zhCN: Translations = {
       supportsReasoningEffort: "推理力度",
       supportsReasoningEffortDescription:
         "向该模型传递推理力度参数（minimal / low / medium / high）。",
+      thinkingProtocol: "思考协议",
+      thinkingProtocolDescription:
+        "控制如何开启服务端的思考模式。vLLM / Qwen 部署请选择「Qwen 模板」（chat_template_kwargs.enable_thinking）。",
+      thinkingProtocolNone: "不发送思考参数",
+      thinkingProtocolQwen: "Qwen 模板（chat_template_kwargs.enable_thinking）",
       reasoningEffortOverride: "推理深度（全局覆盖）",
       reasoningEffortOverrideDescription:
         "自动时跟随各模式默认值（思考/Pro：低，Ultra：高）；设置后对所有对话生效。",

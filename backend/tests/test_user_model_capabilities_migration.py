@@ -55,6 +55,54 @@ def test_user_model_capabilities_migration_on_sqlite(tmp_path: Path) -> None:
     assert "supports_reasoning_effort" in cols
 
 
+def test_thinking_protocol_migration_adds_column_with_default(tmp_path: Path) -> None:
+    """Existing user model rows must keep working: the new column is NOT NULL
+    with a server default of 'none', so legacy rows backfill to "no thinking
+    parameters sent"."""
+    url = asyncio.run(_prepare_sqlite_db(tmp_path / "thinking-protocol.db"))
+
+    async def _seed_row() -> None:
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as conn:
+                # 2026_09_17_user_soft_delete (the revision right before ours)
+                # expects a users table to exist.
+                await conn.execute(
+                    text("CREATE TABLE IF NOT EXISTS users (user_id VARCHAR(64) PRIMARY KEY, created_at DATETIME)")
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO user_models "
+                        "(id, user_id, name, provider, model, enabled, created_at, updated_at) "
+                        "VALUES ('umodel_legacy', 'user-a', 'legacy', 'gaia', 'qwen3.6-27b', 1, '2026-11-01', '2026-11-01')"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_seed_row())
+    cols, _version = asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))
+    assert "thinking_protocol" in cols
+
+    async def _inspect() -> tuple[str | None, bool, str]:
+        engine = create_async_engine(url)
+        try:
+            async with engine.connect() as conn:
+                info = (await conn.execute(text("PRAGMA table_info(user_models)"))).fetchall()
+                row = next(item for item in info if item[1] == "thinking_protocol")
+                value = (
+                    await conn.execute(text("SELECT thinking_protocol FROM user_models WHERE id = 'umodel_legacy'"))
+                ).scalar_one()
+            return row[4], bool(row[3]), str(value)
+        finally:
+            await engine.dispose()
+
+    default, notnull, value = asyncio.run(_inspect())
+    assert default is not None and "none" in str(default)
+    assert notnull is True
+    assert value == "none"
+
+
 def test_draft_skill_mode_migration_defaults_existing_rows_conservatively(tmp_path: Path) -> None:
     url = asyncio.run(_prepare_sqlite_db(tmp_path / "skill-mode.db"))
     asyncio.run(_run_migration_and_inspect(url, backend="sqlite"))

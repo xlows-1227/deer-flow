@@ -214,6 +214,25 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return "服务暂时繁忙，请稍后重试。"
         return "抱歉，服务暂时不可用，请稍后重试。"
 
+    def _log_failure_diagnostics(self, request: ModelRequest, exc: BaseException) -> None:
+        """Log the *shape* of the failing request (never its content).
+
+        When a provider answers with a bare range error such as
+        ``Range of input length should be [1, 983616]`` this is the only way to
+        tell "the prompt was empty" apart from "the prompt was too large".
+        """
+        try:
+            shape = _summarize_messages(getattr(request, "messages", None))
+        except Exception:  # diagnostics must never mask the original error
+            logger.debug("Failed to summarize request messages", exc_info=True)
+            shape = "unavailable"
+        logger.warning(
+            "LLM request diagnostics: %s request_id=%s error_code=%s",
+            shape,
+            _extract_request_id(exc) or "-",
+            _extract_error_code(exc) or "-",
+        )
+
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
         try:
             from langgraph.config import get_stream_writer
@@ -282,6 +301,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
+                self._log_failure_diagnostics(request, exc)
                 if retriable:
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
@@ -330,6 +350,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
+                self._log_failure_diagnostics(request, exc)
                 if retriable:
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
@@ -353,6 +374,77 @@ def _extract_error_code(exc: BaseException) -> Any:
                 value = error.get(key)
                 if value not in (None, ""):
                     return value
+    return None
+
+
+_PREVIEW_LIMIT = 60
+
+
+def _message_parts(msg: Any) -> tuple[str, Any]:
+    """Return (role/type, content) for either a dict or a BaseMessage."""
+    if isinstance(msg, dict):
+        return str(msg.get("role") or msg.get("type") or "unknown"), msg.get("content")
+    return str(getattr(msg, "type", None) or msg.__class__.__name__), getattr(msg, "content", None)
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+    return ""
+
+
+def _edge_description(msg: Any) -> str:
+    if msg is None:
+        return "none"
+    role, content = _message_parts(msg)
+    text = " ".join(_content_text(content).split())
+    preview = text[:_PREVIEW_LIMIT] + ("..." if len(text) > _PREVIEW_LIMIT else "")
+    return f"{role}(len={len(_content_text(content))}, preview={preview!r})"
+
+
+def _summarize_messages(messages: Any) -> str:
+    """Describe a message list by shape only — counts and lengths, no content."""
+    items = list(messages or [])
+    roles: dict[str, int] = {}
+    total_chars = 0
+    tool_call_msgs = 0
+    for msg in items:
+        role, content = _message_parts(msg)
+        roles[role] = roles.get(role, 0) + 1
+        total_chars += len(_content_text(content))
+        tool_calls = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+        if tool_calls:
+            tool_call_msgs += 1
+    return (
+        f"count={len(items)} roles={roles} chars={total_chars} tool_call_msgs={tool_call_msgs} "
+        f"first={_edge_description(items[0] if items else None)} "
+        f"last={_edge_description(items[-1] if items else None)}"
+    )
+
+
+def _extract_request_id(exc: BaseException) -> str | None:
+    for attr in ("request_id", "requestId"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        for container in (body, body.get("error")):
+            if isinstance(container, dict):
+                for key in ("request_id", "requestId"):
+                    value = container.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is not None and hasattr(headers, "get"):
+        for key in ("x-request-id", "X-Request-Id", "request-id"):
+            value = headers.get(key)
+            if value:
+                return str(value)
     return None
 
 
