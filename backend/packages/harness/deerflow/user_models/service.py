@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from deerflow.config.effective_config import invalidate_user_model_cache
@@ -15,6 +16,17 @@ from deerflow.user_models.schemas import (
     UserModelUpdateRequest,
 )
 from deerflow.user_models.secrets import ModelSecretStore
+
+logger = logging.getLogger(__name__)
+
+# Wire format per thinking protocol: (enabled settings, disabled settings).
+# Only providers using langchain_openai:ChatOpenAI accept `extra_body`.
+_THINKING_PROTOCOL_SETTINGS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+    "qwen": (
+        {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+        {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+    ),
+}
 
 
 class UserModelValidationError(ValueError):
@@ -45,6 +57,7 @@ def _record_from_row(row: dict[str, Any]) -> UserModelRecord:
         enabled=bool(row.get("enabled", True)),
         supports_thinking=bool(row.get("supports_thinking", True)),
         supports_reasoning_effort=bool(row.get("supports_reasoning_effort", True)),
+        thinking_protocol=row.get("thinking_protocol") or "none",
         has_api_key=bool(row.get("api_key_ref")),
         api_key_last_four=row.get("api_key_last_four"),
         created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
@@ -77,10 +90,38 @@ def to_model_config(row: dict[str, Any], *, secret_store: ModelSecretStore | Non
     # get the same default so TokenUsageMiddleware can min(remaining, cap).
     kwargs.setdefault("max_tokens", 8192)
 
-    kwargs["supports_thinking"] = bool(row.get("supports_thinking", True))
+    supports_thinking = bool(row.get("supports_thinking", True))
+    kwargs["supports_thinking"] = supports_thinking
     kwargs["supports_reasoning_effort"] = bool(row.get("supports_reasoning_effort", True))
 
+    protocol = row.get("thinking_protocol") or "none"
+    protocol_settings = _THINKING_PROTOCOL_SETTINGS.get(protocol)
+    if protocol_settings is not None:
+        if not supports_thinking:
+            _warn_protocol_conflict(row["name"], protocol)
+        elif PROVIDER_USE_MAP[provider] != "langchain_openai:ChatOpenAI":
+            logger.warning(
+                "User model %r has thinking_protocol=%r but provider %r does not use ChatOpenAI; "
+                "thinking parameters will not be sent.",
+                row["name"],
+                protocol,
+                provider,
+            )
+        else:
+            enabled_settings, disabled_settings = protocol_settings
+            kwargs["when_thinking_enabled"] = enabled_settings
+            kwargs["when_thinking_disabled"] = disabled_settings
+
     return ModelConfig(**kwargs)
+
+
+def _warn_protocol_conflict(name: str, protocol: str) -> None:
+    logger.warning(
+        "User model %r has thinking_protocol=%r but supports_thinking is false; "
+        "no thinking parameters will be sent to the provider.",
+        name,
+        protocol,
+    )
 
 
 class UserModelService:
@@ -103,11 +144,14 @@ class UserModelService:
             "enabled": payload.enabled,
             "supports_thinking": payload.supports_thinking,
             "supports_reasoning_effort": payload.supports_reasoning_effort,
+            "thinking_protocol": payload.thinking_protocol,
         }
         api_key = (payload.api_key or "").strip()
         if api_key:
             values["api_key_ref"] = self._secrets.encrypt_api_key(api_key)
             values["api_key_last_four"] = _last_four(api_key)
+        if values["thinking_protocol"] != "none" and not values["supports_thinking"]:
+            _warn_protocol_conflict(values["name"], values["thinking_protocol"])
         try:
             row = await self._repo.create(values)
         except ValueError as exc:
@@ -137,6 +181,16 @@ class UserModelService:
             values["supports_thinking"] = payload.supports_thinking
         if payload.supports_reasoning_effort is not None:
             values["supports_reasoning_effort"] = payload.supports_reasoning_effort
+        if payload.thinking_protocol is not None:
+            values["thinking_protocol"] = payload.thinking_protocol
+
+        if values.get("thinking_protocol", existing.get("thinking_protocol") or "none") != "none" and not values.get(
+            "supports_thinking", existing.get("supports_thinking", True)
+        ):
+            _warn_protocol_conflict(
+                str(values.get("name") or existing["name"]),
+                str(values.get("thinking_protocol") or existing.get("thinking_protocol") or "none"),
+            )
 
         api_key = payload.api_key
         if api_key is not None:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -75,6 +75,7 @@ export default function ChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    flashFallback,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -161,6 +162,34 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  // Flash mode skips the agent graph; if this conversation already has real
+  // tool activity, the next turn likely needs tools again, so prompt the user
+  // to pick a stronger mode instead of silently falling back.
+  const showFlashToolHint = useMemo(() => {
+    if (settings.context.mode !== "flash") return false;
+    return thread.messages.some((message) => {
+      if (message.type === "tool") {
+        return message.name !== "ask_clarification";
+      }
+      if (message.type === "ai") {
+        return (message.tool_calls ?? []).some(
+          (toolCall) => toolCall.name !== "ask_clarification",
+        );
+      }
+      return false;
+    });
+  }, [settings.context.mode, thread.messages]);
+
+  // A confirmed fallback notice wins over the pre-send hint; both render as
+  // one line so the composer never stacks two warnings.
+  let flashModeNotice: string | null = null;
+  if (settings.context.mode === "flash") {
+    if (flashFallback) {
+      flashModeNotice = t.inputBox.flashToolFallbackHint;
+    } else if (showFlashToolHint) {
+      flashModeNotice = t.inputBox.flashToolHint;
+    }
+  }
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -244,6 +273,14 @@ export default function ChatPage() {
                         hidden={false}
                       />
                     </div>
+                  </div>
+                )}
+                {flashModeNotice && (
+                  <div
+                    role="status"
+                    className="mb-2 px-1 text-xs text-amber-600"
+                  >
+                    {flashModeNotice}
                   </div>
                 )}
                 {mounted ? (

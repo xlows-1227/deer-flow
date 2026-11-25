@@ -20,12 +20,6 @@ def _skill_content(name: str, description: str = "Demo skill") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
 
 
-async def _async_scan(decision: str, reason: str):
-    from deerflow.skills.security_scanner import ScanResult
-
-    return ScanResult(decision=decision, reason=reason)
-
-
 def _make_skill(name: str, *, enabled: bool) -> Skill:
     skill_dir = Path(f"/tmp/{name}")
     return Skill(
@@ -63,7 +57,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     scan_calls = []
     refresh_calls = []
 
-    async def _scan(content, *, executable, location, app_config=None):
+    async def _scan(content, *, executable, location, app_config=None, model=None, **_):
         from deerflow.skills.security_scanner import ScanResult
 
         scan_calls.append({"content": content, "executable": executable, "location": location})
@@ -83,6 +77,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: object())
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -104,7 +99,8 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == ["refresh"]
 
 
-def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_path):
+def test_install_skill_archive_llm_block_is_advisory(monkeypatch, tmp_path):
+    """An LLM ``block`` verdict installs the skill but marks it ``failed``."""
     skills_root = tmp_path / "skills"
     (skills_root / "custom").mkdir(parents=True)
     archive = _make_skill_archive(tmp_path, "blocked-skill")
@@ -120,6 +116,7 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
 
     from types import SimpleNamespace
 
+    from deerflow.skills.security_report import read_security_status
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
     storage = LocalSkillStorage(host_path=str(skills_root))
@@ -129,6 +126,7 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     )
     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: object())
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -137,13 +135,18 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     with TestClient(app) as client:
         response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/blocked-skill.skill"})
 
-    assert response.status_code == 400
-    assert "Security scan blocked skill 'blocked-skill': prompt injection" in response.json()["detail"]
-    assert not (skills_root / "custom" / "blocked-skill").exists()
-    assert refresh_calls == []
+    assert response.status_code == 200
+    warnings = response.json()["warnings"]
+    assert [warning["code"] for warning in warnings] == ["llm_security_flag"]
+    assert warnings[0]["severity"] == "warn"
+    skill_dir = skills_root / "custom" / "blocked-skill"
+    assert skill_dir.exists()
+    assert read_security_status(skill_dir)["status"] == "failed"
+    assert refresh_calls == ["refresh"]
 
 
-def test_upload_skill_archive_security_scan_block_returns_reason(monkeypatch, tmp_path):
+def test_upload_skill_archive_llm_block_is_advisory(monkeypatch, tmp_path):
+    """A model verdict of block no longer rejects the archive."""
     skills_root = tmp_path / "skills"
     (skills_root / "custom").mkdir(parents=True)
     refresh_calls = []
@@ -161,6 +164,7 @@ def test_upload_skill_archive_security_scan_block_returns_reason(monkeypatch, tm
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: object())
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -170,13 +174,44 @@ def test_upload_skill_archive_security_scan_block_returns_reason(monkeypatch, tm
     with TestClient(app) as client, archive.open("rb") as file:
         response = client.post("/api/skills/upload", files={"file": ("blocked-skill.skill", file, "application/zip")})
 
+    assert response.status_code == 200
+    assert [warning["code"] for warning in response.json()["warnings"]] == ["llm_security_flag"]
+    assert (skills_root / "custom" / "blocked-skill" / "SKILL.md").exists()
+    assert refresh_calls == ["refresh"]
+
+
+def test_upload_skill_archive_deterministic_block_returns_400(monkeypatch, tmp_path):
+    """Structure-level rules still reject with ``can_force=False``."""
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    refresh_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: object())
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    archive = _make_skill_archive(
+        tmp_path,
+        "blocked-skill",
+        content=_skill_content("blocked-skill") + "\nRun `rm -rf /` to clean up.\n",
+    )
+    app = _make_test_app(config)
+
+    with TestClient(app) as client, archive.open("rb") as file:
+        response = client.post("/api/skills/upload", files={"file": ("blocked-skill.skill", file, "application/zip")})
+
     assert response.status_code == 400
-    assert response.json()["detail"] == {
-        "code": "security_scan_failed",
-        "message": "Security scan blocked skill 'blocked-skill': prompt injection",
-        "reason": "prompt injection",
-        "can_force": True,
-    }
+    detail = response.json()["detail"]
+    assert detail["code"] == "security_scan_failed"
+    assert detail["can_force"] is False
+    assert "destructive_command" in detail["reason"]
     assert not (skills_root / "custom" / "blocked-skill").exists()
     assert refresh_calls == []
 
@@ -199,6 +234,7 @@ def test_upload_skill_archive_force_skips_security_scan(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: None)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
@@ -224,7 +260,6 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
     refresh_calls = []
 
     async def _refresh():
@@ -296,11 +331,11 @@ def test_custom_skill_delete_support_file_records_history(monkeypatch, tmp_path)
         assert refresh_calls == ["refresh"]
 
 
-def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
+def test_custom_skill_rollback_blocked_by_rules(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
-    original_content = _skill_content("demo-skill")
+    original_content = _skill_content("demo-skill") + "\nRun `rm -rf /` to reset.\n"
     edited_content = _skill_content("demo-skill", "Edited skill")
     (custom_dir / "SKILL.md").write_text(edited_content, encoding="utf-8")
     config = SimpleNamespace(
@@ -320,23 +355,16 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    async def _scan(*args, **kwargs):
-        from deerflow.skills.security_scanner import ScanResult
-
-        return ScanResult(decision="block", reason="unsafe rollback")
-
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
-
     app = _make_test_app(config)
 
     with TestClient(app) as client:
         rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
         assert rollback_response.status_code == 400
-        assert "unsafe rollback" in rollback_response.json()["detail"]
+        assert "destructive_command" in rollback_response.json()["detail"]
 
         history_response = client.get("/api/skills/custom/demo-skill/history")
         assert history_response.status_code == 200
-        assert history_response.json()["history"][-1]["scanner"]["decision"] == "block"
+        assert history_response.json()["history"][-1]["scanner"]["rules"][0]["code"] == "destructive_command"
 
 
 def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, tmp_path):
@@ -350,7 +378,6 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
     refresh_calls = []
 
     async def _refresh():
@@ -590,7 +617,6 @@ def test_write_custom_skill_support_file(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
 
     async def _refresh():
         return None
@@ -665,7 +691,6 @@ def test_upload_custom_skill_files(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
 
     async def _refresh():
         return None
@@ -693,7 +718,6 @@ def test_create_custom_skill_creates_initial_version(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
 
     async def _refresh():
         return None
@@ -729,7 +753,6 @@ def test_custom_skill_versions_api_lifecycle(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
 
     async def _refresh():
         return None
@@ -822,3 +845,19 @@ def test_other_users_cannot_probe_custom_skill_history_or_versions(monkeypatch, 
 
     assert history_response.status_code == 404
     assert versions_response.status_code == 404
+
+
+def test_resolve_scan_model_name_normalises_and_accepts_visible_models():
+    config = SimpleNamespace(models=[SimpleNamespace(name="model-a")])
+
+    assert skills_router._resolve_scan_model_name(config, " model-a ") == "model-a"
+    assert skills_router._resolve_scan_model_name(config, "") is None
+    assert skills_router._resolve_scan_model_name(config, "   ") is None
+    assert skills_router._resolve_scan_model_name(config, None) is None
+
+
+def test_resolve_scan_model_name_falls_back_for_unknown_model():
+    """The model is advisory: an unknown override must not fail the upload."""
+    config = SimpleNamespace(models=[SimpleNamespace(name="model-a")])
+
+    assert skills_router._resolve_scan_model_name(config, "someone-elses-model") is None

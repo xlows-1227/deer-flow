@@ -1,7 +1,13 @@
 "use client";
 
-import { DownloadIcon, FileLockIcon, Share2Icon } from "lucide-react";
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import {
+  AlertTriangleIcon,
+  DownloadIcon,
+  FileLockIcon,
+  Share2Icon,
+} from "lucide-react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
 import { Badge } from "@/components/ui/badge";
@@ -14,13 +20,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { toast } from "sonner";
-import { SkillShareDialog } from "@/components/workspace/skills/skill-share-dialog";
 import { stripSkillFrontmatter } from "@/components/workspace/skills/skill-create-utils";
+import { SkillShareDialog } from "@/components/workspace/skills/skill-share-dialog";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { isAdminUser } from "@/core/auth/types";
+import {
+  dismissSkillSecurityWarnings,
+  loadSkillSecurityReport,
+} from "@/core/skills/api";
 import { useCustomSkill, usePublicSkill } from "@/core/skills/hooks";
-import type { Skill } from "@/core/skills/type";
+import type {
+  Skill,
+  SkillSecurityReport,
+} from "@/core/skills/type";
+import type { SkillSecurityWarning } from "@/core/skills/type";
 import { streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
@@ -67,11 +80,50 @@ export function SkillDetailDialog({
   const isCustom = skill?.category === "custom";
   const isPublic = skill?.category === "public";
   const canViewContent = isCustom || (isPublic && isAdmin);
-  const isOwner = isCustom && user && skill?.owner_user_id === user.id;
+  const isOwner = Boolean(isCustom && user && skill?.owner_user_id === user.id);
   const canShare = isCustom && (isOwner || isAdmin);
-  const canDownload = isCustom && !!skill?.download_url && (isOwner || isAdmin);
+  const canDownload = isCustom && Boolean(skill?.download_url) && (isOwner || isAdmin);
 
   const [shareOpen, setShareOpen] = useState(false);
+  const [securityReport, setSecurityReport] =
+    useState<SkillSecurityReport | null>(null);
+  const [isDismissing, setIsDismissing] = useState(false);
+
+  useEffect(() => {
+    if (!isCustom || !skill?.name) {
+      setSecurityReport(null);
+      return;
+    }
+    let cancelled = false;
+    loadSkillSecurityReport(skill.name)
+      .then((report) => {
+        if (!cancelled) setSecurityReport(report);
+      })
+      .catch(() => {
+        if (!cancelled) setSecurityReport(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isCustom, skill?.name]);
+
+  async function handleDismissWarnings(warnings: SkillSecurityWarning[]) {
+    if (!skill?.name) return;
+    setIsDismissing(true);
+    try {
+      await dismissSkillSecurityWarnings(
+        skill.name,
+        warnings.map((warning) => warning.code),
+      );
+      const report = await loadSkillSecurityReport(skill.name);
+      setSecurityReport(report);
+      toast.success("已忽略本次内容版本的告警");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "忽略告警失败");
+    } finally {
+      setIsDismissing(false);
+    }
+  }
 
   const {
     skill: customSkill,
@@ -209,6 +261,80 @@ export function SkillDetailDialog({
                         {displaySkill.enabled ? "已启用" : "已禁用"}
                       </div>
                     </SidebarSection>
+                    {isCustom ? (
+                      <SidebarSection label="安检状态">
+                        {displaySkill.security_status === "failed" ? (
+                          <Badge
+                            variant="destructive"
+                            title={
+                              displaySkill.security_reason ??
+                              "模型安检未通过，当前 Skill 不会注入对话"
+                            }
+                            className="gap-1"
+                          >
+                            <AlertTriangleIcon className="size-3" />
+                            安检失败
+                          </Badge>
+                        ) : displaySkill.security_status === "unscanned" ? (
+                          <Badge
+                            variant="outline"
+                            className="border-amber-300 bg-amber-50 text-amber-900"
+                            title={
+                              displaySkill.security_reason ??
+                              "模型暂不可用，将在后台自动补扫"
+                            }
+                          >
+                            未安检
+                          </Badge>
+                        ) : (
+                          <span className="text-sm text-gray-600">
+                            已通过
+                          </span>
+                        )}
+                      </SidebarSection>
+                    ) : null}
+                    {isCustom && securityReport?.warnings.length ? (
+                      <SidebarSection
+                        label={`安全告警 (${securityReport.warnings.length})`}
+                      >
+                        <ul className="space-y-2">
+                          {securityReport.warnings.map((warning, index) => (
+                            <li
+                              key={`${warning.code}-${warning.file}-${warning.line}-${index}`}
+                              className="text-xs leading-5 text-gray-700"
+                            >
+                              <div className="flex flex-wrap items-center gap-1 font-medium text-amber-900">
+                                <span>{warning.code}</span>
+                                {warning.file ? (
+                                  <span>
+                                    {warning.file}
+                                    {warning.line ? `:${warning.line}` : ""}
+                                  </span>
+                                ) : null}
+                                {warning.excerpt_hash ? (
+                                  <span className="font-mono text-[10px] text-amber-700">
+                                    #{warning.excerpt_hash}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p>{warning.message}</p>
+                            </li>
+                          ))}
+                        </ul>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="mt-3 w-full justify-start"
+                          disabled={isDismissing}
+                          onClick={() =>
+                            void handleDismissWarnings(securityReport.warnings)
+                          }
+                        >
+                          忽略这些告警（仅当前内容版本）
+                        </Button>
+                      </SidebarSection>
+                    ) : null}
                     {(isCustom && displaySkill?.owner_email) || canDownload || canShare ? (
                       <SidebarSection label="归属">
                         {isCustom && displaySkill?.owner_email && (
@@ -222,14 +348,14 @@ export function SkillDetailDialog({
                           </div>
                         )}
                         {isCustom &&
-                          (displaySkill as Skill).shared_with !== undefined &&
-                          ((displaySkill as Skill).shared_with?.length ?? 0) > 0 && (
+                          (displaySkill).shared_with !== undefined &&
+                          ((displaySkill).shared_with?.length ?? 0) > 0 && (
                             <div className="mb-3 flex gap-2 text-sm text-gray-700">
                               <span className="shrink-0 text-xs uppercase tracking-wider text-gray-400">
                                 已共享给：
                               </span>
                               <span className="min-w-0 flex-1">
-                                {(displaySkill as Skill).shared_with!.length} 人
+                                {(displaySkill).shared_with.length} 人
                               </span>
                             </div>
                           )}
@@ -329,7 +455,7 @@ export function SkillDetailDialog({
       skillDisplayName={
         isCustom ? (displaySkill?.display_name ?? displaySkill?.name ?? null) : null
       }
-      ownerUserId={isCustom ? (displaySkill as Skill).owner_user_id ?? null : null}
+      ownerUserId={isCustom ? (displaySkill!).owner_user_id ?? null : null}
       open={shareOpen}
       onClose={() => setShareOpen(false)}
     />

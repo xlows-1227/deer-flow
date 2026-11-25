@@ -6,6 +6,8 @@ import type {
   Skill,
   SkillFileContent,
   SkillFileEntry,
+  SkillSecurityReport,
+  SkillSecurityWarning,
   SkillSharedUser,
   SkillShareState,
   SkillVersion,
@@ -123,6 +125,7 @@ export interface InstallSkillResponse {
   success: boolean;
   skill_name: string;
   message: string;
+  warnings?: SkillSecurityWarning[];
 }
 
 export interface SkillUploadErrorDetail {
@@ -251,6 +254,42 @@ export async function uploadSkillArchive(
     };
   }
   return response.json();
+}
+
+export async function loadSkillSecurityReport(
+  skillName: string,
+): Promise<SkillSecurityReport> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}/security`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to load security report"),
+    );
+  }
+  return (await response.json()) as SkillSecurityReport;
+}
+
+export async function dismissSkillSecurityWarnings(
+  skillName: string,
+  codes: string[],
+): Promise<void> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}/security/dismiss`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...getCsrfHeaders(),
+      },
+      body: JSON.stringify({ codes }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to dismiss security warnings"),
+    );
+  }
 }
 
 export async function loadCustomSkills(): Promise<Skill[]> {

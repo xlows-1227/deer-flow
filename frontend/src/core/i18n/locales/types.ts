@@ -73,6 +73,8 @@ export interface Translations {
     mode: string;
     flashMode: string;
     flashModeDescription: string;
+    flashToolHint: string;
+    flashToolFallbackHint: string;
     reasoningMode: string;
     reasoningModeDescription: string;
     proMode: string;
@@ -276,6 +278,7 @@ export interface Translations {
       skillsTab: string;
       connectorsTab: string;
       sandboxTab: string;
+      quotaTab: string;
       publishTab: string;
       integrationsTab: string;
       operationsTab: string;
@@ -386,6 +389,10 @@ export interface Translations {
       toolGroups: string;
       skills: string;
       connectorGrants: string;
+      quota: string;
+      quotaInherited: string;
+      quotaInheritAll: string;
+      quotaFieldLabel: (field: string) => string;
       historyTitle: string;
       historyDescription: string;
       historyEmpty: string;
@@ -784,6 +791,10 @@ export interface Translations {
       supportsThinkingDescription: string;
       supportsReasoningEffort: string;
       supportsReasoningEffortDescription: string;
+      thinkingProtocol: string;
+      thinkingProtocolDescription: string;
+      thinkingProtocolNone: string;
+      thinkingProtocolQwen: string;
       reasoningEffortOverride: string;
       reasoningEffortOverrideDescription: string;
       reasoningEffortAuto: string;
@@ -820,6 +831,22 @@ export interface Translations {
         systemBadge: string;
         userBadge: string;
         readOnlyHint: string;
+        nameRequired: string;
+        invalidName: string;
+        refreshConnection: string;
+        refreshing: string;
+        untested: string;
+        connecting: string;
+        connectedCount: (count: number) => string;
+        connectFailed: string;
+        connectSuccess: (name: string) => string;
+        connectSuccessDescription: (count: number) => string;
+        connectFailedTitle: (name: string) => string;
+        toolList: string;
+        toolListHint: (count: number) => string;
+        toolListEmpty: string;
+        toolListIdle: string;
+        toolListDisabled: string;
       };
       imageGeneration: {
         title: string;
@@ -903,6 +930,7 @@ export interface Translations {
       oneDataResponseStrict: string;
       oneDataSummary: string;
       oneDataPolicy: string;
+      connectionUrlSpecialCharHint: string;
       credentialUpdateHint: string;
       credentialUpdateHintInline: string;
       maxRowsLabel: string;

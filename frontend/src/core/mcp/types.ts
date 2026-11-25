@@ -18,6 +18,17 @@ export interface MCPConfig {
   mcp_servers: Record<string, MCPServerConfig>;
 }
 
+export interface MCPToolInfo {
+  name: string;
+  description: string;
+}
+
+export interface MCPServerToolsResponse {
+  server: string;
+  tools: MCPToolInfo[];
+  checked_at: string;
+}
+
 export interface MCPServerCreatePayload {
   name: string;
   enabled?: boolean;

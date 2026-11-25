@@ -20,6 +20,13 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.middlewares.empty_assistant_guard import (
+    EmptyAssistantMessageError,
+    NoSendableMessagesError,
+    ai_message_has_payload,
+    drop_unactionable_assistant_messages,
+    has_sendable_messages,
+)
 from deerflow.agents.middlewares.token_usage_middleware import (
     PublishedRunTokenLimitError,
 )
@@ -214,6 +221,25 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return "服务暂时繁忙，请稍后重试。"
         return "抱歉，服务暂时不可用，请稍后重试。"
 
+    def _log_failure_diagnostics(self, request: ModelRequest, exc: BaseException) -> None:
+        """Log the *shape* of the failing request (never its content).
+
+        When a provider answers with a bare range error such as
+        ``Range of input length should be [1, 983616]`` this is the only way to
+        tell "the prompt was empty" apart from "the prompt was too large".
+        """
+        try:
+            shape = _summarize_messages(getattr(request, "messages", None))
+        except Exception:  # diagnostics must never mask the original error
+            logger.debug("Failed to summarize request messages", exc_info=True)
+            shape = "unavailable"
+        logger.warning(
+            "LLM request diagnostics: %s request_id=%s error_code=%s",
+            shape,
+            _extract_request_id(exc) or "-",
+            _extract_error_code(exc) or "-",
+        )
+
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
         try:
             from langgraph.config import get_stream_writer
@@ -238,6 +264,57 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception:
             logger.debug("Failed to emit llm_retry event", exc_info=True)
 
+    @staticmethod
+    def _filter_request_messages(request: ModelRequest) -> ModelRequest:
+        """Drop empty assistant turns from the *outgoing request only*.
+
+        The graph state (and therefore the checkpoint) is never rewritten here:
+        the stored history keeps the message and the WARNING log line is the
+        only trace of the skip.  This is what lets an already-poisoned thread
+        send again without deleting anything.
+        """
+        messages = getattr(request, "messages", None)
+        if not isinstance(messages, (list, tuple)) or not messages:
+            return request
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        thread_id = None
+        if hasattr(context, "get"):
+            thread_id = context.get("thread_id")
+        filtered = drop_unactionable_assistant_messages(
+            messages,
+            thread_id=str(thread_id) if thread_id else None,
+            origin="agent_graph",
+        )
+        if not has_sendable_messages(filtered):
+            raise NoSendableMessagesError(
+                "no sendable messages after dropping empty assistant turns"
+            )
+        if len(filtered) == len(messages):
+            return request
+        return request.override(messages=filtered)
+
+    @staticmethod
+    def _ensure_response_has_payload(response: ModelCallResult) -> None:
+        """Refuse to hand an empty assistant message back to the graph.
+
+        ``AIMessage`` responses and the messages inside ``ModelResponse`` all
+        flow into the ``messages`` channel.  Persisting one with neither text
+        nor tool calls makes every later request fail with a provider 400
+        ("role 'assistant' must not be empty"), so the run must fail before
+        that write happens.
+        """
+        if isinstance(response, AIMessage):
+            messages: list[Any] = [response]
+        else:
+            result = getattr(response, "result", None)
+            messages = result if isinstance(result, list) else []
+        for message in messages:
+            if isinstance(message, AIMessage) and not ai_message_has_payload(message):
+                raise EmptyAssistantMessageError(
+                    "empty assistant response (no text and no tool calls)"
+                )
+
     @override
     def wrap_model_call(
         self,
@@ -247,12 +324,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return AIMessage(content=self._build_circuit_breaker_message())
 
+        request = self._filter_request_messages(request)
+
         retry_count = 0
         while True:
             try:
                 response = handler(request)
-                self._record_success()
-                return response
             except (GraphBubbleUp, PublishedRunTokenLimitError):
                 # Preserve LangGraph control-flow signals and fail-closed
                 # Published runtime policy errors. Turning either into an
@@ -282,9 +359,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
+                self._log_failure_diagnostics(request, exc)
                 if retriable:
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
+            self._record_success()
+            self._ensure_response_has_payload(response)
+            return response
 
     @override
     async def awrap_model_call(
@@ -295,12 +376,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return AIMessage(content=self._build_circuit_breaker_message())
 
+        request = self._filter_request_messages(request)
+
         retry_count = 0
         while True:
             try:
                 response = await handler(request)
-                self._record_success()
-                return response
             except (GraphBubbleUp, PublishedRunTokenLimitError):
                 # Preserve LangGraph control-flow signals and fail-closed
                 # Published runtime policy errors. Turning either into an
@@ -330,9 +411,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
+                self._log_failure_diagnostics(request, exc)
                 if retriable:
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
+            self._record_success()
+            self._ensure_response_has_payload(response)
+            return response
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
@@ -353,6 +438,77 @@ def _extract_error_code(exc: BaseException) -> Any:
                 value = error.get(key)
                 if value not in (None, ""):
                     return value
+    return None
+
+
+_PREVIEW_LIMIT = 60
+
+
+def _message_parts(msg: Any) -> tuple[str, Any]:
+    """Return (role/type, content) for either a dict or a BaseMessage."""
+    if isinstance(msg, dict):
+        return str(msg.get("role") or msg.get("type") or "unknown"), msg.get("content")
+    return str(getattr(msg, "type", None) or msg.__class__.__name__), getattr(msg, "content", None)
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+    return ""
+
+
+def _edge_description(msg: Any) -> str:
+    if msg is None:
+        return "none"
+    role, content = _message_parts(msg)
+    text = " ".join(_content_text(content).split())
+    preview = text[:_PREVIEW_LIMIT] + ("..." if len(text) > _PREVIEW_LIMIT else "")
+    return f"{role}(len={len(_content_text(content))}, preview={preview!r})"
+
+
+def _summarize_messages(messages: Any) -> str:
+    """Describe a message list by shape only — counts and lengths, no content."""
+    items = list(messages or [])
+    roles: dict[str, int] = {}
+    total_chars = 0
+    tool_call_msgs = 0
+    for msg in items:
+        role, content = _message_parts(msg)
+        roles[role] = roles.get(role, 0) + 1
+        total_chars += len(_content_text(content))
+        tool_calls = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+        if tool_calls:
+            tool_call_msgs += 1
+    return (
+        f"count={len(items)} roles={roles} chars={total_chars} tool_call_msgs={tool_call_msgs} "
+        f"first={_edge_description(items[0] if items else None)} "
+        f"last={_edge_description(items[-1] if items else None)}"
+    )
+
+
+def _extract_request_id(exc: BaseException) -> str | None:
+    for attr in ("request_id", "requestId"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        for container in (body, body.get("error")):
+            if isinstance(container, dict):
+                for key in ("request_id", "requestId"):
+                    value = container.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is not None and hasattr(headers, "get"):
+        for key in ("x-request-id", "X-Request-Id", "request-id"):
+            value = headers.get(key)
+            if value:
+                return str(value)
     return None
 
 

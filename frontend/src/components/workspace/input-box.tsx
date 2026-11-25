@@ -144,7 +144,7 @@ function getResolvedMode(
   if (mode) {
     return mode;
   }
-  return "flash";
+  return supportsThinking ? "thinking" : "flash";
 }
 
 export function InputBox({
@@ -385,6 +385,11 @@ export function InputBox({
     const currentModel = models.find(
       (m) => m.name === contextRef.current.model_name,
     );
+    // Never replace an explicit selection (e.g. the model stored on the
+    // thread) with models[0]: execution must follow what the user chose.
+    if (contextRef.current.model_name && !currentModel) {
+      return;
+    }
     const fallbackModel = currentModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
@@ -1360,7 +1365,9 @@ export function InputBox({
                   context.mode === "pro" ||
                   context.mode === "ultra"
                     ? context.mode
-                    : "flash"
+                    : supportThinking
+                      ? "thinking"
+                      : "flash"
                 }
               >
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">

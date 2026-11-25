@@ -465,14 +465,24 @@ def test_patch_draft_revision_conflict_returns_409():
     assert stale.status_code == 409
 
 
-def test_patch_draft_unknown_skill_returns_422():
+def test_patch_draft_unknown_skill_is_dropped_and_reported():
+    """Unknown skills are auto-dropped instead of rejected.
+
+    Mirrors ``DraftService._resolve_skill_entries`` (24f954b8): blocking the
+    save would trap an owner whose selected skill was deleted, so the entry is
+    filtered out and named in ``removed_skills``.
+    """
     client, _, _ = _make_client()
     agent = client.post("/api/published-agents", json={"slug": "bot", "display_name": "Bot"}).json()
     res = client.patch(
         f"/api/published-agents/{agent['id']}/draft",
         json={"revision": 1, "skills": [{"skill_name": "ghost", "source": "public"}]},
     )
-    assert res.status_code == 422
+    assert res.status_code == 200, res.text
+    assert res.json()["removed_skills"] == ["ghost"]
+    assert res.json()["skills"] == []
+    draft = client.get(f"/api/published-agents/{agent['id']}").json()["draft"]
+    assert draft["skills"] == []
 
 
 def test_patch_draft_other_owners_connector_returns_422():
@@ -706,6 +716,9 @@ def test_get_draft_sandbox_thread_returns_only_frozen_capability_scope():
         "draft_revision": draft["revision"],
         "skill_names": ["public-tool"],
         "connector_ids": [],
+        # The sandbox must report the draft's frozen model, not the platform
+        # default (2f937cf2). This draft never set one, so it is null.
+        "model_name": None,
         "billable": False,
     }
 

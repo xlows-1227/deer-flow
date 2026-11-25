@@ -13,6 +13,30 @@ from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def _resolve_heartbeat_interval(heartbeat_interval: float | None) -> float:
+    """Resolve the heartbeat interval for a single subscription.
+
+    An explicit ``heartbeat_interval`` always wins.  Otherwise the value comes
+    from ``stream_bridge.heartbeat_interval_seconds`` in config.yaml (read via
+    ``get_app_config()`` so a YAML edit is picked up on the next subscribe),
+    falling back to 15s when the section or value is unavailable.  Imports are
+    local to avoid a config <-> runtime import cycle.
+    """
+    if heartbeat_interval is not None:
+        return float(heartbeat_interval)
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        config = get_app_config().stream_bridge
+    except Exception:  # noqa: BLE001 - config problems must not break streaming
+        return _DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    if config is None:
+        return _DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    return float(config.heartbeat_interval_seconds)
+
 
 @dataclass
 class _RunStream:
@@ -87,8 +111,9 @@ class MemoryStreamBridge(StreamBridge):
         run_id: str,
         *,
         last_event_id: str | None = None,
-        heartbeat_interval: float = 15.0,
+        heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        interval = _resolve_heartbeat_interval(heartbeat_interval)
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
             next_offset = self._resolve_start_offset(stream, last_event_id)
@@ -111,7 +136,7 @@ class MemoryStreamBridge(StreamBridge):
                     entry = END_SENTINEL
                 else:
                     try:
-                        await asyncio.wait_for(stream.condition.wait(), timeout=heartbeat_interval)
+                        await asyncio.wait_for(stream.condition.wait(), timeout=interval)
                     except TimeoutError:
                         entry = HEARTBEAT_SENTINEL
                     else:

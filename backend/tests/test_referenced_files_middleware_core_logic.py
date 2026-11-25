@@ -543,3 +543,276 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
         assert result is not None
         assert result["messages"][-1].id == "original-id-99"
+
+
+# ---------------------------------------------------------------------------
+# Oversized references (size-based routing)
+# ---------------------------------------------------------------------------
+
+
+def _oversized_config(monkeypatch, inline_max_bytes=10, max_copy_bytes=1_000_000, copy_retention_hours=24):
+    from types import SimpleNamespace
+
+    import deerflow.agents.middlewares.referenced_files_middleware as module
+
+    cfg = SimpleNamespace(
+        inline_max_bytes=inline_max_bytes,
+        max_copy_bytes=max_copy_bytes,
+        copy_retention_hours=copy_retention_hours,
+    )
+    monkeypatch.setattr(module, "_referenced_files_config", lambda: cfg)
+    return cfg
+
+
+def _text_file(path, name=None, **extra):
+    return {
+        "id": "abc",
+        "name": name or Path(path).name,
+        "path": str(path),
+        "mime_type": "text/plain",
+        "extension": ".txt",
+        "size": 0,
+        **extra,
+    }
+
+
+class TestOversizedReferences:
+    def test_small_file_still_inlines_without_sandbox_path(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=1000)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "f.txt").write_text("hello", encoding="utf-8")
+
+        result = mw._load_file_content(_text_file(Path("f.txt")), thread_id="thread-abc")
+
+        assert result["status"] == "ok"
+        assert result["content"] == "hello"
+        assert "sandbox_path" not in result
+
+    def test_oversized_thread_upload_gets_sandbox_path_only(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        uploads = _uploads_dir(tmp_path)
+        (uploads / "big.txt").write_text("x" * 100, encoding="utf-8")
+        mw = _middleware(tmp_path)
+
+        result = mw._load_file_content(
+            _text_file(Path("big.txt"), source_thread_id="thread-abc"),
+            thread_id="thread-abc",
+        )
+
+        assert result["status"] == "too_large"
+        assert result["content"] == ""
+        assert result["sandbox_path"] == "/mnt/user-data/uploads/big.txt"
+        assert not (mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced").exists()
+
+    def test_oversized_library_file_is_copied_to_workspace(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "big.txt").write_text("y" * 100, encoding="utf-8")
+
+        result = mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+
+        assert result["status"] == "too_large"
+        assert result["content"] == ""
+        sandbox_path = result["sandbox_path"]
+        assert sandbox_path.startswith("/mnt/user-data/workspace/referenced/")
+        copied = mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced" / sandbox_path.rsplit("/", 1)[-1]
+        assert copied.read_text(encoding="utf-8") == "y" * 100
+
+    def test_copy_failure_falls_back_to_truncated_inline(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "big.txt").write_text("z" * 100, encoding="utf-8")
+
+        import deerflow.agents.middlewares.referenced_files_middleware as module
+
+        def _broken_copy(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(module.shutil, "copyfile", _broken_copy)
+
+        result = mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+
+        assert result["status"] == "ok"
+        assert result["content"] == "z" * 100
+        assert "fell back" in result["note"]
+        assert "sandbox_path" not in result
+
+    def test_copies_older_than_retention_are_pruned(self, tmp_path, monkeypatch):
+        import time as clock
+        from types import SimpleNamespace
+
+        import deerflow.agents.middlewares.referenced_files_middleware as module
+
+        _oversized_config(monkeypatch, inline_max_bytes=10, copy_retention_hours=1)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "big.txt").write_text("w" * 100, encoding="utf-8")
+
+        target_dir = mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced"
+        target_dir.mkdir(parents=True)
+        stale = target_dir / "stale.txt"
+        stale.write_text("old", encoding="utf-8")
+
+        # Age the copy with a stubbed clock: mtime mirrors the source now, so
+        # backdating it would no longer represent when the copy was published.
+        future = clock.time() + 7200
+        monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: future))
+
+        result = mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+
+        assert result["status"] == "too_large"
+        assert not stale.exists()
+
+    def test_before_agent_marks_sandbox_path_in_block(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "big.txt").write_text("q" * 100, encoding="utf-8")
+
+        msg = _human(
+            "read this",
+            referenced_files=[
+                {
+                    "id": "abc",
+                    "name": "big.txt",
+                    "path": "big.txt",
+                    "mime_type": "text/plain",
+                    "extension": ".txt",
+                    "size": 100,
+                },
+            ],
+        )
+        result = mw.before_agent({"messages": [msg]}, _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "- Sandbox path: `/mnt/user-data/workspace/referenced/" in content
+        assert "too large to inline" in content
+
+    def test_oversized_library_image_is_copied_for_view_image(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        payload = b"\x89PNG" + b"x" * 100
+        (mw._paths.user_documents_dir(USER_ID) / "pic.png").write_bytes(payload)
+
+        result = mw._load_file_content(
+            _text_file(Path("pic.png"), mime_type="image/png"),
+            thread_id="thread-abc",
+        )
+
+        assert result["status"] == "too_large"
+        assert result["content"] == ""
+        assert "view_image" in result["note"]
+        sandbox_path = result["sandbox_path"]
+        assert sandbox_path.startswith("/mnt/user-data/workspace/referenced/")
+        copied = mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced" / sandbox_path.rsplit("/", 1)[-1]
+        assert copied.read_bytes() == payload
+
+    def test_image_above_view_image_limit_is_not_copied(self, tmp_path, monkeypatch):
+        import deerflow.agents.middlewares.referenced_files_middleware as module
+
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        monkeypatch.setattr(module, "_MAX_VIEWABLE_IMAGE_BYTES", 50)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "huge.png").write_bytes(b"\x89PNG" + b"x" * 100)
+
+        result = mw._load_file_content(
+            _text_file(Path("huge.png"), mime_type="image/png"),
+            thread_id="thread-abc",
+        )
+
+        assert result["status"] == "too_large"
+        assert "sandbox_path" not in result
+        assert "view_image" in result["note"]
+        assert not (mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced").exists()
+
+    def test_same_size_edit_with_newer_mtime_refreshes_workspace_copy(self, tmp_path, monkeypatch):
+        import os
+
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        source = mw._paths.user_documents_dir(USER_ID) / "big.txt"
+        source.write_text("a" * 100, encoding="utf-8")
+
+        first = mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+        copied = mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced" / first["sandbox_path"].rsplit("/", 1)[-1]
+        assert copied.read_text(encoding="utf-8") == "a" * 100
+
+        # Same size, different content: only a newer source mtime signals the edit.
+        source.write_text("b" * 100, encoding="utf-8")
+        newer = copied.stat().st_mtime + 10
+        os.utime(source, (newer, newer))
+
+        second = mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+
+        assert second["sandbox_path"] == first["sandbox_path"]
+        assert copied.read_text(encoding="utf-8") == "b" * 100
+
+    def test_cross_thread_oversized_upload_is_copied_not_misdirected(self, tmp_path, monkeypatch):
+        """A reference from another thread must not resolve to this thread's uploads."""
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        other_uploads = _uploads_dir(tmp_path, "thread-other")
+        (other_uploads / "report.txt").write_text("s" * 120, encoding="utf-8")
+        # Same name in the *current* thread: the old fast path would silently
+        # hand the model this file instead of the referenced one.
+        current_uploads = _uploads_dir(tmp_path, "thread-abc")
+        (current_uploads / "report.txt").write_text("w" * 120, encoding="utf-8")
+        mw = _middleware(tmp_path)
+
+        result = mw._load_file_content(
+            _text_file(Path("report.txt"), source_thread_id="thread-other"),
+            thread_id="thread-abc",
+        )
+
+        assert result["status"] == "too_large"
+        assert result["sandbox_path"] != "/mnt/user-data/uploads/report.txt"
+        assert result["sandbox_path"].startswith("/mnt/user-data/workspace/referenced/")
+        copied = mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced" / result["sandbox_path"].rsplit("/", 1)[-1]
+        assert copied.read_text(encoding="utf-8") == "s" * 120
+
+    def test_unsupported_image_format_never_suggests_view_image(self, tmp_path, monkeypatch):
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        (mw._paths.user_documents_dir(USER_ID) / "anim.gif").write_bytes(b"GIF89a" + b"x" * 100)
+
+        result = mw._load_file_content(
+            _text_file(Path("anim.gif"), mime_type="image/gif"),
+            thread_id="thread-abc",
+        )
+
+        assert result["status"] == "too_large"
+        assert "view_image" not in result["note"]
+        assert result["sandbox_path"].startswith("/mnt/user-data/workspace/referenced/")
+
+    def test_atomic_copy_leaves_no_temp_file_and_syncs_mtime(self, tmp_path, monkeypatch):
+        import os
+
+        _oversized_config(monkeypatch, inline_max_bytes=10)
+        _library_dir(tmp_path)
+        mw = _middleware(tmp_path)
+        source = mw._paths.user_documents_dir(USER_ID) / "big.txt"
+        source.write_text("a" * 100, encoding="utf-8")
+        old = 1_600_000_000
+        os.utime(source, (old, old))
+
+        result = mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+
+        copy_dir = mw._paths.sandbox_work_dir("thread-abc", user_id=USER_ID) / "referenced"
+        copied_name = result["sandbox_path"].rsplit("/", 1)[-1]
+        # No leftover temp file from the atomic replace.
+        assert [entry.name for entry in copy_dir.iterdir()] == [copied_name]
+        copied = copy_dir / copied_name
+        assert copied.read_text(encoding="utf-8") == "a" * 100
+        # mtime is mirrored from the source so the reuse check stays exact.
+        assert abs(copied.stat().st_mtime - old) < 2
+
+        # A second load with an unchanged source reuses the copy.
+        mw._load_file_content(_text_file(Path("big.txt")), thread_id="thread-abc")
+        assert [entry.name for entry in copy_dir.iterdir()] == [copied_name]

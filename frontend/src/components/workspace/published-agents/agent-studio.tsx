@@ -8,6 +8,7 @@ import {
   CableIcon,
   FileCode2Icon,
   FlaskConicalIcon,
+  GaugeIcon,
   LayoutDashboardIcon,
   PlugZapIcon,
   RocketIcon,
@@ -328,6 +329,10 @@ export function AgentStudio({ agentId }: { agentId: string }) {
                     <FlaskConicalIcon />
                     {t.publishedAgents.studio.sandboxTab}
                   </TabsTrigger>
+                  <TabsTrigger value="quota">
+                    <GaugeIcon />
+                    {t.publishedAgents.studio.quotaTab}
+                  </TabsTrigger>
                   <TabsTrigger value="publish">
                     <RocketIcon />
                     {t.publishedAgents.studio.publishTab}
@@ -489,6 +494,14 @@ export function AgentStudio({ agentId }: { agentId: string }) {
                   <DraftSandbox agentId={agent.id} agentSlug={agent.slug} />
                 </TabsContent>
 
+                <TabsContent value="quota">
+                  <QuotaPanel
+                    agentId={agent.id}
+                    draft={agent.draft}
+                    hasUnsavedChanges={dirty}
+                  />
+                </TabsContent>
+
                 <TabsContent value="publish">
                   <PublishPanel
                     agent={agent}
@@ -529,11 +542,6 @@ export function AgentStudio({ agentId }: { agentId: string }) {
                       </p>
                     </div>
                     <UsagePanel agentId={agent.id} />
-                    <QuotaPanel
-                      agentId={agent.id}
-                      draft={agent.draft}
-                      hasUnsavedChanges={dirty}
-                    />
                   </div>
                 </TabsContent>
               </div>

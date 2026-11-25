@@ -8,8 +8,10 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from deerflow.agents.middlewares.sandbox_audit_middleware import (
+    REASON_INCOMPLETE,
     SandboxAuditMiddleware,
     _classify_command,
+    _classify_command_with_reason,
     _split_compound_command,
 )
 
@@ -714,3 +716,47 @@ class TestBenchmarkSummary:
         assert high_recall == 1.0, f"High-risk block rate must be 100%, got {high_recall:.0%}"
         assert medium_recall >= 0.9, f"Medium-risk warn rate must be >=90%, got {medium_recall:.0%}"
         assert false_positive_rate == 0.0, f"False positive rate must be 0%, got {false_positive_rate:.0%}"
+
+
+# ---------------------------------------------------------------------------
+# Truncated tool-call arguments (P1): still blocked, but explained as truncation
+# ---------------------------------------------------------------------------
+
+
+class TestIncompleteCommandHandling:
+    """A command cut off mid-quote must not be reported as a security violation."""
+
+    TRUNCATED = 'python3 -c "print(1)'
+    HIGH_RISK = "rm -rf /"
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    def test_classifier_keeps_block_but_tags_reason(self):
+        assert _classify_command(self.TRUNCATED) == "block"
+        assert _classify_command_with_reason(self.TRUNCATED) == ("block", REASON_INCOMPLETE)
+
+    def test_block_message_explains_truncation(self):
+        request = _make_request(self.TRUNCATED)
+        handler = _make_handler()
+
+        with patch.object(self.mw, "_write_audit") as mock_audit:
+            result = self.mw.wrap_tool_call(request, handler)
+
+        handler.assert_not_called()
+        assert result.status == "error"
+        lowered = result.content.lower()
+        assert "truncated" in lowered
+        assert "security" not in lowered
+        assert "blocked" not in lowered
+        assert mock_audit.call_args.kwargs.get("reason") == REASON_INCOMPLETE
+
+    def test_high_risk_message_unchanged(self):
+        request = _make_request(self.HIGH_RISK)
+        with patch.object(self.mw, "_write_audit") as mock_audit:
+            result = self.mw.wrap_tool_call(request, _make_handler())
+
+        # Model-facing wording stays the same as before P1 ...
+        assert result.content.startswith("Command blocked: security violation detected.")
+        # ... while the precise reason is now recorded for operators.
+        assert mock_audit.call_args.kwargs.get("reason") == "high-risk pattern"

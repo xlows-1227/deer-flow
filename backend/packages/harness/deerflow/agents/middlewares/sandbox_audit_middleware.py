@@ -134,30 +134,42 @@ def _split_compound_command(command: str) -> list[str]:
     return parts if parts else [command]
 
 
-def _classify_single_command(command: str) -> str:
-    """Classify a single (non-compound) command. Return 'block', 'warn', or 'pass'."""
+# Reason tag used when shlex cannot parse the command. In practice this is what
+# a tool call truncated by the model's output limit looks like (string ends
+# mid-quote), not an attempt to bypass the audit.
+REASON_INCOMPLETE = "incomplete command (unclosed quote)"
+
+
+def _classify_single_command(command: str) -> tuple[str, str | None]:
+    """Classify a single (non-compound) command.
+
+    Returns ``(verdict, reason)`` where verdict is 'block' / 'warn' / 'pass'
+    and reason is a short tag (``None`` when no specific rule matched).
+    """
     normalized = " ".join(command.split())
 
     for pattern in _HIGH_RISK_PATTERNS:
         if pattern.search(normalized):
-            return "block"
+            return "block", "high-risk pattern"
 
     # Also try shlex-parsed tokens for high-risk detection
     try:
         tokens = shlex.split(command)
-        joined = " ".join(tokens)
-        for pattern in _HIGH_RISK_PATTERNS:
-            if pattern.search(joined):
-                return "block"
     except ValueError:
-        # shlex.split fails on unclosed quotes — treat as suspicious
-        return "block"
+        # Unclosed quote / dangling escape. Kept as a block (fail-closed), but
+        # tagged separately so the caller can explain that the command was
+        # truncated instead of accusing the model of a security violation.
+        return "block", REASON_INCOMPLETE
+    joined = " ".join(tokens)
+    for pattern in _HIGH_RISK_PATTERNS:
+        if pattern.search(joined):
+            return "block", "high-risk pattern"
 
     for pattern in _MEDIUM_RISK_PATTERNS:
         if pattern.search(normalized):
-            return "warn"
+            return "warn", "medium-risk pattern"
 
-    return "pass"
+    return "pass", None
 
 
 def _classify_command(command: str) -> str:
@@ -171,21 +183,26 @@ def _classify_command(command: str) -> str:
     2. Then split compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and
        classify each sub-command independently. The most severe verdict wins.
     """
+    return _classify_command_with_reason(command)[0]
+
+
+def _classify_command_with_reason(command: str) -> tuple[str, str | None]:
+    """Same as :func:`_classify_command` but also returns the matching reason."""
     # Pass 1: whole-command high-risk scan (catches multi-statement patterns)
     normalized = " ".join(command.split())
     for pattern in _HIGH_RISK_PATTERNS:
         if pattern.search(normalized):
-            return "block"
+            return "block", "high-risk pattern"
 
     # Pass 2: per-sub-command classification
     sub_commands = _split_compound_command(command)
-    worst = "pass"
+    worst: tuple[str, str | None] = ("pass", None)
     for sub in sub_commands:
-        verdict = _classify_single_command(sub)
+        verdict, reason = _classify_single_command(sub)
         if verdict == "block":
-            return "block"  # short-circuit: can't get worse
-        if verdict == "warn":
-            worst = "warn"
+            return "block", reason  # short-circuit: can't get worse
+        if verdict == "warn" and worst[0] == "pass":
+            worst = "warn", reason
     return worst
 
 
@@ -230,7 +247,15 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
 
     _AUDIT_COMMAND_LIMIT = 200
 
-    def _write_audit(self, thread_id: str | None, command: str, verdict: str, *, truncate: bool = False) -> None:
+    def _write_audit(
+        self,
+        thread_id: str | None,
+        command: str,
+        verdict: str,
+        *,
+        truncate: bool = False,
+        reason: str | None = None,
+    ) -> None:
         audited_command = command
         if truncate and len(command) > self._AUDIT_COMMAND_LIMIT:
             audited_command = f"{command[: self._AUDIT_COMMAND_LIMIT]}... ({len(command)} chars)"
@@ -240,12 +265,31 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             "command": audited_command,
             "verdict": verdict,
         }
+        if reason:
+            record["reason"] = reason
         logger.info("[SandboxAudit] %s", json.dumps(record, ensure_ascii=False))
 
     def _build_block_message(self, request: ToolCallRequest, reason: str) -> ToolMessage:
         tool_call_id = str(request.tool_call.get("id") or "missing_id")
+        if reason == REASON_INCOMPLETE:
+            # The argument was cut off before the command was complete (the
+            # model hit its output limit). Telling the model it tripped a
+            # security check sends it off trying to evade detection instead of
+            # splitting the work.
+            content = (
+                "Command not executed: the previous tool call was truncated by "
+                "the output token limit, so the command ended mid-string and "
+                "could not be parsed. Split it into smaller commands or write "
+                "it to a script file first.\n"
+                "（上一次工具调用被输出长度截断，命令未正常闭合，请把命令拆小或改写为脚本文件。）"
+            )
+        else:
+            # Non-truncation blocks keep their original wording; the precise
+            # reason only lives in the audit record and the BLOCKED warning.
+            message_reason = "security violation detected" if reason == "high-risk pattern" else reason
+            content = f"Command blocked: {message_reason}. Please use a safer alternative approach."
         return ToolMessage(
-            content=f"Command blocked: {reason}. Please use a safer alternative approach.",
+            content=content,
             tool_call_id=tool_call_id,
             name="bash",
             status="error",
@@ -293,9 +337,11 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
 
     def _pre_process(self, request: ToolCallRequest) -> tuple[str, str | None, str, str | None]:
         """
-        Returns (command, thread_id, verdict, reject_reason).
-        verdict is 'block', 'warn', or 'pass'.
-        reject_reason is non-None only for input sanitisation rejections.
+        Returns (command, thread_id, verdict, block_reason).
+
+        verdict is 'block', 'warn', or 'pass'. block_reason is set whenever the
+        verdict is 'block' — either an input sanitisation rejection (empty
+        command / too long / NUL byte) or the classification reason.
         """
         args = request.tool_call.get("args", {})
         raw_command = args.get("command")
@@ -305,22 +351,22 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         # ① input sanitisation — reject malformed input before regex analysis
         reject_reason = self._validate_input(command)
         if reject_reason:
-            self._write_audit(thread_id, command, "block", truncate=True)
+            self._write_audit(thread_id, command, "block", truncate=True, reason=reject_reason)
             logger.warning("[SandboxAudit] INVALID INPUT thread=%s reason=%s", thread_id, reject_reason)
             return command, thread_id, "block", reject_reason
 
         # ② classify command
-        verdict = _classify_command(command)
+        verdict, classify_reason = _classify_command_with_reason(command)
 
         # ③ audit log
-        self._write_audit(thread_id, command, verdict)
+        self._write_audit(thread_id, command, verdict, reason=classify_reason)
 
         if verdict == "block":
-            logger.warning("[SandboxAudit] BLOCKED thread=%s cmd=%r", thread_id, command)
+            logger.warning("[SandboxAudit] BLOCKED thread=%s reason=%s cmd=%r", thread_id, classify_reason, command)
         elif verdict == "warn":
             logger.warning("[SandboxAudit] WARN (medium-risk) thread=%s cmd=%r", thread_id, command)
 
-        return command, thread_id, verdict, None
+        return command, thread_id, verdict, classify_reason
 
     # ------------------------------------------------------------------
     # wrap_tool_call hooks

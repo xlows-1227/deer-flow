@@ -74,6 +74,14 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="Maximum characters to keep from read_file tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
+    read_file_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=0,
+        description=(
+            "Files larger than this many bytes are rejected by the read_file tool before any content is loaded, "
+            "with a hint to use bash/python or to split the file. Set to 0 to disable the guard."
+        ),
+    )
     ls_output_max_chars: int = Field(
         default=20000,
         ge=0,

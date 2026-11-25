@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 ProviderType = Literal["gaia", "openai", "anthropic"]
+ThinkingProtocol = Literal["none", "qwen"]
 
 PROVIDER_USE_MAP: dict[ProviderType, str] = {
     "gaia": "langchain_openai:ChatOpenAI",
@@ -32,6 +33,7 @@ class UserModelRecord(BaseModel):
     enabled: bool = True
     supports_thinking: bool = True
     supports_reasoning_effort: bool = True
+    thinking_protocol: ThinkingProtocol = "none"
     has_api_key: bool = False
     api_key_last_four: str | None = None
     created_at: str | None = None
@@ -48,6 +50,7 @@ class UserModelCreateRequest(BaseModel):
     enabled: bool = True
     supports_thinking: bool = True
     supports_reasoning_effort: bool = True
+    thinking_protocol: ThinkingProtocol = "none"
 
 
 class UserModelUpdateRequest(BaseModel):
@@ -60,6 +63,7 @@ class UserModelUpdateRequest(BaseModel):
     enabled: bool | None = None
     supports_thinking: bool | None = None
     supports_reasoning_effort: bool | None = None
+    thinking_protocol: ThinkingProtocol | None = None
 
 
 class UserModelListResponse(BaseModel):

@@ -135,7 +135,7 @@ function ThemePreviewCard({
       type="button"
       onClick={() => onSelect(mode)}
       className={cn(
-        "group flex h-full flex-col gap-3 rounded-lg border p-4 text-left transition-all",
+        "group flex h-full min-w-0 flex-col gap-3 rounded-lg border p-4 text-left transition-all",
         active
           ? "border-primary ring-primary/30 shadow-sm ring-2"
           : "hover:border-border hover:shadow-sm",
@@ -170,7 +170,7 @@ function ThemePreviewCard({
           <div className="h-2 w-10 rounded-full bg-current/20" />
           <div className="h-2 w-6 rounded-full bg-current/15" />
         </div>
-        <div className="grid grid-cols-[1fr_240px] gap-3 px-3 py-3">
+        <div className="grid grid-cols-[1fr_minmax(0,240px)] gap-3 px-3 py-3">
           <div className="space-y-2">
             <div className="h-3 w-3/4 rounded-full bg-current/15" />
             <div className="h-3 w-1/2 rounded-full bg-current/10" />

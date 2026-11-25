@@ -14,7 +14,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   context: {
     model_name: undefined,
-    mode: "flash",
+    mode: "thinking",
     // No default reasoning_effort: leave it undefined so per-mode defaults
     // apply at submit time. Advanced users can set a global override from
     // the Settings page.
@@ -135,10 +135,8 @@ export function getThreadContext(
   if (json) {
     try {
       const context = JSON.parse(json) as ThreadContextSettings;
-      // Drop legacy per-thread reasoning_effort written by the removed
-      // input-box selector; the only override source now is the global
-      // setting from the Settings page.
-      delete context.reasoning_effort;
+      // reasoning_effort is part of the thread's model selection and must be
+      // preserved so a thread created with an explicit effort keeps it.
       return {
         ...context,
       };

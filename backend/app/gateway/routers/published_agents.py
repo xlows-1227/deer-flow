@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.gateway.deps import (
     get_agent_usage_repo,
     get_external_audit_repo,
+    get_local_provider,
     get_thread_store,
 )
 from app.gateway.draft_sandbox import (
@@ -303,6 +304,30 @@ def _platform_quota(request: Request) -> PlatformQuota:
         None,
     )
     return value if isinstance(value, PlatformQuota) else PlatformQuota()
+
+
+async def _created_by_emails(created_by_ids: set[str]) -> dict[str, str]:
+    """Resolve Release creator ids (``users.id``) to user emails for display.
+
+    Returns an empty map when the auth provider is unavailable (for example in
+    router tests without a database) so callers keep showing the raw id.
+    """
+    if not created_by_ids:
+        return {}
+    try:
+        repository = get_local_provider().repository
+    except RuntimeError:
+        return {}
+    resolved: dict[str, str] = {}
+    for user_id in created_by_ids:
+        try:
+            user = await repository.get_user_by_id(user_id)
+        except Exception:  # noqa: BLE001 - display-only lookup, never fail the list
+            continue
+        email = getattr(user, "email", None)
+        if email:
+            resolved[user_id] = email
+    return resolved
 
 
 def _quota_values(platform: PlatformQuota) -> dict[str, int]:
@@ -635,7 +660,16 @@ async def list_releases(
     agent = await draft_service.get_agent(agent_id, owner_user_id=owner)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return await service.list_releases(agent_id, owner_user_id=owner)
+    releases = await service.list_releases(agent_id, owner_user_id=owner)
+    creator_ids = {str(release["created_by"]) for release in releases if release.get("created_by")}
+    emails = await _created_by_emails(creator_ids)
+    return [
+        {
+            **release,
+            "created_by_email": emails.get(str(release.get("created_by"))),
+        }
+        for release in releases
+    ]
 
 
 @router.get("/{agent_id}/releases/{release_no}")

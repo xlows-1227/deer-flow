@@ -294,7 +294,12 @@ class RunManager:
             logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
-        """Persist a running token/message snapshot without changing status."""
+        """Persist a running token/message snapshot without changing status.
+
+        The store update is guarded by ``status='running'``. A ``False`` result
+        means another worker already cancelled the run, so the worker that owns
+        the asyncio task aborts it here.
+        """
         should_persist = True
         async with self._lock:
             record = self._runs.get(run_id)
@@ -305,11 +310,28 @@ class RunManager:
                     if hasattr(record, key) and value is not None:
                         setattr(record, key, value)
                 record.updated_at = _now_iso()
-        if should_persist and self._store is not None:
-            try:
-                await self._store.update_run_progress(run_id, **kwargs)
-            except Exception:
-                logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
+        if not (should_persist and self._store is not None):
+            return
+        try:
+            updated = await self._store.update_run_progress(run_id, **kwargs)
+        except Exception:
+            logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
+            return
+        if updated is False:
+            await self._abort_run_cancelled_elsewhere(run_id)
+
+    async def _abort_run_cancelled_elsewhere(self, run_id: str) -> None:
+        """Stop the local task after another worker persisted ``interrupted``."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.running:
+                return
+            record.status = RunStatus.interrupted
+            record.updated_at = _now_iso()
+            record.abort_event.set()
+            if record.task is not None and not record.task.done():
+                record.task.cancel()
+        logger.info("Run %s was interrupted on another worker; cancelled local task", run_id)
 
     async def create(
         self,
@@ -477,25 +499,54 @@ class RunManager:
         Sets the abort event with the action reason and cancels the asyncio task.
         Returns ``True`` if cancellation was initiated **or** the run was already
         interrupted (idempotent — a second cancel is a no-op success).
-        Returns ``False`` only when the run is unknown to this worker or has
-        reached a terminal state other than interrupted (completed, failed, etc.).
+        Returns ``False`` when the run has reached a terminal state other than
+        interrupted (completed, failed, etc.).
+
+        When the run is not registered on this worker, the cancellation is
+        persisted to the shared store; the owning worker picks it up from its
+        periodic progress update and aborts its local task.
         """
+        record: RunRecord | None = None
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None:
-                return False
-            if record.status == RunStatus.interrupted:
-                return True  # idempotent — already cancelled on this worker
-            if record.status not in (RunStatus.pending, RunStatus.running):
-                return False
-            record.abort_action = action
-            record.abort_event.set()
-            if record.task is not None and not record.task.done():
-                record.task.cancel()
-            record.status = RunStatus.interrupted
-            record.updated_at = _now_iso()
+            if record is not None:
+                if record.status == RunStatus.interrupted:
+                    return True  # idempotent — already cancelled on this worker
+                if record.status not in (RunStatus.pending, RunStatus.running):
+                    return False
+                record.abort_action = action
+                record.abort_event.set()
+                if record.task is not None and not record.task.done():
+                    record.task.cancel()
+                record.status = RunStatus.interrupted
+                record.updated_at = _now_iso()
+        if record is None:
+            return await self._cancel_run_owned_by_another_worker(run_id, action=action)
         await self._persist_status(record, RunStatus.interrupted)
         logger.info("Run %s cancelled (action=%s)", run_id, action)
+        return True
+
+    async def _cancel_run_owned_by_another_worker(self, run_id: str, *, action: str) -> bool:
+        """Persist ``interrupted`` for a run whose task lives in another worker."""
+        if self._store is None:
+            return False
+        try:
+            row = await self._store.get(run_id)
+        except Exception:
+            logger.warning("Failed to load run %s for cancellation", run_id, exc_info=True)
+            return False
+        if row is None:
+            return False
+        status = row.get("status") or RunStatus.pending.value
+        if status == RunStatus.interrupted.value:
+            return True  # idempotent
+        if status not in (RunStatus.pending.value, RunStatus.running.value):
+            return False
+        record = self._record_from_store(row)
+        record.abort_action = action
+        if not await self._persist_status(record, RunStatus.interrupted):
+            return False
+        logger.info("Run %s cancelled on another worker (action=%s)", run_id, action)
         return True
 
     async def discard_unstarted(self, run_id: str) -> bool:

@@ -553,6 +553,7 @@ class TestSkillInstallation:
 
             return ScanResult(decision="allow", reason="ok")
 
+        monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: None)
         monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
 
     @pytest.fixture(autouse=True)

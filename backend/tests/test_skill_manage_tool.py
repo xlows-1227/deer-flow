@@ -11,12 +11,6 @@ def _skill_content(name: str, description: str = "Demo skill") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
 
 
-async def _async_result(decision: str, reason: str):
-    from deerflow.skills.security_scanner import ScanResult
-
-    return ScanResult(decision=decision, reason=reason)
-
-
 def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     config = SimpleNamespace(
@@ -31,7 +25,6 @@ def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
         refresh_calls.append("refresh")
 
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
 
     runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
 
@@ -73,7 +66,6 @@ def test_skill_manage_patch_replaces_single_occurrence_by_default(monkeypatch, t
         return None
 
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
 
     runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
     content = _skill_content("demo-skill", "Demo skill") + "\nRepeated: Demo skill\n"
@@ -135,7 +127,6 @@ def test_skill_manage_sync_wrapper_supported(monkeypatch, tmp_path):
         refresh_calls.append("refresh")
 
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
 
     runtime = SimpleNamespace(context={"thread_id": "thread-sync"}, config={"configurable": {"thread_id": "thread-sync"}})
     result = skill_manage_module.skill_manage_tool.func(
@@ -162,7 +153,6 @@ def test_skill_manage_rejects_support_path_traversal(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
-    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
 
     runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
     anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "demo-skill", _skill_content("demo-skill"))

@@ -204,7 +204,7 @@ export function SkillAiCreateWorkspace({
   const skillContext = useMemo(
     () => ({
       ...settings.context,
-      mode: settings.context.mode ?? "flash",
+      mode: settings.context.mode ?? "thinking",
       skill_name: "skill-creator",
     }),
     [settings.context],

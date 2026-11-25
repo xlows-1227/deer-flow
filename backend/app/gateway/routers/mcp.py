@@ -1,8 +1,9 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 
-from deerflow.config.extensions_config import get_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config
 from deerflow.extensions_user.mcp_service import (
     UserMcpNotFoundError,
     UserMcpPersistenceError,
@@ -14,8 +15,11 @@ from deerflow.extensions_user.schemas import (
     McpServerCreateRequest,
     McpServerEnabledRequest,
     McpServerRecord,
+    McpServerToolsResponse,
     McpServerUpdateRequest,
+    McpToolInfo,
 )
+from deerflow.mcp.client import list_server_tools
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,43 @@ async def set_mcp_server_enabled(name: str, request: McpServerEnabledRequest) ->
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except UserMcpPersistenceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post(
+    "/mcp/servers/{name}/tools",
+    response_model=McpServerToolsResponse,
+    summary="Test MCP server connection and list its tools",
+)
+async def list_mcp_server_tools(name: str) -> McpServerToolsResponse:
+    user_id = _user_id()
+    try:
+        servers = await make_user_mcp_service().build_user_mcp_servers(user_id, _system_servers())
+    except UserMcpPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    server = servers.get(name)
+    if server is None:
+        raise HTTPException(status_code=404, detail=f"MCP server {name!r} not found")
+    if not server.enabled:
+        raise HTTPException(status_code=400, detail=f"MCP server {name!r} is disabled")
+
+    try:
+        tools = await list_server_tools(
+            name,
+            server,
+            extensions_config=ExtensionsConfig(mcp_servers={name: server}),
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=f"MCP server {name!r} connection timed out") from exc
+    except Exception as exc:
+        logger.warning("Failed to list tools for MCP server %s: %s", name, exc)
+        raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
+
+    return McpServerToolsResponse(
+        server=name,
+        tools=[McpToolInfo(**tool) for tool in tools],
+        checked_at=datetime.now(UTC).isoformat(),
+    )
 
 
 @router.post(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -17,6 +18,10 @@ from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+# Final function names exposed to the model: letters/digits/underscore/hyphen,
+# must start with a letter, max 64 chars.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
 
 def _extract_thread_id(runtime: Runtime | None) -> str:
@@ -216,7 +221,7 @@ async def get_mcp_tools(
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
-            if servers_config[server_name].get("transport") in ("sse", "http"):
+            if servers_config[server_name].get("transport") in ("sse", "http", "streamable_http"):
                 existing_headers = dict(servers_config[server_name].get("headers", {}))
                 existing_headers["Authorization"] = auth_header
                 servers_config[server_name]["headers"] = existing_headers
@@ -260,6 +265,17 @@ async def get_mcp_tools(
         # temporary sessions – the persistent-session wrapping is applied below).
         tools = await client.get_tools()
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
+
+        # Drop tools whose final function name is invalid for the model
+        # (e.g. overlong ``{server}_{tool}``); one bad adapter name would make
+        # the whole chat completion fail with 400.
+        valid_tools: list[BaseTool] = []
+        for tool in tools:
+            if not _TOOL_NAME_RE.fullmatch(tool.name):
+                logger.warning(f"Skipping MCP tool with invalid function name: {tool.name!r}")
+                continue
+            valid_tools.append(tool)
+        tools = valid_tools
 
         # Wrap each tool with persistent-session logic.
         wrapped_tools: list[BaseTool] = []

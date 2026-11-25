@@ -6,6 +6,8 @@ from deerflow.config.effective_config import invalidate_user_extensions_cache
 from deerflow.config.extensions_config import McpOAuthConfig, McpServerConfig
 from deerflow.extensions_user.schemas import (
     MASKED_VALUE,
+    MCP_SERVER_NAME_RE,
+    MCP_TRANSPORT_TYPES,
     McpConfigResponse,
     McpServerCreateRequest,
     McpServerEnabledRequest,
@@ -227,6 +229,12 @@ class UserMcpService:
         name = payload.name.strip()
         if not name:
             raise UserMcpValidationError("Server name is required")
+        if not MCP_SERVER_NAME_RE.fullmatch(name):
+            raise UserMcpValidationError(
+                "Server name must start with a letter and contain only letters, digits, '_' or '-' (max 32 characters)"
+            )
+        if payload.type not in MCP_TRANSPORT_TYPES:
+            raise UserMcpValidationError(f"Unsupported transport type: {payload.type}")
         if name in system_servers:
             raise UserMcpValidationError(f"Cannot create user server with reserved system name: {name}")
 

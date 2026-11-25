@@ -35,11 +35,27 @@ import {
   useRollbackAgent,
   type AgentDraft,
   type AgentRelease,
+  type QuotaOverrides,
 } from "@/core/published-agents";
+
+import { quotaFields, type QuotaField } from "./quota-fields";
 
 interface SetDiff {
   added: string[];
   removed: string[];
+}
+
+export interface QuotaFieldDiff {
+  field: QuotaField;
+  /** null 表示该字段未覆盖，继承平台默认值。 */
+  before: number | null;
+  after: number | null;
+}
+
+export interface QuotaDiff {
+  changed: boolean;
+  fields: QuotaFieldDiff[];
+  platformDefaults: Required<QuotaOverrides> | null;
 }
 
 export interface ReleaseDiff {
@@ -51,6 +67,27 @@ export interface ReleaseDiff {
   toolGroups: SetDiff;
   skills: SetDiff;
   connectorGrants: SetDiff;
+  quota: QuotaDiff;
+}
+
+function quotaDiff(
+  before: QuotaOverrides,
+  after: QuotaOverrides,
+  platformDefaults?: Required<QuotaOverrides>,
+): QuotaDiff {
+  const fields: QuotaFieldDiff[] = [];
+  for (const field of quotaFields) {
+    const from = before[field] ?? null;
+    const to = after[field] ?? null;
+    if (from !== to) {
+      fields.push({ field, before: from, after: to });
+    }
+  }
+  return {
+    changed: fields.length > 0,
+    fields,
+    platformDefaults: platformDefaults ?? null,
+  };
 }
 
 function setDiff(before: string[], after: string[]): SetDiff {
@@ -84,6 +121,7 @@ function createDiff(
     tool_groups: string[];
     skills: string[];
     connector_grants: string[];
+    quota_overrides: QuotaOverrides;
   },
   after: {
     agent_markdown: string;
@@ -92,7 +130,9 @@ function createDiff(
     tool_groups: string[];
     skills: string[];
     connector_grants: string[];
+    quota_overrides: QuotaOverrides;
   },
+  platformDefaults?: Required<QuotaOverrides>,
 ): ReleaseDiff {
   return {
     instructionsChanged:
@@ -111,12 +151,18 @@ function createDiff(
     toolGroups: setDiff(before.tool_groups, after.tool_groups),
     skills: setDiff(before.skills, after.skills),
     connectorGrants: setDiff(before.connector_grants, after.connector_grants),
+    quota: quotaDiff(
+      before.quota_overrides,
+      after.quota_overrides,
+      platformDefaults,
+    ),
   };
 }
 
 export function buildDraftReleaseDiff(
   draft: AgentDraft,
   release: AgentRelease | null,
+  platformDefaults?: Required<QuotaOverrides>,
 ): ReleaseDiff {
   return createDiff(
     release
@@ -127,6 +173,7 @@ export function buildDraftReleaseDiff(
           tool_groups: release.tool_groups,
           skills: releaseSkillNames(release),
           connector_grants: grantNames(release.connector_grants),
+          quota_overrides: release.quota_overrides,
         }
       : {
           agent_markdown: "",
@@ -135,6 +182,7 @@ export function buildDraftReleaseDiff(
           tool_groups: [],
           skills: [],
           connector_grants: [],
+          quota_overrides: {},
         },
     {
       agent_markdown: draft.agent_markdown,
@@ -143,13 +191,16 @@ export function buildDraftReleaseDiff(
       tool_groups: draft.tool_groups,
       skills: draft.skills.map((skill) => skill.skill_name),
       connector_grants: grantNames(draft.connector_grants),
+      quota_overrides: draft.quota_overrides ?? {},
     },
+    platformDefaults,
   );
 }
 
 export function buildReleaseDiff(
   before: AgentRelease,
   after: AgentRelease,
+  platformDefaults?: Required<QuotaOverrides>,
 ): ReleaseDiff {
   return createDiff(
     {
@@ -159,6 +210,7 @@ export function buildReleaseDiff(
       tool_groups: before.tool_groups,
       skills: releaseSkillNames(before),
       connector_grants: grantNames(before.connector_grants),
+      quota_overrides: before.quota_overrides,
     },
     {
       agent_markdown: after.agent_markdown,
@@ -167,7 +219,9 @@ export function buildReleaseDiff(
       tool_groups: after.tool_groups,
       skills: releaseSkillNames(after),
       connector_grants: grantNames(after.connector_grants),
+      quota_overrides: after.quota_overrides,
     },
+    platformDefaults,
   );
 }
 
@@ -307,6 +361,68 @@ export function ReleaseDiffView({ diff }: { diff: ReleaseDiff }) {
           diff={diff.connectorGrants}
         />
       </div>
+      <QuotaChangeList diff={diff.quota} />
+    </div>
+  );
+}
+
+function QuotaChangeList({ diff }: { diff: QuotaDiff }) {
+  const { t } = useI18n();
+  const formatValue = (field: QuotaField, value: number | null) => {
+    if (value !== null) {
+      return value.toLocaleString();
+    }
+    const inherited = diff.platformDefaults?.[field];
+    return inherited === undefined
+      ? t.publishedAgents.publish.quotaInherited
+      : `${t.publishedAgents.publish.quotaInherited} (${inherited.toLocaleString()})`;
+  };
+
+  return (
+    <div className="bg-background rounded-lg border p-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <p className="text-xs font-semibold tracking-wide uppercase">
+          {t.publishedAgents.publish.quota}
+        </p>
+        {diff.changed ? (
+          <Badge variant="secondary">{diff.fields.length}</Badge>
+        ) : (
+          <span className="text-muted-foreground flex items-center gap-1 text-xs">
+            <CheckIcon className="size-3" />
+            {t.publishedAgents.publish.unchanged}
+          </span>
+        )}
+      </div>
+      {diff.changed ? (
+        <div className="space-y-1.5 font-mono text-xs">
+          {diff.fields.map(({ field, before, after }) => (
+            <p key={field} className="flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground font-sans">
+                {t.publishedAgents.publish.quotaFieldLabel(field)}
+              </span>
+              <span
+                className={
+                  before === null
+                    ? "text-muted-foreground"
+                    : "text-rose-700 line-through dark:text-rose-300"
+                }
+              >
+                {formatValue(field, before)}
+              </span>
+              <span className="text-muted-foreground">→</span>
+              <span
+                className={
+                  after === null
+                    ? "text-muted-foreground"
+                    : "text-emerald-700 dark:text-emerald-300"
+                }
+              >
+                {formatValue(field, after)}
+              </span>
+            </p>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -322,10 +438,12 @@ export function ReleaseHistory({
   agentId,
   currentReleaseId,
   releases,
+  platformDefaults,
 }: {
   agentId: string;
   currentReleaseId: string | null;
   releases: AgentRelease[];
+  platformDefaults?: Required<QuotaOverrides>;
 }) {
   const { t } = useI18n();
   const rollback = useRollbackAgent(agentId);
@@ -343,9 +461,9 @@ export function ReleaseHistory({
       (release) => String(release.release_no) === compareTo,
     );
     return from && to && from.id !== to.id
-      ? { from, to, diff: buildReleaseDiff(from, to) }
+      ? { from, to, diff: buildReleaseDiff(from, to, platformDefaults) }
       : null;
-  }, [compareFrom, compareTo, releases]);
+  }, [compareFrom, compareTo, releases, platformDefaults]);
 
   async function confirmRollback() {
     if (!rollbackTarget) {
@@ -474,7 +592,21 @@ export function ReleaseHistory({
                       <p className="text-muted-foreground mt-1 text-xs">
                         {formatTimestamp(release.created_at)} ·{" "}
                         {t.publishedAgents.publish.createdBy}{" "}
-                        <span className="font-mono">{release.created_by}</span>
+                        <span className="font-mono">
+                          {release.created_by_email ?? release.created_by}
+                        </span>
+                      </p>
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        {t.publishedAgents.publish.quota}:{" "}
+                        {quotaFields.flatMap((field) => {
+                          const value = release.quota_overrides[field];
+                          return typeof value === "number"
+                            ? [
+                                `${t.publishedAgents.publish.quotaFieldLabel(field)} ${value.toLocaleString()}`,
+                              ]
+                            : [];
+                        }).join(" · ") ||
+                          t.publishedAgents.publish.quotaInheritAll}
                       </p>
                     </div>
                     <Button

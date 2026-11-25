@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -50,7 +50,7 @@ class BaseMySQLProtocolDatabaseAdapter:
         if not host or not database:
             raise ConnectorValidationError("Database connector requires host and database config")
         port = int(instance.config.get(self.default_port_key) or self.default_port)
-        return f"{self.sqlalchemy_driver}://{quote_plus(str(username))}:{quote_plus(str(password))}@{host}:{port}/{database}"
+        return f"{self.sqlalchemy_driver}://{quote(str(username), safe='')}:{quote(str(password), safe='')}@{host}:{port}/{database}"
 
     def _secret_payload(self, secrets: dict[str, Any]) -> dict[str, Any]:
         if "url" in secrets:

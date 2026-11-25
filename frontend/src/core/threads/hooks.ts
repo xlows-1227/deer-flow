@@ -132,6 +132,7 @@ export function useThreadStream({
   const { t } = useI18n();
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  const [flashFallback, setFlashFallback] = useState(false);
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
@@ -180,6 +181,7 @@ export function useThreadStream({
     // Switching chats clears stop suppression so scheduled/other-client runs
     // can still be auto-joined on the newly selected thread.
     suppressAutoRejoinRef.current = false;
+    setFlashFallback(false);
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -193,6 +195,7 @@ export function useThreadStream({
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
     activeRunThreadIdRef.current = _threadId;
+    setFlashFallback(false);
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
@@ -292,6 +295,16 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "flash_direct_fallback"
+      ) {
+        setFlashFallback(true);
+        return;
+      }
+
       if (
         typeof event === "object" &&
         event !== null &&
@@ -790,6 +803,12 @@ export function useThreadStream({
           }),
         );
 
+        const effectiveReasoningEffort =
+          context.mode === "flash"
+            ? undefined
+            : (context.reasoning_effort ??
+              (context.mode === "ultra" ? "high" : "low"));
+
         await thread.submit(
           {
             messages: [
@@ -812,11 +831,23 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
-            streamMode: ["values", "messages"],
+            streamMode: ["values", "messages", "custom"],
             streamSubgraphs: true,
             streamResumable: true,
             onDisconnect: "continue",
             multitaskStrategy: options?.multitaskStrategy,
+            // Write the current page selection onto the thread in the same
+            // request that creates it, so the record/chat UI never has to fall
+            // back to a default model while the user has not picked one yet.
+            metadata: {
+              ...(context.model_name
+                ? { model_name: context.model_name }
+                : {}),
+              ...(context.mode ? { mode: context.mode } : {}),
+              ...(effectiveReasoningEffort
+                ? { reasoning_effort: effectiveReasoningEffort }
+                : {}),
+            },
             config: {
               recursion_limit: 1000,
             },
@@ -826,15 +857,11 @@ export function useThreadStream({
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
-              // Per-mode defaults; a global override from the Settings page
-              // (context.reasoning_effort) wins when set. Pro defaults to
-              // "low": its planning power comes from the TodoList middleware,
-              // not reasoning depth, and "low" is significantly faster.
-              reasoning_effort:
-                context.mode === "flash"
-                  ? undefined
-                  : (context.reasoning_effort ??
-                    (context.mode === "ultra" ? "high" : "low")),
+              // Per-mode defaults; an explicit per-thread effort wins when set.
+              // Pro defaults to "low": its planning power comes from the
+              // TodoList middleware, not reasoning depth, and "low" is
+              // significantly faster.
+              reasoning_effort: effectiveReasoningEffort,
               thread_id: threadId,
               skill_name: context.skill_name,
               connector_ids: context.connector_ids,
@@ -944,6 +971,7 @@ export function useThreadStream({
     thread: mergedThread,
     pendingUsageMessages,
     sendMessage,
+    flashFallback,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,

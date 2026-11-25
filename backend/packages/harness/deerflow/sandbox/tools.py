@@ -212,6 +212,12 @@ def _read_skills_file_from_host(
     if not path_obj.is_file():
         raise FileNotFoundError(requested_path)
 
+    size_limit = _read_file_max_bytes()
+    if size_limit:
+        size = path_obj.stat().st_size
+        if size > size_limit:
+            return _too_large_file_message(requested_path, size, size_limit)
+
     content = path_obj.read_text(encoding="utf-8", errors="replace")
     if not content:
         return "(empty)"
@@ -1401,6 +1407,24 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     return f"{output[:kept]}{marker}"
 
 
+def _read_file_max_bytes() -> int:
+    """Return the pre-read size guard for read_file (0 disables it)."""
+    try:
+        sandbox_cfg = get_app_config().sandbox
+        return sandbox_cfg.read_file_max_bytes if sandbox_cfg else 5 * 1024 * 1024
+    except Exception:
+        return 5 * 1024 * 1024
+
+
+def _too_large_file_message(path: str, size: int, limit: int) -> str:
+    return (
+        f"Error: File is too large to load into memory: {path} is {size:,} bytes "
+        f"(limit {limit:,} bytes). Use `bash`/`python` to stream or inspect it "
+        "(for example `head`, `sed -n`, or a script), or split it into smaller files first. "
+        "`start_line`/`end_line` cannot help here because read_file loads the whole file before slicing."
+    )
+
+
 def _truncate_ls_output(output: str, max_chars: int) -> str:
     """Head-truncate ls output, preserving the beginning of the listing.
 
@@ -1767,6 +1791,11 @@ def read_file_tool(
             elif not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
+        size_limit = _read_file_max_bytes()
+        if size_limit:
+            size = sandbox.get_file_size(path)
+            if size is not None and size > size_limit:
+                return _too_large_file_message(path, size, size_limit)
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"

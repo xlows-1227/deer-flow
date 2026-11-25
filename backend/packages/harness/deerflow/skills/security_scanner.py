@@ -7,18 +7,38 @@ import logging
 import re
 from dataclasses import dataclass
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.skill_evolution_config import (
+    DEFAULT_SECURITY_SCAN_CONCURRENCY,
+    MAX_SECURITY_SCAN_CONCURRENCY,
+)
 from deerflow.models import create_chat_model
 from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
 
 
+SECURITY_SCAN_MODEL_TIMEOUT_SECONDS = 10
+
+
 @dataclass(slots=True)
 class ScanResult:
     decision: str
     reason: str
+    # True when the verdict is a degraded advisory (model unavailable, timed
+    # out, or returned unparseable output).  Callers must never block on it.
+    skipped: bool = False
+
+
+class SkillScanModelError(RuntimeError):
+    """Raised when the security-scan model cannot be created or called."""
+
+    def __init__(self, message: str, *, model_name: str | None = None) -> None:
+        super().__init__(message)
+        self.model_name = model_name
 
 
 def _extract_json_object(raw: str) -> dict | None:
@@ -67,7 +87,78 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
-async def scan_skill_content(content: str, *, executable: bool = False, location: str = SKILL_MD_FILE, app_config: AppConfig | None = None) -> ScanResult:
+def _create_scan_model_with_limits(name: str | None, config: AppConfig) -> BaseChatModel:
+    """Instantiate a scan model with retries disabled and a short timeout.
+
+    The scan is a best-effort synchronous step inside the upload request, so a
+    single slow/failing call must not burn the whole request budget. Some
+    providers reject ``max_retries``/``timeout`` kwargs, so fall back to plain
+    construction when the strict attempt fails.
+    """
+    strict_kwargs: dict = {
+        "thinking_enabled": False,
+        "app_config": config,
+        "max_retries": 0,
+        "timeout": SECURITY_SCAN_MODEL_TIMEOUT_SECONDS,
+    }
+    if name:
+        strict_kwargs["name"] = name
+    try:
+        return create_chat_model(**strict_kwargs)
+    except Exception:  # noqa: BLE001 - provider may reject unknown kwargs
+        fallback_kwargs: dict = {"thinking_enabled": False, "app_config": config}
+        if name:
+            fallback_kwargs["name"] = name
+        return create_chat_model(**fallback_kwargs)
+
+
+def create_scan_model(app_config: AppConfig | None = None, model_name: str | None = None) -> BaseChatModel:
+    """Create the chat model used by :func:`scan_skill_content`.
+
+    Priority: explicit ``model_name`` > ``skill_evolution.moderation_model_name``
+    > the default chat model. An explicit name never silently falls back to the
+    default, otherwise a user who picked a model cannot tell it was ignored.
+
+    Batch callers (e.g. archive install) create it once and pass it in, so the
+    per-file cost of instantiating the model is paid once per batch.
+    """
+    config = app_config or get_app_config()
+    requested = (model_name or "").strip() or None
+    if requested is None:
+        requested = getattr(config.skill_evolution, "moderation_model_name", None)
+    try:
+        return _create_scan_model_with_limits(requested, config)
+    except Exception as exc:
+        label = requested or "<default>"
+        raise SkillScanModelError(
+            f"Security scan model '{label}' is unavailable: {exc}",
+            model_name=requested,
+        ) from exc
+
+
+def get_scan_concurrency(app_config: AppConfig | None = None) -> int:
+    """Return how many skill files may be security-scanned concurrently.
+
+    Falls back to the default when the config is unavailable or the stored
+    value is not usable, so scanning never breaks on bad configuration.
+    """
+    try:
+        config = app_config or get_app_config()
+        value = int(getattr(getattr(config, "skill_evolution", None), "security_scan_concurrency", DEFAULT_SECURITY_SCAN_CONCURRENCY))
+    except Exception:
+        return DEFAULT_SECURITY_SCAN_CONCURRENCY
+    return max(1, min(value, MAX_SECURITY_SCAN_CONCURRENCY))
+
+
+async def scan_skill_content(
+    content: str,
+    *,
+    executable: bool = False,
+    location: str = SKILL_MD_FILE,
+    app_config: AppConfig | None = None,
+    model: BaseChatModel | None = None,
+    raise_on_model_error: bool = False,
+) -> ScanResult:
     """Screen skill content before it is written to disk."""
     rubric = (
         "You are a security reviewer for AI agent skills. "
@@ -80,11 +171,11 @@ async def scan_skill_content(content: str, *, executable: bool = False, location
     prompt = f"Location: {location}\nExecutable: {str(executable).lower()}\n\nReview this content:\n-----\n{content}\n-----"
 
     model_responded = False
+    scan_model = model
     try:
-        config = app_config or get_app_config()
-        model_name = config.skill_evolution.moderation_model_name
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config) if model_name else create_chat_model(thinking_enabled=False, app_config=config)
-        response = await model.ainvoke(
+        if scan_model is None:
+            scan_model = create_scan_model(app_config)
+        response = await scan_model.ainvoke(
             [
                 {"role": "system", "content": rubric},
                 {"role": "user", "content": prompt},
@@ -99,16 +190,29 @@ async def scan_skill_content(content: str, *, executable: bool = False, location
             if decision in {"allow", "warn", "block"}:
                 return ScanResult(decision, str(parsed.get("reason") or "No reason provided."))
         logger.warning("Security scan produced unparseable output: %s", raw[:200])
-    except Exception:
+    except SkillScanModelError:
+        if raise_on_model_error:
+            raise
+        logger.warning("Skill security scan model unavailable; using conservative fallback", exc_info=True)
+    except Exception as exc:
+        if raise_on_model_error:
+            raise SkillScanModelError(
+                f"Security scan model call failed: {exc}",
+                model_name=getattr(scan_model, "model_name", None),
+            ) from exc
         logger.warning("Skill security scan model call failed; using conservative fallback", exc_info=True)
 
     if model_responded:
-        return ScanResult("block", "Security scan produced unparseable output; manual review required.")
-    if executable:
-        return ScanResult("block", "Security scan unavailable for executable content; manual review required.")
-    logger.warning("Security scan model unavailable; allowing non-executable content with warning.")
+        logger.warning("Security scan produced unparseable output; treating as advisory warning")
+        return ScanResult(
+            "warn",
+            "Security review output was unparseable; advisory only, no blocking decision.",
+            skipped=True,
+        )
+    logger.warning("Security scan unavailable; treating as advisory warning (upload is not blocked)")
     return ScanResult(
         "warn",
-        "Security scan unavailable for skill content (model call failed); "
-        "auto-approved as non-executable, proceed with caution.",
+        "Security review was unavailable (model error, timeout, or quota); advisory only, "
+        "no blocking decision.",
+        skipped=True,
     )

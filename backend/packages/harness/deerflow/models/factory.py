@@ -525,6 +525,35 @@ def _normalize_provider_reasoning_effort(model_use_path: str, model_settings_fro
             settings["reasoning_effort"] = deepseek_reasoning_effort[effort]
 
 
+_ANTHROPIC_MODEL_USE_PREFIXES = (
+    "langchain_anthropic:",
+    "deerflow.models.claude_provider:",
+)
+
+
+def _is_anthropic_family_model(model_use_path: str, model_class: type) -> bool:
+    """Return True when the model speaks the Anthropic protocol.
+
+    ``reasoning_effort`` is an OpenAI-style parameter. ``langchain_anthropic``
+    declares no such field, so ``build_extra`` forwards it into ``model_kwargs``
+    and finally into ``messages.create(...)``, which raises ``TypeError``.
+
+    The class check covers built-in ``ChatAnthropic`` as well as user-defined
+    subclasses (e.g. ``deerflow.models.claude_provider:ClaudeChatModel``). The
+    ``use`` path fallback keeps the check effective when callers/tests substitute
+    a stand-in class for the real provider class. ``langchain_anthropic`` is an
+    optional dependency, hence the lazy import.
+    """
+    try:
+        from langchain_anthropic import ChatAnthropic
+    except ImportError:
+        ChatAnthropic = None  # type: ignore[assignment]
+
+    if ChatAnthropic is not None and isinstance(model_class, type) and issubclass(model_class, ChatAnthropic):
+        return True
+    return model_use_path.startswith(_ANTHROPIC_MODEL_USE_PREFIXES)
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -591,6 +620,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config.thinking is not None:
         merged_thinking = {**(effective_wte.get("thinking") or {}), **model_config.thinking}
         effective_wte = {**effective_wte, "thinking": merged_thinking}
+    if thinking_enabled and not has_thinking_settings:
+        # User-defined models only carry a thinking protocol when one is
+        # explicitly configured; without it pro/ultra mode silently degrades
+        # to a plain request (no enable_thinking / thinking flags).
+        logger.warning(
+            "Model %r is in thinking mode but has no thinking settings "
+            "(when_thinking_enabled/thinking); no thinking parameters will be sent.",
+            name,
+        )
     if thinking_enabled and has_thinking_settings:
         if not model_config.supports_thinking:
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
@@ -620,6 +658,24 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+    elif _is_anthropic_family_model(model_config.use, model_class):
+        # Anthropic's messages.create() has no reasoning_effort parameter; passing
+        # it through model_kwargs raises TypeError at call time. Drop it here so
+        # one request cannot take down every run handled by this model.
+        dropped_effort = kwargs.pop("reasoning_effort", None)
+        if dropped_effort is None:
+            dropped_effort = model_settings_from_config.pop("reasoning_effort", None)
+        else:
+            model_settings_from_config.pop("reasoning_effort", None)
+        if dropped_effort is not None:
+            logger.warning(
+                "Model %r uses the Anthropic protocol (%s), which does not accept "
+                "`reasoning_effort`; dropping effort=%r instead of forwarding it to "
+                "messages.create().",
+                name,
+                model_config.use,
+                dropped_effort,
+            )
     else:
         _normalize_provider_reasoning_effort(model_config.use, model_settings_from_config, kwargs)
 

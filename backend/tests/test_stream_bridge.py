@@ -7,6 +7,7 @@ import anyio
 import pytest
 
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, make_stream_bridge
+from deerflow.runtime.stream_bridge import memory as memory_module
 
 # ---------------------------------------------------------------------------
 # Unit tests for MemoryStreamBridge
@@ -334,3 +335,85 @@ async def test_make_stream_bridge_defaults():
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
+
+
+# ---------------------------------------------------------------------------
+# Configurable heartbeat interval
+# ---------------------------------------------------------------------------
+
+
+def _app_config_with_heartbeat(value: float | None):
+    """Build a minimal AppConfig stand-in exposing ``stream_bridge``."""
+    from types import SimpleNamespace
+
+    from deerflow.config.stream_bridge_config import StreamBridgeConfig
+
+    if value is None:
+        return SimpleNamespace(stream_bridge=None)
+    return SimpleNamespace(stream_bridge=StreamBridgeConfig(heartbeat_interval_seconds=value))
+
+
+def test_heartbeat_interval_explicit_argument_wins(monkeypatch):
+    """An explicit argument overrides the configured value."""
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: _app_config_with_heartbeat(30.0))
+
+    assert memory_module._resolve_heartbeat_interval(7.5) == 7.5
+
+
+def test_heartbeat_interval_defaults_to_15_without_config(monkeypatch):
+    """No ``stream_bridge`` section falls back to the 15s default."""
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: _app_config_with_heartbeat(None))
+
+    assert memory_module._resolve_heartbeat_interval(None) == 15.0
+
+
+def test_heartbeat_interval_defaults_to_15_when_config_load_fails(monkeypatch):
+    """A broken config must never break streaming."""
+
+    def _boom():
+        raise RuntimeError("config exploded")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", _boom)
+
+    assert memory_module._resolve_heartbeat_interval(None) == 15.0
+
+
+def test_heartbeat_interval_uses_configured_value(monkeypatch):
+    """The configured value is used when no explicit argument is given."""
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: _app_config_with_heartbeat(42.0))
+
+    assert memory_module._resolve_heartbeat_interval(None) == 42.0
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 4, 61])
+def test_stream_bridge_config_rejects_out_of_range_heartbeat(bad_value):
+    """Values outside 5-60 seconds are rejected at config load time."""
+    from pydantic import ValidationError
+
+    from deerflow.config.stream_bridge_config import StreamBridgeConfig
+
+    with pytest.raises(ValidationError):
+        StreamBridgeConfig(heartbeat_interval_seconds=bad_value)
+
+
+@pytest.mark.parametrize("ok_value", [5, 60])
+def test_stream_bridge_config_accepts_heartbeat_range_bounds(ok_value):
+    from deerflow.config.stream_bridge_config import StreamBridgeConfig
+
+    assert StreamBridgeConfig(heartbeat_interval_seconds=ok_value).heartbeat_interval_seconds == ok_value
+
+
+@pytest.mark.anyio
+async def test_subscribe_uses_resolved_interval(bridge: MemoryStreamBridge, monkeypatch):
+    """subscribe() without an explicit interval must use the resolved value."""
+    run_id = "run-resolved"
+    bridge._get_or_create_stream(run_id)
+    monkeypatch.setattr(memory_module, "_resolve_heartbeat_interval", lambda _: 0.05)
+
+    async def consumer() -> bool:
+        async for entry in bridge.subscribe(run_id):
+            if entry is HEARTBEAT_SENTINEL:
+                return True
+        return False  # pragma: no cover
+
+    assert await asyncio.wait_for(consumer(), timeout=2.0) is True

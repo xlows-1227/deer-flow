@@ -538,6 +538,29 @@ class ConnectorService:
             operation="sample",
         )
 
+    async def record_result_spill(
+        self,
+        connector_id: str,
+        *,
+        context: ConnectorRuntimeContext,
+        capability: str,
+        operation: str,
+        request_summary: dict[str, Any],
+        result_summary: dict[str, Any],
+    ) -> None:
+        """Audit that an oversized connector result was written to a thread file."""
+        await write_connector_audit(
+            self.repository,
+            connector_id=connector_id,
+            connector_type=None,
+            context=context,
+            capability=capability,
+            operation="result_spill",
+            decision="allow",
+            request_summary={**request_summary, "source_operation": operation},
+            result_summary=result_summary,
+        )
+
     async def execute_connector_action(
         self,
         connector_id: str,

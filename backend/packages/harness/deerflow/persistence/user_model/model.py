@@ -27,6 +27,10 @@ class UserModelRow(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_reasoning_effort: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # How DeerFlow should tell the provider to switch thinking on/off.
+    # "none" keeps the provider defaults; "qwen" sends
+    # extra_body.chat_template_kwargs.enable_thinking (vLLM / Qwen template).
+    thinking_protocol: Mapped[str] = mapped_column(String(32), nullable=False, default="none", server_default="none")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

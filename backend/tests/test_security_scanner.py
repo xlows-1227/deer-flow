@@ -76,14 +76,15 @@ async def test_scan_skill_content_passes_run_name_to_model(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_scan_skill_content_blocks_when_model_unavailable(monkeypatch):
+async def test_scan_skill_content_degrades_when_model_unavailable(monkeypatch):
     config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
     result = await scan_skill_content(SKILL_CONTENT, executable=False)
 
-    assert result.decision == "block"
+    assert result.decision == "warn"
+    assert result.skipped is True
     assert "unavailable" in result.reason
 
 
@@ -128,7 +129,8 @@ async def test_scan_handles_prose_wrapped_json(monkeypatch):
 async def test_scan_distinguishes_unparseable_from_unavailable(monkeypatch):
     _make_env(monkeypatch, "I can't decide, this is just prose without any JSON at all.")
     result = await scan_skill_content(SKILL_CONTENT, executable=False)
-    assert result.decision == "block"
+    assert result.decision == "warn"
+    assert result.skipped is True
     assert "unparseable" in result.reason
 
 
@@ -136,6 +138,7 @@ async def test_scan_distinguishes_unparseable_from_unavailable(monkeypatch):
 async def test_scan_distinguishes_unparseable_executable(monkeypatch):
     _make_env(monkeypatch, "no json here")
     result = await scan_skill_content(SKILL_CONTENT, executable=True)
-    # Even for executable content, unparseable uses the unparseable message
-    assert result.decision == "block"
+    # Advisory only: unparseable output never blocks, even for executables.
+    assert result.decision == "warn"
+    assert result.skipped is True
     assert "unparseable" in result.reason

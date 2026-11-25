@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   PublishValidationError,
+  useAgentQuotaPolicy,
   useAgentReleases,
   usePublishAgent,
   type AgentDraft,
@@ -40,6 +41,7 @@ export function PublishPanel({
 }) {
   const { t } = useI18n();
   const { releases, isLoading, error } = useAgentReleases(agent.id);
+  const { data: quotaPolicy } = useAgentQuotaPolicy(agent.id);
   const publish = usePublishAgent(agent.id);
   const [violations, setViolations] = useState<PublishViolation[]>([]);
   const [publishedReleaseNo, setPublishedReleaseNo] = useState<number | null>(
@@ -53,8 +55,13 @@ export function PublishPanel({
     [agent.current_release_id, releases],
   );
   const diff = useMemo(
-    () => buildDraftReleaseDiff(draft, currentRelease),
-    [currentRelease, draft],
+    () =>
+      buildDraftReleaseDiff(
+        draft,
+        currentRelease,
+        quotaPolicy?.platform_defaults,
+      ),
+    [currentRelease, draft, quotaPolicy?.platform_defaults],
   );
 
   async function publishDraft() {
@@ -216,6 +223,7 @@ export function PublishPanel({
         agentId={agent.id}
         currentReleaseId={agent.current_release_id}
         releases={releases}
+        platformDefaults={quotaPolicy?.platform_defaults}
       />
     </div>
   );

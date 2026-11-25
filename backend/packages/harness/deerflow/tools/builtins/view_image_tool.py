@@ -8,7 +8,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadDataState
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.config.paths import VIEWABLE_IMAGE_EXTENSIONS, VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 
 _ALLOWED_IMAGE_VIRTUAL_ROOTS = (
@@ -18,12 +18,15 @@ _ALLOWED_IMAGE_VIRTUAL_ROOTS = (
 )
 _ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT = ", ".join(_ALLOWED_IMAGE_VIRTUAL_ROOTS)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
-_EXTENSION_TO_MIME = {
+_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
 }
+# Derived from the shared constant so adding a format only has to happen once.
+# A missing MIME mapping fails loudly at import instead of drifting silently.
+_EXTENSION_TO_MIME = {extension: _MIME_BY_EXTENSION[extension] for extension in sorted(VIEWABLE_IMAGE_EXTENSIONS)}
 
 
 def _is_allowed_image_virtual_path(image_path: str) -> bool:
