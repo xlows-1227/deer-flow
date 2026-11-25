@@ -795,6 +795,7 @@ export interface Translations {
       thinkingProtocolDescription: string;
       thinkingProtocolNone: string;
       thinkingProtocolQwen: string;
+      reasoningEffortQwenDisabled: string;
       reasoningEffortOverride: string;
       reasoningEffortOverrideDescription: string;
       reasoningEffortAuto: string;

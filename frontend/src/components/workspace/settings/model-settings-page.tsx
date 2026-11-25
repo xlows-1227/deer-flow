@@ -39,7 +39,6 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/core/i18n/hooks";
-import { useOnboardingGuide } from "../onboarding/onboarding-guide-provider";
 import {
   buildApiKeyUpdateValue,
   createCustomModel,
@@ -53,6 +52,8 @@ import {
 } from "@/core/models/config-api";
 import { useLocalSettings } from "@/core/settings";
 import { cn } from "@/lib/utils";
+
+import { useOnboardingGuide } from "../onboarding/onboarding-guide-provider";
 
 import { SettingsSection } from "./settings-section";
 
@@ -92,7 +93,10 @@ const emptyForm: ModelForm = {
   hasStoredKey: false,
   enabled: true,
   supportsThinking: true,
-  supportsReasoningEffort: true,
+  // Gaia models created via onboarding use thinking_protocol="none", so pro /
+  // thinking / ultra mode would send reasoning_effort without any thinking
+  // parameter. YUMC-style gateways reject that with HTTP 400.
+  supportsReasoningEffort: false,
   thinkingProtocol: "none",
 };
 
@@ -134,6 +138,9 @@ export function ModelSettingsPage({
   const [saving, setSaving] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<ModelForm>(emptyForm);
+  // The vLLM template toggles thinking through chat_template_kwargs, so a
+  // reasoning-effort setting has no effect for that protocol.
+  const isQwenProtocol = form.thinkingProtocol === "qwen";
 
   const refreshModels = useCallback(async () => {
     setLoading(true);
@@ -282,6 +289,9 @@ export function ModelSettingsPage({
           name: GAIA_DEFAULTS.name,
           model: GAIA_DEFAULTS.model,
           baseUrl: GAIA_DEFAULTS.baseUrl,
+          // See emptyForm: reasoning effort + thinking_protocol="none" is
+          // rejected by YUMC-style gateways with 400.
+          supportsReasoningEffort: false,
         };
       }
       return {
@@ -290,6 +300,7 @@ export function ModelSettingsPage({
         name: "",
         model: "",
         baseUrl: DEFAULT_BASE_URLS[provider],
+        supportsReasoningEffort: true,
       };
     });
   };
@@ -442,7 +453,7 @@ export function ModelSettingsPage({
             on it would be treated as "outside" by Radix DismissableLayer and
             close the dialog — block that while the guide is active. */}
         <DialogContent
-          className="sm:max-w-lg"
+          className="sm:max-w-2xl max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto]"
           onPointerDownOutside={
             step != null ? (e) => e.preventDefault() : undefined
           }
@@ -461,7 +472,14 @@ export function ModelSettingsPage({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid gap-4">
+          {/* The guide spotlight covers this wrapper (fields + footer), so the
+              save button stays clickable during onboarding step 4. */}
+          <div
+            id="onboarding-add-model-form"
+            className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-4"
+          >
+          <div className="grid min-h-0 gap-4 overflow-y-auto pr-1">
+          <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-2 text-sm">
               <span>{t.settings.models.provider}</span>
               <Select
@@ -480,10 +498,8 @@ export function ModelSettingsPage({
             </label>
           </div>
 
-          {/* Onboarding spotlight starts at the Name field so the dialog
-               header (incl. close button) stays covered during the guide */}
-          <div id="onboarding-add-model-form" className="grid gap-4">
-            <div className="grid gap-4">
+          <div className="grid gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-2 text-sm">
               <span>{t.settings.models.name}</span>
               <Input
@@ -565,7 +581,12 @@ export function ModelSettingsPage({
               />
             </div>
 
-            <div className="flex items-center justify-between rounded-lg border px-3 py-2">
+            <div
+              className={cn(
+                "flex items-center justify-between rounded-lg border px-3 py-2",
+                isQwenProtocol && "opacity-60",
+              )}
+            >
               <div>
                 <p className="text-sm font-medium">
                   {t.settings.models.supportsReasoningEffort}
@@ -573,9 +594,15 @@ export function ModelSettingsPage({
                 <p className="text-muted-foreground text-xs">
                   {t.settings.models.supportsReasoningEffortDescription}
                 </p>
+                {isQwenProtocol && (
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    {t.settings.models.reasoningEffortQwenDisabled}
+                  </p>
+                )}
               </div>
               <Switch
                 checked={form.supportsReasoningEffort}
+                disabled={isQwenProtocol}
                 onCheckedChange={(supportsReasoningEffort) =>
                   setForm((current) => ({
                     ...current,
@@ -585,8 +612,15 @@ export function ModelSettingsPage({
               />
             </div>
 
-            <label className="grid gap-2 text-sm">
-              <span>{t.settings.models.thinkingProtocol}</span>
+            <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 sm:col-span-2">
+              <div>
+                <p className="text-sm font-medium">
+                  {t.settings.models.thinkingProtocol}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  {t.settings.models.thinkingProtocolDescription}
+                </p>
+              </div>
               <Select
                 value={form.thinkingProtocol}
                 onValueChange={(value) =>
@@ -596,7 +630,7 @@ export function ModelSettingsPage({
                   }))
                 }
               >
-                <SelectTrigger>
+                <SelectTrigger className="w-44 shrink-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -608,12 +642,9 @@ export function ModelSettingsPage({
                   </SelectItem>
                 </SelectContent>
               </Select>
-              <span className="text-muted-foreground text-xs">
-                {t.settings.models.thinkingProtocolDescription}
-              </span>
-            </label>
+            </div>
 
-            <div className="flex items-center justify-between rounded-lg border px-3 py-2">
+            <div className="flex items-center justify-between rounded-lg border px-3 py-2 sm:col-span-2">
               <div>
                 <p className="text-sm font-medium">
                   {t.settings.models.enabled}
@@ -629,9 +660,11 @@ export function ModelSettingsPage({
                 }
               />
             </div>
-            </div>
+          </div>
+          </div>
+          </div>
 
-            <DialogFooter>
+          <DialogFooter>
               <Button
                 type="button"
                 variant="outline"
