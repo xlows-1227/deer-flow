@@ -1014,9 +1014,11 @@ export const enUS: Translations = {
         "Pass the reasoning effort parameter (minimal / low / medium / high) to this model.",
       thinkingProtocol: "Thinking protocol",
       thinkingProtocolDescription:
-        "How to switch the provider's thinking mode. Use the Qwen template for vLLM/Qwen deployments that read chat_template_kwargs.enable_thinking.",
+        "How to switch the provider's thinking mode. Choose the vLLM template for deployments that read chat_template_kwargs.enable_thinking.",
       thinkingProtocolNone: "Do not send thinking parameters",
-      thinkingProtocolQwen: "Qwen template (chat_template_kwargs.enable_thinking)",
+      thinkingProtocolQwen: "vLLM template (chat_template_kwargs.enable_thinking)",
+      reasoningEffortQwenDisabled:
+        "This protocol toggles thinking via chat_template_kwargs.enable_thinking, so reasoning effort has no effect.",
       reasoningEffortOverride: "Reasoning effort override",
       reasoningEffortOverrideDescription:
         "Auto follows each mode's default (Thinking/Pro: low, Ultra: high). Set a value to override it for all chats.",
