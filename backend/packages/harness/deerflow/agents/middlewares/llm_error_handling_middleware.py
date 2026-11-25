@@ -20,6 +20,13 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.middlewares.empty_assistant_guard import (
+    EmptyAssistantMessageError,
+    NoSendableMessagesError,
+    ai_message_has_payload,
+    drop_unactionable_assistant_messages,
+    has_sendable_messages,
+)
 from deerflow.agents.middlewares.token_usage_middleware import (
     PublishedRunTokenLimitError,
 )
@@ -257,6 +264,57 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception:
             logger.debug("Failed to emit llm_retry event", exc_info=True)
 
+    @staticmethod
+    def _filter_request_messages(request: ModelRequest) -> ModelRequest:
+        """Drop empty assistant turns from the *outgoing request only*.
+
+        The graph state (and therefore the checkpoint) is never rewritten here:
+        the stored history keeps the message and the WARNING log line is the
+        only trace of the skip.  This is what lets an already-poisoned thread
+        send again without deleting anything.
+        """
+        messages = getattr(request, "messages", None)
+        if not isinstance(messages, (list, tuple)) or not messages:
+            return request
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        thread_id = None
+        if hasattr(context, "get"):
+            thread_id = context.get("thread_id")
+        filtered = drop_unactionable_assistant_messages(
+            messages,
+            thread_id=str(thread_id) if thread_id else None,
+            origin="agent_graph",
+        )
+        if not has_sendable_messages(filtered):
+            raise NoSendableMessagesError(
+                "no sendable messages after dropping empty assistant turns"
+            )
+        if len(filtered) == len(messages):
+            return request
+        return request.override(messages=filtered)
+
+    @staticmethod
+    def _ensure_response_has_payload(response: ModelCallResult) -> None:
+        """Refuse to hand an empty assistant message back to the graph.
+
+        ``AIMessage`` responses and the messages inside ``ModelResponse`` all
+        flow into the ``messages`` channel.  Persisting one with neither text
+        nor tool calls makes every later request fail with a provider 400
+        ("role 'assistant' must not be empty"), so the run must fail before
+        that write happens.
+        """
+        if isinstance(response, AIMessage):
+            messages: list[Any] = [response]
+        else:
+            result = getattr(response, "result", None)
+            messages = result if isinstance(result, list) else []
+        for message in messages:
+            if isinstance(message, AIMessage) and not ai_message_has_payload(message):
+                raise EmptyAssistantMessageError(
+                    "empty assistant response (no text and no tool calls)"
+                )
+
     @override
     def wrap_model_call(
         self,
@@ -266,12 +324,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return AIMessage(content=self._build_circuit_breaker_message())
 
+        request = self._filter_request_messages(request)
+
         retry_count = 0
         while True:
             try:
                 response = handler(request)
-                self._record_success()
-                return response
             except (GraphBubbleUp, PublishedRunTokenLimitError):
                 # Preserve LangGraph control-flow signals and fail-closed
                 # Published runtime policy errors. Turning either into an
@@ -305,6 +363,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 if retriable:
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
+            self._record_success()
+            self._ensure_response_has_payload(response)
+            return response
 
     @override
     async def awrap_model_call(
@@ -315,12 +376,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return AIMessage(content=self._build_circuit_breaker_message())
 
+        request = self._filter_request_messages(request)
+
         retry_count = 0
         while True:
             try:
                 response = await handler(request)
-                self._record_success()
-                return response
             except (GraphBubbleUp, PublishedRunTokenLimitError):
                 # Preserve LangGraph control-flow signals and fail-closed
                 # Published runtime policy errors. Turning either into an
@@ -354,6 +415,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 if retriable:
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
+            self._record_success()
+            self._ensure_response_has_payload(response)
+            return response
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:

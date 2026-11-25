@@ -62,6 +62,9 @@ class RunResponse(BaseModel):
     thread_id: str
     assistant_id: str | None = None
     status: str
+    # Effective model the run actually executed with (reconciliation source for
+    # legacy threads that have no model metadata on the thread record).
+    model_name: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     multitask_strategy: str = "reject"
@@ -115,6 +118,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         thread_id=record.thread_id,
         assistant_id=record.assistant_id,
         status=record.status.value,
+        model_name=record.model_name,
         metadata=record.metadata,
         kwargs=record.kwargs,
         multitask_strategy=record.multitask_strategy,

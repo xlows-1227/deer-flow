@@ -23,6 +23,29 @@ export interface Skill {
   owner_email?: string | null;
   shared_with?: SkillSharedUser[];
   can_edit?: boolean;
+  security_warning_count?: number;
+  security_status?: SkillSecurityStatus;
+  security_reason?: string | null;
+  security_checked_at?: string | null;
+}
+
+export type SkillSecurityStatus = "passed" | "failed" | "unscanned";
+
+export interface SkillSecurityWarning {
+  code: string;
+  severity: "warn";
+  file: string | null;
+  line: number | null;
+  message: string;
+  excerpt_hash: string | null;
+  source: "rules" | "llm";
+}
+
+export interface SkillSecurityReport {
+  content_hash: string | null;
+  scanned_at: string | null;
+  stale: boolean;
+  warnings: SkillSecurityWarning[];
 }
 
 export interface CustomSkill extends Skill {

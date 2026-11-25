@@ -383,6 +383,13 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
+    def get_file_size(self, path: str) -> int | None:
+        """Host-side size lookup so the read guard does not need a shell call."""
+        try:
+            return os.path.getsize(self._resolve_path(path))
+        except OSError:
+            return None
+
     def download_file(self, path: str) -> bytes:
         normalised = path.replace("\\", "/")
         stripped_path = normalised.lstrip("/")

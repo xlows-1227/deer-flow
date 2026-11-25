@@ -173,17 +173,38 @@ class SkillStorage(ABC):
         """
 
     @abstractmethod
-    async def ainstall_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
+    async def ainstall_skill_from_archive(
+        self,
+        archive_path: str | Path,
+        *,
+        skip_security_scan: bool = False,
+        model_name: str | None = None,
+    ) -> dict:
         """Async install of a skill from a ``.skill`` ZIP archive.
+
+        ``model_name`` optionally overrides the model used for the security
+        scan. ``None`` keeps the configured/default scan model.
 
         Origin: ``deerflow.skills.installer.ainstall_skill_from_archive``.
         """
 
-    def install_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
+    def install_skill_from_archive(
+        self,
+        archive_path: str | Path,
+        *,
+        skip_security_scan: bool = False,
+        model_name: str | None = None,
+    ) -> dict:
         """Sync wrapper — delegates to :meth:`ainstall_skill_from_archive`."""
         from deerflow.skills.installer import _run_async_install
 
-        return _run_async_install(self.ainstall_skill_from_archive(archive_path, skip_security_scan=skip_security_scan))
+        return _run_async_install(
+            self.ainstall_skill_from_archive(
+                archive_path,
+                skip_security_scan=skip_security_scan,
+                model_name=model_name,
+            )
+        )
 
     @abstractmethod
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:

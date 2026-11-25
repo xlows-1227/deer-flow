@@ -592,7 +592,15 @@ async def rollup_thread_memory(thread_id: str, request: Request) -> DailyPersonS
     if captured is None:
         return None
 
-    summary = DailyRollupService().rollup_thread_incremental(user_id, thread_id, captured.date)
+    # Memory summarization follows the model the user selected for this thread;
+    # only fall back to the configured memory model when the thread has none.
+    from app.gateway.deps import get_thread_store
+
+    thread_record = await get_thread_store(request).get(thread_id)
+    thread_metadata = (thread_record or {}).get("metadata") or {}
+    thread_model_name = thread_metadata.get("model_name") if isinstance(thread_metadata, dict) else None
+
+    summary = DailyRollupService(model_name=thread_model_name).rollup_thread_incremental(user_id, thread_id, captured.date)
     if summary is not None:
         ProfileConsolidator().rebuild_profile(user_id)
     return summary

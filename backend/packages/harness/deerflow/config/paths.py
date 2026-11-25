@@ -8,6 +8,11 @@ from deerflow.config.runtime_paths import runtime_home
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
+# Image extensions the built-in ``view_image`` tool can decode. Declared here
+# because both the tool and the @-reference middleware already import this
+# module; importing the tool package from the middleware would be circular.
+VIEWABLE_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 

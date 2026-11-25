@@ -803,6 +803,12 @@ export function useThreadStream({
           }),
         );
 
+        const effectiveReasoningEffort =
+          context.mode === "flash"
+            ? undefined
+            : (context.reasoning_effort ??
+              (context.mode === "ultra" ? "high" : "low"));
+
         await thread.submit(
           {
             messages: [
@@ -830,6 +836,18 @@ export function useThreadStream({
             streamResumable: true,
             onDisconnect: "continue",
             multitaskStrategy: options?.multitaskStrategy,
+            // Write the current page selection onto the thread in the same
+            // request that creates it, so the record/chat UI never has to fall
+            // back to a default model while the user has not picked one yet.
+            metadata: {
+              ...(context.model_name
+                ? { model_name: context.model_name }
+                : {}),
+              ...(context.mode ? { mode: context.mode } : {}),
+              ...(effectiveReasoningEffort
+                ? { reasoning_effort: effectiveReasoningEffort }
+                : {}),
+            },
             config: {
               recursion_limit: 1000,
             },
@@ -839,15 +857,11 @@ export function useThreadStream({
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
-              // Per-mode defaults; a global override from the Settings page
-              // (context.reasoning_effort) wins when set. Pro defaults to
-              // "low": its planning power comes from the TodoList middleware,
-              // not reasoning depth, and "low" is significantly faster.
-              reasoning_effort:
-                context.mode === "flash"
-                  ? undefined
-                  : (context.reasoning_effort ??
-                    (context.mode === "ultra" ? "high" : "low")),
+              // Per-mode defaults; an explicit per-thread effort wins when set.
+              // Pro defaults to "low": its planning power comes from the
+              // TodoList middleware, not reasoning depth, and "low" is
+              // significantly faster.
+              reasoning_effort: effectiveReasoningEffort,
               thread_id: threadId,
               skill_name: context.skill_name,
               connector_ids: context.connector_ids,

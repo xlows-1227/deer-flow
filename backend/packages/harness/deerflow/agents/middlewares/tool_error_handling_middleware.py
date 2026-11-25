@@ -185,4 +185,12 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
+    # Subagents can hit the same provider input limit as the lead agent, and
+    # they have no token-usage middleware in this chain.
+    request_budget_config = app_config.request_budget
+    if request_budget_config.enabled:
+        from deerflow.agents.middlewares.request_budget_middleware import RequestBudgetMiddleware
+
+        middlewares.append(RequestBudgetMiddleware.from_config(request_budget_config))
+
     return middlewares

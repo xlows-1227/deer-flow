@@ -225,6 +225,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to start daily memory rollup loop")
 
+        try:
+            from app.gateway.skill_security_scheduler import start_skill_security_rescan_loop
+
+            start_skill_security_rescan_loop(app)
+        except Exception:
+            logger.exception("Failed to start skill security rescan loop")
+
         # Warm caches for the hot path (flash direct model) so the first
         # user request does not pay the cold-start penalty of loading skills
         # and constructing chat model instances.
@@ -385,6 +392,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop daily memory rollup loop")
+
+        try:
+            from app.gateway.skill_security_scheduler import stop_skill_security_rescan_loop
+
+            await asyncio.wait_for(
+                stop_skill_security_rescan_loop(app),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Skill security rescan loop shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to stop skill security rescan loop")
 
         quota_tasks = set(getattr(app.state, "agent_quota_tasks", ()) or ())
         if quota_tasks:

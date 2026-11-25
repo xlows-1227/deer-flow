@@ -12,9 +12,12 @@ import posixpath
 import shutil
 import stat
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from deerflow.skills.security_scanner import create_scan_model, get_scan_concurrency, scan_skill_content
+from deerflow.skills.content_rules import scan_content_rules
+from deerflow.skills.security_report import STATUS_FAILED, STATUS_PASSED, STATUS_UNSCANNED
+from deerflow.skills.security_scanner import SkillScanModelError, create_scan_model, get_scan_concurrency, scan_skill_content
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,18 @@ class SkillSecurityScanError(ValueError):
         super().__init__(message)
         self.reason = reason or message
         self.can_force = can_force
+
+
+class SkillScanModelUnavailableError(Exception):
+    """Raised when the model chosen for the security scan cannot be used.
+
+    Deliberately not a ``ValueError`` so route handlers do not mistake it for
+    an invalid archive.
+    """
+
+    def __init__(self, message: str, *, model_name: str | None = None) -> None:
+        super().__init__(message)
+        self.model_name = model_name
 
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
@@ -199,47 +214,129 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
             shutil.rmtree(target)
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, model=None) -> None:
+async def _screen_skill_file(
+    skill_dir: Path,
+    path: Path,
+    skill_name: str,
+    *,
+    executable: bool,
+    model=None,
+    advisory_enabled: bool = True,
+) -> list[dict]:
+    """Screen one file: deterministic rules block, LLM advice only warns.
+
+    ``advisory_enabled=False`` (the ``force`` path) skips the LLM call and the
+    rule warnings, but deterministic ``block`` findings are always enforced.
+    """
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as e:
-        raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8", can_force=True) from e
+        raise SkillSecurityScanError(
+            f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8",
+            can_force=False,
+        ) from e
+
+    findings = scan_content_rules(content, location=location, executable=executable)
+    blocking = [finding for finding in findings if finding.severity == "block"]
+    if blocking:
+        first = blocking[0]
+        raise SkillSecurityScanError(
+            f"Security scan blocked {location}: rule '{first.rule_id}' at line {first.line}.",
+            reason=f"{first.rule_id} at line {first.line}",
+            can_force=False,
+        )
+
+    if not advisory_enabled:
+        return []
+
+    warnings = [finding.as_dict(file=location) for finding in findings]
+
+    if model is None:
+        warnings.append(
+            {
+                "code": "llm_scan_skipped",
+                "severity": "warn",
+                "file": location,
+                "line": None,
+                "message": "LLM advisory review was skipped because no scan model was available.",
+                "excerpt_hash": None,
+                "source": "llm",
+            }
+        )
+        return warnings
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location, model=model)
-    except Exception as e:
-        raise SkillSecurityScanError(f"Security scan failed for {location}: {e}", reason=str(e), can_force=True) from e
+        result = await scan_skill_content(content=content, executable=executable, location=location, model=model)
+    except Exception:  # noqa: BLE001 - advisory must never block an upload
+        logger.warning("LLM skill review failed for %s; continuing with warnings only", location, exc_info=True)
+        warnings.append(
+            {
+                "code": "llm_scan_skipped",
+                "severity": "warn",
+                "file": location,
+                "line": None,
+                "message": "LLM advisory review failed or timed out; review was not blocking.",
+                "excerpt_hash": None,
+                "source": "llm",
+            }
+        )
+        return warnings
 
-    decision = getattr(result, "decision", None)
-    reason = str(getattr(result, "reason", "") or "No reason provided.")
-    if decision == "block":
-        if rel_path == "SKILL.md":
-            raise SkillSecurityScanError(f"Security scan blocked skill '{skill_name}': {reason}", reason=reason, can_force=True)
-        raise SkillSecurityScanError(f"Security scan blocked {location}: {reason}", reason=reason, can_force=True)
-    if executable and decision != "allow":
-        raise SkillSecurityScanError(f"Security scan rejected executable {location}: {reason}", reason=reason, can_force=True)
-    if decision not in {"allow", "warn"}:
-        raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}", reason=reason, can_force=True)
+    if getattr(result, "skipped", False):
+        warnings.append(
+            {
+                "code": "llm_scan_skipped",
+                "severity": "warn",
+                "file": location,
+                "line": None,
+                "message": "LLM advisory review was unavailable; review was not blocking.",
+                "excerpt_hash": None,
+                "source": "llm",
+            }
+        )
+    elif result.decision in {"warn", "block"}:
+        # The model's reason is intentionally not echoed: it may quote content.
+        warnings.append(
+            {
+                "code": "llm_security_flag",
+                "severity": "warn",
+                "file": location,
+                "line": None,
+                "message": f"LLM advisory review flagged this file ({result.decision}).",
+                "excerpt_hash": None,
+                "source": "llm",
+                "decision": result.decision,
+            }
+        )
+    return warnings
 
 
-async def _scan_paths_or_raise(
+async def _screen_paths(
     skill_dir: Path,
     targets: list[tuple[Path, bool]],
     skill_name: str,
     *,
     model,
     max_concurrency: int,
-) -> None:
-    """Scan support files concurrently; fail fast on the first rejection."""
+    advisory_enabled: bool = True,
+) -> list[dict]:
+    """Screen support files concurrently; raise on the first deterministic block."""
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _scan_one(path: Path, executable: bool) -> None:
+    async def _screen_one(path: Path, executable: bool) -> list[dict]:
         async with semaphore:
-            await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=executable, model=model)
+            return await _screen_skill_file(
+                skill_dir,
+                path,
+                skill_name,
+                executable=executable,
+                model=model,
+                advisory_enabled=advisory_enabled,
+            )
 
-    tasks = [asyncio.create_task(_scan_one(path, executable)) for path, executable in targets]
+    tasks = [asyncio.create_task(_screen_one(path, executable)) for path, executable in targets]
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in pending:
@@ -250,6 +347,11 @@ async def _scan_paths_or_raise(
             exception = task.exception()
             if exception is not None:
                 raise exception
+        warnings: list[dict] = []
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                warnings.extend(task.result())
+        return warnings
     finally:
         leftover = [task for task in tasks if not task.done()]
         for task in leftover:
@@ -258,21 +360,49 @@ async def _scan_paths_or_raise(
             await asyncio.gather(*leftover, return_exceptions=True)
 
 
-async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, skip_security_scan: bool = False) -> None:
-    """Run the skill security scanner against all installable text and script files."""
+@dataclass(slots=True)
+class ScreeningOutcome:
+    """Result of a full skill screen.
+
+    ``status`` is ``passed`` / ``failed`` / ``unscanned``.  ``failed`` means the
+    advisory LLM review explicitly flagged the content as unsafe; the skill is
+    still installed (the uploader sees a warning) but is hidden from the model.
+    ``unscanned`` means the LLM review did not run, so the background rescan
+    will pick the skill up later.
+    """
+
+    warnings: list[dict]
+    status: str
+    reason: str | None
+
+
+async def _screen_skill_archive_contents(
+    skill_dir: Path,
+    skill_name: str,
+    *,
+    skip_warnings: bool = False,
+    model_name: str | None = None,
+) -> ScreeningOutcome:
+    """Screen all installable text and script files and return advisory warnings.
+
+    Deterministic rule violations raise :class:`SkillSecurityScanError` with
+    ``can_force=False``.  Everything else (rule warnings, LLM flags, LLM
+    unavailability) is returned for the uploader to see and for auditing.
+    """
     skill_md = skill_dir / "SKILL.md"
     scan_model = None
-    if not skip_security_scan:
+    if not skip_warnings:
         try:
-            scan_model = create_scan_model()
-        except Exception:
-            # Keep the previous behaviour: a per-file attempt inside
-            # scan_skill_content applies the conservative degradation rules.
-            logger.warning("Security scan model unavailable; falling back to per-file creation", exc_info=True)
+            scan_model = create_scan_model(model_name=model_name)
+        except SkillScanModelError as e:
+            # Advisory only: a missing/broken model must not fail the upload.
+            logger.warning("Skill security review model unavailable: %s", e)
             scan_model = None
-        await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, model=scan_model)
 
-    scan_targets: list[tuple[Path, bool]] = []
+    # SKILL.md is screened first for ordering, but all targets run concurrently
+    # so a deterministic block is detected immediately instead of waiting for a
+    # slow LLM review of another file.
+    scan_targets: list[tuple[Path, bool]] = [(skill_md, False)]
     for path in sorted(skill_dir.rglob("*")):
         if not path.is_file():
             continue
@@ -281,22 +411,46 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
         if rel_path == Path("SKILL.md"):
             continue
         if path.name == "SKILL.md":
-            raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
-        if skip_security_scan:
-            continue
+            raise SkillSecurityScanError(
+                f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}",
+                can_force=False,
+            )
         if not _should_scan_support_file(rel_path):
             continue
 
         scan_targets.append((path, _is_script_support_file(rel_path)))
 
-    if scan_targets:
-        await _scan_paths_or_raise(
-            skill_dir,
-            scan_targets,
-            skill_name,
-            model=scan_model,
-            max_concurrency=get_scan_concurrency(),
+    warnings = await _screen_paths(
+        skill_dir,
+        scan_targets,
+        skill_name,
+        model=scan_model,
+        max_concurrency=get_scan_concurrency(),
+        advisory_enabled=not skip_warnings,
+    )
+
+    if skip_warnings:
+        return ScreeningOutcome(
+            warnings=[],
+            status=STATUS_UNSCANNED,
+            reason="security warnings were skipped by an explicit force request; pending background rescan",
         )
+
+    skipped_warnings = [warning for warning in warnings if warning.get("code") == "llm_scan_skipped"]
+    blocking_flags = [warning for warning in warnings if warning.get("decision") == "block"]
+    if skipped_warnings:
+        return ScreeningOutcome(
+            warnings=warnings,
+            status=STATUS_UNSCANNED,
+            reason="LLM advisory review was unavailable; pending background rescan",
+        )
+    if blocking_flags:
+        return ScreeningOutcome(
+            warnings=warnings,
+            status=STATUS_FAILED,
+            reason=f"LLM advisory review flagged {blocking_flags[0].get('file') or 'skill content'} as unsafe",
+        )
+    return ScreeningOutcome(warnings=warnings, status=STATUS_PASSED, reason=None)
 
 
 def _run_async_install(coro):

@@ -38,15 +38,16 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.request_budget_middleware import RequestBudgetMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_call_text_parser_middleware import (
     ToolCallTextParserMiddleware,
 )
-from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
-from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
@@ -200,7 +201,7 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None, memory_enabled: bool | None = None) -> DeerFlowSummarizationMiddleware | None:
+def _create_summarization_middleware(*, app_config: AppConfig | None = None, memory_enabled: bool | None = None, model_name: str | None = None) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
     resolved_app_config = app_config or get_app_config()
     config = resolved_app_config.summarization
@@ -227,8 +228,13 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None, mem
     # ``_make_lead_agent``) already carries tracing callbacks; binding them
     # again at the model level would emit duplicate spans and break
     # ``session_id`` / ``user_id`` propagation.
-    if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
+    #
+    # Summarization follows the model the user selected for this thread (the
+    # resolved runtime ``model_name``); the configured summarization model is
+    # only a fallback for callers that do not have a thread selection.
+    effective_model_name = model_name or config.model_name
+    if effective_model_name:
+        model = create_chat_model(name=effective_model_name, thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     else:
         model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     model = model.with_config(tags=["middleware:summarize"])
@@ -482,7 +488,7 @@ def _build_middlewares(
     # Published Runs cannot invoke auxiliary/global models: the immutable
     # Release model and one Run token budget govern every model call.
     if not is_published:
-        summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+        summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config, model_name=model_name)
         if summarization_middleware is not None:
             middlewares.append(summarization_middleware)
 
@@ -541,6 +547,13 @@ def _build_middlewares(
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
+    # RequestBudgetMiddleware — replace the longest tool results with a head +
+    # tail preview when the outbound request would exceed the provider limit.
+    # Registered just before token accounting so both see the final request.
+    request_budget_config = resolved_app_config.request_budget
+    if request_budget_config.enabled:
+        middlewares.append(RequestBudgetMiddleware.from_config(request_budget_config))
 
     # Keep token accounting/capping inside every request-rewriting middleware
     # (loop warnings, images, deferred tools, and custom middleware) so the

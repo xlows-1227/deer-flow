@@ -5,6 +5,7 @@ import re
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -20,9 +21,16 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.models import create_chat_model
 from deerflow.persistence.skill_share.store import SkillShareRepository
 from deerflow.skills import Skill
+from deerflow.skills.content_rules import scan_content_rules
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.parser import parse_skill_file
-from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.security_report import (
+    dismiss_warnings,
+    effective_warnings,
+    mark_skill_unscanned,
+    read_security_status,
+    warning_count,
+)
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
 
@@ -38,6 +46,23 @@ def _format_upload_limit(size: int) -> str:
     if size % (1024 * 1024) == 0:
         return f"{size // (1024 * 1024)} MiB"
     return f"{size} bytes"
+
+
+def _resolve_scan_model_name(config: AppConfig, model_name: str | None) -> str | None:
+    """Resolve an optional security-scan model override.
+
+    Only names in the request-scoped effective config are honoured, so a caller
+    cannot reach another user's model.  An unknown name is advisory noise only:
+    it falls back to the configured default instead of failing the upload.
+    """
+    requested = (model_name or "").strip() or None
+    if requested is None:
+        return None
+    available = {model.name for model in getattr(config, "models", ()) or ()}
+    if requested not in available:
+        logger.warning("Requested security-scan model %s is unavailable; using the default model", requested)
+        return None
+    return requested
 
 
 async def _write_skill_archive_upload_to_temp_file(file: UploadFile, suffix: str) -> Path:
@@ -80,6 +105,16 @@ class SkillResponse(BaseModel):
         description="Custom-skill share recipients (sharees).  Each entry has keys 'id', 'email', 'system_role'.  Empty for public skills.",
     )
     can_edit: bool = Field(True, description="Whether the caller may mutate this skill.  Shared custom skills are read-only for sharees.")
+    security_warning_count: int = Field(
+        0,
+        description="Number of active (non-dismissed) security warnings for a custom skill.",
+    )
+    security_status: str = Field(
+        "unscanned",
+        description="Custom skill security status: 'passed', 'failed' or 'unscanned'.",
+    )
+    security_reason: str | None = Field(None, description="Why the status is 'failed' or 'unscanned'.")
+    security_checked_at: str | None = Field(None, description="When the security status was last updated.")
 
 
 class SkillShareUserInfo(BaseModel):
@@ -139,12 +174,43 @@ class SkillInstallRequest(BaseModel):
     path: str = Field(..., description="Virtual path to the .skill file (e.g., mnt/user-data/outputs/my-skill.skill)")
 
 
+class SkillSecurityWarning(BaseModel):
+    """One non-blocking security warning for an installed skill."""
+
+    code: str = Field(..., description="Rule id or 'llm_scan_skipped' / 'llm_security_flag'")
+    severity: str = Field("warn", description="Always 'warn' today; block findings are rejected instead")
+    file: str | None = Field(None, description="Skill-relative file path")
+    line: int | None = Field(None, description="1-based line number when known")
+    message: str = Field(..., description="Human-readable description; never contains the raw snippet")
+    excerpt_hash: str | None = Field(None, description="Hash of the matched snippet for correlation")
+    source: str = Field("rules", description="'rules' or 'llm'")
+
+
 class SkillInstallResponse(BaseModel):
     """Response model for skill installation."""
 
     success: bool = Field(..., description="Whether the installation was successful")
     skill_name: str = Field(..., description="Name of the installed skill")
     message: str = Field(..., description="Installation result message")
+    warnings: list[SkillSecurityWarning] = Field(
+        default_factory=list,
+        description="Advisory security warnings (deterministic rules + LLM review).  They never block the install.",
+    )
+
+
+class SkillSecurityReportResponse(BaseModel):
+    """Current security report of a custom skill."""
+
+    content_hash: str | None = Field(None, description="Content hash the warnings were computed for")
+    scanned_at: str | None = Field(None, description="When the security report was generated")
+    stale: bool = Field(False, description="True when the skill content changed since the last scan")
+    warnings: list[SkillSecurityWarning] = Field(default_factory=list)
+
+
+class SkillSecurityDismissRequest(BaseModel):
+    """Dismiss selected warnings for the current content hash."""
+
+    codes: list[str] = Field(..., min_length=1, description="Warning codes to dismiss for this content version")
 
 
 class SkillUploadErrorDetail(BaseModel):
@@ -317,6 +383,14 @@ async def _require_system_admin(http_request: Request) -> None:
         raise HTTPException(status_code=403, detail="Permission denied: system:admin")
 
 
+def _mark_custom_skill_unscanned(storage: Any, skill_name: str) -> None:
+    """Reset the security status after an edit (never calls the model here)."""
+    try:
+        mark_skill_unscanned(storage.get_custom_skill_dir(skill_name))
+    except Exception:
+        logger.warning("Failed to reset security status for skill %s", skill_name, exc_info=True)
+
+
 def _skill_to_response(
     skill: Skill,
     *,
@@ -335,12 +409,21 @@ def _skill_to_response(
     effective_owner_email: str | None = None
     effective_shared_with: list[dict] = []
     effective_can_edit: bool = True
+    security_warning_count = 0
+    security_status = "unscanned"
+    security_reason: str | None = None
+    security_checked_at: str | None = None
     if skill.category == SkillCategory.CUSTOM:
         download_url = f"/api/skills/custom/{skill.name}/download"
         effective_owner_id = skill.owner_user_id
         effective_owner_email = owner_email
         effective_shared_with = [s.model_dump(mode="json") for s in (shared_with or [])]
         effective_can_edit = can_edit
+        security_warning_count = warning_count(skill.skill_dir)
+        status_info = read_security_status(skill.skill_dir)
+        security_status = status_info["status"]
+        security_reason = status_info["reason"]
+        security_checked_at = status_info["checked_at"]
     return SkillResponse(
         name=skill.name,
         description=skill.description,
@@ -354,6 +437,10 @@ def _skill_to_response(
         owner_email=effective_owner_email,
         shared_with=effective_shared_with,
         can_edit=effective_can_edit,
+        security_warning_count=security_warning_count,
+        security_status=security_status,
+        security_reason=security_reason,
+        security_checked_at=security_checked_at,
     )
 
 
@@ -732,6 +819,14 @@ async def install_skill(request: SkillInstallRequest, config: AppConfig = Depend
         raise HTTPException(status_code=404, detail=str(e))
     except SkillAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except SkillSecurityScanError as e:
+        detail = SkillUploadErrorDetail(
+            code="security_scan_failed",
+            message=str(e),
+            reason=e.reason,
+            can_force=e.can_force,
+        )
+        raise HTTPException(status_code=400, detail=detail.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -779,9 +874,18 @@ async def create_custom_skill(request: Request, body: CustomSkillCreateRequest, 
 
         content = body.content or _build_default_skill_content(skill_name, body.description.strip(), body.allowed_tools)
         storage.validate_skill_markdown_content(skill_name, content)
-        scan = await scan_skill_content(content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
-        if scan.decision == "block":
-            raise HTTPException(status_code=400, detail=f"Security scan blocked the create: {scan.reason}")
+        # Deterministic rules only: no synchronous model call on save.  The
+        # security status becomes "unscanned" and the background loop reviews it.
+        blocking = [
+            finding
+            for finding in scan_content_rules(content, location=f"{skill_name}/{SKILL_MD_FILE}", executable=False)
+            if finding.severity == "block"
+        ]
+        if blocking:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Security scan blocked the create: {blocking[0].rule_id} at line {blocking[0].line}",
+            )
 
         storage.write_custom_skill(skill_name, SKILL_MD_FILE, content)
         storage.append_history(
@@ -793,9 +897,10 @@ async def create_custom_skill(request: Request, body: CustomSkillCreateRequest, 
                 "file_path": SKILL_MD_FILE,
                 "prev_content": None,
                 "new_content": content,
-                "scanner": {"decision": scan.decision, "reason": scan.reason},
+                "scanner": {"status": "unscanned", "reason": "pending background rescan"},
             },
         )
+        _mark_custom_skill_unscanned(storage, skill_name)
         try:
             storage.create_skill_version(
                 skill_name,
@@ -833,18 +938,24 @@ async def draft_custom_skill_with_ai(request: SkillAIDraftRequest, config: AppCo
 @router.post("/skills/upload", response_model=SkillInstallResponse, summary="Upload Skill Archive")
 async def upload_skill_archive(
     file: UploadFile = File(...),
-    force: bool = Query(False, description="Skip user-overridable skill security scan checks after explicit user confirmation."),
+    force: bool = Query(False, description="Skip warn-level security findings and the advisory LLM review after explicit user confirmation. Blocking rule findings cannot be forced."),
+    model_name: str | None = Form(None, description="Optional model name used for the security scan; omit to use the configured default."),
     config: AppConfig = Depends(get_config),
 ) -> SkillInstallResponse:
     filename = file.filename or "skill.skill"
     suffix = Path(filename).suffix.lower()
     if suffix not in {".skill", ".zip"}:
         raise HTTPException(status_code=400, detail="File must have .skill or .zip extension")
+    scan_model_name = _resolve_scan_model_name(config, model_name)
     try:
         tmp_path = await _write_skill_archive_upload_to_temp_file(file, suffix)
         try:
             storage = get_or_new_skill_storage(app_config=config)
-            result = await storage.ainstall_skill_from_archive(tmp_path, skip_security_scan=force)
+            result = await storage.ainstall_skill_from_archive(
+                tmp_path,
+                skip_security_scan=force,
+                model_name=scan_model_name,
+            )
             skill_name = result.get("skill_name")
             if skill_name:
                 try:
@@ -1280,11 +1391,14 @@ async def _write_custom_skill_support_file(
 ) -> str:
     normalized_path = path.replace("\\", "/").lstrip("/")
     executable = normalized_path.startswith("scripts/") or "/scripts/" in f"/{normalized_path}/"
-    scan = await scan_skill_content(content, executable=executable, location=f"{skill_name}/{normalized_path}", app_config=config)
-    if scan.decision == "block":
-        raise HTTPException(status_code=400, detail=f"Security scan blocked the write: {scan.reason}")
-    if executable and scan.decision != "allow":
-        raise HTTPException(status_code=400, detail=f"Security scan rejected executable content: {scan.reason}")
+    findings = scan_content_rules(content, location=f"{skill_name}/{normalized_path}", executable=executable)
+    blocking = [finding for finding in findings if finding.severity == "block"]
+    if blocking:
+        first = blocking[0]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Security scan blocked the write: rule '{first.rule_id}' at line {first.line}.",
+        )
     target = storage.ensure_safe_support_path(skill_name, normalized_path)
     prev_content = target.read_text(encoding="utf-8") if target.exists() else None
     storage.write_custom_skill(skill_name, normalized_path, content)
@@ -1297,9 +1411,14 @@ async def _write_custom_skill_support_file(
             "file_path": normalized_path,
             "prev_content": prev_content,
             "new_content": content,
-            "scanner": {"decision": scan.decision, "reason": scan.reason},
+            "scanner": {
+                "status": "unscanned",
+                "reason": "content changed; pending background rescan",
+                "rules": [finding.as_dict(file=normalized_path) for finding in findings],
+            },
         },
     )
+    _mark_custom_skill_unscanned(storage, skill_name)
     return normalized_path
 
 
@@ -1368,9 +1487,13 @@ async def delete_custom_skill_file(skill_name: str, path: str, config: AppConfig
                 "file_path": normalized_path,
                 "prev_content": prev_content,
                 "new_content": None,
-                "scanner": {"decision": "allow", "reason": "File deletion requested."},
+                "scanner": {
+                    "status": "unscanned",
+                    "reason": "content changed; pending background rescan",
+                },
             },
         )
+        _mark_custom_skill_unscanned(storage, skill_name)
         await refresh_skills_system_prompt_cache_async()
         return {"success": True}
     except FileNotFoundError as e:
@@ -1447,7 +1570,10 @@ async def upload_custom_skill_files(
                         "file_path": normalized_path,
                         "prev_content": None,
                         "new_content": None,
-                        "scanner": {"decision": "allow", "reason": "Binary upload."},
+                        "scanner": {
+                            "status": "unscanned",
+                            "reason": "content changed; pending background rescan",
+                        },
                     },
                 )
             else:
@@ -1460,6 +1586,7 @@ async def upload_custom_skill_files(
                     author="human",
                 )
             uploaded_paths.append(normalized_path)
+        _mark_custom_skill_unscanned(storage, skill_name)
         await refresh_skills_system_prompt_cache_async()
         return CustomSkillUploadResponse(paths=uploaded_paths)
     except HTTPException:
@@ -1480,9 +1607,14 @@ async def update_custom_skill(skill_name: str, req: Request, body: CustomSkillUp
         storage = get_or_new_skill_storage(app_config=config)
         storage.ensure_custom_skill_is_editable(skill_name)
         storage.validate_skill_markdown_content(skill_name, body.content)
-        scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
-        if scan.decision == "block":
-            raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
+        findings = scan_content_rules(body.content, location=f"{skill_name}/{SKILL_MD_FILE}", executable=False)
+        blocking = [finding for finding in findings if finding.severity == "block"]
+        if blocking:
+            first = blocking[0]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Security scan blocked the edit: rule '{first.rule_id}' at line {first.line}.",
+            )
         prev_content = storage.read_custom_skill(skill_name) if storage.custom_skill_exists(skill_name) else None
         storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
         storage.append_history(
@@ -1494,9 +1626,14 @@ async def update_custom_skill(skill_name: str, req: Request, body: CustomSkillUp
                 "file_path": SKILL_MD_FILE,
                 "prev_content": prev_content,
                 "new_content": body.content,
-                "scanner": {"decision": scan.decision, "reason": scan.reason},
+                "scanner": {
+                    "status": "unscanned",
+                    "reason": "content changed; pending background rescan",
+                    "rules": [finding.as_dict(file=SKILL_MD_FILE) for finding in findings],
+                },
             },
         )
+        _mark_custom_skill_unscanned(storage, skill_name)
         await refresh_skills_system_prompt_cache_async()
         return await _get_custom_skill_response(skill_name, req, config, share_repo)
     except HTTPException:
@@ -1553,6 +1690,73 @@ async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(
     except Exception as e:
         logger.error("Failed to read history for %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read history: {str(e)}")
+
+
+@router.get(
+    "/skills/custom/{skill_name}/security",
+    response_model=SkillSecurityReportResponse,
+    summary="Get Custom Skill Security Report",
+)
+async def get_custom_skill_security_report(
+    skill_name: str,
+    config: AppConfig = Depends(get_config),
+) -> SkillSecurityReportResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        if not storage.custom_skill_exists(skill_name):
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        report = effective_warnings(storage.get_custom_skill_dir(skill_name))
+        return SkillSecurityReportResponse(**report)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to read security report for %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to read security report: {str(e)}")
+
+
+@router.post(
+    "/skills/custom/{skill_name}/security/dismiss",
+    response_model=SkillSecurityReportResponse,
+    summary="Dismiss Custom Skill Security Warnings",
+)
+async def dismiss_custom_skill_security_warnings(
+    skill_name: str,
+    payload: SkillSecurityDismissRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillSecurityReportResponse:
+    """Dismiss warnings for the current content hash only.
+
+    A later content change invalidates the dismissal, so warnings reappear.
+    The dismissal is recorded in the skill history for auditing.
+    """
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        storage = get_or_new_skill_storage(app_config=config)
+        if not storage.custom_skill_exists(skill_name):
+            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+        storage.ensure_custom_skill_is_editable(skill_name)
+        auth = getattr(request.state, "auth", None)
+        actor = str(getattr(auth, "user_id", "") or "unknown")
+        report = dismiss_warnings(storage.get_custom_skill_dir(skill_name), payload.codes, actor=actor)
+        storage.append_history(
+            skill_name,
+            {
+                "action": "security_warning_dismissal",
+                "author": actor,
+                "content_hash": report.get("content_hash"),
+                "codes": sorted(set(payload.codes)),
+            },
+        )
+        return SkillSecurityReportResponse(**report)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to dismiss security warnings for %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to dismiss security warnings: {str(e)}")
 
 
 @router.get("/skills/custom/{skill_name}/versions", response_model=CustomSkillVersionsResponse, summary="List Custom Skill Versions")
@@ -1643,6 +1847,7 @@ async def restore_custom_skill_version(skill_name: str, seq: int, config: AppCon
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = get_or_new_skill_storage(app_config=config)
         record = storage.restore_skill_version(skill_name, seq, author="human", thread_id=None)
+        _mark_custom_skill_unscanned(storage, skill_name)
         await refresh_skills_system_prompt_cache_async()
         return CustomSkillVersionRestoreResponse(version=record)
     except FileNotFoundError as e:
@@ -1668,7 +1873,8 @@ async def rollback_custom_skill(skill_name: str, req: Request, body: SkillRollba
         if target_content is None:
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
         storage.validate_skill_markdown_content(skill_name, target_content)
-        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
+        findings = scan_content_rules(target_content, location=f"{skill_name}/{SKILL_MD_FILE}", executable=False)
+        blocking = [finding for finding in findings if finding.severity == "block"]
         skill_file = storage.get_custom_skill_file(skill_name)
         current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
         history_entry = {
@@ -1679,13 +1885,22 @@ async def rollback_custom_skill(skill_name: str, req: Request, body: SkillRollba
             "prev_content": current_content,
             "new_content": target_content,
             "rollback_from_ts": record.get("ts"),
-            "scanner": {"decision": scan.decision, "reason": scan.reason},
+            "scanner": {
+                "status": "unscanned",
+                "reason": "content changed; pending background rescan",
+                "rules": [finding.as_dict(file=SKILL_MD_FILE) for finding in findings],
+            },
         }
-        if scan.decision == "block":
+        if blocking:
+            first = blocking[0]
             storage.append_history(skill_name, history_entry)
-            raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rollback blocked by security scanner: rule '{first.rule_id}' at line {first.line}.",
+            )
         storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
         storage.append_history(skill_name, history_entry)
+        _mark_custom_skill_unscanned(storage, skill_name)
         await refresh_skills_system_prompt_cache_async()
         return await _get_custom_skill_response(skill_name, req, config, share_repo)
     except HTTPException:

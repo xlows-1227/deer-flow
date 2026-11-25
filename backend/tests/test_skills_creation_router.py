@@ -42,7 +42,6 @@ def _make_client(
     app.include_router(skills_router.router)
 
     monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda app_config=None: storage)
-    monkeypatch.setattr(skills_router, "scan_skill_content", allow_scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", refresh_cache)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", allow_scan)
 
@@ -133,8 +132,16 @@ def test_ai_draft_returns_model_generated_skill_markdown(tmp_path, monkeypatch):
 
 
 def test_upload_skill_archive_accepts_zip(tmp_path, monkeypatch):
+    from deerflow.skills.security_scanner import ScanResult
+
     client, storage = _make_client(tmp_path, monkeypatch)
     archive_path = _make_skill_archive(tmp_path, "uploaded-zip-skill", ".zip")
+
+    async def _allow(*args, **kwargs):
+        return ScanResult(decision="allow", reason="ok")
+
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: object())
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow)
 
     with archive_path.open("rb") as file:
         response = client.post(
@@ -147,6 +154,35 @@ def test_upload_skill_archive_accepts_zip(tmp_path, monkeypatch):
     assert body["success"] is True
     assert body["skill_name"] == "uploaded-zip-skill"
     assert storage.get_custom_skill_file("uploaded-zip-skill").exists()
+
+
+def test_upload_skill_archive_reports_model_unavailable(tmp_path, monkeypatch):
+    """A broken scan model installs the skill as ``unscanned`` for a later rescan."""
+    from deerflow.skills.security_report import read_security_status
+    from deerflow.skills.security_scanner import SkillScanModelError
+
+    client, storage = _make_client(tmp_path, monkeypatch)
+    archive_path = _make_skill_archive(tmp_path, "scan-model-down", ".zip")
+
+    def _create(**kwargs):
+        raise SkillScanModelError("429 quota exceeded", model_name=kwargs.get("model_name"))
+
+    monkeypatch.setattr("deerflow.skills.installer.create_scan_model", _create)
+
+    with archive_path.open("rb") as file:
+        response = client.post(
+            "/api/skills/upload",
+            files={"file": ("scan-model-down.zip", file, "application/zip")},
+        )
+
+    assert response.status_code == 200
+    warnings = response.json()["warnings"]
+    assert [warning["code"] for warning in warnings] == ["llm_scan_skipped"]
+    skill_file = storage.get_custom_skill_file("scan-model-down")
+    assert skill_file.exists()
+    status = read_security_status(skill_file.parent)
+    assert status["status"] == "unscanned"
+    assert "model" in status["reason"].lower() or "advisory" in status["reason"].lower()
 
 
 def test_upload_skill_archive_rejects_over_limit_and_removes_temp_file(tmp_path, monkeypatch):

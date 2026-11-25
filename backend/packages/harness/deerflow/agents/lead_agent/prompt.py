@@ -576,9 +576,34 @@ You have access to skills that provide optimized workflows for specific tasks. E
 </skill_system>"""
 
 
+def _exclude_failed_security_skills(skills: list[Skill]) -> list[Skill]:
+    """Return the skills that may be exposed to the model.
+
+    This is the *only* place that decides skill visibility for the agent: a
+    skill whose persisted security status is ``failed`` is not injected into
+    the prompt (and therefore cannot be invoked).  ``passed`` and
+    ``unscanned`` remain available so a model outage does not disable skills.
+    """
+    from deerflow.skills.security_report import STATUS_FAILED, read_security_status
+
+    visible: list[Skill] = []
+    for skill in skills:
+        skill_dir = getattr(skill, "skill_dir", None)
+        if skill_dir is None:
+            visible.append(skill)
+            continue
+        try:
+            if read_security_status(skill_dir)["status"] == STATUS_FAILED:
+                continue
+        except Exception:
+            logger.warning("Could not read security status for skill %s", getattr(skill, "name", "?"), exc_info=True)
+        visible.append(skill)
+    return visible
+
+
 def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_config: AppConfig | None = None) -> str:
     """Generate the skills prompt section with available skills list."""
-    skills = get_enabled_skills_for_config(app_config)
+    skills = _exclude_failed_security_skills(get_enabled_skills_for_config(app_config))
 
     if app_config is None:
         try:

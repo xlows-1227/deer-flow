@@ -136,3 +136,24 @@ class Sandbox(ABC):
             OSError: If the sandbox cannot remove the file.
         """
         self.execute_command(f"rm -f -- {shlex.quote(path)}")
+
+    def get_file_size(self, path: str) -> int | None:
+        """Return the size of a sandbox file in bytes, or ``None`` when unknown.
+
+        The default implementation asks a POSIX shell for the size via ``wc -c``
+        (portable across GNU/Linux, BSD and macOS; ``stat -c`` is GNU-only).
+        Callers must treat ``None`` as "cannot tell" and continue with the
+        original behaviour, so a sandbox that cannot answer never blocks a read.
+
+        Sandboxes that are not POSIX shell based (e.g. Windows hosts without a
+        POSIX shell) should override this method.
+        """
+        try:
+            output = self.execute_command(f"wc -c < {shlex.quote(path)}")
+        except Exception:  # noqa: BLE001 - size probing must never break a read
+            return None
+        for line in reversed((output or "").strip().splitlines()):
+            candidate = line.strip()
+            if candidate.isdigit():
+                return int(candidate)
+        return None

@@ -1127,3 +1127,69 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 
     # DeepSeek normalizes "minimal" to "low", and kwargs (runtime) takes precedence over config
     assert captured.get("reasoning_effort") == "low"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic protocol must never receive reasoning_effort
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_model_drops_reasoning_effort(monkeypatch, caplog):
+    """Anthropic's messages.create() rejects reasoning_effort, so the factory must strip it."""
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "anthropic-shim",
+                use="langchain_anthropic:ChatAnthropic",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    with caplog.at_level("WARNING"):
+        factory_module.create_chat_model(
+            name="anthropic-shim",
+            thinking_enabled=True,
+            reasoning_effort="low",
+        )
+
+    assert "reasoning_effort" not in captured
+    assert any("does not accept `reasoning_effort`" in record.message for record in caplog.records)
+
+
+def test_openai_model_keeps_reasoning_effort(monkeypatch):
+    """OpenAI-compatible models keep reasoning_effort when the model enables it."""
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "openai-effort",
+                use="langchain_openai:ChatOpenAI",
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="openai-effort", reasoning_effort="high")
+
+    assert captured.get("reasoning_effort") == "high"

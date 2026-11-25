@@ -20,6 +20,8 @@ from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.publishing_config import PublishingConfig
+from deerflow.config.referenced_files_config import ReferencedFilesConfig
+from deerflow.config.request_budget_config import RequestBudgetConfig
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
@@ -105,6 +107,8 @@ class AppConfig(BaseModel):
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
+    request_budget: RequestBudgetConfig = Field(default_factory=RequestBudgetConfig, description="Outbound LLM request size budget middleware configuration")
+    referenced_files: ReferencedFilesConfig = Field(default_factory=ReferencedFilesConfig, description="'@' referenced file inlining and workspace copy configuration")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     model_config = ConfigDict(extra="allow")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Unified database backend configuration")

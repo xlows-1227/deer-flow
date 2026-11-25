@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertTriangleIcon,
   BookOpenIcon,
   CheckCircleIcon,
   ChevronDownIcon,
@@ -289,6 +290,30 @@ export default function WorkspaceSkillsPage() {
                       </Badge>
                       {skill.license ? (
                         <Badge variant="outline">{skill.license}</Badge>
+                      ) : null}
+                      {skill.category === "custom" &&
+                      skill.security_status === "unscanned" ? (
+                        <Badge
+                          variant="outline"
+                          className="border-amber-300 bg-amber-50 text-amber-900"
+                          title="模型暂不可用，将在后台自动补扫"
+                        >
+                          未安检
+                        </Badge>
+                      ) : null}
+                      {skill.category === "custom" &&
+                      skill.security_status === "failed" ? (
+                        <Badge
+                          variant="destructive"
+                          className="gap-1"
+                          title={
+                            skill.security_reason ??
+                            "模型安检未通过，当前 Skill 不会注入对话"
+                          }
+                        >
+                          <AlertTriangleIcon className="size-3" />
+                          安检失败
+                        </Badge>
                       ) : null}
                     </div>
                     {skill.category === "custom" &&

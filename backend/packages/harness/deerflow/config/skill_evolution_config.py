@@ -22,6 +22,22 @@ class SkillEvolutionConfig(BaseModel):
             f"Clamped to 1..{MAX_SECURITY_SCAN_CONCURRENCY}."
         ),
     )
+    security_rescan_enabled: bool = Field(
+        default=True,
+        description="Whether the background loop rescans skills whose security status is 'unscanned'.",
+    )
+    security_rescan_interval_seconds: int = Field(
+        default=300,
+        description="Minimum seconds between two background security rescan batches.",
+    )
+    security_rescan_batch_size: int = Field(
+        default=5,
+        description="Maximum number of unscanned skills processed per background batch.",
+    )
+    security_rescan_concurrency: int = Field(
+        default=1,
+        description="Maximum number of skills scanned concurrently per background batch.",
+    )
 
     @field_validator("security_scan_concurrency", mode="before")
     @classmethod

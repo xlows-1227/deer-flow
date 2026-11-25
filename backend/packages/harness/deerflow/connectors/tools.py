@@ -3,8 +3,16 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from deerflow.connectors.errors import ConnectorAuthorizationError, ConnectorError
-from deerflow.connectors.schemas import ONEDATA_CALL_API, ONEDATA_GET_PARAMS, ConnectorRuntimeContext
+from deerflow.connectors.result_spill import maybe_spill_result
+from deerflow.connectors.schemas import (
+    DATABASE_QUERY,
+    DATABASE_TABLE_SAMPLE,
+    ONEDATA_CALL_API,
+    ONEDATA_GET_PARAMS,
+    ConnectorRuntimeContext,
+)
 from deerflow.connectors.service import make_connector_service
+from deerflow.connectors.sql_safety import extract_tables
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -36,6 +44,36 @@ def _ensure_selected(context: ConnectorRuntimeContext, connector_id: str) -> Non
     selected_ids = set(context.connector_ids or [])
     if selected_ids and connector_id not in selected_ids:
         raise ConnectorAuthorizationError("Connector is not selected for this chat context", recoverable=True)
+
+
+async def _spill_if_needed(
+    payload,
+    *,
+    context: ConnectorRuntimeContext,
+    service,
+    connector_id: str,
+    tool_name: str,
+    capability: str,
+    operation: str,
+    sql: str | None = None,
+    tables: list[str] | None = None,
+    extra_meta: dict | None = None,
+) -> dict:
+    """Keep small results inline; persist oversized ones and return a summary."""
+    if not isinstance(payload, dict):
+        return payload
+    return await maybe_spill_result(
+        payload,
+        context=context,
+        service=service,
+        connector_id=connector_id,
+        tool_name=tool_name,
+        capability=capability,
+        operation=operation,
+        sql=sql,
+        tables=tables,
+        extra_meta=extra_meta,
+    )
 
 
 @tool("list_connectors", parse_docstring=True)
@@ -86,7 +124,19 @@ async def query_database_tool(runtime: Runtime, connector_id: str, sql: str, rea
     try:
         context = _context(runtime)
         _ensure_selected(context, connector_id)
-        return (await make_connector_service().query_database(connector_id, sql, reason=reason, context=context)).model_dump()
+        service = make_connector_service()
+        result = await service.query_database(connector_id, sql, reason=reason, context=context)
+        return await _spill_if_needed(
+            result.model_dump(),
+            context=context,
+            service=service,
+            connector_id=connector_id,
+            tool_name="query_database",
+            capability=DATABASE_QUERY,
+            operation="query",
+            sql=sql,
+            tables=extract_tables(sql),
+        )
     except ConnectorError as exc:
         return _error_payload(exc)
 
@@ -104,7 +154,19 @@ async def sample_database_table_tool(runtime: Runtime, connector_id: str, schema
     try:
         context = _context(runtime)
         _ensure_selected(context, connector_id)
-        return (await make_connector_service().sample_database_table(connector_id, schema=schema_name, table=table, limit=limit, context=context)).model_dump()
+        service = make_connector_service()
+        result = await service.sample_database_table(connector_id, schema=schema_name, table=table, limit=limit, context=context)
+        return await _spill_if_needed(
+            result.model_dump(),
+            context=context,
+            service=service,
+            connector_id=connector_id,
+            tool_name="sample_database_table",
+            capability=DATABASE_TABLE_SAMPLE,
+            operation="sample",
+            tables=[f"{schema_name}.{table}"],
+            extra_meta={"schema": schema_name, "table": table, "limit": limit},
+        )
     except ConnectorError as exc:
         return _error_payload(exc)
 
@@ -136,14 +198,27 @@ async def call_connector_action_tool(
     try:
         context = _context(runtime)
         _ensure_selected(context, connector_id)
-        result = await make_connector_service().execute_connector_action(
+        service = make_connector_service()
+        result = await service.execute_connector_action(
             connector_id,
             capability=capability,
             args=action_args or {},
             reason=reason,
             context=context,
         )
-        return result.model_dump() if hasattr(result, "model_dump") else result
+        payload = result.model_dump() if hasattr(result, "model_dump") else result
+        sql_text = action_args.get("sql") if isinstance(action_args, dict) else None
+        return await _spill_if_needed(
+            payload,
+            context=context,
+            service=service,
+            connector_id=connector_id,
+            tool_name="call_connector_action",
+            capability=capability,
+            operation="action",
+            sql=sql_text,
+            tables=extract_tables(sql_text) if isinstance(sql_text, str) and sql_text else None,
+        )
     except ConnectorError as exc:
         return _error_payload(exc)
 
@@ -217,13 +292,24 @@ async def call_onedata_api_tool(
         ):
             if value is not None:
                 action_args[target] = value
-        result = await make_connector_service().execute_connector_action(
+        service = make_connector_service()
+        result = await service.execute_connector_action(
             connector_id,
             capability=ONEDATA_CALL_API,
             args=action_args,
             reason=reason,
             context=context,
         )
-        return result.model_dump() if hasattr(result, "model_dump") else result
+        payload = result.model_dump() if hasattr(result, "model_dump") else result
+        return await _spill_if_needed(
+            payload,
+            context=context,
+            service=service,
+            connector_id=connector_id,
+            tool_name="call_onedata_api",
+            capability=ONEDATA_CALL_API,
+            operation="call_api",
+            extra_meta={"api_id": api_id, "page_size": page_size, "page_num": page_num},
+        )
     except ConnectorError as exc:
         return _error_payload(exc)

@@ -513,10 +513,17 @@ class SchedulerService:
             return ExecuteTaskResult(found=True, error_message=str(exc))
 
         thread_id = str(uuid.uuid4())
+        task_mode = task.get("mode") or "pro"
+        # Persist the task's model/mode/reasoning on the thread record at the
+        # same time the thread is created, so the chat/record UI can render the
+        # real choice instead of falling back to the default model.
         metadata = {
             "source": "scheduled_task",
             "scheduled_task_id": task_id,
             "scheduled_task_name": task["name"],
+            "model_name": task.get("model_name"),
+            "mode": task_mode,
+            "reasoning_effort": task.get("reasoning_effort") or _default_reasoning_effort(task_mode),
         }
         context = self._task_context(task, thread_id, user_id)
         raw_input = {

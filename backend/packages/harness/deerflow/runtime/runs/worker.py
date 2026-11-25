@@ -4023,7 +4023,7 @@ async def _run_flash_direct_model(
     model_config = app_config.get_model_config(model_name)
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
-    if record.model_name is not None and model_name != record.model_name:
+    if model_name != record.model_name:
         await run_manager.update_model_name(record.run_id, model_name)
 
     existing_values = _checkpoint_channel_values(pre_run_checkpoint_tuple)
@@ -4046,6 +4046,32 @@ async def _run_flash_direct_model(
         for msg in conversation_messages
     ]
 
+    # --- Read-side guard (request only): drop assistant turns that have
+    # neither text nor tool calls so an already-poisoned thread can still be
+    # sent to the provider.  `conversation_messages` stays untouched — the
+    # checkpoint keeps every message and the persistence call below writes the
+    # unfiltered list, i.e. nothing is deleted from stored history here.
+    from deerflow.agents.middlewares.empty_assistant_guard import (
+        NoSendableMessagesError,
+        drop_unactionable_assistant_messages,
+        has_sendable_messages,
+    )
+
+    sendable_messages = drop_unactionable_assistant_messages(
+        conversation_messages,
+        thread_id=record.thread_id,
+        origin="flash_direct",
+    )
+    if not has_sendable_messages(sendable_messages):
+        logger.error(
+            "Run %s: nothing sendable after dropping empty assistant messages (thread_id=%s)",
+            record.run_id,
+            record.thread_id,
+        )
+        raise NoSendableMessagesError(
+            "no sendable messages after dropping empty assistant turns"
+        )
+
     system_prompt = apply_prompt_template(
         subagent_enabled=False,
         max_concurrent_subagents=cfg.get("max_concurrent_subagents", 3),
@@ -4061,7 +4087,7 @@ async def _run_flash_direct_model(
         agent_instructions=agent_instructions,
         flash_mode=True,
     )
-    model_messages = [SystemMessage(content=system_prompt), *conversation_messages]
+    model_messages = [SystemMessage(content=system_prompt), *sendable_messages]
 
     model = get_cached_chat_model(
         name=model_name,
@@ -4172,6 +4198,30 @@ async def _run_flash_direct_model(
             )
         return False
 
+    final_ai_message = _clean_aimessage_content(final_ai_message)
+    if not record.abort_event.is_set():
+        from deerflow.agents.middlewares.empty_assistant_guard import (
+            EmptyAssistantMessageError,
+            ai_message_has_payload,
+        )
+
+        # A provider can finish the stream without emitting text or tool calls
+        # (zero chunks, or whitespace stripped to "").  Persisting that empty
+        # assistant message bricks the thread: every later request replays it
+        # and the provider rejects the whole payload with a 400 ("the message
+        # at position N with role 'assistant' must not be empty").  Fail the
+        # run instead of writing anything to the checkpoint.
+        if not ai_message_has_payload(final_ai_message):
+            logger.error(
+                "Run %s: model returned no text and no tool calls (%d streamed chunk(s)); "
+                "refusing to persist an empty assistant message",
+                record.run_id,
+                len(streamed_chunks),
+            )
+            raise EmptyAssistantMessageError(
+                f"empty assistant response (streamed_chunks={len(streamed_chunks)})"
+            )
+
     if "messages" in lg_modes:
         # Use a single timestamp for the entire streamed response so every
         # chunk (and the final message) carries one.  This lets the frontend
@@ -4195,7 +4245,6 @@ async def _run_flash_direct_model(
             _enrich_tool_call_content_in_serialized(serialized, run_id=record.run_id)
             await bridge.publish(record.run_id, _lg_mode_to_sse_event("messages"), serialized)
 
-    final_ai_message = _clean_aimessage_content(final_ai_message)
     # Add timestamp so frontend can sort messages correctly
     now_iso = datetime.now(UTC).isoformat()
     final_ai_message = final_ai_message.model_copy(update={
@@ -4304,6 +4353,20 @@ def _friendly_error_message(exc: BaseException) -> str:
         type(exc).__name__,
         raw_text[:500] if raw_text else "",
     )
+    # 0) Model returned neither text nor tool calls: the run failed before any
+    #    assistant message was persisted, so ask the user to retry.
+    from deerflow.agents.middlewares.empty_assistant_guard import (
+        EMPTY_ASSISTANT_MESSAGE_TEXT,
+        NO_SENDABLE_MESSAGES_TEXT,
+        EmptyAssistantMessageError,
+        NoSendableMessagesError,
+    )
+
+    if isinstance(exc, EmptyAssistantMessageError):
+        return EMPTY_ASSISTANT_MESSAGE_TEXT
+    if isinstance(exc, NoSendableMessagesError):
+        return NO_SENDABLE_MESSAGES_TEXT
+
     # 1) Concurrent / rate limits (Kimi: "concurrent request limit", generic: "too many requests")
     if "concurrent request limit" in raw_text or "access_terminated_error" in raw_text:
         return "当前同时运行的请求太多了，请稍等几秒，等之前的请求处理完后再试试。"
@@ -4724,6 +4787,36 @@ async def run_agent(
         from langchain_core.runnables import RunnableConfig
         from langgraph.runtime import Runtime
 
+        # The thread record is the source of truth for the user's model/mode/
+        # reasoning choice: the UI writes them together with the thread (create
+        # or patch), so a run must execute what the thread says even when the
+        # request payload omitted those fields. `runs.model_name` is still
+        # persisted afterwards as the effective-model reconciliation source.
+        if thread_store is not None:
+            try:
+                thread_record = await thread_store.get(thread_id)
+            except Exception:
+                thread_record = None
+                logger.warning("Failed to load thread metadata for %s", thread_id, exc_info=True)
+            thread_metadata = (thread_record or {}).get("metadata") or {}
+            if isinstance(thread_metadata, dict):
+                selected = {
+                    key: thread_metadata[key]
+                    for key in ("model_name", "mode", "reasoning_effort")
+                    if thread_metadata.get(key)
+                }
+                if selected:
+                    context_cfg = config.get("context")
+                    if not isinstance(context_cfg, dict):
+                        context_cfg = {}
+                    context_cfg.update(selected)
+                    selected_mode = context_cfg.get("mode")
+                    if selected_mode:
+                        context_cfg["thinking_enabled"] = selected_mode != "flash"
+                        context_cfg["is_plan_mode"] = selected_mode in ("pro", "ultra")
+                        context_cfg["subagent_enabled"] = selected_mode == "ultra"
+                    config["context"] = context_cfg
+
         # Inject runtime context so middlewares and tools (via ToolRuntime.context) can
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
@@ -4830,13 +4923,13 @@ async def run_agent(
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
         # requested name is not in the allowlist — this update ensures the
-        # persisted model_name reflects the actual model used.
-        if record.model_name is not None:
-            resolved = getattr(agent, "metadata", {}) or {}
-            if isinstance(resolved, dict):
-                effective = resolved.get("model_name")
-                if effective and effective != record.model_name:
-                    await run_manager.update_model_name(record.run_id, effective)
+        # persisted model_name always reflects the actual model used, even when
+        # the run was created without an explicit model_name.
+        resolved = getattr(agent, "metadata", {}) or {}
+        if isinstance(resolved, dict):
+            effective = resolved.get("model_name")
+            if effective and effective != record.model_name:
+                await run_manager.update_model_name(record.run_id, effective)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:

@@ -5,9 +5,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.middlewares.empty_assistant_guard import (
+    EmptyAssistantMessageError,
+    NoSendableMessagesError,
+)
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
@@ -514,3 +518,114 @@ def test_failure_diagnostics_logged_without_content(caplog: pytest.LogCaptureFix
     assert "error_code=invalid_parameter_error" in line
     assert secret not in line  # only a <=60-char preview may appear
     assert "x" * 61 not in line
+
+
+def test_sync_model_call_rejects_empty_assistant_message() -> None:
+    """An empty response must fail the run instead of being persisted."""
+    middleware = _build_middleware()
+
+    def handler(_request) -> AIMessage:
+        return AIMessage(content="")
+
+    with pytest.raises(EmptyAssistantMessageError):
+        middleware.wrap_model_call(SimpleNamespace(), handler)
+
+
+def test_async_model_call_rejects_whitespace_only_assistant_message() -> None:
+    middleware = _build_middleware()
+
+    async def handler(_request) -> AIMessage:
+        return AIMessage(content="  \n\t ")
+
+    with pytest.raises(EmptyAssistantMessageError):
+        asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+
+def test_sync_model_call_keeps_tool_only_assistant_message() -> None:
+    """Tool-only messages (empty content + tool_calls) are legitimate."""
+    middleware = _build_middleware()
+    tool_only = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "read_file",
+                "args": {"path": "/mnt/user-data/a.txt"},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    def handler(_request) -> AIMessage:
+        return tool_only
+
+    assert middleware.wrap_model_call(SimpleNamespace(), handler) is tool_only
+
+
+def test_sync_model_call_rejects_empty_message_inside_model_response() -> None:
+    middleware = _build_middleware()
+    response = SimpleNamespace(result=[AIMessage(content="")])
+
+    def handler(_request):
+        return response
+
+    with pytest.raises(EmptyAssistantMessageError):
+        middleware.wrap_model_call(SimpleNamespace(), handler)
+
+
+class _RequestStub:
+    """Minimal ModelRequest stand-in: state is never touched, only the request."""
+
+    def __init__(self, messages: list[Any]) -> None:
+        self.messages = messages
+        self.runtime = SimpleNamespace(context={"thread_id": "thread-1"})
+
+    def override(self, **kwargs: Any) -> _RequestStub:
+        return _RequestStub(kwargs["messages"])
+
+
+def test_model_call_drops_empty_assistant_message_from_request() -> None:
+    middleware = _build_middleware()
+    sent: list[Any] = []
+
+    def handler(request) -> AIMessage:
+        sent.extend(request.messages)
+        return AIMessage(content="ok")
+
+    history = [HumanMessage(content="你好"), AIMessage(content="")]
+    result = middleware.wrap_model_call(_RequestStub(history), handler)
+
+    assert result.content == "ok"
+    assert [m.type for m in sent] == ["human"]
+    # The caller's list is untouched: state/checkpoint keeps the message.
+    assert [m.type for m in history] == ["human", "ai"]
+
+
+def test_model_call_keeps_tool_only_message_in_request() -> None:
+    middleware = _build_middleware()
+    sent: list[Any] = []
+
+    def handler(request) -> AIMessage:
+        sent.extend(request.messages)
+        return AIMessage(content="ok")
+
+    tool_only = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "read_file", "args": {"path": "/a"}, "id": "call-1", "type": "tool_call"}
+        ],
+    )
+    middleware.wrap_model_call(_RequestStub([HumanMessage(content="你好"), tool_only]), handler)
+
+    assert [m.type for m in sent] == ["human", "ai"]
+
+
+def test_model_call_with_only_system_messages_raises() -> None:
+    middleware = _build_middleware()
+
+    def handler(_request) -> AIMessage:
+        return AIMessage(content="ok")
+
+    with pytest.raises(NoSendableMessagesError):
+        middleware.wrap_model_call(_RequestStub([SystemMessage(content="sys")]), handler)
+

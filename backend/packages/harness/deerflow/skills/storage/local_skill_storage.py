@@ -240,13 +240,19 @@ class LocalSkillStorage(SkillStorage):
         tmp_path.replace(target)
         make_skill_path_sandbox_readable(self.get_custom_skill_dir(name))
 
-    async def ainstall_skill_from_archive(self, archive_path: str | Path, *, skip_security_scan: bool = False) -> dict:
+    async def ainstall_skill_from_archive(
+        self,
+        archive_path: str | Path,
+        *,
+        skip_security_scan: bool = False,
+        model_name: str | None = None,
+    ) -> dict:
         import zipfile
 
         from deerflow.skills.installer import (
             SkillAlreadyExistsError,
             _move_staged_skill_into_reserved_target,
-            _scan_skill_archive_contents_or_raise,
+            _screen_skill_archive_contents,
             resolve_skill_dir_from_archive,
             safe_extract_skill_archive,
         )
@@ -289,7 +295,13 @@ class LocalSkillStorage(SkillStorage):
             if target.exists():
                 raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, skip_security_scan=skip_security_scan)
+            outcome = await _screen_skill_archive_contents(
+                skill_dir,
+                skill_name,
+                skip_warnings=skip_security_scan,
+                model_name=model_name,
+            )
+            warnings = outcome.warnings
 
             with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
                 staging_target = Path(staging_root) / skill_name
@@ -298,13 +310,54 @@ class LocalSkillStorage(SkillStorage):
             if self._enforce_owner_isolation:
                 self._write_custom_skill_owner(target)
             make_skill_path_sandbox_readable(target)
+            self._record_install_security_report(skill_name, target, outcome)
             logger.info("Skill %r installed to %s", skill_name, target)
 
         return {
             "success": True,
             "skill_name": skill_name,
             "message": f"Skill '{skill_name}' installed successfully",
+            "warnings": warnings,
+            "security_status": outcome.status,
+            "security_reason": outcome.reason,
         }
+
+    def _record_install_security_report(self, skill_name: str, skill_dir: Path, outcome) -> None:
+        """Persist the security report and write the install audit record."""
+        from deerflow.skills.security_report import compute_content_hash, write_security_report
+
+        try:
+            content_hash = compute_content_hash(skill_dir)
+            write_security_report(
+                skill_dir,
+                content_hash=content_hash,
+                warnings=outcome.warnings,
+                status=outcome.status,
+                reason=outcome.reason,
+            )
+        except OSError:
+            logger.warning("Could not write security report for skill %s", skill_name, exc_info=True)
+            return
+
+        try:
+            self.append_history(
+                skill_name,
+                {
+                    "action": "install_from_archive",
+                    "author": "upload",
+                    "content_hash": content_hash,
+                    "scanner": {
+                        "status": outcome.status,
+                        "status_reason": outcome.reason,
+                        "warnings": outcome.warnings,
+                        "blocked": False,
+                        "llm_skipped": outcome.status == "unscanned",
+                    },
+                },
+            )
+        except OSError as e:
+            # Audit failure must not undo a successful install.
+            logger.warning("Skipping install history write for %s: %s", skill_name, e)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)

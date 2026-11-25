@@ -6,11 +6,11 @@ import {
   AlertTriangleIcon,
   CheckCircleIcon,
   FileArchiveIcon,
+  InfoIcon,
   Loader2Icon,
   UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -18,6 +18,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { uploadSkillArchive } from "@/core/skills/api";
 import type { SkillUploadErrorDetail } from "@/core/skills/api";
+import type { SkillSecurityWarning } from "@/core/skills/type";
 import { cn } from "@/lib/utils";
 
 function isSupportedArchive(file: File | null) {
@@ -26,28 +27,30 @@ function isSupportedArchive(file: File | null) {
   return name.endsWith(".zip") || name.endsWith(".skill");
 }
 
+interface InstallResult {
+  skillName: string;
+  warnings: SkillSecurityWarning[];
+}
+
 export default function UploadSkillPage() {
-  const router = useRouter();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [isForceUpload, setIsForceUpload] = useState(false);
   const [uploadError, setUploadError] = useState<SkillUploadErrorDetail | null>(
     null,
   );
+  const [installResult, setInstallResult] = useState<InstallResult | null>(null);
 
   const canUpload = isSupportedArchive(file) && !isUploading;
 
-  async function handleUpload(force = false) {
+  async function handleUpload() {
     if (!file || !canUpload) return;
     setIsUploading(true);
-    setIsForceUpload(force);
-    if (!force) {
-      setUploadError(null);
-    }
+    setUploadError(null);
+    setInstallResult(null);
     try {
-      const result = await uploadSkillArchive(file, { force });
+      const result = await uploadSkillArchive(file);
       if (!result.success) {
         const error = "error" in result ? result.error : undefined;
         setUploadError(
@@ -61,9 +64,12 @@ export default function UploadSkillPage() {
         toast.error(result.message || "上传失败");
         return;
       }
-      setUploadError(null);
+      setFile(null);
+      setInstallResult({
+        skillName: result.skill_name,
+        warnings: result.warnings ?? [],
+      });
       toast.success(result.message || "Skill 已上传");
-      router.push("/workspace/skills");
     } catch (error) {
       const message = error instanceof Error ? error.message : "上传失败";
       setUploadError({
@@ -75,18 +81,12 @@ export default function UploadSkillPage() {
       toast.error(message);
     } finally {
       setIsUploading(false);
-      setIsForceUpload(false);
     }
   }
 
   function onUploadClick(event: React.MouseEvent<HTMLButtonElement>) {
     event.preventDefault();
-    void handleUpload(false);
-  }
-
-  function onForceUploadClick(event: React.MouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    void handleUpload(true);
+    void handleUpload();
   }
 
   function selectFile(nextFile: File | null) {
@@ -119,18 +119,16 @@ export default function UploadSkillPage() {
             </p>
           </div>
         </div>
-        <Button type="button" disabled={!canUpload} onClick={onUploadClick}>
-          {isUploading ? (
-            <Loader2Icon className="h-4 w-4 animate-spin" />
-          ) : (
-            <UploadIcon className="h-4 w-4" />
-          )}
-          {isUploading
-            ? isForceUpload
-              ? "继续上传中"
-              : "上传中"
-            : "安装 skill"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button type="button" disabled={!canUpload} onClick={onUploadClick}>
+            {isUploading ? (
+              <Loader2Icon className="h-4 w-4 animate-spin" />
+            ) : (
+              <UploadIcon className="h-4 w-4" />
+            )}
+            {isUploading ? "上传中" : "安装 skill"}
+          </Button>
+        </div>
       </header>
 
       <main className="flex-1 overflow-y-auto p-6">
@@ -229,34 +227,67 @@ export default function UploadSkillPage() {
                 {uploadError.reason !== uploadError.message ? (
                   <p>原因：{uploadError.reason}</p>
                 ) : null}
-                {uploadError.can_force ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="border-red-300 bg-white text-red-900 hover:bg-red-100"
-                      disabled={!file || isUploading}
-                      onClick={onForceUploadClick}
-                    >
-                      {isUploading && isForceUpload ? (
-                        <Loader2Icon className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <UploadIcon className="h-4 w-4" />
-                      )}
-                      仍然上传
-                    </Button>
-                    <span className="text-xs text-red-800">
-                      仅在你确认该 Skill 来源可信时继续。
-                    </span>
-                  </div>
+                {uploadError.code === "security_scan_failed" ? (
+                  <p className="mt-2 text-xs text-red-800">
+                    结构性风险不可跳过；请移除命中规则的内容后重新上传。
+                  </p>
                 ) : null}
               </AlertDescription>
             </Alert>
           ) : null}
 
+          {installResult ? (
+            <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <CheckCircleIcon className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+                  <div>
+                    <p className="text-sm font-medium text-emerald-900">
+                      {installResult.skillName} 安装完成
+                    </p>
+                    <p className="mt-1 text-xs text-emerald-800">
+                      {installResult.warnings.length > 0
+                        ? "以下为提示性安全告警，不影响安装。"
+                        : "安全规则已通过，未发现告警。"}
+                    </p>
+                  </div>
+                </div>
+                <Button type="button" size="sm" variant="outline" asChild>
+                  <Link href="/workspace/skills">查看技能</Link>
+                </Button>
+              </div>
+              {installResult.warnings.length > 0 ? (
+                <ul className="mt-4 space-y-2">
+                  {installResult.warnings.map((warning, index) => (
+                    <li
+                      key={`${warning.code}-${warning.file}-${warning.line}-${index}`}
+                      className="rounded border border-amber-200 bg-white p-3 text-xs text-amber-950"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 font-medium">
+                        <AlertTriangleIcon className="h-3.5 w-3.5 text-amber-600" />
+                        <span>{warning.code}</span>
+                        {warning.file ? (
+                          <span className="text-amber-800">
+                            {warning.file}
+                            {warning.line ? `:${warning.line}` : ""}
+                          </span>
+                        ) : null}
+                        {warning.excerpt_hash ? (
+                          <span className="font-mono text-[10px] text-amber-700">
+                            #{warning.excerpt_hash}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-1 leading-5">{warning.message}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+          ) : null}
+
           <Alert className="border-blue-200 bg-blue-50 text-blue-900">
-            <CheckCircleIcon className="h-4 w-4" />
+            <InfoIcon className="h-4 w-4" />
             <AlertDescription className="text-blue-800">
               请按照skill的格式上传,上传后会安装到 Friday custom skills。
             </AlertDescription>
