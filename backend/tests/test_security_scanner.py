@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -108,6 +109,50 @@ async def test_scan_normalizes_uppercase_decision(monkeypatch):
     _make_env(monkeypatch, '{"decision": "BLOCK", "reason": "dangerous"}')
     result = await scan_skill_content(SKILL_CONTENT, executable=False)
     assert result.decision == "block"
+
+
+@pytest.mark.anyio
+async def test_scan_parses_category_and_line(monkeypatch):
+    _make_env(
+        monkeypatch,
+        '{"decision":"block","category":"hardcoded_credential","line":2,"reason":"secret on line 2"}',
+    )
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+
+    assert (result.decision, result.category, result.line) == ("block", "hardcoded_credential", 2)
+
+
+@pytest.mark.anyio
+async def test_scan_normalises_unknown_category_and_bogus_line(monkeypatch):
+    _make_env(monkeypatch, '{"decision":"warn","category":"made up","line":9999,"reason":"x"}')
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+
+    assert result.category == "other"
+    assert result.line is None
+
+
+@pytest.mark.anyio
+async def test_scan_rejects_boolean_line(monkeypatch):
+    _make_env(monkeypatch, '{"decision":"warn","category":"other","line":true,"reason":"x"}')
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+
+    assert result.line is None
+
+
+@pytest.mark.anyio
+async def test_scan_logs_category_and_line_but_never_reason(monkeypatch, caplog):
+    _make_env(
+        monkeypatch,
+        '{"decision":"block","category":"exfiltration","line":2,"reason":"QUOTED SECRET TEXT"}',
+    )
+    with caplog.at_level(logging.INFO, logger="deerflow.skills.security_scanner"):
+        result = await scan_skill_content(SKILL_CONTENT, executable=False)
+
+    assert result.reason == "QUOTED SECRET TEXT"
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "category=exfiltration" in logged
+    assert "line=2" in logged
+    assert "QUOTED SECRET TEXT" not in logged
 
 
 @pytest.mark.anyio

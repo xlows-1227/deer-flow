@@ -41,7 +41,10 @@ def test_missing_report_is_treated_as_passed_for_legacy_skills(tmp_path):
 
     status = read_security_status(skill_dir)
 
-    assert status == {"status": STATUS_PASSED, "reason": None, "checked_at": None}
+    assert status["status"] == STATUS_PASSED
+    assert status["reason"] is None
+    assert status["checked_at"] is None
+    assert status["override"] is None
 
 
 def test_status_transitions_are_persisted_and_readable(tmp_path):

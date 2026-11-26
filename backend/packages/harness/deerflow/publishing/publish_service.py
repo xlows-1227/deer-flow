@@ -25,8 +25,6 @@ import hashlib
 import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from deerflow.persistence.agent_release import AgentReleaseRepository
 from deerflow.persistence.published_agent import (
     AgentDraftRepository,
@@ -40,6 +38,8 @@ from deerflow.publishing.validation import (
     load_platform_quota_limits,
     validate_draft_for_publish,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PublishError(Exception):

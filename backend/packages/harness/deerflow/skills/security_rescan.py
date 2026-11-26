@@ -21,11 +21,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import TypedDict
 from weakref import WeakValueDictionary
 
 from deerflow.skills.installer import SkillSecurityScanError, _screen_skill_archive_contents
 from deerflow.skills.security_report import (
+    REASON_CODE_RULE_BLOCK,
     STATUS_FAILED,
+    STATUS_PASSED,
     STATUS_UNSCANNED,
     compute_content_hash,
     read_security_status,
@@ -33,6 +36,20 @@ from deerflow.skills.security_report import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class RescanResult(TypedDict):
+    """Shape returned by :func:`rescan_skill_dir`.
+
+    ``status`` is ``None`` only for the "already in flight" short-circuit;
+    otherwise it is one of the persisted security statuses.
+    """
+
+    scanned: bool
+    status: str | None
+    reason: str | None
+    changed: bool
+
 
 _locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _inflight: set[str] = set()
@@ -53,10 +70,11 @@ def _lock_for(key: str) -> asyncio.Lock:
     return lock
 
 
-async def rescan_skill_dir(skill_dir: Path, *, model_name: str | None = None) -> dict:
+async def rescan_skill_dir(skill_dir: Path, *, model_name: str | None = None) -> RescanResult:
     """Rescan one skill if it is still ``unscanned``.
 
-    Returns ``{"scanned": bool, "status": str, "reason": str | None}``.
+    Returns ``{"scanned", "status", "reason", "changed"}``; ``status`` is
+    ``None`` when another scan for the same directory is already in flight.
     """
     key = _key(skill_dir)
     if key in _inflight:
@@ -77,10 +95,12 @@ async def rescan_skill_dir(skill_dir: Path, *, model_name: str | None = None) ->
                     model_name=model_name,
                 )
                 status, reason, warnings = outcome.status, outcome.reason, outcome.warnings
+                reason_code = outcome.reason_code
             except SkillSecurityScanError as e:
                 status = STATUS_FAILED
-                reason = str(getattr(e, "reason", None) or e)
+                reason = str(e.reason)
                 warnings = []
+                reason_code = e.reason_code or REASON_CODE_RULE_BLOCK
 
             hash_after = compute_content_hash(skill_dir)
             if hash_after != hash_before:
@@ -89,6 +109,7 @@ async def rescan_skill_dir(skill_dir: Path, *, model_name: str | None = None) ->
                 status = STATUS_UNSCANNED
                 reason = "content changed during rescan; will retry"
                 warnings = []
+                reason_code = None
 
             record_scan_result(
                 skill_dir,
@@ -96,8 +117,16 @@ async def rescan_skill_dir(skill_dir: Path, *, model_name: str | None = None) ->
                 reason=reason,
                 warnings=warnings,
                 content_hash=hash_after,
+                reason_code=reason_code,
             )
-            logger.info("Rescanned skill %s: status=%s", skill_dir.name, status)
+            logger.info(
+                "Skill security rescan: skill=%s status=%s reason_code=%s changed=%s reason=%s",
+                skill_dir.name,
+                status,
+                reason_code,
+                status != current["status"],
+                reason,
+            )
             # ``unscanned`` means the model was still unavailable; it stays in
             # the queue and is retried on the next tick.
             return {
@@ -140,6 +169,10 @@ async def _refresh_prompt_cache_after_status_change() -> None:
         logger.exception("Failed to refresh the skills system prompt cache after a rescan")
 
 
+def _empty_summary(*, candidates: int = 0) -> dict[str, int]:
+    return {"candidates": candidates, "processed": 0, "passed": 0, "failed": 0, "unscanned": 0, "changed": 0}
+
+
 async def rescan_unscanned_skills(
     skills_root: Path,
     *,
@@ -155,16 +188,16 @@ async def rescan_unscanned_skills(
     candidates = list_unscanned_skill_dirs(skills_root)
     batch = candidates[: max(1, batch_size)]
     if not batch:
-        return {"candidates": 0, "processed": 0, "passed": 0, "failed": 0, "unscanned": 0, "changed": 0}
+        return _empty_summary()
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    async def _one(skill_dir: Path) -> dict:
+    async def _one(skill_dir: Path) -> RescanResult:
         async with semaphore:
             return await rescan_skill_dir(skill_dir, model_name=model_name)
 
     results = await asyncio.gather(*(_one(skill_dir) for skill_dir in batch), return_exceptions=True)
-    summary = {"candidates": len(candidates), "processed": 0, "passed": 0, "failed": 0, "unscanned": 0, "changed": 0}
+    summary = _empty_summary(candidates=len(candidates))
     for result in results:
         if isinstance(result, BaseException):
             logger.warning("Background skill rescan failed: %s", result)
@@ -172,7 +205,7 @@ async def rescan_unscanned_skills(
             continue
         summary["processed"] += 1
         status = result.get("status")
-        if status == "passed":
+        if status == STATUS_PASSED:
             summary["passed"] += 1
         elif status == STATUS_FAILED:
             summary["failed"] += 1

@@ -315,6 +315,16 @@ export default function WorkspaceSkillsPage() {
                           安检失败
                         </Badge>
                       ) : null}
+                      {skill.category === "custom" &&
+                      skill.security_status === "overridden" ? (
+                        <Badge
+                          variant="outline"
+                          className="border-amber-300 bg-amber-50 text-amber-900"
+                          title="已由技能所有者或管理员人工放行"
+                        >
+                          已人工放行
+                        </Badge>
+                      ) : null}
                     </div>
                     {skill.category === "custom" &&
                     user &&

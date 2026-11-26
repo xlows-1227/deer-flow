@@ -20,12 +20,34 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 SECURITY_REPORT_FILENAME = ".security-scan.json"
+SECURITY_OVERRIDE_FILENAME = ".security-override.json"
 REPORT_VERSION = 2
 
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
 STATUS_UNSCANNED = "unscanned"
+# Emitted only by :func:`read_security_status` when a human explicitly accepted
+# a ``failed`` verdict for the exact content that was scanned.  It is never
+# persisted as a report status.
+STATUS_OVERRIDDEN = "overridden"
 SECURITY_STATUSES = (STATUS_PASSED, STATUS_FAILED, STATUS_UNSCANNED)
+
+# Why a skill ended up ``failed``.  Informational only: every failed skill can
+# be overridden by its owner or an admin.
+REASON_CODE_LLM_BLOCK = "llm_block"
+REASON_CODE_RULE_BLOCK = "rule_block"
+REASON_CODE_STRUCTURAL = "structural"
+SECURITY_REASON_CODES = (REASON_CODE_LLM_BLOCK, REASON_CODE_RULE_BLOCK, REASON_CODE_STRUCTURAL)
+
+
+def _normalize_status(status: str | None) -> str:
+    """Coerce a requested/persisted status into one of ``SECURITY_STATUSES``."""
+    return status if status in SECURITY_STATUSES else STATUS_UNSCANNED
+
+
+def _normalize_reason_code(reason_code: str | None) -> str | None:
+    """Keep only known failure classes; unknown values carry no meaning."""
+    return reason_code if reason_code in SECURITY_REASON_CODES else None
 
 
 def _is_ignored(rel_path: str) -> bool:
@@ -55,16 +77,17 @@ def write_security_report(
     warnings: list[dict],
     status: str = STATUS_PASSED,
     reason: str | None = None,
+    reason_code: str | None = None,
 ) -> dict:
-    if status not in SECURITY_STATUSES:
-        status = STATUS_UNSCANNED
+    now = datetime.now(UTC).isoformat()
     report = {
         "version": REPORT_VERSION,
-        "status": status,
+        "status": _normalize_status(status),
         "reason": reason,
+        "reason_code": _normalize_reason_code(reason_code),
         "content_hash": content_hash,
-        "scanned_at": datetime.now(UTC).isoformat(),
-        "checked_at": datetime.now(UTC).isoformat(),
+        "scanned_at": now,
+        "checked_at": now,
         "warnings": warnings,
         "dismissals": [],
     }
@@ -90,6 +113,7 @@ def update_security_status(
     content_hash: str | None = None,
     warnings: list[dict] | None = None,
     keep_warnings: bool = True,
+    reason_code: str | None = None,
 ) -> dict:
     """Update the status fields while preserving unrelated report data."""
     report = read_security_report(skill_dir) or {
@@ -100,8 +124,9 @@ def update_security_status(
         "dismissals": [],
     }
     report["version"] = REPORT_VERSION
-    report["status"] = status if status in SECURITY_STATUSES else STATUS_UNSCANNED
+    report["status"] = _normalize_status(status)
     report["reason"] = reason
+    report["reason_code"] = _normalize_reason_code(reason_code)
     report["checked_at"] = datetime.now(UTC).isoformat()
     if content_hash is not None:
         report["content_hash"] = content_hash
@@ -120,6 +145,7 @@ def record_scan_result(
     reason: str | None,
     warnings: list[dict],
     content_hash: str | None = None,
+    reason_code: str | None = None,
 ) -> dict:
     """Merge a (re)scan result into the report, preserving existing dismissals."""
     report = read_security_report(skill_dir) or {
@@ -130,8 +156,9 @@ def record_scan_result(
     report.update(
         {
             "version": REPORT_VERSION,
-            "status": status if status in SECURITY_STATUSES else STATUS_UNSCANNED,
+            "status": _normalize_status(status),
             "reason": reason,
+            "reason_code": _normalize_reason_code(reason_code),
             "content_hash": content_hash or compute_content_hash(skill_dir),
             "scanned_at": now,
             "checked_at": now,
@@ -154,23 +181,108 @@ def mark_skill_unscanned(skill_dir: Path, *, reason: str = "content changed; pen
     )
 
 
+def effective_reason_code(report: dict | None) -> str | None:
+    """Derive the failure class, including reports written before it existed.
+
+    Legacy ``failed`` reports only carry warnings; a blocking LLM warning is
+    enough evidence that the failure was an advisory ``block``.
+    """
+    report = report or {}
+    code = report.get("reason_code")
+    if code in SECURITY_REASON_CODES:
+        return code
+    if report.get("status") != STATUS_FAILED:
+        return None
+    for warning in report.get("warnings") or []:
+        if isinstance(warning, dict) and warning.get("decision") == "block" and warning.get("source", "llm") == "llm":
+            return REASON_CODE_LLM_BLOCK
+    return None
+
+
 def read_security_status(skill_dir: Path) -> dict:
-    """Return the persisted status.
+    """Return the persisted status, merged with a human override if active.
 
     A missing or unreadable report means ``passed``: skills that predate the
     status field were scanned by the old upload flow, so they are neither shown
     as a warning nor queued for a background rescan.  Only this change may
     introduce ``unscanned`` (an LLM skip at install/edit time).
+
+    ``overridden`` is derived, never stored: it requires a ``failed`` report
+    plus an override record pinned to that report's content hash.  Any content
+    change updates the report hash, which makes the override inert again.
     """
     report = read_security_report(skill_dir) or {}
     status = report.get("status")
     if status not in SECURITY_STATUSES:
         status = STATUS_PASSED
+    override = active_override(skill_dir, report=report)
+    if override is not None:
+        status = STATUS_OVERRIDDEN
     return {
         "status": status,
         "reason": report.get("reason"),
+        "reason_code": effective_reason_code(report),
         "checked_at": report.get("checked_at") or report.get("scanned_at"),
+        "override": override,
     }
+
+
+def read_override(skill_dir: Path) -> dict | None:
+    path = skill_dir / SECURITY_OVERRIDE_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        override = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Unreadable security override at %s", path, exc_info=True)
+        return None
+    return override if isinstance(override, dict) else None
+
+
+def active_override(skill_dir: Path, *, report: dict | None = None) -> dict | None:
+    """Return the override only while it matches the currently failed content."""
+    report = report if report is not None else (read_security_report(skill_dir) or {})
+    if report.get("status") != STATUS_FAILED:
+        return None
+    override = read_override(skill_dir)
+    if not override:
+        return None
+    if not override.get("content_hash") or override.get("content_hash") != report.get("content_hash"):
+        return None
+    return override
+
+
+def write_override(
+    skill_dir: Path,
+    *,
+    content_hash: str,
+    actor: dict,
+    reason: str | None,
+    acknowledged: list[dict],
+) -> dict:
+    """Persist a human acceptance of a ``failed`` verdict for this content hash."""
+    override = {
+        "version": 1,
+        "content_hash": content_hash,
+        "actor": actor,
+        "at": datetime.now(UTC).isoformat(),
+        "reason": reason,
+        "acknowledged": acknowledged,
+    }
+    (skill_dir / SECURITY_OVERRIDE_FILENAME).write_text(
+        json.dumps(override, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return override
+
+
+def delete_override(skill_dir: Path) -> bool:
+    path = skill_dir / SECURITY_OVERRIDE_FILENAME
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def read_security_report(skill_dir: Path) -> dict | None:
@@ -189,7 +301,16 @@ def effective_warnings(skill_dir: Path) -> dict:
     """Return the warnings still in force for the current content."""
     report = read_security_report(skill_dir)
     if not report:
-        return {"content_hash": None, "scanned_at": None, "stale": False, "warnings": []}
+        return {
+            "content_hash": None,
+            "scanned_at": None,
+            "stale": False,
+            "warnings": [],
+            "status": STATUS_PASSED,
+            "reason": None,
+            "reason_code": None,
+            "override": None,
+        }
 
     current_hash = compute_content_hash(skill_dir)
     stored_hash = report.get("content_hash")
@@ -198,16 +319,17 @@ def effective_warnings(skill_dir: Path) -> dict:
         if isinstance(entry, dict) and entry.get("content_hash") == current_hash:
             dismissed.update(entry.get("codes") or [])
 
-    warnings = [
-        warning
-        for warning in (report.get("warnings") or [])
-        if isinstance(warning, dict) and warning.get("code") not in dismissed
-    ]
+    warnings = [warning for warning in (report.get("warnings") or []) if isinstance(warning, dict) and warning.get("code") not in dismissed]
+    status_info = read_security_status(skill_dir)
     return {
         "content_hash": current_hash,
         "scanned_at": report.get("scanned_at"),
         "stale": stored_hash != current_hash,
         "warnings": warnings,
+        "status": status_info["status"],
+        "reason": status_info["reason"],
+        "reason_code": status_info["reason_code"],
+        "override": status_info["override"],
     }
 
 
@@ -258,8 +380,4 @@ def warning_count(skill_dir: Path) -> int:
     for entry in report.get("dismissals") or []:
         if isinstance(entry, dict) and entry.get("content_hash") == stored_hash:
             dismissed.update(entry.get("codes") or [])
-    return sum(
-        1
-        for warning in (report.get("warnings") or [])
-        if isinstance(warning, dict) and warning.get("code") not in dismissed
-    )
+    return sum(1 for warning in (report.get("warnings") or []) if isinstance(warning, dict) and warning.get("code") not in dismissed)

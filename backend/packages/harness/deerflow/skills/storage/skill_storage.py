@@ -1,4 +1,4 @@
-"""Abstract SkillStorage base class with template-method flows."""
+﻿"""Abstract SkillStorage base class with template-method flows."""
 
 from __future__ import annotations
 
@@ -177,7 +177,6 @@ class SkillStorage(ABC):
         self,
         archive_path: str | Path,
         *,
-        skip_security_scan: bool = False,
         model_name: str | None = None,
     ) -> dict:
         """Async install of a skill from a ``.skill`` ZIP archive.
@@ -192,7 +191,6 @@ class SkillStorage(ABC):
         self,
         archive_path: str | Path,
         *,
-        skip_security_scan: bool = False,
         model_name: str | None = None,
     ) -> dict:
         """Sync wrapper — delegates to :meth:`ainstall_skill_from_archive`."""
@@ -201,7 +199,6 @@ class SkillStorage(ABC):
         return _run_async_install(
             self.ainstall_skill_from_archive(
                 archive_path,
-                skip_security_scan=skip_security_scan,
                 model_name=model_name,
             )
         )

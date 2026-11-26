@@ -180,8 +180,8 @@ def test_upload_skill_archive_llm_block_is_advisory(monkeypatch, tmp_path):
     assert refresh_calls == ["refresh"]
 
 
-def test_upload_skill_archive_deterministic_block_returns_400(monkeypatch, tmp_path):
-    """Structure-level rules still reject with ``can_force=False``."""
+def test_upload_rule_block_installs_as_failed(monkeypatch, tmp_path):
+    """Deterministic rule blocks no longer reject: install + failed + override."""
     skills_root = tmp_path / "skills"
     (skills_root / "custom").mkdir(parents=True)
     refresh_calls = []
@@ -207,27 +207,19 @@ def test_upload_skill_archive_deterministic_block_returns_400(monkeypatch, tmp_p
     with TestClient(app) as client, archive.open("rb") as file:
         response = client.post("/api/skills/upload", files={"file": ("blocked-skill.skill", file, "application/zip")})
 
-    assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert detail["code"] == "security_scan_failed"
-    assert detail["can_force"] is False
-    assert "destructive_command" in detail["reason"]
-    assert not (skills_root / "custom" / "blocked-skill").exists()
-    assert refresh_calls == []
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["security_status"] == "failed"
+    assert payload["security_reason"]
+    assert "destructive_command" in [warning["code"] for warning in payload["warnings"]]
+    assert (skills_root / "custom" / "blocked-skill" / "SKILL.md").exists()
+    assert refresh_calls == ["refresh"]
 
 
-def test_upload_skill_archive_force_skips_security_scan(monkeypatch, tmp_path):
+def test_upload_nested_skill_markdown_still_returns_400(monkeypatch, tmp_path):
+    """Package-structure errors have no override path."""
     skills_root = tmp_path / "skills"
     (skills_root / "custom").mkdir(parents=True)
-    refresh_calls = []
-
-    async def _scan(*args, **kwargs):
-        from deerflow.skills.security_scanner import ScanResult
-
-        return ScanResult(decision="block", reason="prompt injection")
-
-    async def _refresh():
-        refresh_calls.append("refresh")
 
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
@@ -235,19 +227,21 @@ def test_upload_skill_archive_force_skips_security_scan(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.installer.create_scan_model", lambda **_: None)
-    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
-    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    archive = _make_skill_archive(tmp_path, "forced-skill")
+    archive = tmp_path / "nested.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("nested-skill/SKILL.md", _skill_content("nested-skill"))
+        zf.writestr("nested-skill/references/inner/SKILL.md", "# inner\n")
     app = _make_test_app(config)
 
     with TestClient(app) as client, archive.open("rb") as file:
-        response = client.post("/api/skills/upload?force=true", files={"file": ("forced-skill.skill", file, "application/zip")})
+        response = client.post("/api/skills/upload", files={"file": ("nested.skill", file, "application/zip")})
 
-    assert response.status_code == 200
-    assert response.json()["skill_name"] == "forced-skill"
-    assert (skills_root / "custom" / "forced-skill" / "SKILL.md").exists()
-    assert refresh_calls == ["refresh"]
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_skill_structure"
+    assert "can_force" not in detail
+    assert not (skills_root / "custom" / "nested-skill").exists()
 
 
 def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):

@@ -5,7 +5,6 @@ from typing import Any
 
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage
-from langchain_core.runnables import RunnableConfig
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
@@ -265,8 +264,6 @@ def _apply_multimodal_normalization_wrapper(instance: BaseChatModel, resolved_na
     every human message is normalised provider-safely right before hitting the
     underlying SDK transport.  Runs AFTER every higher-level middleware /
     flash-direct pre-processing, guaranteeing no path can escape the fix."""
-    import functools
-
     orig_agenerate = instance._agenerate
     orig_generate = instance._generate
     orig_astream = getattr(instance, "_astream", None)

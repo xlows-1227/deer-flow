@@ -244,7 +244,6 @@ class LocalSkillStorage(SkillStorage):
         self,
         archive_path: str | Path,
         *,
-        skip_security_scan: bool = False,
         model_name: str | None = None,
     ) -> dict:
         import zipfile
@@ -298,7 +297,6 @@ class LocalSkillStorage(SkillStorage):
             outcome = await _screen_skill_archive_contents(
                 skill_dir,
                 skill_name,
-                skip_warnings=skip_security_scan,
                 model_name=model_name,
             )
             warnings = outcome.warnings
@@ -334,10 +332,20 @@ class LocalSkillStorage(SkillStorage):
                 warnings=outcome.warnings,
                 status=outcome.status,
                 reason=outcome.reason,
+                reason_code=outcome.reason_code,
             )
         except OSError:
             logger.warning("Could not write security report for skill %s", skill_name, exc_info=True)
             return
+
+        logger.info(
+            "Skill security scan: skill=%s status=%s reason_code=%s warnings=%d reason=%s",
+            skill_name,
+            outcome.status,
+            outcome.reason_code,
+            len(outcome.warnings),
+            outcome.reason,
+        )
 
         try:
             self.append_history(
@@ -349,6 +357,7 @@ class LocalSkillStorage(SkillStorage):
                     "scanner": {
                         "status": outcome.status,
                         "status_reason": outcome.reason,
+                        "reason_code": outcome.reason_code,
                         "warnings": outcome.warnings,
                         "blocked": False,
                         "llm_skipped": outcome.status == "unscanned",
