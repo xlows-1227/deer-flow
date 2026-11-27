@@ -29,7 +29,7 @@ export interface Skill {
   security_checked_at?: string | null;
 }
 
-export type SkillSecurityStatus = "passed" | "failed" | "unscanned";
+export type SkillSecurityStatus = "passed" | "failed" | "unscanned" | "overridden";
 
 export interface SkillSecurityWarning {
   code: string;
@@ -39,6 +39,23 @@ export interface SkillSecurityWarning {
   message: string;
   excerpt_hash: string | null;
   source: "rules" | "llm";
+  decision?: "warn" | "block" | null;
+  category?: string | null;
+}
+
+export interface SkillSecurityOverride {
+  content_hash: string;
+  actor: { user_id: string; email: string; role: "owner" | "admin" | "user" };
+  at: string;
+  reason: string | null;
+  acknowledged: Array<{
+    code: string | null;
+    decision: "block";
+    category: string | null;
+    file: string | null;
+    line: number | null;
+    excerpt_hash: string | null;
+  }>;
 }
 
 export interface SkillSecurityReport {
@@ -46,6 +63,10 @@ export interface SkillSecurityReport {
   scanned_at: string | null;
   stale: boolean;
   warnings: SkillSecurityWarning[];
+  status?: SkillSecurityStatus;
+  reason?: string | null;
+  reason_code?: "llm_block" | "rule_block" | "structural" | null;
+  override?: SkillSecurityOverride | null;
 }
 
 export interface CustomSkill extends Skill {

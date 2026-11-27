@@ -7,6 +7,7 @@ import type {
   SkillFileContent,
   SkillFileEntry,
   SkillSecurityReport,
+  SkillSecurityStatus,
   SkillSecurityWarning,
   SkillSharedUser,
   SkillShareState,
@@ -40,7 +41,6 @@ function normalizeErrorDetail(
         code: typeof value.code === "string" ? value.code : "upload_failed",
         message,
         reason: typeof value.reason === "string" ? value.reason : message,
-        can_force: value.can_force === true,
       },
     };
   }
@@ -126,13 +126,14 @@ export interface InstallSkillResponse {
   skill_name: string;
   message: string;
   warnings?: SkillSecurityWarning[];
+  security_status?: SkillSecurityStatus | null;
+  security_reason?: string | null;
 }
 
 export interface SkillUploadErrorDetail {
   code: string;
   message: string;
   reason: string;
-  can_force: boolean;
 }
 
 export interface SkillUploadFailure {
@@ -228,13 +229,11 @@ export async function generateSkillDraft(
 
 export async function uploadSkillArchive(
   file: File,
-  options?: { force?: boolean },
 ): Promise<InstallSkillResponse | SkillUploadFailure> {
   const formData = new FormData();
   formData.append("file", file);
-  const query = options?.force ? "?force=true" : "";
   const response = await fetch(
-    `${getBackendBaseURL()}/api/skills/upload${query}`,
+    `${getBackendBaseURL()}/api/skills/upload`,
     {
       method: "POST",
       body: formData,
@@ -290,6 +289,49 @@ export async function dismissSkillSecurityWarnings(
       await readErrorMessage(response, "Failed to dismiss security warnings"),
     );
   }
+}
+
+export async function overrideSkillSecurity(
+  skillName: string,
+  reason?: string,
+): Promise<SkillSecurityReport> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}/security/override`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...getCsrfHeaders(),
+      },
+      body: JSON.stringify({ acknowledge: true, reason: reason ?? null }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to override security review"),
+    );
+  }
+  return (await response.json()) as SkillSecurityReport;
+}
+
+export async function revokeSkillSecurityOverride(
+  skillName: string,
+): Promise<SkillSecurityReport> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/custom/${encodeURIComponent(skillName)}/security/override`,
+    {
+      method: "DELETE",
+      headers: {
+        ...getCsrfHeaders(),
+      },
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to revoke security override"),
+    );
+  }
+  return (await response.json()) as SkillSecurityReport;
 }
 
 export async function loadCustomSkills(): Promise<Skill[]> {

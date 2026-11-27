@@ -16,9 +16,14 @@ import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { uploadSkillArchive } from "@/core/skills/api";
+import { SecurityOverridePanel } from "@/components/workspace/skills/security-override-panel";
+import { overrideSkillSecurity, uploadSkillArchive } from "@/core/skills/api";
 import type { SkillUploadErrorDetail } from "@/core/skills/api";
-import type { SkillSecurityWarning } from "@/core/skills/type";
+import { securityCategoryInfo } from "@/core/skills/security-category";
+import type {
+  SkillSecurityStatus,
+  SkillSecurityWarning,
+} from "@/core/skills/type";
 import { cn } from "@/lib/utils";
 
 function isSupportedArchive(file: File | null) {
@@ -30,6 +35,8 @@ function isSupportedArchive(file: File | null) {
 interface InstallResult {
   skillName: string;
   warnings: SkillSecurityWarning[];
+  securityStatus: SkillSecurityStatus | null;
+  securityReason: string | null;
 }
 
 export default function UploadSkillPage() {
@@ -41,8 +48,11 @@ export default function UploadSkillPage() {
     null,
   );
   const [installResult, setInstallResult] = useState<InstallResult | null>(null);
+  const [showOverride, setShowOverride] = useState(false);
+  const [isOverriding, setIsOverriding] = useState(false);
 
   const canUpload = isSupportedArchive(file) && !isUploading;
+  const installFailed = installResult?.securityStatus === "failed";
 
   async function handleUpload() {
     if (!file || !canUpload) return;
@@ -58,7 +68,6 @@ export default function UploadSkillPage() {
             code: "upload_failed",
             message: result.message || "上传失败",
             reason: result.message || "上传失败",
-            can_force: false,
           },
         );
         toast.error(result.message || "上传失败");
@@ -68,7 +77,10 @@ export default function UploadSkillPage() {
       setInstallResult({
         skillName: result.skill_name,
         warnings: result.warnings ?? [],
+        securityStatus: result.security_status ?? null,
+        securityReason: result.security_reason ?? null,
       });
+      setShowOverride(false);
       toast.success(result.message || "Skill 已上传");
     } catch (error) {
       const message = error instanceof Error ? error.message : "上传失败";
@@ -76,7 +88,6 @@ export default function UploadSkillPage() {
         code: "upload_failed",
         message,
         reason: message,
-        can_force: false,
       });
       toast.error(message);
     } finally {
@@ -101,6 +112,29 @@ export default function UploadSkillPage() {
   function openFilePicker() {
     if (isUploading) return;
     inputRef.current?.click();
+  }
+
+  async function handleOverride(reason?: string) {
+    if (!installResult || isOverriding) return;
+    setIsOverriding(true);
+    try {
+      const report = await overrideSkillSecurity(installResult.skillName, reason);
+      setInstallResult((previous) =>
+        previous
+          ? {
+              ...previous,
+              securityStatus: report.status ?? "overridden",
+              securityReason: report.reason ?? null,
+            }
+          : previous,
+      );
+      setShowOverride(false);
+      toast.success("已放行，该 Skill 在对话中可立即使用");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "放行失败");
+    } finally {
+      setIsOverriding(false);
+    }
   }
 
   return (
@@ -227,9 +261,9 @@ export default function UploadSkillPage() {
                 {uploadError.reason !== uploadError.message ? (
                   <p>原因：{uploadError.reason}</p>
                 ) : null}
-                {uploadError.code === "security_scan_failed" ? (
+                {uploadError.code === "invalid_skill_structure" ? (
                   <p className="mt-2 text-xs text-red-800">
-                    结构性风险不可跳过；请移除命中规则的内容后重新上传。
+                    归档结构不合法（例如包含嵌套 SKILL.md），无法安装；请调整归档结构后重试。
                   </p>
                 ) : null}
               </AlertDescription>
@@ -237,50 +271,112 @@ export default function UploadSkillPage() {
           ) : null}
 
           {installResult ? (
-            <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-5">
+            <section
+              className={cn(
+                "rounded-lg border p-5",
+                installFailed
+                  ? "border-red-200 bg-red-50"
+                  : "border-emerald-200 bg-emerald-50",
+              )}
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-2">
-                  <CheckCircleIcon className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+                  {installFailed ? (
+                    <AlertTriangleIcon className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+                  ) : (
+                    <CheckCircleIcon className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+                  )}
                   <div>
-                    <p className="text-sm font-medium text-emerald-900">
-                      {installResult.skillName} 安装完成
+                    <p
+                      className={cn(
+                        "text-sm font-medium",
+                        installFailed ? "text-red-900" : "text-emerald-900",
+                      )}
+                    >
+                      {installFailed
+                        ? `${installResult.skillName} 已安装，但因安检未通过暂未启用`
+                        : `${installResult.skillName} 安装完成`}
                     </p>
-                    <p className="mt-1 text-xs text-emerald-800">
-                      {installResult.warnings.length > 0
-                        ? "以下为提示性安全告警，不影响安装。"
-                        : "安全规则已通过，未发现告警。"}
+                    <p
+                      className={cn(
+                        "mt-1 text-xs",
+                        installFailed ? "text-red-800" : "text-emerald-800",
+                      )}
+                    >
+                      {installFailed
+                        ? "安检未通过（规则命中、文件无法扫描或模型判定），当前不会注入对话。确认来源可信后可人工放行。"
+                        : installResult.warnings.length > 0
+                          ? "以下为提示性安全告警，不影响使用。"
+                          : "安全规则已通过，未发现告警。"}
                     </p>
+                    {installFailed && installResult.securityReason ? (
+                      <p className="mt-1 text-xs text-red-800">
+                        原因：{installResult.securityReason}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
-                <Button type="button" size="sm" variant="outline" asChild>
-                  <Link href="/workspace/skills">查看技能</Link>
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {installFailed ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => setShowOverride((previous) => !previous)}
+                    >
+                      我已知悉风险，仍要使用
+                    </Button>
+                  ) : null}
+                  <Button type="button" size="sm" variant="outline" asChild>
+                    <Link href="/workspace/skills">查看技能</Link>
+                  </Button>
+                </div>
               </div>
+              {installFailed && showOverride ? (
+                <SecurityOverridePanel
+                  isSubmitting={isOverriding}
+                  onConfirm={handleOverride}
+                  onCancel={() => setShowOverride(false)}
+                />
+              ) : null}
               {installResult.warnings.length > 0 ? (
                 <ul className="mt-4 space-y-2">
-                  {installResult.warnings.map((warning, index) => (
-                    <li
-                      key={`${warning.code}-${warning.file}-${warning.line}-${index}`}
-                      className="rounded border border-amber-200 bg-white p-3 text-xs text-amber-950"
-                    >
-                      <div className="flex flex-wrap items-center gap-2 font-medium">
-                        <AlertTriangleIcon className="h-3.5 w-3.5 text-amber-600" />
-                        <span>{warning.code}</span>
-                        {warning.file ? (
-                          <span className="text-amber-800">
-                            {warning.file}
-                            {warning.line ? `:${warning.line}` : ""}
-                          </span>
+                  {installResult.warnings.map((warning, index) => {
+                    const categoryInfo = securityCategoryInfo(warning.category);
+                    return (
+                      <li
+                        key={`${warning.code}-${warning.file}-${warning.line}-${index}`}
+                        className="rounded border border-amber-200 bg-white p-3 text-xs text-amber-950"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 font-medium">
+                          <AlertTriangleIcon className="h-3.5 w-3.5 text-amber-600" />
+                          <span>{warning.code}</span>
+                          {categoryInfo ? (
+                            <span className="rounded bg-amber-100 px-1 text-[10px] font-semibold">
+                              {categoryInfo.label}
+                            </span>
+                          ) : null}
+                          {warning.file ? (
+                            <span className="text-amber-800">
+                              {warning.file}
+                              {warning.line ? `:${warning.line}` : ""}
+                            </span>
+                          ) : null}
+                          {warning.excerpt_hash ? (
+                            <span className="font-mono text-[10px] text-amber-700">
+                              #{warning.excerpt_hash}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="mt-1 leading-5">{warning.message}</p>
+                        {categoryInfo ? (
+                          <p className="mt-1 leading-5 text-gray-600">
+                            {categoryInfo.advice}
+                          </p>
                         ) : null}
-                        {warning.excerpt_hash ? (
-                          <span className="font-mono text-[10px] text-amber-700">
-                            #{warning.excerpt_hash}
-                          </span>
-                        ) : null}
-                      </div>
-                      <p className="mt-1 leading-5">{warning.message}</p>
-                    </li>
-                  ))}
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : null}
             </section>

@@ -43,6 +43,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import VIEWABLE_IMAGE_EXTENSIONS, VIRTUAL_PATH_PREFIX, Paths, get_paths
+from deerflow.config.referenced_files_config import ReferencedFilesConfig
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -65,29 +66,20 @@ _MAX_TOTAL_CHARS = 1_000_000  # 1 MB
 # Oversized library files are copied here, relative to the thread workspace.
 _REFERENCED_SUBDIR = "referenced"
 
-_DEFAULT_INLINE_MAX_BYTES = 4 * 1024 * 1024
-_DEFAULT_MAX_COPY_BYTES = 50 * 1024 * 1024
-_DEFAULT_COPY_RETENTION_HOURS = 24
 
-
-def _referenced_files_config():
-    """Load the referenced-files config lazily, falling back to defaults.
+def _referenced_files_config() -> ReferencedFilesConfig:
+    """Load the referenced-files config lazily, falling back to model defaults.
 
     The fallback keeps small-file behaviour working even when the global app
-    config cannot be loaded (for example in isolated unit tests).
+    config cannot be loaded (for example in isolated unit tests).  Defaults live
+    on the model itself, so the fallback cannot drift from the real config.
     """
     try:
         from deerflow.config.app_config import get_app_config
 
         return get_app_config().referenced_files
     except Exception:  # noqa: BLE001 - config failure must not change file injection
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            inline_max_bytes=_DEFAULT_INLINE_MAX_BYTES,
-            max_copy_bytes=_DEFAULT_MAX_COPY_BYTES,
-            copy_retention_hours=_DEFAULT_COPY_RETENTION_HOURS,
-        )
+        return ReferencedFilesConfig()
 
 # File extensions we treat as "read raw text". Includes common code, data,
 # and config formats. Matching is case-insensitive on the suffix.

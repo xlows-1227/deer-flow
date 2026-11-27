@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -25,11 +25,16 @@ from deerflow.skills.content_rules import scan_content_rules
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.security_report import (
+    STATUS_FAILED,
+    STATUS_OVERRIDDEN,
+    delete_override,
     dismiss_warnings,
     effective_warnings,
     mark_skill_unscanned,
+    read_security_report,
     read_security_status,
     warning_count,
+    write_override,
 )
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -111,7 +116,7 @@ class SkillResponse(BaseModel):
     )
     security_status: str = Field(
         "unscanned",
-        description="Custom skill security status: 'passed', 'failed' or 'unscanned'.",
+        description="Custom skill security status: 'passed', 'failed', 'unscanned' or 'overridden'.",
     )
     security_reason: str | None = Field(None, description="Why the status is 'failed' or 'unscanned'.")
     security_checked_at: str | None = Field(None, description="When the security status was last updated.")
@@ -184,6 +189,11 @@ class SkillSecurityWarning(BaseModel):
     message: str = Field(..., description="Human-readable description; never contains the raw snippet")
     excerpt_hash: str | None = Field(None, description="Hash of the matched snippet for correlation")
     source: str = Field("rules", description="'rules' or 'llm'")
+    decision: str | None = Field(None, description="LLM verdict behind the warning: 'warn' or 'block'")
+    category: str | None = Field(
+        None,
+        description="Closed-vocabulary reason class for LLM warnings (e.g. 'hardcoded_credential', 'exfiltration')",
+    )
 
 
 class SkillInstallResponse(BaseModel):
@@ -196,6 +206,11 @@ class SkillInstallResponse(BaseModel):
         default_factory=list,
         description="Advisory security warnings (deterministic rules + LLM review).  They never block the install.",
     )
+    security_status: str | None = Field(
+        None,
+        description="'passed' / 'failed' / 'unscanned' / 'overridden'. A 'failed' skill is installed but hidden from the model until a human overrides it.",
+    )
+    security_reason: str | None = Field(None, description="Why the installed skill is not 'passed'.")
 
 
 class SkillSecurityReportResponse(BaseModel):
@@ -205,6 +220,20 @@ class SkillSecurityReportResponse(BaseModel):
     scanned_at: str | None = Field(None, description="When the security report was generated")
     stale: bool = Field(False, description="True when the skill content changed since the last scan")
     warnings: list[SkillSecurityWarning] = Field(default_factory=list)
+    status: str = Field("passed", description="'passed' / 'failed' / 'unscanned' / 'overridden'")
+    reason: str | None = Field(None, description="Why the skill is 'failed' or 'unscanned'")
+    reason_code: str | None = Field(None, description="Failure class: 'llm_block' / 'rule_block' / 'structural'; any 'failed' skill is overridable")
+    override: dict | None = Field(
+        None,
+        description="Human override metadata when status is 'overridden': actor, at, reason, acknowledged findings",
+    )
+
+
+class SkillSecurityOverrideRequest(BaseModel):
+    """Explicit human acceptance of a failed security scan."""
+
+    acknowledge: bool = Field(..., description="Must be true; the caller confirms the flagged findings")
+    reason: str | None = Field(None, max_length=500, description="Optional note stored in the audit trail")
 
 
 class SkillSecurityDismissRequest(BaseModel):
@@ -217,7 +246,6 @@ class SkillUploadErrorDetail(BaseModel):
     code: str = Field(..., description="Machine-readable upload error code")
     message: str = Field(..., description="Human-readable upload error message")
     reason: str = Field(..., description="Specific failure reason")
-    can_force: bool = Field(False, description="Whether the user may retry with force=true")
 
 
 class CustomSkillContentResponse(SkillResponse):
@@ -820,11 +848,11 @@ async def install_skill(request: SkillInstallRequest, config: AppConfig = Depend
     except SkillAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except SkillSecurityScanError as e:
+        # Package-structure error (nested SKILL.md): never installable.
         detail = SkillUploadErrorDetail(
-            code="security_scan_failed",
+            code="invalid_skill_structure",
             message=str(e),
             reason=e.reason,
-            can_force=e.can_force,
         )
         raise HTTPException(status_code=400, detail=detail.model_dump())
     except ValueError as e:
@@ -938,7 +966,6 @@ async def draft_custom_skill_with_ai(request: SkillAIDraftRequest, config: AppCo
 @router.post("/skills/upload", response_model=SkillInstallResponse, summary="Upload Skill Archive")
 async def upload_skill_archive(
     file: UploadFile = File(...),
-    force: bool = Query(False, description="Skip warn-level security findings and the advisory LLM review after explicit user confirmation. Blocking rule findings cannot be forced."),
     model_name: str | None = Form(None, description="Optional model name used for the security scan; omit to use the configured default."),
     config: AppConfig = Depends(get_config),
 ) -> SkillInstallResponse:
@@ -953,7 +980,6 @@ async def upload_skill_archive(
             storage = get_or_new_skill_storage(app_config=config)
             result = await storage.ainstall_skill_from_archive(
                 tmp_path,
-                skip_security_scan=force,
                 model_name=scan_model_name,
             )
             skill_name = result.get("skill_name")
@@ -977,15 +1003,15 @@ async def upload_skill_archive(
             code="skill_already_exists",
             message=str(e),
             reason="A skill with this name already exists. Please choose a different name or delete the existing skill first.",
-            can_force=False,
         )
         raise HTTPException(status_code=409, detail=detail.model_dump())
     except SkillSecurityScanError as e:
+        # Package-structure errors only (nested SKILL.md): security verdicts
+        # install as ``failed`` and are overridable instead of rejecting.
         detail = SkillUploadErrorDetail(
-            code="security_scan_failed",
+            code="invalid_skill_structure",
             message=str(e),
             reason=e.reason,
-            can_force=e.can_force,
         )
         raise HTTPException(status_code=400, detail=detail.model_dump())
     except HTTPException:
@@ -995,7 +1021,6 @@ async def upload_skill_archive(
             code="invalid_archive",
             message=str(e),
             reason="The uploaded file is not a valid skill archive.",
-            can_force=False,
         )
         raise HTTPException(status_code=400, detail=detail.model_dump())
     except Exception as e:
@@ -1004,7 +1029,6 @@ async def upload_skill_archive(
             code="upload_failed",
             message=str(e),
             reason="An unexpected error occurred while processing the uploaded archive.",
-            can_force=False,
         )
         raise HTTPException(status_code=500, detail=detail.model_dump())
     finally:
@@ -1195,37 +1219,47 @@ async def _enforce_share_admin(
     auth = await _resolve_auth(request)
     is_admin = _is_admin_auth(auth)
     caller_id = None if auth.user is None else str(getattr(auth.user, "id", None))
-    logger.info("_enforce_share_admin: skill_name=%s, caller_id=%s, is_admin=%s",
-                skill_name, caller_id, is_admin)
     storage = get_or_new_skill_storage(app_config=config)
+
+    def _log_check(*, allowed: bool, source: str, owner_id: str | None, owner_match: bool) -> None:
+        role = "admin" if is_admin else ("owner" if owner_match else "none")
+        logger.info(
+            "Skill share-admin check: skill=%s actor=%s role=%s allowed=%s source=%s owner=%s",
+            skill_name,
+            caller_id,
+            role,
+            allowed,
+            source,
+            owner_id or "-",
+        )
+
+    def _deny(source: str, owner_id: str | None) -> None:
+        _log_check(allowed=False, source=source, owner_id=owner_id, owner_match=False)
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+
     all_skills = storage.load_skills(enabled_only=False)
-    logger.info("_enforce_share_admin: loaded %d skills total", len(all_skills))
     # Owner path: storage native access succeeds
-    owned_skills = [s for s in all_skills
-                    if s.name == skill_name and s.category == SkillCategory.CUSTOM]
-    logger.info("_enforce_share_admin: owned_skills count=%d, names=%s",
-                len(owned_skills), [s.name for s in owned_skills])
+    owned_skills = [s for s in all_skills if s.name == skill_name and s.category == SkillCategory.CUSTOM]
     if owned_skills:
         owner_id = owned_skills[0].owner_user_id
-        logger.info("_enforce_share_admin: owner_id=%s, owner_id_type=%s",
-                    owner_id, type(owner_id).__name__)
         if owner_id is None:
-            logger.info("_enforce_share_admin: owner_id is None, is_admin=%s", is_admin)
             if is_admin:
+                _log_check(allowed=True, source="listing", owner_id="", owner_match=False)
                 return skill_name, auth, ""
-            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        logger.info("_enforce_share_admin: checking ownership: caller_id=%s vs owner_id=%s (matched=%s)",
-                    caller_id, owner_id, caller_id and caller_id.lower() == owner_id.lower())
-        if is_admin or (caller_id and caller_id.lower() == owner_id.lower()):
+            _deny("listing", None)
+        owner_match = bool(caller_id and caller_id.lower() == owner_id.lower())
+        if is_admin or owner_match:
+            _log_check(allowed=True, source="listing", owner_id=owner_id, owner_match=owner_match)
             return skill_name, auth, owner_id
-        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-    logger.info("_enforce_share_admin: owned_skills empty, is_admin=%s, caller_id=%s", is_admin, caller_id)
+        _deny("listing", owner_id)
+
     # Fallback: try direct disk-based ownership check (handles cases where
     # enforce_owner_isolation filtered out the skill due to contextvar issues)
     skill_dir = storage.get_custom_skill_dir(skill_name)
     if not skill_dir.exists() or not (skill_dir / SKILL_MD_FILE).exists():
         if not is_admin:
-            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+            _deny("disk", None)
+        _log_check(allowed=True, source="disk", owner_id="", owner_match=False)
         return skill_name, auth, ""
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
@@ -1233,13 +1267,15 @@ async def _enforce_share_admin(
     if isinstance(storage, LocalSkillStorage):
         raw = storage._read_custom_skill_owner(skill_dir)
         owner_id = raw or ""
-    logger.info("_enforce_share_admin: fallback disk check: owner_id=%s, caller_id=%s", owner_id, caller_id)
     if is_admin:
+        _log_check(allowed=True, source="disk", owner_id=owner_id or "", owner_match=False)
         return skill_name, auth, owner_id or ""
     # Non-admin: verify ownership via disk metadata
-    if caller_id and owner_id and caller_id.lower() == owner_id.lower():
+    owner_match = bool(caller_id and owner_id and caller_id.lower() == owner_id.lower())
+    if owner_match:
+        _log_check(allowed=True, source="disk", owner_id=owner_id, owner_match=True)
         return skill_name, auth, owner_id
-    raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+    _deny("disk", owner_id)
 
 
 @router.get(
@@ -1757,6 +1793,152 @@ async def dismiss_custom_skill_security_warnings(
     except Exception as e:
         logger.error("Failed to dismiss security warnings for %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to dismiss security warnings: {str(e)}")
+
+
+def _override_actor(auth: AuthContext, *, caller_id: str | None, owner_id: str) -> dict:
+    user = getattr(auth, "user", None)
+    if _is_admin_auth(auth):
+        role = "admin"
+    elif caller_id and owner_id and caller_id.lower() == owner_id.lower():
+        role = "owner"
+    else:
+        role = "user"
+    return {
+        "user_id": caller_id or "",
+        "email": str(getattr(user, "email", "") or ""),
+        "role": role,
+    }
+
+
+def _acknowledged_findings(report: dict | None) -> list[dict]:
+    """Structural summary of the blocking verdicts; never the model's reason."""
+    acknowledged: list[dict] = []
+    for warning in (report or {}).get("warnings") or []:
+        if not isinstance(warning, dict) or warning.get("decision") != "block":
+            continue
+        acknowledged.append(
+            {
+                "code": warning.get("code"),
+                "decision": "block",
+                "category": warning.get("category"),
+                "file": warning.get("file"),
+                "line": warning.get("line"),
+                "excerpt_hash": warning.get("excerpt_hash"),
+            }
+        )
+    return acknowledged
+
+
+@router.post(
+    "/skills/custom/{skill_name}/security/override",
+    response_model=SkillSecurityReportResponse,
+    summary="Override a Failed Security Scan",
+)
+async def override_custom_skill_security(
+    skill_name: str,
+    payload: SkillSecurityOverrideRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillSecurityReportResponse:
+    """Human-accept any ``failed`` security verdict for the current content.
+
+    Rule blocks, structural failures and LLM blocks are all overridable: the
+    user decides whether to use the skill anyway.  Package-structure errors
+    (nested ``SKILL.md``) never reach this state because the installer rejects
+    them outright.  The override is pinned to the content hash, so any later
+    edit makes it inert, and it is recorded in the skill history.
+    """
+    try:
+        skill_name, auth, owner_id = await _enforce_share_admin(request, skill_name, config=config)
+        if not payload.acknowledge:
+            raise HTTPException(status_code=400, detail="acknowledge must be true")
+        storage = get_or_new_skill_storage(app_config=config)
+        skill_dir = storage.get_custom_skill_dir(skill_name)
+        status_info = read_security_status(skill_dir)
+        if status_info["status"] == STATUS_OVERRIDDEN:
+            raise HTTPException(status_code=409, detail="Skill security has already been overridden")
+        if status_info["status"] != STATUS_FAILED:
+            raise HTTPException(status_code=409, detail=f"Only a failed skill can be overridden (current status: {status_info['status']})")
+        report = read_security_report(skill_dir) or {}
+        content_hash = report.get("content_hash")
+        if not content_hash:
+            raise HTTPException(status_code=409, detail="Security report is missing a content hash; rescan the skill first")
+
+        user = getattr(auth, "user", None)
+        caller_id = None if user is None else str(getattr(user, "id", "") or "")
+        actor = _override_actor(auth, caller_id=caller_id, owner_id=owner_id)
+        acknowledged = _acknowledged_findings(report)
+        write_override(
+            skill_dir,
+            content_hash=content_hash,
+            actor=actor,
+            reason=payload.reason,
+            acknowledged=acknowledged,
+        )
+        storage.append_history(
+            skill_name,
+            {
+                "action": "security_override_granted",
+                "author": actor["user_id"] or actor["email"] or "unknown",
+                "actor_role": actor["role"],
+                "content_hash": content_hash,
+                "reason": payload.reason,
+                "acknowledged": acknowledged,
+            },
+        )
+        await refresh_skills_system_prompt_cache_async()
+        logger.info(
+            "Security override granted: skill=%s actor=%s role=%s reason_code=%s findings=%d",
+            skill_name,
+            actor["user_id"] or actor["email"],
+            actor["role"],
+            report.get("reason_code"),
+            len(acknowledged),
+        )
+        return SkillSecurityReportResponse(**effective_warnings(skill_dir))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to override security for %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to override security: {str(e)}")
+
+
+@router.delete(
+    "/skills/custom/{skill_name}/security/override",
+    response_model=SkillSecurityReportResponse,
+    summary="Revoke a Security Override",
+)
+async def revoke_custom_skill_security_override(
+    skill_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillSecurityReportResponse:
+    """Remove the human override, returning the skill to ``failed``."""
+    try:
+        skill_name, auth, owner_id = await _enforce_share_admin(request, skill_name, config=config)
+        storage = get_or_new_skill_storage(app_config=config)
+        skill_dir = storage.get_custom_skill_dir(skill_name)
+        if not delete_override(skill_dir):
+            raise HTTPException(status_code=409, detail="Skill security has not been overridden")
+        user = getattr(auth, "user", None)
+        caller_id = None if user is None else str(getattr(user, "id", "") or "")
+        actor = _override_actor(auth, caller_id=caller_id, owner_id=owner_id)
+        storage.append_history(
+            skill_name,
+            {
+                "action": "security_override_revoked",
+                "author": actor["user_id"] or actor["email"] or "unknown",
+                "actor_role": actor["role"],
+            },
+        )
+        await refresh_skills_system_prompt_cache_async()
+        logger.info("Security override revoked: skill=%s actor=%s role=%s", skill_name, actor["user_id"] or actor["email"], actor["role"])
+        return SkillSecurityReportResponse(**effective_warnings(skill_dir))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to revoke security override for %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to revoke security override: {str(e)}")
 
 
 @router.get("/skills/custom/{skill_name}/versions", response_model=CustomSkillVersionsResponse, summary="List Custom Skill Versions")

@@ -741,7 +741,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = [] if is_published else _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    # ``allowed-tools`` only restricts the skill explicitly selected for this
+    # turn. Without a selected skill the whitelist must not affect the chat.
+    skills_for_tool_policy = (
+        _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+        if not is_published and forced_skill
+        else []
+    )
     skills_signature = _skills_cache_signature(skills_for_tool_policy)
 
     try:

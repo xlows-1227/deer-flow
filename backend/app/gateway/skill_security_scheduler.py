@@ -53,8 +53,13 @@ async def skill_security_rescan_loop(app: FastAPI, *, tick_seconds: float = _TIC
                     )
                     if summary["processed"]:
                         logger.info(
-                            "Skill security rescan batch: %s",
-                            summary,
+                            "Skill security rescan batch: candidates=%d processed=%d passed=%d failed=%d unscanned=%d changed=%d",
+                            summary["candidates"],
+                            summary["processed"],
+                            summary["passed"],
+                            summary["failed"],
+                            summary["unscanned"],
+                            summary["changed"],
                         )
                     next_run = time.monotonic() + max(
                         1, getattr(skill_config, "security_rescan_interval_seconds", 300)

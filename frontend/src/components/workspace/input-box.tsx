@@ -1464,10 +1464,12 @@ export function InputBox({
                       </PromptInputActionMenuItem>
                     )}
                     <PromptInputActionMenuItem
+                      disabled={!supportThinking}
                       className={cn(
                         context.mode === "pro"
                           ? "text-accent-foreground"
                           : "text-muted-foreground/65",
+                        !supportThinking && "opacity-50",
                       )}
                       onSelect={() => handleModeSelect("pro")}
                     >
@@ -1483,7 +1485,9 @@ export function InputBox({
                           {t.inputBox.proMode}
                         </div>
                         <div className="pl-7 text-xs">
-                          {t.inputBox.proModeDescription}
+                          {supportThinking
+                            ? t.inputBox.proModeDescription
+                            : t.inputBox.modeUnsupportedReason}
                         </div>
                       </div>
                       {context.mode === "pro" ? (
@@ -1493,10 +1497,12 @@ export function InputBox({
                       )}
                     </PromptInputActionMenuItem>
                     <PromptInputActionMenuItem
+                      disabled={!supportThinking}
                       className={cn(
                         context.mode === "ultra"
                           ? "text-accent-foreground"
                           : "text-muted-foreground/65",
+                        !supportThinking && "opacity-50",
                       )}
                       onSelect={() => handleModeSelect("ultra")}
                     >
@@ -1517,7 +1523,9 @@ export function InputBox({
                           </div>
                         </div>
                         <div className="pl-7 text-xs">
-                          {t.inputBox.ultraModeDescription}
+                          {supportThinking
+                            ? t.inputBox.ultraModeDescription
+                            : t.inputBox.modeUnsupportedReason}
                         </div>
                       </div>
                       {context.mode === "ultra" ? (

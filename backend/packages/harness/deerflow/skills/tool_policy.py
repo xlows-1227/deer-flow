@@ -41,4 +41,13 @@ def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](tools: list[ToolT], sk
     if allowed is None:
         return tools
 
-    return [tool for tool in tools if tool.name in allowed]
+    kept = [tool for tool in tools if tool.name in allowed]
+    dropped = [tool.name for tool in tools if tool.name not in allowed]
+    if dropped:
+        logger.info(
+            "Skill allowed-tools applied (skills=%s): kept=%s dropped=%s",
+            ", ".join(skill.name for skill in skills),
+            ", ".join(tool.name for tool in kept),
+            ", ".join(dropped),
+        )
+    return kept

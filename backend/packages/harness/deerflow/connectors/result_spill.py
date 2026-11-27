@@ -41,26 +41,25 @@ def serialized_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":")))
 
 
-def _inline_max_chars() -> int:
+def _config_int(section: str, attribute: str, default: int) -> int:
+    """Read one integer config value; *default* is used when it is unavailable."""
     try:
-        return int(get_app_config().connectors.result_inline_max_chars)
-    except Exception:  # noqa: BLE001 - fall back to the documented default
-        return 50000
+        return int(getattr(getattr(get_app_config(), section), attribute))
+    except Exception:  # noqa: BLE001 - config failure must not break a tool call
+        return default
+
+
+def _inline_max_chars() -> int:
+    return _config_int("connectors", "result_inline_max_chars", 50000)
 
 
 def _preview_rows() -> int:
-    try:
-        return int(get_app_config().connectors.result_preview_rows)
-    except Exception:  # noqa: BLE001 - fall back to the documented default
-        return 5
+    return _config_int("connectors", "result_preview_rows", 5)
 
 
 def _retention_hours() -> int:
     """Return the spill-file retention window in hours (0 = keep forever)."""
-    try:
-        return int(get_app_config().connectors.result_spill_retention_hours)
-    except Exception:  # noqa: BLE001 - fall back to the documented default
-        return 24
+    return _config_int("connectors", "result_spill_retention_hours", 24)
 
 
 def _prune_spill_files(host_dir: Path, retention_hours: int) -> None:
@@ -78,11 +77,7 @@ def _prune_spill_files(host_dir: Path, retention_hours: int) -> None:
 
 def _read_file_limit_bytes() -> int:
     """Return the read_file pre-read size limit (0 = guard disabled)."""
-    try:
-        sandbox_cfg = get_app_config().sandbox
-        return int(sandbox_cfg.read_file_max_bytes) if sandbox_cfg else 5 * 1024 * 1024
-    except Exception:  # noqa: BLE001 - mirror the read_file tool fallback
-        return 5 * 1024 * 1024
+    return _config_int("sandbox", "read_file_max_bytes", 5 * 1024 * 1024)
 
 
 def _resolve_spill_target(context: ConnectorRuntimeContext) -> tuple[Path, str] | None:
@@ -178,7 +173,6 @@ def _write_result_files(
         "sql": sql,
         "tables": tables or [],
         "columns": columns,
-        "row_count": returned,
         "returned": returned,
         "total": total,
         "truncated": truncated,

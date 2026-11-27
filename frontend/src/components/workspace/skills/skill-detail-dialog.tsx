@@ -20,6 +20,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { SecurityOverridePanel } from "@/components/workspace/skills/security-override-panel";
 import { stripSkillFrontmatter } from "@/components/workspace/skills/skill-create-utils";
 import { SkillShareDialog } from "@/components/workspace/skills/skill-share-dialog";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -27,8 +28,11 @@ import { isAdminUser } from "@/core/auth/types";
 import {
   dismissSkillSecurityWarnings,
   loadSkillSecurityReport,
+  overrideSkillSecurity,
+  revokeSkillSecurityOverride,
 } from "@/core/skills/api";
 import { useCustomSkill, usePublicSkill } from "@/core/skills/hooks";
+import { securityCategoryInfo } from "@/core/skills/security-category";
 import type {
   Skill,
   SkillSecurityReport,
@@ -88,6 +92,8 @@ export function SkillDetailDialog({
   const [securityReport, setSecurityReport] =
     useState<SkillSecurityReport | null>(null);
   const [isDismissing, setIsDismissing] = useState(false);
+  const [isOverriding, setIsOverriding] = useState(false);
+  const [showOverrideConfirm, setShowOverrideConfirm] = useState(false);
 
   useEffect(() => {
     if (!isCustom || !skill?.name) {
@@ -122,6 +128,37 @@ export function SkillDetailDialog({
       toast.error(error instanceof Error ? error.message : "忽略告警失败");
     } finally {
       setIsDismissing(false);
+    }
+  }
+
+  async function handleOverrideSecurity(reason?: string) {
+    if (!skill?.name || isOverriding) return;
+    setIsOverriding(true);
+    try {
+      const report = await overrideSkillSecurity(skill.name, reason);
+      setSecurityReport(report);
+      setShowOverrideConfirm(false);
+      await refetchCustom();
+      toast.success("已放行，该 Skill 在对话中可立即使用");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "放行失败");
+    } finally {
+      setIsOverriding(false);
+    }
+  }
+
+  async function handleRevokeOverride() {
+    if (!skill?.name || isOverriding) return;
+    setIsOverriding(true);
+    try {
+      const report = await revokeSkillSecurityOverride(skill.name);
+      setSecurityReport(report);
+      await refetchCustom();
+      toast.success("已撤销放行，该 Skill 重新停用");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "撤销放行失败");
+    } finally {
+      setIsOverriding(false);
     }
   }
 
@@ -264,17 +301,73 @@ export function SkillDetailDialog({
                     {isCustom ? (
                       <SidebarSection label="安检状态">
                         {displaySkill.security_status === "failed" ? (
-                          <Badge
-                            variant="destructive"
-                            title={
-                              displaySkill.security_reason ??
-                              "模型安检未通过，当前 Skill 不会注入对话"
-                            }
-                            className="gap-1"
-                          >
-                            <AlertTriangleIcon className="size-3" />
-                            安检失败
-                          </Badge>
+                          <div className="space-y-3">
+                            <Badge
+                              variant="destructive"
+                              title={
+                                displaySkill.security_reason ??
+                                "模型安检未通过，当前 Skill 不会注入对话"
+                              }
+                              className="gap-1"
+                            >
+                              <AlertTriangleIcon className="size-3" />
+                              安检失败
+                            </Badge>
+                            {canShare ? (
+                              <div>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="destructive"
+                                  onClick={() =>
+                                    setShowOverrideConfirm((previous) => !previous)
+                                  }
+                                >
+                                  我已知悉风险，仍要使用
+                                </Button>
+                                {showOverrideConfirm ? (
+                                  <SecurityOverridePanel
+                                    isSubmitting={isOverriding}
+                                    onConfirm={handleOverrideSecurity}
+                                    onCancel={() => setShowOverrideConfirm(false)}
+                                  />
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : displaySkill.security_status === "overridden" ? (
+                          <div className="space-y-2">
+                            <Badge
+                              variant="outline"
+                              className="border-amber-300 bg-amber-50 text-amber-900"
+                            >
+                              已人工放行
+                            </Badge>
+                            {securityReport?.override ? (
+                              <p className="text-xs leading-5 text-gray-600">
+                                {securityReport.override.actor.email ||
+                                  securityReport.override.actor.user_id}
+                                {" · "}
+                                {new Date(
+                                  securityReport.override.at,
+                                ).toLocaleString()}
+                                {securityReport.override.reason
+                                  ? ` · ${securityReport.override.reason}`
+                                  : ""}
+                              </p>
+                            ) : null}
+                            {canShare ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={isOverriding}
+                                onClick={() => void handleRevokeOverride()}
+                              >
+                                撤销放行
+                              </Button>
+                            ) : null}
+                          </div>
                         ) : displaySkill.security_status === "unscanned" ? (
                           <Badge
                             variant="outline"
@@ -298,28 +391,48 @@ export function SkillDetailDialog({
                         label={`安全告警 (${securityReport.warnings.length})`}
                       >
                         <ul className="space-y-2">
-                          {securityReport.warnings.map((warning, index) => (
-                            <li
-                              key={`${warning.code}-${warning.file}-${warning.line}-${index}`}
-                              className="text-xs leading-5 text-gray-700"
-                            >
-                              <div className="flex flex-wrap items-center gap-1 font-medium text-amber-900">
-                                <span>{warning.code}</span>
-                                {warning.file ? (
-                                  <span>
-                                    {warning.file}
-                                    {warning.line ? `:${warning.line}` : ""}
-                                  </span>
+                          {securityReport.warnings.map((warning, index) => {
+                            const categoryInfo = securityCategoryInfo(
+                              warning.category,
+                            );
+                            return (
+                              <li
+                                key={`${warning.code}-${warning.file}-${warning.line}-${index}`}
+                                className="text-xs leading-5 text-gray-700"
+                              >
+                                <div className="flex flex-wrap items-center gap-1 font-medium text-amber-900">
+                                  <span>{warning.code}</span>
+                                  {categoryInfo ? (
+                                    <span className="rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-900">
+                                      {categoryInfo.label}
+                                    </span>
+                                  ) : null}
+                                  {warning.decision === "block" ? (
+                                    <span className="rounded bg-red-100 px-1 text-[10px] font-semibold text-red-700">
+                                      触发停用
+                                    </span>
+                                  ) : null}
+                                  {warning.file ? (
+                                    <span>
+                                      {warning.file}
+                                      {warning.line ? `:${warning.line}` : ""}
+                                    </span>
+                                  ) : null}
+                                  {warning.excerpt_hash ? (
+                                    <span className="font-mono text-[10px] text-amber-700">
+                                      #{warning.excerpt_hash}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p>{warning.message}</p>
+                                {categoryInfo ? (
+                                  <p className="text-[11px] text-gray-500">
+                                    {categoryInfo.advice}
+                                  </p>
                                 ) : null}
-                                {warning.excerpt_hash ? (
-                                  <span className="font-mono text-[10px] text-amber-700">
-                                    #{warning.excerpt_hash}
-                                  </span>
-                                ) : null}
-                              </div>
-                              <p>{warning.message}</p>
-                            </li>
-                          ))}
+                              </li>
+                            );
+                          })}
                         </ul>
                         <Button
                           type="button"

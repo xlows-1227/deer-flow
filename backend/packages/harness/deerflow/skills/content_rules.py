@@ -8,7 +8,8 @@ auditable.
 Severity policy:
 
 * ``block`` — structural or high-confidence dangerous patterns.  A skill
-  containing one of these is rejected and there is no force override.
+  containing one of these installs as ``failed`` and stays hidden from the
+  model until its owner or an admin explicitly overrides the verdict.
 * ``warn`` — heuristic / semantic signals.  They are surfaced to the uploader
   and recorded in the audit trail, but they never block.
 
@@ -115,6 +116,86 @@ _ENV_ASSIGN_RE = re.compile(
 )
 _ENV_DUMP_RE = re.compile(r"(?i)\b(?:data|json|files|body)\s*=\s*(?:dict\()?\s*(?:os\.environ|process\.env)")
 
+_EMBEDDED_SECRET_MESSAGE = "Content appears to embed a live credential or private key."
+
+# Generic ``name = literal`` secret assignments: ``App Secret：<32 chars>``,
+# ``client_secret: "…"``, ``api_key=…``.  Provider-prefixed tokens (``sk-``,
+# ``AKIA``, ``ghp_``, ``xox``) are handled by the ``embedded_secret`` rule
+# patterns; this catches plain values.  ``(?<![/?&])`` keeps URL query
+# parameters (``?access_token=…``) out, and the value is validated by
+# :func:`_looks_like_literal_secret` so placeholders, environment lookups and
+# template braces never match.
+_SECRET_ASSIGN_RE = re.compile(
+    r"(?ix)"
+    r"(?<![/?&\w.-])"
+    r"(?P<name>app[\s_-]?secret|client[\s_-]?secret|secret[\s_-]?key|api[\s_-]?key"
+    r"|access[\s_-]?token|refresh[\s_-]?token|bot[\s_-]?token|webhook[\s_-]?secret"
+    r"|signing[\s_-]?key|encryption[\s_-]?key|private[\s_-]?key)"
+    r"[\"']?\s*[:=：]\s*[\"']?"
+    r"(?P<value>[A-Za-z0-9_+][A-Za-z0-9_+\-]{15,})"
+    r"(?![A-Za-z0-9_+\-])"
+)
+
+# Values that are documentation placeholders or code references, not secrets.
+_PLACEHOLDER_PREFIXES = (
+    "your",
+    "my",
+    "some",
+    "the",
+    "test",
+    "dummy",
+    "sample",
+    "example",
+    "placeholder",
+    "changeme",
+    "change_me",
+    "redacted",
+    "none",
+    "null",
+    "true",
+    "false",
+    "todo",
+    "secret",
+    "token",
+    "key",
+    "value",
+    "password",
+    "os",
+    "process",
+    "sys",
+    "env",
+)
+
+
+def _looks_like_literal_secret(value: str) -> bool:
+    """Reject placeholders, identifiers and template references.
+
+    A real credential in documentation is a literal string: it carries a digit,
+    has some character variety, and is not a SCREAMING_SNAKE_CASE identifier.
+    """
+    lowered = value.lower()
+    if any(lowered.startswith(prefix) for prefix in _PLACEHOLDER_PREFIXES):
+        return False
+    if not any(ch.isdigit() for ch in value):
+        return False
+    if value.isdigit():
+        return False
+    if len(set(value)) < 5:
+        return False
+    if value.isupper() and "_" in value:
+        return False
+    return True
+
+
+def _embedded_secret_hits(text: str) -> list[tuple[int, str]]:
+    hits: list[tuple[int, str]] = []
+    for match in _SECRET_ASSIGN_RE.finditer(text):
+        if not _looks_like_literal_secret(match.group("value")):
+            continue
+        hits.append((match.start(), match.group(0)))
+    return hits
+
+
 # A credential path only matters when the same line actually reads the file:
 # a library call (``open``/``read_text``), a shell reader (``cat``) or a
 # request that streams a local file (``@path`` / ``--upload-file``).
@@ -177,7 +258,7 @@ class _Rule:
     # Block rules are downgraded to ``warn`` when the matching line explicitly
     # tells the reader not to do it ("never run ...", "禁止执行 ...").
     negation_downgrade: bool = True
-    applies_to: Literal["always", "script", "document"] = "always"
+    applies_to: Literal["always", "script"] = "always"
     # A match is discarded when the rest of its line matches one of these
     # guards, e.g. a download piped into a formatter instead of an interpreter.
     tail_guards: tuple[re.Pattern[str], ...] = ()
@@ -328,7 +409,7 @@ _RULES: tuple[_Rule, ...] = (
     # --- secrets embedded in content ------------------------------------
     _Rule(
         rule_id="embedded_secret",
-        message="Content appears to embed a live credential or private key.",
+        message=_EMBEDDED_SECRET_MESSAGE,
         severity="warn",
         patterns=_rx(
             r"\bsk-[A-Za-z0-9]{16,}",
@@ -413,7 +494,7 @@ def _is_negated(lines: list[str], line_number: int) -> bool:
 def _host_allowed(host: str | None) -> bool:
     if not host:
         return True
-    host = host.lower().split(":")[0]
+    host = host.lower()
     return any(host == suffix or host.endswith("." + suffix) for suffix in _ALLOWLISTED_HOST_SUFFIXES)
 
 
@@ -528,8 +609,6 @@ def scan_content_rules(
     for rule in _RULES:
         if rule.applies_to == "script" and not executable:
             continue
-        if rule.applies_to == "document" and executable:
-            continue
         for pattern in rule.patterns:
             for match in pattern.finditer(text):
                 if rule.tail_guards and any(guard.search(_line_tail(text, match.start())) for guard in rule.tail_guards):
@@ -569,12 +648,26 @@ def scan_content_rules(
             excerpt_hash=_excerpt_hash(snippet),
         )
 
+    # Plain ``name = literal`` secrets.  Values that are placeholders, env
+    # lookups or template braces are filtered out by the validator above.
+    for offset, snippet in _embedded_secret_hits(text):
+        line_number = _line_of(text, offset)
+        key = ("embedded_secret", line_number)
+        if key in findings:
+            continue
+        findings[key] = Finding(
+            rule_id="embedded_secret",
+            severity="warn",
+            line=line_number,
+            message=_EMBEDDED_SECRET_MESSAGE,
+            excerpt_hash=_excerpt_hash(snippet),
+        )
+
     # Outbound hosts: an unknown host is a warning.  It blocks only when the
     # payload is sensitive (archive, whole environment, credential/browser
     # stores); the destination does not matter then.
     script_sends_data = executable and bool(_NETWORK_SEND_RE.search(text))
     sends_sensitive = script_sends_data and _carries_sensitive_payload(text)
-    seen_urls: set[tuple[str, int]] = set()
     for match in _URL_RE.finditer(text):
         host = urlsplit(match.group(0)).hostname
         if _host_allowed(host):
@@ -590,9 +683,8 @@ def scan_content_rules(
             ):
                 continue
         key = ("external_egress_unknown", line_number)
-        if key in seen_urls:
+        if key in findings:
             continue
-        seen_urls.add(key)
         dynamic_url = _is_dynamic_url(text, match.start(), match.group(0))
         blocking = sends_sensitive
         if blocking:
