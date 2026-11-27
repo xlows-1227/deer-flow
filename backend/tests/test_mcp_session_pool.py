@@ -1,5 +1,6 @@
 """Tests for the MCP persistent-session pool."""
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -188,6 +189,220 @@ async def test_close_all():
 
     assert all(cm.closed for cm in cms)
     assert len(pool._entries) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_session_same_key_creates_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Concurrent callers for one scope must share a single session."""
+    import asyncio
+
+    pool = MCPSessionPool()
+    created: list[Any] = []
+
+    class SlowCM:
+        """Yield control inside __aenter__ to widen the creation race."""
+
+        def __init__(self) -> None:
+            self.session = AsyncMock()
+            self.exited = 0
+
+        async def __aenter__(self):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return self.session
+
+        async def __aexit__(self, *args):
+            self.exited += 1
+            return False
+
+    def make_cm(*_a: Any, **_kw: Any) -> SlowCM:
+        cm = SlowCM()
+        created.append(cm)
+        return cm
+
+    connection = {"transport": "stdio", "command": "x", "args": []}
+    with (
+        patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm),
+        caplog.at_level("INFO"),
+    ):
+        sessions = await asyncio.gather(
+            *[pool.get_session("server", "thread-1", connection) for _ in range(20)]
+        )
+
+    assert len(created) == 1
+    assert all(session is sessions[0] for session in sessions)
+    assert created[0].exited == 0
+    created_logs = [r for r in caplog.records if "Created persistent MCP session" in r.getMessage()]
+    assert len(created_logs) == 1
+
+
+@pytest.mark.asyncio
+async def test_replaced_session_is_closed_explicitly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A session from another loop is closed, not dropped for the GC."""
+    import asyncio
+
+    pool = MCPSessionPool()
+    old_loop = asyncio.new_event_loop()
+    old_cm = _RecordingCM()
+    key = ("server", "thread-1")
+    try:
+        pool._entries[key] = (old_cm.session, old_loop)
+        pool._context_managers[key] = old_cm
+
+        new_cm = _RecordingCM()
+        with (
+            patch("langchain_mcp_adapters.sessions.create_session", return_value=new_cm),
+            caplog.at_level("WARNING"),
+        ):
+            session = await pool.get_session("server", "thread-1", {"transport": "stdio"})
+
+        assert session is new_cm.session
+        assert old_cm.exit_count == 1  # explicit close, not left to GC
+        assert old_cm.exit_task is not None
+        assert "Replaced existing MCP session" in caplog.text
+    finally:
+        old_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_replaced_session_close_error_is_logged_not_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An anyio cancel-scope error while closing is logged, never escapes."""
+    import asyncio
+
+    pool = MCPSessionPool()
+    old_loop = asyncio.new_event_loop()
+    old_cm = _RecordingCM()
+    old_cm.exit_error = RuntimeError(
+        "Attempted to exit cancel scope in a different task than it was entered in"
+    )
+    key = ("server", "thread-1")
+    try:
+        pool._entries[key] = (old_cm.session, old_loop)
+        pool._context_managers[key] = old_cm
+
+        new_cm = _RecordingCM()
+        with (
+            patch("langchain_mcp_adapters.sessions.create_session", return_value=new_cm),
+            caplog.at_level("WARNING"),
+        ):
+            session = await pool.get_session("server", "thread-1", {"transport": "stdio"})
+
+        assert session is new_cm.session
+        assert old_cm.exit_count == 1
+        assert "Error closing MCP session" in caplog.text
+        assert "Replaced existing MCP session" in caplog.text
+    finally:
+        old_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_key_locks_are_pruned() -> None:
+    """Locks registered for loops closed by the sync wrapper must not leak."""
+    import asyncio
+
+    pool = MCPSessionPool()
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+
+    pool._get_key_lock(("server", "scope"), closed_loop)
+    assert any(entry[2] is closed_loop for entry in pool._key_locks)
+
+    current_loop = asyncio.get_running_loop()
+    lock = pool._get_key_lock(("server", "scope"), current_loop)
+
+    assert len(pool._key_locks) == 1
+    assert all(not entry[2].is_closed() for entry in pool._key_locks)
+    assert pool._get_key_lock(("server", "scope"), current_loop) is lock
+
+
+@pytest.mark.asyncio
+async def test_close_cm_timeout_does_not_block_same_key(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung __aexit__ times out and releases the per-key lock."""
+    import asyncio
+
+    monkeypatch.setattr(MCPSessionPool, "SESSION_CLOSE_TIMEOUT", 0.05)
+    pool = MCPSessionPool()
+    other_loop = asyncio.new_event_loop()
+    hanging_cm = _HangingCM()
+    key = ("server", "thread-1")
+    try:
+        pool._entries[key] = (hanging_cm.session, other_loop)
+        pool._context_managers[key] = hanging_cm
+
+        new_cm = _RecordingCM()
+        with (
+            patch("langchain_mcp_adapters.sessions.create_session", return_value=new_cm),
+            caplog.at_level("WARNING"),
+        ):
+            session = await asyncio.wait_for(
+                pool.get_session("server", "thread-1", {"transport": "stdio"}),
+                timeout=2.0,
+            )
+            # The same key must be usable again right away (lock released).
+            again = await asyncio.wait_for(
+                pool.get_session("server", "thread-1", {"transport": "stdio"}),
+                timeout=2.0,
+            )
+
+        assert session is new_cm.session
+        assert again is new_cm.session
+        assert hanging_cm.exit_count == 1
+        assert "Timed out closing MCP session" in caplog.text
+    finally:
+        other_loop.close()
+
+
+class _HangingCM:
+    """Fake context manager whose __aexit__ never returns on its own."""
+
+    def __init__(self) -> None:
+        self.session = AsyncMock()
+        self.exit_count = 0
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, *args):
+        import asyncio
+
+        self.exit_count += 1
+        await asyncio.sleep(30)
+        return False
+
+
+class _RecordingCM:
+    """Fake MCP context manager recording enter/exit tasks."""
+
+    def __init__(self) -> None:
+        self.session = AsyncMock()
+        self.enter_task = None
+        self.exit_task = None
+        self.exit_count = 0
+        self.exit_error: Exception | None = None
+
+    async def __aenter__(self):
+        import asyncio
+
+        self.enter_task = asyncio.current_task()
+        return self.session
+
+    async def __aexit__(self, *args):
+        import asyncio
+
+        self.exit_task = asyncio.current_task()
+        self.exit_count += 1
+        if self.exit_error is not None:
+            raise self.exit_error
+        return False
 
 
 # ---------------------------------------------------------------------------

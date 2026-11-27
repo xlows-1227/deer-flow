@@ -11,6 +11,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.empty_assistant_guard import (
     EmptyAssistantMessageError,
     NoSendableMessagesError,
+    ai_message_has_payload,
 )
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
@@ -628,4 +629,126 @@ def test_model_call_with_only_system_messages_raises() -> None:
 
     with pytest.raises(NoSendableMessagesError):
         middleware.wrap_model_call(_RequestStub([SystemMessage(content="sys")]), handler)
+
+
+def test_sync_empty_response_retried_once_then_succeeds() -> None:
+    """One in-place retry may recover a provider that ended without content."""
+    middleware = _build_middleware()
+    calls = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        return AIMessage(content="") if calls == 1 else AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert result.content == "ok"
+    assert calls == 2
+
+
+def test_async_empty_response_retried_once_then_succeeds() -> None:
+    middleware = _build_middleware()
+    calls = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        return AIMessage(content="  ") if calls == 1 else AIMessage(content="ok")
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert result.content == "ok"
+    assert calls == 2
+
+
+def test_sync_empty_response_after_retry_raises() -> None:
+    """Two empty answers in a row still fail; only one extra call is spent."""
+    middleware = _build_middleware()
+    calls = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        return AIMessage(content="")
+
+    with pytest.raises(EmptyAssistantMessageError):
+        middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert calls == 2
+
+
+def test_async_empty_response_after_retry_raises() -> None:
+    middleware = _build_middleware()
+    calls = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        return AIMessage(content="")
+
+    with pytest.raises(EmptyAssistantMessageError):
+        asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert calls == 2
+
+
+def test_reasoning_only_response_is_not_a_payload() -> None:
+    """Reasoning-only output must not be persisted as an assistant turn."""
+    middleware = _build_middleware()
+    calls = 0
+    reasoning_only = AIMessage(
+        content="",
+        additional_kwargs={"reasoning_content": "internal chain of thought"},
+        response_metadata={"finish_reason": "length"},
+    )
+
+    def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        return reasoning_only
+
+    with pytest.raises(EmptyAssistantMessageError):
+        middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert calls == 2
+    assert ai_message_has_payload(reasoning_only) is False
+
+
+def test_empty_response_diagnostics_log_shape_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The empty-response warning carries metadata and lengths, never text."""
+    middleware = _build_middleware()
+    secret = "user-secret-thoughts"
+    empty = AIMessage(
+        content="",
+        additional_kwargs={"reasoning_content": secret},
+        response_metadata={
+            "finish_reason": "length",
+            "token_usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 0,
+                "total_tokens": 11,
+            },
+        },
+    )
+
+    def handler(_request) -> AIMessage:
+        return empty
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(EmptyAssistantMessageError):
+            middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    lines = [r.getMessage() for r in caplog.records if "Empty assistant response" in r.getMessage()]
+    assert len(lines) == 2
+    assert "empty_attempt=1" in lines[0]
+    assert "empty_attempt=2" in lines[1]
+    assert "finish_reason=length" in lines[0]
+    assert "input_tokens=11" in lines[0]
+    assert "output_tokens=0" in lines[0]
+    assert "content_len=0" in lines[0]
+    assert f"reasoning_len={len(secret)}" in lines[0]
+    assert secret not in caplog.text
 
