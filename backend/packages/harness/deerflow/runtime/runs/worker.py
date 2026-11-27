@@ -4809,6 +4809,22 @@ async def run_agent(
                     context_cfg = config.get("context")
                     if not isinstance(context_cfg, dict):
                         context_cfg = {}
+                    requested_model_name = context_cfg.get("model_name")
+                    thread_model_name = selected.get("model_name")
+                    if (
+                        requested_model_name
+                        and thread_model_name
+                        and requested_model_name != thread_model_name
+                    ):
+                        logger.warning(
+                            "Run request model '%s' differs from thread metadata model '%s'; using the run request value.",
+                            requested_model_name,
+                            thread_model_name,
+                        )
+                    # An explicit model on the run request wins over thread
+                    # metadata; the thread value only fills a missing request.
+                    if requested_model_name:
+                        selected.pop("model_name", None)
                     context_cfg.update(selected)
                     selected_mode = context_cfg.get("mode")
                     if selected_mode:

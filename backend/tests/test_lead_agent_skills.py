@@ -191,7 +191,65 @@ def test_make_lead_agent_filters_tools_from_available_skills(monkeypatch):
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
+    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test", "skill_name": "restricted"}})
+
+    assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file"]
+
+
+def test_make_lead_agent_does_not_filter_tools_without_selected_skill(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["restricted"]))
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_load_enabled_skills_for_tool_policy",
+        lambda available_skills, *, app_config: [_make_skill("restricted", ["read_file"])],
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")])
+
+    mock_app_config = MagicMock()
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
+
+    assert [tool.name for tool in agent_kwargs["tools"]] == ["bash", "read_file", "web_search", "update_agent"]
+
+
+def test_make_lead_agent_filters_tools_from_selected_skill_only(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["restricted", "other"]))
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")])
+
+    policies = {"restricted": _make_skill("restricted", ["read_file"]), "other": _make_skill("other", ["bash"])}
+
+    def fake_policy(available_skills, *, app_config):
+        if available_skills is None:
+            return list(policies.values())
+        return [skill for name, skill in policies.items() if name in available_skills]
+
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", fake_policy)
+
+    mock_app_config = MagicMock()
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
+    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test", "skill_name": "restricted"}})
 
     assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file"]
 
@@ -242,7 +300,7 @@ def test_make_lead_agent_enforces_allowed_tools_when_skill_cache_is_cold(monkeyp
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None, **kwargs: mock_storage)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
-    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
+    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test", "skill_name": "restricted"}})
 
     assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file"]
 
@@ -271,6 +329,6 @@ def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
     with pytest.raises(RuntimeError, match="skill storage unavailable"):
-        lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
+        lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test", "skill_name": "restricted"}})
 
     create_agent_mock.assert_not_called()
