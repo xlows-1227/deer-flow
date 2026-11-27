@@ -315,6 +315,67 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     "empty assistant response (no text and no tool calls)"
                 )
 
+    @staticmethod
+    def _log_empty_response_diagnostics(
+        response: ModelCallResult,
+        empty_attempt: int,
+    ) -> None:
+        """Log the *shape* of an empty response, never its text.
+
+        A thinking model can finish with reasoning only; recording token
+        counts and content/reasoning lengths is enough to tell "truly empty"
+        apart from "reasoning-only" without persisting or logging user data.
+        """
+        if isinstance(response, AIMessage):
+            messages: list[Any] = [response]
+        else:
+            result = getattr(response, "result", None)
+            messages = result if isinstance(result, list) else []
+        for message in messages:
+            if not isinstance(message, AIMessage):
+                continue
+            metadata = getattr(message, "response_metadata", None) or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            usage = metadata.get("token_usage") or metadata.get("usage")
+            if not isinstance(usage, dict):
+                usage = getattr(message, "usage_metadata", None)
+            if not isinstance(usage, dict):
+                usage = {}
+            content = getattr(message, "content", None)
+            if isinstance(content, str):
+                content_len = len(content)
+            elif isinstance(content, list):
+                content_len = sum(
+                    len(part.get("text") or "")
+                    if isinstance(part, dict)
+                    else len(part)
+                    if isinstance(part, str)
+                    else 0
+                    for part in content
+                )
+            else:
+                content_len = 0
+            reasoning = (getattr(message, "additional_kwargs", None) or {}).get(
+                "reasoning_content"
+            )
+            reasoning_len = len(reasoning) if isinstance(reasoning, str) else 0
+            logger.warning(
+                "Empty assistant response (empty_attempt=%d): finish_reason=%s "
+                "input_tokens=%s output_tokens=%s total_tokens=%s "
+                "content_len=%d reasoning_len=%d tool_calls=%d",
+                empty_attempt,
+                metadata.get("finish_reason")
+                or metadata.get("stop_reason")
+                or "-",
+                _usage_value(usage, "prompt_tokens", "input_tokens"),
+                _usage_value(usage, "completion_tokens", "output_tokens"),
+                _usage_value(usage, "total_tokens"),
+                content_len,
+                reasoning_len,
+                len(getattr(message, "tool_calls", None) or []),
+            )
+
     @override
     def wrap_model_call(
         self,
@@ -327,6 +388,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request = self._filter_request_messages(request)
 
         retry_count = 0
+        empty_retry_count = 0
         while True:
             try:
                 response = handler(request)
@@ -364,7 +426,18 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
             self._record_success()
-            self._ensure_response_has_payload(response)
+            try:
+                self._ensure_response_has_payload(response)
+            except EmptyAssistantMessageError:
+                empty_retry_count += 1
+                self._log_empty_response_diagnostics(response, empty_retry_count)
+                if empty_retry_count > 1:
+                    raise
+                # One in-place retry: a provider can end a stream without
+                # content; a second attempt often yields a usable message.
+                # Deliberately outside the transient retry loop above so an
+                # empty response costs at most one extra model call.
+                continue
             return response
 
     @override
@@ -379,6 +452,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request = self._filter_request_messages(request)
 
         retry_count = 0
+        empty_retry_count = 0
         while True:
             try:
                 response = await handler(request)
@@ -416,12 +490,29 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     self._record_failure()
                 return AIMessage(content=self._build_user_message(exc, reason))
             self._record_success()
-            self._ensure_response_has_payload(response)
+            try:
+                self._ensure_response_has_payload(response)
+            except EmptyAssistantMessageError:
+                empty_retry_count += 1
+                self._log_empty_response_diagnostics(response, empty_retry_count)
+                if empty_retry_count > 1:
+                    raise
+                # Single in-place retry, same empty check on the next pass.
+                continue
             return response
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in detail for pattern in patterns)
+
+
+def _usage_value(usage: dict[str, Any], *keys: str) -> Any:
+    """Return the first present usage value, preserving a legitimate 0."""
+    for key in keys:
+        value = usage.get(key)
+        if value is not None:
+            return value
+    return "-"
 
 
 def _extract_error_code(exc: BaseException) -> Any:
